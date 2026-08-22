@@ -157,11 +157,14 @@ export interface TrackerSyncFacade {
   /** Resolve one open conflict the user's way. Unknown/already-resolved id is a no-op. */
   resolveConflictChoice(conflictId: number, choice: TrackerConflictChoice): Promise<void>;
 
-  /** An entity's live tracker link, or null when it is not synced. */
-  linkForEntity(
+  /**
+   * EVERY live tracker link an entity has, one per provider at most — an empty
+   * array means it is not synced to any tracker.
+   */
+  linksForEntity(
     entityType: TrackerEntityType,
     entityId: string,
-  ): Promise<TrackerEntityLinkRef | null>;
+  ): Promise<TrackerEntityLinkRef[]>;
 
   /**
    * True when hard-deleting this entity would also remove other SYNCED entities
@@ -207,7 +210,7 @@ export interface TrackerSyncFacade {
    * callers with no confirm dialog left to dismiss.
    *
    * `unlinked: false` means the entity had no live link (the renderer's
-   * linkForEntity read was stale, or nothing was ever synced).
+   * linksForEntity read was stale, or nothing was ever synced).
    */
   unlinkEntity(
     entityType: TrackerEntityType,

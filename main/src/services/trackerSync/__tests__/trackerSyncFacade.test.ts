@@ -2337,7 +2337,7 @@ describe('TrackerSyncService conflict resolution — the pass AFTER the ruling',
 });
 
 // ---------------------------------------------------------------------------
-// reconcilePreview + linkForEntity
+// reconcilePreview + linksForEntity
 // ---------------------------------------------------------------------------
 
 describe('TrackerSyncService.reconcilePreview', () => {
@@ -2388,17 +2388,48 @@ describe('TrackerSyncService.reconcilePreview', () => {
       external_url: 'https://linear.app/acme/issue/CORE-142',
     });
 
-    await expect(service.linkForEntity('idea', ideaId)).resolves.toEqual({
-      provider: 'linear',
-      externalIdentifier: 'CORE-142',
-      externalUrl: 'https://linear.app/acme/issue/CORE-142',
-    });
-    await expect(service.linkForEntity('idea', 'ide_missing')).resolves.toBeNull();
+    await expect(service.linksForEntity('idea', ideaId)).resolves.toEqual([
+      {
+        provider: 'linear',
+        externalIdentifier: 'CORE-142',
+        externalUrl: 'https://linear.app/acme/issue/CORE-142',
+      },
+    ]);
+    await expect(service.linksForEntity('idea', 'ide_missing')).resolves.toEqual([]);
 
     raw.prepare(`UPDATE entity_external_links SET orphaned_at = datetime('now') WHERE id = ?`).run(
       link.id,
     );
-    await expect(service.linkForEntity('idea', ideaId)).resolves.toBeNull();
+    await expect(service.linksForEntity('idea', ideaId)).resolves.toEqual([]);
+  });
+
+  it('returns EVERY live provider link, not just the first — the removal-disclosure fix', async () => {
+    makeConnection();
+    const connDart = makeConnection({ id: 'conn-dart', provider: 'dart' });
+    const ideaId = await createEntity('idea', { title: 'Multi-tracker idea' });
+    upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-linear-1',
+      external_identifier: 'CORE-142',
+      external_url: 'https://linear.app/acme/issue/CORE-142',
+    });
+    upsertLink(raw, {
+      connection_id: connDart.id,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'dart',
+      external_id: 'ext-dart-1',
+      external_identifier: 'DART-7',
+      external_url: 'https://app.itsdart.com/t/DART-7',
+    });
+
+    const links = await service.linksForEntity('idea', ideaId);
+    expect(links.map((l) => l.provider).sort()).toEqual(['dart', 'linear']);
+    expect(links.find((l) => l.provider === 'dart')?.externalIdentifier).toBe('DART-7');
+    expect(links.find((l) => l.provider === 'linear')?.externalIdentifier).toBe('CORE-142');
   });
 });
 
@@ -2437,7 +2468,7 @@ describe('TrackerSyncService.unlinkEntity', () => {
     expect(linkRow(link.id).orphaned_at).not.toBeNull();
     expect(outboxRows()).toEqual([]);
     // The link is gone as far as every read model is concerned.
-    await expect(service.linkForEntity('idea', ideaId)).resolves.toBeNull();
+    await expect(service.linksForEntity('idea', ideaId)).resolves.toEqual([]);
     expect(broadcasts).toEqual([
       { projectId: PROJECT_ID, connectionId: CONN_ID, kind: 'connection' },
     ]);
@@ -2597,7 +2628,7 @@ describe('TrackerSyncService staged local-removal ruling', () => {
     expect(linkRow(link.id).orphaned_at).toBeNull();
     expect(outboxRows()).toEqual([]);
     expect(broadcasts).toEqual([]);
-    await expect(service.linkForEntity('idea', ideaId)).resolves.not.toBeNull();
+    await expect(service.linksForEntity('idea', ideaId)).resolves.not.toEqual([]);
   });
 
   it('applies the ruling only once the delete actually commits', async () => {
@@ -2769,7 +2800,7 @@ describe('TrackerSyncService staged local-removal ruling', () => {
 
     expect(outboxRows()).toEqual([]);
     expect(linkRow(link.id).orphaned_at).toBeNull();
-    await expect(service.linkForEntity('idea', ideaId)).resolves.not.toBeNull();
+    await expect(service.linksForEntity('idea', ideaId)).resolves.not.toEqual([]);
   });
 
   // -------------------------------------------------------------------------

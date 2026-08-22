@@ -17,7 +17,7 @@
  *   syncNow                       : mutation     -> TrackerSyncPassSummary ("Sync now")
  *   conflicts                     : query        -> TrackerConflictSummary[]
  *   resolveConflict               : mutation     -> void
- *   linkForEntity                 : query        -> TrackerEntityLinkRef | null
+ *   linksForEntity                : query        -> TrackerEntityLinkRef[]
  *   hasLinkedDescendants          : query        -> boolean (does the delete cascade hit synced children?)
  *   stageUnlinkRuling             : mutation     -> { ok } (COLLECT the local-removal ruling; mutates nothing)
  *   clearUnlinkRuling             : mutation     -> { ok } (DISCARD a ruling the user backed out of)
@@ -695,12 +695,12 @@ export const trackerRouter = router({
   // Entity link lookup
   // -------------------------------------------------------------------------
 
-  /** An entity's live tracker link, or null when it is not synced (or orphaned). */
-  linkForEntity: protectedProcedure
+  /** Every live tracker link an entity has — empty when it is not synced (or every link is orphaned). */
+  linksForEntity: protectedProcedure
     .input(z.object({ entityType: entityTypeSchema, entityId: z.string().min(1) }))
-    .query(async ({ input }): Promise<TrackerEntityLinkRef | null> => {
+    .query(async ({ input }): Promise<TrackerEntityLinkRef[]> => {
       try {
-        return await getTrackerSyncFacade().linkForEntity(input.entityType, input.entityId);
+        return await getTrackerSyncFacade().linksForEntity(input.entityType, input.entityId);
       } catch (err) {
         rethrowAsTRPCError(err);
       }

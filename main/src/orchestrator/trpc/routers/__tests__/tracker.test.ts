@@ -112,7 +112,7 @@ class UnusedFacade implements TrackerSyncFacade {
   resolveConflictChoice(_id: number, _c: TrackerConflictChoice): Promise<void> {
     throw new Error('not used');
   }
-  linkForEntity(_t: TrackerEntityType, _id: string): Promise<TrackerEntityLinkRef | null> {
+  linksForEntity(_t: TrackerEntityType, _id: string): Promise<TrackerEntityLinkRef[]> {
     throw new Error('not used');
   }
   hasLinkedDescendants(_t: TrackerEntityType, _id: string): Promise<boolean> {

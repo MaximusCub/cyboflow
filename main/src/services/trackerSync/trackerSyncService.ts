@@ -2595,25 +2595,28 @@ export class TrackerSyncService implements TrackerSyncFacade {
   // -------------------------------------------------------------------------
 
   /**
-   * The live tracker link for one entity, or null when it is not synced.
-   * ORPHANED links read back as null: they point at an issue the remote no
-   * longer has, so an "open in Linear" affordance built on one would be a dead
-   * end.
+   * EVERY live tracker link for one entity — one per provider at most (the
+   * schema's `UNIQUE (entity_type, entity_id, provider)`). ORPHANED links are
+   * excluded: they point at an issue the remote no longer has, so an "open in
+   * Linear" affordance built on one would be a dead end.
+   *
+   * Was `linkForEntity`, returning only the FIRST provider's link: the removal
+   * dialog built on that shape disclosed one provider while
+   * {@link handleLocalRemoval}/{@link unlinkEntity} apply the ruling to EVERY
+   * live link — an entity synced to both Linear and Dart showed "Archive in
+   * Linear" while ALSO trashing the Dart task, undisclosed. The ruling itself
+   * stays global (a deleted entity must not leave a live link anywhere), so the
+   * fix is disclosure, not scoping.
    */
-  async linkForEntity(
+  async linksForEntity(
     entityType: TrackerEntityType,
     entityId: string,
-  ): Promise<TrackerEntityLinkRef | null> {
-    for (const provider of LINK_PROVIDERS) {
-      const link = getLinkByEntity(this.db, entityType, entityId, provider);
-      if (link === null || link.orphaned_at !== null) continue;
-      return {
-        provider,
-        externalUrl: link.external_url,
-        externalIdentifier: link.external_identifier,
-      };
-    }
-    return null;
+  ): Promise<TrackerEntityLinkRef[]> {
+    return this.liveLinksForEntity(entityType, entityId).map((link) => ({
+      provider: link.provider,
+      externalUrl: link.external_url,
+      externalIdentifier: link.external_identifier,
+    }));
   }
 
   /**
@@ -2622,7 +2625,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * asks so its copy can say the one ruling covers those children too — which is
    * exactly what {@link handleLocalRemoval} then does.
    *
-   * Deliberately its own call rather than a field on {@link linkForEntity}'s
+   * Deliberately its own call rather than a field on {@link linksForEntity}'s
    * result: that shape is the "open in Linear" chip's data, and a cascade
    * question has no business being answered on every read of it.
    */

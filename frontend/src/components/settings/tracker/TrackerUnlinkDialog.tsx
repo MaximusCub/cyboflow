@@ -1,30 +1,39 @@
 /**
  * TrackerUnlinkDialog — the local-removal ruling from
  * docs/proposals/tracker-sync-integration.md ("Deletes"): deleting or archiving
- * a LINKED backlog entity asks what should happen to the tracker issue before
- * the local delete runs. Exactly two answers, both of which drop the link:
+ * a LINKED backlog entity asks what should happen to its tracker issue(s)
+ * before the local delete runs. Exactly two answers, both of which drop EVERY
+ * live link the entity has — an entity can be synced to more than one tracker
+ * at once (one link per provider), and the ruling is deliberately GLOBAL rather
+ * than per-provider: a deleted entity must not leave a live link pointing at it
+ * from any tracker, so scoping the choice would just strand the others.
  *
- *   Keep in <provider>    -> unlink only; the issue is left exactly as it is.
- *   Archive in <provider> -> unlink AND queue the strongest non-destructive
- *                            write the provider offers: its own trash/archive
+ *   Keep in <trackers>    -> unlink only; every issue is left exactly as it is.
+ *   Archive in <trackers> -> unlink AND queue the strongest non-destructive
+ *                            write each provider offers: its own trash/archive
  *                            where one exists (Linear, Dart), and a move into
  *                            the tracker's CANCELLED group where none does
  *                            (Plane, whose public v1 API has no archive
  *                            endpoint).
  *
  * We never hard-delete on the remote side, so archiving is deliberately the
- * strongest option offered. The copy stays PROVIDER-AGNOSTIC on purpose: the
- * archive capability lives on the adapter seam in the main process and does not
- * cross IPC, so the dialog says what is true of every provider — nothing is
- * deleted, and the fallback is named in the body rather than guessed at in the
- * button.
+ * strongest option offered. The copy stays PROVIDER-AGNOSTIC beyond NAMING
+ * which trackers are involved: the archive capability lives on the adapter seam
+ * in the main process and does not cross IPC, so the dialog says what is true
+ * of every provider — nothing is deleted, and the fallback is named in the body
+ * rather than guessed at in the button.
+ *
+ * DISCLOSURE. `links` is EVERY live link this entity has (never just one) —
+ * the whole reason this dialog takes an array: the ruling below is applied to
+ * all of them by `handleLocalRemoval`/`unlinkEntity`, so a dialog that named
+ * only the first provider would silently trash the others' issues too.
  *
  * THIS DIALOG ONLY COLLECTS THE ANSWER. Both buttons call
  * `cyboflow.tracker.stageUnlinkRuling`, which mutates NOTHING — it records the
  * ruling in the main process — and then hand control back through `onResolved`,
  * where the caller opens the ordinary archive/delete confirm. The ruling is
  * applied by that confirm's entity write when it commits, so backing out of it
- * leaves the entity, its link and the tracker issue all untouched and the unused
+ * leaves the entity, its links and every tracker issue untouched and the unused
  * ruling simply expires. (The previous design unlinked here, up front: a user
  * who then cancelled the confirm kept the entity but had already lost the link
  * and possibly cancelled the remote issue.)
@@ -53,6 +62,16 @@ import type {
   TrackerEntityType,
 } from '../../../../../shared/types/trackerSync';
 
+/**
+ * "Linear" | "Linear and Dart" | "Linear, Dart, and Plane" — the header and
+ * button copy's disclosure of every tracker involved. `names` is never empty
+ * here (the dialog only renders for a non-empty `links`).
+ */
+function joinNames(names: string[]): string {
+  if (names.length <= 2) return names.join(' and ');
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+}
+
 interface TrackerUnlinkDialogProps {
   /** The entity the user is about to remove locally. */
   entityType: TrackerEntityType;
@@ -61,8 +80,13 @@ interface TrackerUnlinkDialogProps {
   entityRef: string;
   /** What happens once the ruling lands — only the copy differs. */
   action: 'delete' | 'archive';
-  /** The live link, as read by `tracker.linkForEntity` on the delete intent. */
-  link: TrackerEntityLinkRef;
+  /**
+   * EVERY live link this entity has, as read by `tracker.linksForEntity` on
+   * the delete intent — never just one, since the ruling applies to all of
+   * them. Non-empty: the caller only renders this dialog once the query comes
+   * back with at least one link.
+   */
+  links: TrackerEntityLinkRef[];
   /**
    * The delete will also remove synced CHILDREN (`tracker.hasLinkedDescendants`).
    * Only ever true for an idea/epic delete; the ruling covers them too.
@@ -80,7 +104,7 @@ export function TrackerUnlinkDialog({
   entityId,
   entityRef,
   action,
-  link,
+  links,
   hasLinkedDescendants = false,
   isOpen,
   onClose,
@@ -95,8 +119,12 @@ export function TrackerUnlinkDialog({
     setError(null);
   }, [isOpen, entityId]);
 
-  const providerName = providerMeta(link.provider).name;
-  const issueLabel = link.externalIdentifier ?? 'the linked issue';
+  // Single-link case reads exactly as before (`joinedProviders` degenerates to
+  // that one name) — the array only changes rendering once there is more than
+  // one tracker to disclose.
+  const providerNames = links.map((l) => providerMeta(l.provider).name);
+  const joinedProviders = joinNames(providerNames);
+  const multiple = links.length > 1;
   const entityLabel = entityType === 'idea' ? 'idea' : entityType === 'epic' ? 'epic' : 'task';
   const actionLabel = action === 'archive' ? 'Archiving' : 'Deleting';
   // Children only ever go with a DELETE — archiving an idea leaves its epics and
@@ -129,8 +157,8 @@ export function TrackerUnlinkDialog({
       // outcome neither button offered.
       setError(
         err instanceof Error
-          ? `Could not update ${providerName}: ${err.message}`
-          : `Could not update ${providerName}.`,
+          ? `Could not update ${joinedProviders}: ${err.message}`
+          : `Could not update ${joinedProviders}.`,
       );
     } finally {
       setSubmitting(false);
@@ -139,15 +167,39 @@ export function TrackerUnlinkDialog({
 
   return (
     <Modal isOpen={isOpen} onClose={dismiss} size="sm" showCloseButton={false}>
-      <ModalHeader title={`${entityRef} is linked to ${providerName}`} onClose={dismiss} />
+      <ModalHeader title={`${entityRef} is linked to ${joinedProviders}`} onClose={dismiss} />
       <ModalBody className="space-y-3">
         <div className="flex flex-col gap-2" data-testid="tracker-unlink-dialog">
-          <p className="text-sm text-text-secondary">
-            {actionLabel} this {entityLabel} does not delete{' '}
-            <span className="font-semibold text-text-primary">{issueLabel}</span> in{' '}
-            {providerName} — cyboflow never deletes issues in your tracker. Choose what happens to
-            it:
-          </p>
+          {multiple ? (
+            <>
+              <p className="text-sm text-text-secondary">
+                {actionLabel} this {entityLabel} does not delete any of its linked issues —
+                cyboflow never deletes issues in your tracker. Choose what happens to them:
+              </p>
+              <ul
+                className="list-disc space-y-0.5 pl-4 text-sm text-text-secondary"
+                data-testid="tracker-unlink-issue-list"
+              >
+                {links.map((l) => (
+                  <li key={l.provider}>
+                    <span className="font-semibold text-text-primary">
+                      {l.externalIdentifier ?? 'the linked issue'}
+                    </span>{' '}
+                    in {providerMeta(l.provider).name}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="text-sm text-text-secondary">
+              {actionLabel} this {entityLabel} does not delete{' '}
+              <span className="font-semibold text-text-primary">
+                {links[0].externalIdentifier ?? 'the linked issue'}
+              </span>{' '}
+              in {providerNames[0]} — cyboflow never deletes issues in your tracker. Choose what
+              happens to it:
+            </p>
+          )}
           {rulesChildren && (
             <p className="text-xs text-text-tertiary" data-testid="tracker-unlink-children-note">
               This {entityLabel}&apos;s synced sub-items are deleted with it, and your choice
@@ -155,10 +207,11 @@ export function TrackerUnlinkDialog({
             </p>
           )}
           <p className="text-xs text-text-tertiary">
-            Archiving moves the issue to {providerName}&apos;s trash or archive; where{' '}
-            {providerName} has no archive, it is marked cancelled instead. Either way the{' '}
-            {entityLabel} stops syncing with {providerName}, and nothing happens until you confirm
-            the {action} on the next step.
+            Archiving moves {multiple ? 'each issue' : 'the issue'} to{' '}
+            {multiple ? 'its tracker' : providerNames[0]}&apos;s trash or archive; where{' '}
+            {multiple ? 'a tracker' : providerNames[0]} has no archive, it is marked cancelled
+            instead. Either way the {entityLabel} stops syncing with {joinedProviders}, and
+            nothing happens until you confirm the {action} on the next step.
           </p>
           {error && (
             <p className="text-xs text-status-error" role="alert">
@@ -183,7 +236,7 @@ export function TrackerUnlinkDialog({
           className="inline-flex items-center gap-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Link2Off className="h-3.5 w-3.5" />
-          Keep in {providerName}
+          Keep in {joinedProviders}
         </button>
         <button
           type="button"
@@ -193,7 +246,7 @@ export function TrackerUnlinkDialog({
           className="inline-flex items-center gap-1 rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Archive className="h-3.5 w-3.5" />
-          Archive in {providerName}
+          Archive in {joinedProviders}
         </button>
       </ModalFooter>
     </Modal>
