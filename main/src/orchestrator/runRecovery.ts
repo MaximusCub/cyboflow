@@ -21,6 +21,7 @@ import { AgentInvocationStore } from './agentInvocationStore';
 import { hasReviewItemsTable, resolveReviewItemById } from './reviewItemListing';
 import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter';
 import { DELIVERED_RUN_OUTCOMES_SQL_IN } from '../../../shared/types/cyboflow';
+import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -801,4 +802,113 @@ export function stampSessionRunsPrOpen(db: DatabaseLike, sessionId: string): num
     )
     .run(sessionId) as { changes: number };
   return info.changes;
+}
+
+export interface RunUsageBackfillResult {
+  /** Terminal runs found holding usage in raw_events with no materialized row. */
+  candidates: number;
+  /** Rows actually written to run_usage. */
+  materialized: number;
+}
+
+/**
+ * Boot-time backfill that materializes the `run_usage` rollup (migration 026)
+ * for terminal runs that never got one.
+ *
+ * WHY A BOOT SWEEP AND NOT ANOTHER SEAM CALL.
+ * `rollupRunUsage` is wired to exactly ONE place — runExecutor's
+ * onLifecycleTransition, for the 'drained' / 'failed' / 'canceled' phases. But a
+ * run reaches a terminal STATUS from roughly eight writers: cancelRunHandler,
+ * cancelAndRestartHandler, questionRouter, trpc/routers/runs.ts (three close-out
+ * sites), the merge path in ipc/git.ts, and recoverActiveStateOrphans itself
+ * force-failing an orphan at boot. Every one of those bypasses the executor
+ * hook, so the run keeps its raw_events but never gets the durable row. Adding
+ * the call to each writer is how the gap opened in the first place — a sweep
+ * over the invariant ("terminal + has usage events => has a row") cannot drift
+ * as new terminal writers appear.
+ *
+ * Measured 2026-08-21: 330 of 468 runs carrying usage data had no materialized
+ * row (216 canceled, 103 failed, 6 completed, 5 stranded 'running'). Insights
+ * still SHOWED their cost because selectRunUsageRollups falls back to a full
+ * raw_events scan — which is why this was invisible, and why it is load-bearing
+ * before any raw_events retention: pruning would delete the only copy.
+ *
+ * TERMINAL ONLY, DELIBERATELY. A run still running/awaiting has an incomplete
+ * raw_events log; materializing mid-flight would freeze a partial rollup that
+ * the read path then prefers over the truth. Those are left to the executor's
+ * seam. This runs AFTER recoverActiveStateOrphans + the outcome backfills at
+ * boot, so a run stranded by a crash has already been force-failed and is
+ * eligible here on the same boot.
+ *
+ * Uses the FORCE-SCAN rollup helper for the same reason rollupRunUsage does its
+ * DELETE first: the materialized-first reader would happily return the row we
+ * are trying to create. Batched — one scan for every candidate, one
+ * transaction — rather than N per-run round trips.
+ *
+ * `INSERT OR IGNORE` (not REPLACE): if a row appeared between the SELECT and the
+ * write, the existing one wins. This can only ever ADD a missing row, never
+ * overwrite a real rollup. Idempotent: a second run finds no candidates.
+ *
+ * Fail-soft: any error is logged and swallowed — a rollup backfill must never
+ * block boot.
+ */
+export function backfillRunUsageRollups(
+  db: DatabaseLike,
+  logger?: Pick<LoggerLike, 'warn'>,
+): RunUsageBackfillResult {
+  const empty: RunUsageBackfillResult = { candidates: 0, materialized: 0 };
+  try {
+    const rows = db
+      .prepare(
+        `SELECT r.id AS runId
+           FROM workflow_runs r
+          WHERE r.status IN ('completed', 'failed', 'canceled')
+            AND NOT EXISTS (SELECT 1 FROM run_usage u WHERE u.run_id = r.id)
+            AND EXISTS (SELECT 1 FROM raw_events e WHERE e.run_id = r.id)`,
+      )
+      .all() as Array<{ runId: string }>;
+    if (rows.length === 0) return empty;
+
+    const runIds = rows.map((r) => r.runId);
+    const rollups = selectRunUsageRollupsFromRawEvents(db, runIds);
+
+    const tx = db.transaction(() => {
+      const stmt = db.prepare(
+        `INSERT OR IGNORE INTO run_usage (
+           run_id,
+           input_tokens,
+           output_tokens,
+           cache_read_tokens,
+           cache_creation_tokens,
+           total_tokens,
+           cost_usd,
+           num_turns,
+           assistant_message_count
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      let written = 0;
+      for (const rollup of rollups) {
+        const info = stmt.run(
+          rollup.runId,
+          rollup.inputTokens,
+          rollup.outputTokens,
+          rollup.cacheReadTokens,
+          rollup.cacheCreationTokens,
+          rollup.totalTokens,
+          rollup.costUsd,
+          rollup.numTurns,
+          rollup.assistantMessageCount,
+        ) as { changes: number };
+        written += info.changes;
+      }
+      return written;
+    });
+
+    return { candidates: runIds.length, materialized: tx() as number };
+  } catch (err) {
+    logger?.warn('[runRecovery] run_usage rollup backfill failed (fail-soft)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return empty;
+  }
 }
