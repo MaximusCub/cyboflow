@@ -104,7 +104,6 @@ export class Orchestrator {
     this.detector = new StuckDetector({
       db: this.deps.db,
       claudeManager,
-      permissionServer: this.deps.permissionServer,
       emitter: detectorEvents,
       logger: this.deps.logger,
     });

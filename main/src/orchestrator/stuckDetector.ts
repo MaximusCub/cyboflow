@@ -52,16 +52,6 @@ export interface ClaudeManagerLike {
   hasActiveRunForId(runId: string): boolean;
 }
 
-/**
- * Narrow interface for querying whether a permission-socket client is
- * connected for a given run ID.  The real implementation is supplied by the
- * permission IPC layer.  When unavailable, default to `false` (stale_socket
- * classification disabled) with a one-time WARN.
- */
-export interface PermissionServerLike {
-  hasClientForRun(runId: string): boolean;
-}
-
 // ---------------------------------------------------------------------------
 // Internal row shapes
 // ---------------------------------------------------------------------------
@@ -87,8 +77,6 @@ interface WorkflowRunRow {
 export interface StuckDetectorDeps {
   db: DatabaseLike;
   claudeManager: ClaudeManagerLike;
-  /** Optional — when omitted, stale_socket classification is skipped. */
-  permissionServer?: PermissionServerLike;
   /** Per-component event emitter for publishing 'runs:stuck' events. */
   emitter: EventEmitter;
   logger: LoggerLike;
@@ -101,14 +89,10 @@ export interface StuckDetectorDeps {
 export class StuckDetector {
   private readonly db: DatabaseLike;
   private readonly claudeManager: ClaudeManagerLike;
-  private readonly permissionServer: PermissionServerLike | undefined;
   private readonly emitter: EventEmitter;
   private readonly logger: LoggerLike;
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
-
-  /** One-time warning flag for missing permissionServer. */
-  private permissionServerWarnEmitted = false;
 
   // Hoisted prepared statements — SQL is static, so prepare once per detector
   // instance instead of on every scan tick / per-row.
@@ -120,7 +104,6 @@ export class StuckDetector {
   constructor(deps: StuckDetectorDeps) {
     this.db = deps.db;
     this.claudeManager = deps.claudeManager;
-    this.permissionServer = deps.permissionServer;
     this.emitter = deps.emitter;
     this.logger = deps.logger;
 
@@ -246,11 +229,14 @@ export class StuckDetector {
    * Classify a stale approval into a StuckReason variant (first match wins):
    *
    * 1. orphan_pty      — no active Claude run for the run's ID.
-   * 2. stale_socket    — no permission-socket client connected for the run's ID.
-   * 3. self_deadlock   — the same run has another pending approval distinct from
+   * 2. self_deadlock   — the same run has another pending approval distinct from
    *                      this one (intra-run queue jam).
-   * 4. cross_run_deadlock — another run is in 'awaiting_review' AND itself holds
+   * 3. cross_run_deadlock — another run is in 'awaiting_review' AND itself holds
    *                         a stale pending approval (conflictingRunId set).
+   *
+   * `stale_socket` was rung 2 and is RETIRED — see the note on StuckReason in
+   * shared/types/stuckDetection.ts. It never fired, and wiring it would have
+   * been wrong in all three directions (rationale below).
    *
    * Returns null when none of the above apply — the approval is stale but not
    * deterministically stuck, so no transition fires.
@@ -267,28 +253,40 @@ export class StuckDetector {
       return { kind: 'orphan_pty' };
     }
 
-    // 2. stale_socket
-    if (this.permissionServer) {
-      if (!this.permissionServer.hasClientForRun(runId)) {
-        return { kind: 'stale_socket' };
-      }
-    } else {
-      // Emit one-time WARN when permissionServer is not wired.
-      if (!this.permissionServerWarnEmitted) {
-        this.permissionServerWarnEmitted = true;
-        this.logger.warn(
-          '[StuckDetector] permissionServer not provided — stale_socket classification disabled',
-        );
-      }
-    }
+    // RETIRED RUNG — `stale_socket`, formerly rung 2, asked the socket server
+    // whether a permission-socket client was still connected for this run. It
+    // was never wired (the dep was never passed), so it never fired once: zero
+    // rows in any database carry stuck_reason='stale_socket'. Wiring it was
+    // examined on 2026-08-21 and rejected, because the condition it hunts for
+    // cannot survive to be observed, and the query it would have run is wrong
+    // for every lane:
+    //
+    //   - PTY shell-hook lane: when the client dies mid-approval the socket's
+    //     own 'close'/'error' handler calls abandonPendingForRun, which settles
+    //     the row and restores awaiting_review -> running SYNCHRONOUSLY. No
+    //     stale pending approval survives for a later scan to classify.
+    //   - OMP lane: the same disconnect calls orphanPendingForRun, which keeps
+    //     the ask pending ON PURPOSE (nobody is waiting; the verdict stays
+    //     collectable by a later retry — migration 111's `awaited = 0`). That
+    //     is a designed state, so firing here would report a healthy run.
+    //   - claude-sdk lane: permission decisions are produced in-process by the
+    //     PreToolUse hook and never touch the socket at all. hasClientForRun
+    //     binds LAZILY, on the first envelope carrying a runId, so a healthy
+    //     SDK run that has not yet called a cyboflow_* tool reads false — an
+    //     unconditional rung 2 would stamp it stuck on nothing.
+    //
+    // So: no true positives available, false positives across the whole SDK
+    // lane, and the one genuinely orphaned case (a socket lost across an app
+    // restart, where the in-memory binding map is empty) is already covered by
+    // rung 1 above, which answers it for every lane rather than just this one.
 
-    // 3. self_deadlock — another pending approval for the same run
+    // 2. self_deadlock — another pending approval for the same run
     const selfRow = this.stmtSelfDeadlockCount.get(runId, approvalId) as { cnt: number };
     if (selfRow.cnt > 0) {
       return { kind: 'self_deadlock' };
     }
 
-    // 4. cross_run_deadlock (v1 heuristic)
+    // 3. cross_run_deadlock
     const crossRow = this.stmtCrossRunDeadlock.get(runId, cutoff) as WorkflowRunRow | undefined;
     if (crossRow) {
       return { kind: 'cross_run_deadlock', conflictingRunId: crossRow.id };

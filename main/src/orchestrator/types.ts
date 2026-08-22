@@ -6,7 +6,7 @@
  * main/src/services/*. Only primitive types are allowed.
  */
 import type { RunQueueRegistry } from './RunQueueRegistry';
-import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
+import type { ClaudeManagerLike } from './stuckDetector';
 import type { StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
 
@@ -79,12 +79,6 @@ export interface OrchestratorDeps {
    */
   claudeManager?: ClaudeManagerLike;
   /**
-   * Optional: narrow interface for querying whether a permission-socket
-   * client is connected for a given run ID.  When omitted, stale_socket
-   * classification is disabled with a one-time WARN logged.
-   */
-  permissionServer?: PermissionServerLike;
-  /**
    * Optional: the review-item write chokepoint (ReviewItemRouter.applyReviewItem).
    * Used at orchestrator start to drain LEGACY idle-session review items (the mint
    * was retired for the live QuickSessionsTable — see drainLegacyIdleReviewItems).
@@ -118,4 +112,4 @@ export interface StuckEventSink {
 
 // Re-export narrow interfaces so callers that only need the interface shapes
 // do not need to import from stuckDetector.ts directly.
-export type { ClaudeManagerLike, PermissionServerLike };
+export type { ClaudeManagerLike };

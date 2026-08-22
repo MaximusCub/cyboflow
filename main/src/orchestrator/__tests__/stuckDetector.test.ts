@@ -5,7 +5,8 @@
  *
  * 1. Scheduling: 60s interval fires scan; stop() cancels it.
  * 2. Staleness filter: only approvals past STALE_THRESHOLD_MS reach classifyStaleApproval.
- * 3. Classification variants: orphan_pty, stale_socket, self_deadlock, cross_run_deadlock.
+ * 3. Classification variants: orphan_pty, self_deadlock, cross_run_deadlock
+ *    (stale_socket is retired — its suite pins that it can no longer fire).
  * 4. Status guard: run already canceled — no stuck transition fires.
  * 5. Idempotency: three scan ticks, only one 'runs:stuck' event.
  * 6. Error isolation: classifier throws on tick 1, scan continues on tick 2.
@@ -28,7 +29,6 @@ import { EventEmitter } from 'node:events';
 import {
   StuckDetector,
   type ClaudeManagerLike,
-  type PermissionServerLike,
   type StuckDetectorDeps,
 } from '../stuckDetector';
 import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection';
@@ -89,11 +89,6 @@ function makeClaudeManager(activeRunIds: Set<string> = new Set()): ClaudeManager
   };
 }
 
-function makePermissionServer(connectedRunIds: Set<string> = new Set()): PermissionServerLike {
-  return {
-    hasClientForRun: (runId) => connectedRunIds.has(runId),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // TEST 1: Scheduling — 60s interval fires scan; stop() cancels it
@@ -222,7 +217,6 @@ describe('StuckDetector staleness filter', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(activeRuns),
-      permissionServer: makePermissionServer(connectedRuns),
       emitter,
       logger,
     });
@@ -258,7 +252,6 @@ describe('StuckDetector classification: orphan_pty', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set()), // empty — no active runs
-      permissionServer: makePermissionServer(new Set(['run-orphan'])),
       emitter,
       logger,
     });
@@ -275,11 +268,22 @@ describe('StuckDetector classification: orphan_pty', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TEST 3b: Classification — stale_socket
+// TEST 3b: Classification — stale_socket is RETIRED
 // ---------------------------------------------------------------------------
 
-describe('StuckDetector classification: stale_socket', () => {
-  it('returns stale_socket when permissionServer has no connected client', () => {
+describe('StuckDetector classification: stale_socket (retired)', () => {
+  it('never returns stale_socket — a live run with no other evidence classifies null', () => {
+    // Formerly rung 2. It asked whether a permission-socket client was still
+    // connected, was never wired, and never fired in any build. It is retired
+    // rather than wired because the condition cannot survive to be observed:
+    // the socket's own disconnect handler already settles the approval
+    // (abandonPendingForRun on the shell lane) or keeps it pending on purpose
+    // (orphanPendingForRun on the OMP lane), and the claude-sdk lane never
+    // opens a socket at all, so "no client" is the healthy state there.
+    //
+    // This pins the retirement: the exact fixture that used to yield
+    // stale_socket — a live run, stale awaited approval, no socket, nothing
+    // else wrong — must now yield null.
     const rawDb = createTestDb({ includeStuckDetectedAt: true });
     const db = dbAdapter(rawDb);
     const emitter = new EventEmitter();
@@ -288,11 +292,9 @@ describe('StuckDetector classification: stale_socket', () => {
     seedRun(rawDb, 'run-socket', 'awaiting_review');
     seedApproval(rawDb, { id: 'approval-socket', runId: 'run-socket', toolName: 'Bash', createdAt: ageMsToIso(STALE_AGE_MS) });
 
-    // Run is active (no orphan_pty), but no socket client (stale_socket)
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-socket'])),
-      permissionServer: makePermissionServer(new Set()), // no connected clients
       emitter,
       logger,
     });
@@ -301,8 +303,7 @@ describe('StuckDetector classification: stale_socket', () => {
       .prepare("SELECT id, run_id, status, created_at FROM approvals WHERE id = 'approval-socket'")
       .get() as { id: string; run_id: string; status: string; created_at: string };
 
-    const reason = detector.classifyStaleApproval(row);
-    expect(reason).toEqual({ kind: 'stale_socket' });
+    expect(detector.classifyStaleApproval(row)).toBeNull();
 
     rawDb.close();
   });
@@ -328,7 +329,6 @@ describe('StuckDetector classification: self_deadlock', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-self'])),
-      permissionServer: makePermissionServer(new Set(['run-self'])),
       emitter,
       logger,
     });
@@ -366,7 +366,6 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-cross-1', 'run-cross-2'])),
-      permissionServer: makePermissionServer(new Set(['run-cross-1', 'run-cross-2'])),
       emitter,
       logger,
     });
@@ -403,7 +402,6 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-live', 'run-at-rest'])),
-      permissionServer: makePermissionServer(new Set(['run-live', 'run-at-rest'])),
       emitter,
       logger,
     });
@@ -433,7 +431,6 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-x', 'run-y'])),
-      permissionServer: makePermissionServer(new Set(['run-x', 'run-y'])),
       emitter,
       logger,
     });
@@ -489,7 +486,6 @@ describe('StuckDetector classification: cross_run_deadlock', () => {
     const detector = new StuckDetector({
       db,
       claudeManager: makeClaudeManager(new Set(['run-a', 'run-b'])),
-      permissionServer: makePermissionServer(new Set(['run-a', 'run-b'])),
       emitter,
       logger,
     });
