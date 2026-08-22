@@ -230,7 +230,7 @@ const conflictModeSchema = z.enum(['auto', 'manual']);
 const directionModeSchema = z.enum(['auto', 'manual']);
 
 /**
- * TrackerContentSyncMode — field write-back / archive cadence (migration 112).
+ * TrackerContentSyncMode — field write-back / archive cadence (migration 114).
  * A SEPARATE declaration from `directionModeSchema`, deliberately: 'off' is a
  * real third answer here ("never"), and coupling it onto the two-state schema
  * above would let status/pull/push silently accept a value they must never
@@ -242,7 +242,7 @@ const priorityLevelSchema = z.enum(['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6']);
 const entityCategorySchema = z.enum(['feature', 'bug', 'chore']);
 
 /**
- * The wizard's edited priority-mapping overlay (migration 112's
+ * The wizard's edited priority-mapping overlay (migration 114's
  * `priority_mapping_json`). `toProvider` only — `toLocal` is deliberately
  * never sent by the wizard; the resolver falls back to the seed's own inbound
  * table when it is absent (see shared/types/trackerSync.ts's

@@ -222,7 +222,7 @@ export interface TrackerCategoryMapping {
 }
 
 /**
- * The wizard's edited priority-mapping OVERLAY (migration 112's
+ * The wizard's edited priority-mapping OVERLAY (migration 114's
  * `priority_mapping_json`) — `toProvider` only. `toLocal` is deliberately
  * never sent: the wizard's picker edits only which provider token each local
  * level sends, and the resolver (`resolveEffectivePriorityMapping`) falls back
@@ -332,7 +332,7 @@ export type TrackerDirectionMode = 'auto' | 'manual';
 
 /**
  * Per-connection cadence for field write-back ("Sync task fields") and remote
- * archive/trash (migration 112). A SEPARATE type from {@link
+ * archive/trash (migration 114). A SEPARATE type from {@link
  * TrackerDirectionMode} rather than a widening of it — deliberately: the
  * existing three directions (status/pull/push) answer "auto or manual", never
  * "never", and coupling a third value onto that pair would let an unrelated
@@ -414,9 +414,9 @@ export interface TrackerConnectionSummary {
   statusSyncMode: TrackerDirectionMode;
   pullMode: TrackerDirectionMode;
   pushMode: TrackerDirectionMode;
-  /** Field write-back cadence (migration 112); 'off' on every pre-Phase-3 connection. */
+  /** Field write-back cadence (migration 114); 'off' on every pre-Phase-3 connection. */
   contentSyncMode: TrackerContentSyncMode;
-  /** Remote archive/trash cadence (migration 112); 'off' on every pre-Phase-3 connection. */
+  /** Remote archive/trash cadence (migration 114); 'off' on every pre-Phase-3 connection. */
   archiveSyncMode: TrackerContentSyncMode;
   mirrorSubissues: boolean;
   conflictMode: TrackerConflictMode;

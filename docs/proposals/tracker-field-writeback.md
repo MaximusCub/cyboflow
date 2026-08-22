@@ -98,7 +98,7 @@ Deliverable: a probe transcript appended to this doc. P1 failing ⇒ Plane ships
 
 ## Phase 1 — Widen local priority to P0-P6 (self-contained; no tracker coupling)
 
-Migration **111** (`111_widen_entity_priority.sql`): widen the CHECK on `ideas`/`epics`/`tasks` per
+Migration **111** (`113_widen_entity_priority.sql`): widen the CHECK on `ideas`/`epics`/`tasks` per
 the **103 recipe** (add shadow column → copy → drop → re-add with `CHECK (priority IN
 ('P0','P1','P2','P3','P4','P5','P6'))` + `DEFAULT 'P2'` → copy back → drop shadow; no
 table-recreate — the column has no index/FK/view entanglement). Migration test mirrors
@@ -184,7 +184,7 @@ Code sites (the shared type does NOT propagate to most of these — they are ind
 6. Category inbound applies only from Dart; a null category from Linear/Plane is "absent", never a
    diff.
 
-## Phase 3 — Migration 112 + direction modes + outbox kinds
+## Phase 3 — Migration 114 + direction modes + outbox kinds
 
 One migration, **094-ordered** (idempotent ALTERs first, backfill second, recreate LAST):
 
@@ -205,7 +205,7 @@ One migration, **094-ordered** (idempotent ALTERs first, backfill second, recrea
    `CONTENT_OUTBOX_KINDS = ['update_content']` and `ARCHIVE_OUTBOX_KINDS = ['archive_issue']` arms +
    `summarizeConnection` + `updateSettings` + `appendHeldDirectionLines` (two new held lines);
    `shared/types/trackerSync.ts` summary/connect/patch; `tracker.ts` zod.
-5. Migration 112 test: every kind inserts; a bogus kind throws `/CHECK/i`; column list pinned;
+5. Migration 114 test: every kind inserts; a bogus kind throws `/CHECK/i`; column list pinned;
    mode CHECKs accept the three values and reject others.
 
 Numbering: 111/112 are next-free today; renumber-at-merge is the established convention if a
@@ -332,7 +332,7 @@ priority: boolean; category: boolean }` and `archive: 'trash' | 'archive' | 'non
   content-never-supersedes-state), drain-one-row-of-every-kind, echo suite (outbound write → stamp
   → synthetic inbound pass diffs to no-change, per provider fixture), marker re-append, archive
   404-is-success, `'off'` gating (no enqueue; "Sync now" does not drain; no inbound stall).
-- Migration 111/112 tests; `entitySchemaParity`; full `pnpm test:unit` on the settled tree.
+- Migration 113/112 tests; `entitySchemaParity`; full `pnpm test:unit` on the settled tree.
 - Live smokes, one per provider: edit title/body/priority (+category on Dart) locally → Sync now →
   verify remote + no phantom conflict on the following two passes; archive locally → remote
   trashed; Dart rename-a-type → loud sync-log line, no silent drop.

@@ -106,7 +106,7 @@ describe('Migration 105: dart as a third tracker provider', () => {
       // later file's column is visible; asserted for real in migration110.test.ts.
       'push_target',
       // Appended by 112 (content/archive write-back modes + mapping
-      // overlays) — asserted for real in migration112.test.ts.
+      // overlays) — asserted for real in migration114.test.ts.
       'content_sync_mode', 'archive_sync_mode', 'priority_mapping_json', 'category_mapping_json',
     ]);
     expect(columnNames(raw, 'entity_external_links')).toEqual([

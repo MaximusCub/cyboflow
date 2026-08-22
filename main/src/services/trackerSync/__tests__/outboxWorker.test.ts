@@ -1470,7 +1470,7 @@ describe('drainOutbox — failure handling', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Drain — migration 112's new kinds, before Phase 5 wires a real handler
+// Drain — migration 114's new kinds, before Phase 5 wires a real handler
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

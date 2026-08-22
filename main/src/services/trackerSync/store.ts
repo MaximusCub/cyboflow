@@ -131,13 +131,13 @@ export interface ConnectionSettingsPatch {
   push_mode?: TrackerConnectionRow['push_mode'];
   /** 0 | 1 — see TrackerConnectionRow.push_target (migration 110). */
   push_target?: number;
-  /** Field write-back cadence (migration 112). */
+  /** Field write-back cadence (migration 114). */
   content_sync_mode?: TrackerConnectionRow['content_sync_mode'];
-  /** Remote archive/trash cadence (migration 112). */
+  /** Remote archive/trash cadence (migration 114). */
   archive_sync_mode?: TrackerConnectionRow['archive_sync_mode'];
-  /** The priority mapping overlay JSON (migration 112); see priorityMapping.ts. */
+  /** The priority mapping overlay JSON (migration 114); see priorityMapping.ts. */
   priority_mapping_json?: string;
-  /** The category mapping overlay JSON (migration 112); see categoryMapping.ts. */
+  /** The category mapping overlay JSON (migration 114); see categoryMapping.ts. */
   category_mapping_json?: string;
   mirror_subissues?: number;
   conflict_mode?: TrackerConnectionRow['conflict_mode'];

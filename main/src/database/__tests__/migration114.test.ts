@@ -4,7 +4,7 @@
  * tracker_connections, plus tracker_outbox.kind widened to accept
  * 'update_content' and 'archive_issue'.
  *
- * Mirrors migration111.test.ts / migration110.test.ts's two-boot real-upgrade
+ * Mirrors migration113.test.ts / migration110.test.ts's two-boot real-upgrade
  * pattern: a DB is migrated by a DatabaseService whose migrations dir omits
  * 114, rows are seeded in the pre-114 shape, then a second DatabaseService
  * pointed at the full dir boots on the same file — exactly what happens when

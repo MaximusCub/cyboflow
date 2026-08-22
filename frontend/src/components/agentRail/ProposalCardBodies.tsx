@@ -107,7 +107,7 @@ export function LaunchRunBody({ payload }: { payload: LaunchRunProposalPayload }
  * Absolute-urgency glyph for a target priority. The payload carries no PRIOR
  * priority to diff against (`ReprioritizeBacklogItem` is target-only), so this
  * is deliberately NOT a before/after delta — it reads a target against three
- * bands on the 7-level P0-P6 scale (migration 111 widen): P0-P1 "promoted"
+ * bands on the 7-level P0-P6 scale (migration 113 widen): P0-P1 "promoted"
  * (green up), P2-P3 neutral, P4-P6 "lowered" (muted down), mirroring the
  * packet's green-up / muted-down/neutral color split without fabricating data
  * the payload doesn't have.

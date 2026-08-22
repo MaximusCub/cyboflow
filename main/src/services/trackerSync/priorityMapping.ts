@@ -218,7 +218,7 @@ export function seedDefaultPriorityMapping(
 
 /**
  * The persisted overlay's JSON shape (`tracker_connections.priority_mapping_json`,
- * migration 112). BOTH halves are stored because neither can be derived from
+ * migration 114). BOTH halves are stored because neither can be derived from
  * the other — see the module header.
  *
  * Either half may be absent, and an absent half keeps the seed's: a user who
@@ -242,7 +242,7 @@ interface PriorityMappingOverlay {
  * ENTRY is validated on its own, so one bad value costs that value and not the
  * whole mapping.
  *
- * `overlayJson` is null until migration 112 adds the column; every Phase-2
+ * `overlayJson` is null until migration 114 adds the column; every Phase-2
  * caller passes null and gets the seed.
  *
  * AN OVERLAY TOKEN IS RE-VALIDATED AGAINST THE LIVE LIST, not restored verbatim,

@@ -1550,7 +1550,7 @@ describe('TrackerSyncService direction modes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Content/archive sync modes (migration 112) — the THREE-state gate.
+// Content/archive sync modes (migration 114) — the THREE-state gate.
 //
 // Phase 5 has not wired an enqueue trigger for either kind yet, so these tests
 // enqueue an `update_content`/`archive_issue` row directly (exactly the shape

@@ -1,17 +1,17 @@
 /**
- * Migration 111_widen_entity_priority.sql — widen ideas/epics/tasks.priority
+ * Migration 117_widen_entity_priority.sql — widen ideas/epics/tasks.priority
  * from the 3-level P0-P2 CHECK (migration 015) to 7-level P0-P6.
  *
  * Mirrors migration110.test.ts's two-boot real-upgrade-path pattern: a DB is
- * migrated by a DatabaseService whose migrations dir omits 111, rows are
- * seeded in the pre-111 shape, then a second DatabaseService pointed at the
+ * migrated by a DatabaseService whose migrations dir omits 117, rows are
+ * seeded in the pre-117 shape, then a second DatabaseService pointed at the
  * full dir boots on the same file — exactly what happens when a user updates
  * the app. Also mirrors migration034.test.ts's "(c)" CHECK-boundary pattern,
  * inverted for the new scale: P0-P6 all accepted, one past the top (P7) and a
  * non-scale string both rejected.
  *
  * Findings (review_items.priority, migration 034) are a DIFFERENT axis and
- * are NOT touched by 111 — not exercised here.
+ * are NOT touched by 117 — not exercised here.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -21,13 +21,13 @@ import { join } from 'node:path';
 import { DatabaseService } from '../database';
 
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
-const MIGRATION_111 = '111_widen_entity_priority.sql';
+const MIGRATION_117 = '117_widen_entity_priority.sql';
 
 let tmpDir: string;
 let dbPath: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration111-'));
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration117-'));
   dbPath = join(tmpDir, 'test.db');
 });
 
@@ -35,12 +35,12 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 111 — i.e. the pre-111 app. */
-function migrationsDirWithout111(): string {
-  const dir = join(tmpDir, 'migrations-pre-111');
+/** A migrations dir holding every real migration except 117 — i.e. the pre-117 app. */
+function migrationsDirWithout117(): string {
+  const dir = join(tmpDir, 'migrations-pre-117');
   mkdirSync(dir);
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_111) continue;
+    if (name === MIGRATION_117) continue;
     if (!/^\d{3}_.*\.sql$/.test(name)) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
@@ -68,7 +68,7 @@ function columnInfo(db: Database.Database, table: string, column: string): Table
 }
 
 function seedProjectAndBoard(db: Database.Database): void {
-  db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p111')`).run();
+  db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p117')`).run();
   db.prepare(`INSERT INTO boards (id, project_id, name, kind, is_default) VALUES ('board-1', 1, 'Default', 'default', 1)`).run();
   db.prepare(
     `INSERT INTO board_stages (id, board_id, label, color_oklch, position, write_policy, is_terminal, hidden_by_default)
@@ -84,12 +84,12 @@ function insertWithPriority(db: Database.Database, table: 'ideas' | 'epics' | 't
   ).run(id, `${table.toUpperCase()}-${id}`, id, priority);
 }
 
-describe('Migration 111: widen ideas/epics/tasks.priority to P0-P6', () => {
-  it('(a) upgrades a pre-111 DB: CHECK widens, DEFAULT stays P2, existing rows preserved', () => {
-    const pre111 = migrationsDirWithout111();
-    const pre = openAt(pre111);
+describe('Migration 117: widen ideas/epics/tasks.priority to P0-P6', () => {
+  it('(a) upgrades a pre-117 DB: CHECK widens, DEFAULT stays P2, existing rows preserved', () => {
+    const pre117 = migrationsDirWithout117();
+    const pre = openAt(pre117);
     seedProjectAndBoard(pre.getDb());
-    // Pre-111: only P0-P2 accepted.
+    // Pre-117: only P0-P2 accepted.
     insertWithPriority(pre.getDb(), 'ideas', 'idea-legacy', 'P1');
     expect(() => insertWithPriority(pre.getDb(), 'ideas', 'idea-bad', 'P3')).toThrow(/CHECK constraint failed/);
     pre.close();

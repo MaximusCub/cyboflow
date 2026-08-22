@@ -102,7 +102,7 @@ describe('Migration 093: tracker-sync data model', () => {
       // asserted for real in migration110.test.ts.
       'push_target',
       // Appended by 112 (content/archive write-back modes + mapping
-      // overlays), asserted for real in migration112.test.ts.
+      // overlays), asserted for real in migration114.test.ts.
       'content_sync_mode',
       'archive_sync_mode',
       'priority_mapping_json',

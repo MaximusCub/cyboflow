@@ -366,7 +366,7 @@ describe('editRunTask', () => {
     seedLane(db, 'batch-1', 'task-a', 'queued');
     const { deps, applySpy } = makeDeps(db);
 
-    // 'high' is coerced to the canonical Priority 'P1' (migration 111: HIGH now
+    // 'high' is coerced to the canonical Priority 'P1' (migration 113: HIGH now
     // gets its own tier below URGENT/CRITICAL's P0, on the widened P0-P6 scale).
     const res = await editRunTask('run-1', { taskRef: 'TASK-1', title: 'Renamed', priority: 'high' }, deps);
     expect(res).toMatchObject({ ok: true, taskRef: 'TASK-1' });

@@ -53,7 +53,7 @@ const READY_FOR_DEV_POSITION = 6;
  * Returns undefined for anything unrecognized so the chokepoint default (P2)
  * applies rather than a bogus write.
  *
- * Widened for the 7-level P0-P6 scale (migration 111): URGENT/CRITICAL keep
+ * Widened for the 7-level P0-P6 scale (migration 113): URGENT/CRITICAL keep
  * the top slot, HIGH now gets its own tier below them (previously grouped
  * with URGENT/CRITICAL at P0, back when only 3 levels existed), and the
  * bottom of the scale gains LOW (P4) and MINOR/LOWEST/TRIVIAL (P6) so a low
