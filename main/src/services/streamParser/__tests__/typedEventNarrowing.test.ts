@@ -192,6 +192,139 @@ describe('TypedEventNarrowing', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Image tool_result content block — regression test for the dropped-
+  // screenshot defect (image blocks carry no `text` field)
+  // -------------------------------------------------------------------------
+
+  it('narrows a user tool_result event whose content array includes an image block to the user variant, not __unknown__', () => {
+    // Verbatim shape a tool_result carries when a tool returns an image (e.g. a
+    // visual-verification screenshot): a base64-embedded block with no `text`
+    // field. The old array-arm schema required `text: z.string()` on every
+    // element, so this block was rejected outright, demoting the whole `user`
+    // event to `{ kind: '__unknown__' }` and dropping it from the transcript.
+    const raw = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_011TZjjfBovjdqjSbh7vMdH1',
+            content: [
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUg==' },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('Image tool_result user event narrowed to __unknown__');
+    expect(event.type).toBe('user');
+    if (event.type !== 'user') throw new Error('Expected UserEvent');
+    const block = event.message.content[0];
+    expect(block.type).toBe('tool_result');
+    if (block.type !== 'tool_result') throw new Error('Expected ToolResultBlock');
+    expect(Array.isArray(block.content)).toBe(true);
+    if (!Array.isArray(block.content)) throw new Error('Expected array content');
+    expect(block.content[0].type).toBe('image');
+  });
+
+  it('narrows a user tool_result event whose content array mixes text and image blocks to the user variant', () => {
+    const raw = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_mixedBlockTypes01',
+            content: [
+              { type: 'text', text: 'here is the screenshot' },
+              {
+                type: 'image',
+                source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUg==' },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('Mixed-block tool_result user event narrowed to __unknown__');
+    expect(event.type).toBe('user');
+    if (event.type !== 'user') throw new Error('Expected UserEvent');
+    const block = event.message.content[0];
+    if (block.type !== 'tool_result') throw new Error('Expected ToolResultBlock');
+    expect(Array.isArray(block.content)).toBe(true);
+    if (!Array.isArray(block.content)) throw new Error('Expected array content');
+    expect(block.content.map((b) => b.type)).toEqual(['text', 'image']);
+  });
+
+  // -------------------------------------------------------------------------
+  // Pre-existing tool_result content shapes — non-regression: plain string and
+  // plain text-block-array content must keep narrowing exactly as before.
+  // -------------------------------------------------------------------------
+
+  it('still narrows a user tool_result event whose content is a plain string', () => {
+    const raw = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_plainStringContent01',
+            content: 'plain string tool result',
+          },
+        ],
+      },
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('Plain-string tool_result user event narrowed to __unknown__');
+    expect(event.type).toBe('user');
+    if (event.type !== 'user') throw new Error('Expected UserEvent');
+    const block = event.message.content[0];
+    if (block.type !== 'tool_result') throw new Error('Expected ToolResultBlock');
+    expect(block.content).toBe('plain string tool result');
+  });
+
+  it('still narrows a user tool_result event whose content is a plain text-block array', () => {
+    const raw = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_textBlockArray01',
+            content: [{ type: 'text', text: 'ordinary text-only tool result' }],
+          },
+        ],
+      },
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('Text-block-array tool_result user event narrowed to __unknown__');
+    expect(event.type).toBe('user');
+    if (event.type !== 'user') throw new Error('Expected UserEvent');
+    const block = event.message.content[0];
+    if (block.type !== 'tool_result') throw new Error('Expected ToolResultBlock');
+    expect(Array.isArray(block.content)).toBe(true);
+    if (!Array.isArray(block.content)) throw new Error('Expected array content');
+    expect(block.content[0]).toEqual({ type: 'text', text: 'ordinary text-only tool result' });
+  });
+
+  // -------------------------------------------------------------------------
   // Background-task lifecycle system events
   // -------------------------------------------------------------------------
 

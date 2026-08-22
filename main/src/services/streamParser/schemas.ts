@@ -42,10 +42,35 @@ const thinkingBlockSchema = z.object({
 });
 
 /**
- * tool_result.content can be a plain string or an array of { type, text } objects.
+ * tool_result.content array elements. Two shapes are modelled explicitly:
+ *   - image blocks: { type: 'image', source: { type, media_type, data } } — the
+ *     base64-embedded shape a tool_result carries when a tool returns an image
+ *     (e.g. a visual-verification screenshot). This block has NO `text` field,
+ *     which is why the old single-shape arm (requiring `text: z.string()` on
+ *     every element) rejected it outright, demoting the whole `user` event to
+ *     `__unknown__` and dropping it from the transcript.
+ *   - everything else: the pre-existing loose `{ type, text? }` passthrough
+ *     catch-all — `text` is now OPTIONAL (was required) so an arbitrary/
+ *     unrecognized block type with no `text` field is still accepted rather
+ *     than narrowed out. This stays a plain union, not a discriminatedUnion:
+ *     the catch-all doesn't pin a literal `type`, so it can't be a
+ *     discriminated branch.
+ */
+const toolResultImageBlockSchema = z.object({
+  type: z.literal('image'),
+  source: z.object({ type: z.string(), media_type: z.string(), data: z.string() }).passthrough(),
+}).passthrough();
+
+const toolResultGenericBlockSchema = z.object({ type: z.string(), text: z.string().optional() }).passthrough();
+
+/**
+ * tool_result.content can be a plain string or an array of block objects.
  * Research §1 confirms both forms appear on the wire.
  */
-const toolResultContentSchema = z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string() }).passthrough())]);
+const toolResultContentSchema = z.union([
+  z.string(),
+  z.array(z.union([toolResultImageBlockSchema, toolResultGenericBlockSchema])),
+]);
 
 const toolResultBlockSchema = z.object({
   type: z.literal('tool_result'),
