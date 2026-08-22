@@ -61,6 +61,7 @@ import { TrackerApiError, TrackerAuthError } from './errors';
 import {
   claimNextPending,
   findCreateClientKey,
+  getConnection,
   listUnresolvedOutbox,
   markOrphaned,
   resolveOutbox,
@@ -238,6 +239,17 @@ export async function drainOutbox(
   const fields = new FieldMappingCache(adapter, connection);
 
   for (;;) {
+    // Re-read the connection's status before EVERY claim, not just once at the
+    // top of the drain. `disconnect` is the user's stop lever, and an
+    // `archive_issue` row is destructive — sending it after the user has
+    // already hit disconnect (or an auth pause landed mid-drain) is exactly
+    // the write they were trying to stop. The service's phase-boundary guard
+    // (trackerSyncService.ts's isStillActive) only re-checks BETWEEN passes,
+    // which cannot see a disconnect that lands while a single drain is
+    // mid-flight and still holding the decrypted adapter across many
+    // iterations — so the drain must make this check itself. A row not yet
+    // claimed is left `pending`, untouched, for whatever runs next.
+    if (getConnection(deps.db, connection.id)?.status !== 'active') break;
     const row = claimNextPending(deps.db, connection.id, toSqliteUtc(deps.nowIso()), allowedKinds);
     if (!row) break;
     const halted = await processRow(deps, connection, adapter, states, fields, row, report);

@@ -175,6 +175,9 @@ class FakeAdapter implements TrackerAdapter {
   /** Runs INSIDE updateIssueContent — a test's hook for a mid-flight local edit. */
   onContentWrite: (() => void) | undefined = undefined;
 
+  /** Runs INSIDE archiveIssue — a test's hook for a mid-flight connection change. */
+  onArchiveWrite: (() => void) | undefined = undefined;
+
   readonly updateCalls: UpdateCall[] = [];
   readonly createCalls: CreateCall[] = [];
   readonly contentCalls: Array<{ externalId: string; patch: IssueContentPatch }> = [];
@@ -280,6 +283,10 @@ class FakeAdapter implements TrackerAdapter {
   }
   async archiveIssue(externalId: string): Promise<void> {
     this.archiveCalls.push(externalId);
+    // The concurrent seam a disconnect lands through: whatever a test does
+    // here happens between the send and the settle, exactly as a real
+    // mid-flight disconnect would.
+    this.onArchiveWrite?.();
     if (this.failArchive) throw this.takeFailure('failArchive');
   }
 
@@ -1814,6 +1821,40 @@ describe('drainOutbox — archive_issue', () => {
     expect(adapter.archiveCalls).toHaveLength(0);
     expect(report.failedTerminal).toBe(1);
     expect(fetchOutbox(row.id).last_error).toContain('no archive endpoint');
+  });
+});
+
+describe('drainOutbox — a disconnect mid-drain stops sending more', () => {
+  it('re-checks connection status before EACH claim, leaving unclaimed rows pending', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'T1', archived: true });
+    seedTask('tsk_2', { title: 'T2', archived: true });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'linear', 'tsk_1');
+    linkTask(connection.id, 'ext-2', BASE_BASELINE, 'linear', 'tsk_2');
+    const row1 = enqueueArchiveRow(connection.id, 'ext-1', 'tsk_1');
+    const row2 = enqueueArchiveRow(connection.id, 'ext-2', 'tsk_2');
+    const adapter = new FakeAdapter();
+    // Models the user hitting disconnect (or an auth-pause landing) WHILE the
+    // first archive is in flight — before the service's own phase-boundary
+    // guard (trackerSyncService.ts's isStillActive) ever gets a chance to see
+    // it, since that only runs BETWEEN passes.
+    adapter.onArchiveWrite = () => {
+      raw
+        .prepare("UPDATE tracker_connections SET status = 'disconnected' WHERE id = ?")
+        .run(connection.id);
+    };
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    // The first archive was already claimed and in flight when the disconnect
+    // landed, so it completes — but the drain must not claim the second,
+    // equally destructive archive after the user's stop lever has fired.
+    expect(adapter.archiveCalls).toEqual(['ext-1']);
+    expect(report.archived).toBe(1);
+    expect(fetchOutbox(row1.id).state).toBe('done');
+    const remaining = fetchOutbox(row2.id);
+    expect(remaining.state).toBe('pending');
+    expect(remaining.attempts).toBe(0);
   });
 });
 
