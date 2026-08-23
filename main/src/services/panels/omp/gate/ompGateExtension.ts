@@ -111,10 +111,15 @@ export const ENV_GATE_CONFIG = 'CYBOFLOW_OMP_GATE_CONFIG';
 export const ENV_GATE_SENTINEL = 'CYBOFLOW_OMP_GATE_SENTINEL';
 
 /**
- * OMP's subagent-dispatch tool (`tools/builtin-names.ts:19`). Denied outside
- * `dontAsk` until hook scope inside OMP subagents is verified — OMP's docs say
- * subagents run forced-yolo, and whether this extension's `tool_call` handler
- * is even installed in a subagent session is UNKNOWN.
+ * OMP's subagent-dispatch tool (`tools/builtin-names.ts:19`).
+ *
+ * Was denied in every mode while hook scope inside OMP subagents was unverified.
+ * It is verified now — the handler and its config reach a subagent at depth 2,
+ * measured; see `ompGateConfigBuilder.ts` for the probe and for why the
+ * "OMP's docs say subagents run forced-yolo" claim this comment used to carry
+ * was an assumption rather than a citation. `denyTaskTool` still exists and
+ * still blocks at rule 2 whenever it is set, which is what the fail-closed
+ * defaults rely on.
  */
 export const OMP_TASK_TOOL_NAME = 'task';
 

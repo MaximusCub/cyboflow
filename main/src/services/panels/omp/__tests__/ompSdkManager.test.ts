@@ -465,7 +465,10 @@ describe('OmpSdkManager — the spawn', () => {
       };
       expect(gateConfig.permissionMode).toBe('acceptEdits');
       expect(gateConfig.editTools).toContain('write');
-      expect(gateConfig.denyTaskTool).toBe(true);
+      // False since the subagent hook-scope premise was measured — see
+      // ompGateConfigBuilder's doc block. What this assertion is really here
+      // for is that the field is CARRIED into the spawn env at all.
+      expect(gateConfig.denyTaskTool).toBe(false);
       expect(gateConfig.cyboflowMcpToolNames).toContain('mcp__cyboflow_report_finding');
       await manager.killAllProcesses();
     } finally {
