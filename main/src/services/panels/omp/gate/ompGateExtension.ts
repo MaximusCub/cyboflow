@@ -1319,8 +1319,77 @@ const BENIGN_REDIRECT = /(?:&>>?|[0-9]*>>?)\s*(?:\/dev\/null|&[0-9])(?=\s|$)/g;
  * weakening it: `cat secrets > /tmp/exfil` and `echo hi > important.txt` are
  * untouched, and so is the `&` that backgrounds.
  */
+/**
+ * A redirect target this gate is willing to read as a PLAIN LOCAL PATH: a
+ * quoted or bare token of path characters, optionally carrying a variable
+ * expansion (`> "$OUT"`, `> "$SMOKE_DIR/x.json"` — an agent writing a computed
+ * path is ordinary, and a variable can only ever name a destination, never run
+ * anything).
+ *
+ * Deliberately EXCLUDES `(`, `)` and a backtick, so process substitution
+ * (`> >(sh)`, `< <(curl …)`) never matches and stays refused, and excludes `<`
+ * so a heredoc's `<<DELIM` never looks like a target.
+ */
+const PLAIN_REDIRECT_TARGET = /^(?:'[^']*'|"[^"`]*"|[A-Za-z0-9_./~@+%:${}-]+)$/;
+
+/**
+ * Redirect targets that are NOT files however plain they look.
+ *
+ * `/dev/tcp/host/port` and `/dev/udp/…` are bash's NETWORK redirects — a
+ * `cat < /dev/tcp/evil/80` opens a socket, which is the one thing a "this is
+ * just a file path" argument cannot cover. The substitution placeholder is
+ * refused for the same class of reason: a target decided by a command
+ * substitution is not a path this gate has read.
+ */
+function isRedirectTargetSafe(rawTarget: string): boolean {
+  const target = rawTarget.replace(/^["']|["']$/g, '');
+  if (target.includes(SUBSTITUTION_PLACEHOLDER)) return false;
+  if (/^\/dev\/(?:tcp|udp)(?:\/|$)/.test(target)) return false;
+  // Scoped to the working tree, via the same crude, over-eager test the
+  // path-sensitive programs use. The parity argument reaches "a file the agent
+  // may already write with the `write` tool"; it does NOT reach `> /etc/hosts`,
+  // and the fact that the `edit-tool` rung applies no path check of its own is
+  // a hole to close there rather than a licence to open a second one here.
+  //
+  // KNOWN LIMIT: a variable target (`> "$OUT"`) is unresolvable in a pure
+  // function, so it passes — the same statement already true of `cp "$X" "$Y"`
+  // under PATH_ESCAPE_SENSITIVE_PROGRAMS.
+  if (escapesWorkingTree(target)) return false;
+  return PLAIN_REDIRECT_TARGET.test(rawTarget);
+}
+
+/**
+ * A redirect operator plus its target, for the parity strip below.
+ * `<<` (heredoc) is excluded by requiring the `<` form to be a SINGLE `<`.
+ */
+const REDIRECT_WITH_TARGET =
+  /(?:&>>?|[0-9]*>>?|[0-9]*<(?!<))\s*('[^']*'|"[^"`]*"|\S+)(?=\s|$)/g;
+
+/**
+ * Strip the redirects `auto` has no reason to refuse.
+ *
+ * THE PARITY ARGUMENT (the defect this closes). In `auto`, the `write`/`edit`
+ * tools are auto-allowed by the `edit-tool` rung and `read` by
+ * `autoAllowTools` — so the agent may already write and read any local path
+ * without a human. Refusing `echo x > report.json` while allowing
+ * `write({path:'report.json'})` gates the CAPABILITY differently depending on
+ * which tool spells it, which is an inconsistency rather than a boundary. On
+ * the 2026-08-23 OMP smoke, redirects accounted for 8 of the 9 remaining bash
+ * escalations, every one of them a probe writing its own output file.
+ *
+ * What still refuses, and why the strip cannot launder it: only a redirect
+ * whose target reads as a plain local path is removed
+ * ({@link isRedirectTargetSafe}). Process substitution keeps its parentheses,
+ * a heredoc keeps its second `<`, a network redirect is rejected by target, and
+ * a bare `&` (backgrounding) is never a redirect at all — so each of those
+ * survives into {@link hasStructuralRefusal} and still reaches the human.
+ */
 function stripBenignRedirects(segment: string): string {
-  return segment.replace(BENIGN_REDIRECT, ' ');
+  return segment
+    .replace(BENIGN_REDIRECT, ' ')
+    .replace(REDIRECT_WITH_TARGET, (whole, target: string) =>
+      isRedirectTargetSafe(target) ? ' ' : whole,
+    );
 }
 
 /**

