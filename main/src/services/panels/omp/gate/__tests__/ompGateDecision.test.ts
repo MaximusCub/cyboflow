@@ -1245,3 +1245,96 @@ describe('the hidden coordination tools', () => {
     ).toEqual({ kind: 'ask' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Rule 4b — OMP's `xd://mcp__*` dispatch wrapper
+// ---------------------------------------------------------------------------
+
+describe("rule 4b: the `xd://mcp__*` dispatch wrapper", () => {
+  const dispatch = (target: string, over: Partial<OmpGateConfig> = {}) =>
+    decideToolCall(
+      { toolName: 'write', input: { path: `xd://${target}`, content: '{"query":"test"}' } },
+      config({ permissionMode: 'auto', ...over }),
+    );
+
+  it.each(['default', 'acceptEdits', 'auto'] as const)(
+    'allows the wrapper in %s mode — the target is gated again under its own name',
+    (permissionMode) => {
+      expect(dispatch('mcp__fal_ai_search_models', { permissionMode })).toEqual({
+        kind: 'allow',
+        rule: 'xd-mcp-dispatch',
+      });
+    },
+  );
+
+  it('allows the read-side wrapper that fetches a tool schema', () => {
+    expect(
+      decideToolCall(
+        { toolName: 'read', input: { path: 'xd://mcp__node_repl_js' } },
+        config({ permissionMode: 'auto' }),
+      ),
+    ).toEqual({ kind: 'allow', rule: 'xd-mcp-dispatch' });
+  });
+
+  it("no longer escalates a dispatch of cyboflow's own MCP tool", () => {
+    // The regression this rung exists for: rule 3 allows the real call, but the
+    // `write` carrying it used to reach the human because its name is `write`.
+    expect(
+      dispatch('mcp__cyboflow_list_workflows', {
+        cyboflowMcpToolNames: ['mcp__cyboflow_list_workflows'],
+      }),
+    ).toEqual({ kind: 'allow', rule: 'xd-mcp-dispatch' });
+  });
+
+  it('blocks at the wrapper when the TARGET is disallowed', () => {
+    const decision = dispatch('mcp__github_create_release', {
+      disallowedTools: ['mcp__github_create_release'],
+    });
+
+    expect(decision.kind).toBe('block');
+    if (decision.kind !== 'block') return;
+    expect(decision.reason).toContain('mcp__github_create_release');
+  });
+
+  it('still blocks the wrapper TOOL itself when it is disallowed', () => {
+    const decision = decideToolCall(
+      { toolName: 'write', input: { path: 'xd://mcp__fal_ai_search_models' } },
+      config({ permissionMode: 'auto', disallowedTools: ['write'] }),
+    );
+
+    expect(decision.kind).toBe('block');
+    if (decision.kind !== 'block') return;
+    expect(decision.reason).toContain('write');
+  });
+
+  it('does not widen the target itself — a foreign MCP call still asks', () => {
+    expect(
+      decideToolCall(
+        { toolName: 'mcp__fal_ai_search_models', input: { query: 'test' } },
+        config({ permissionMode: 'auto' }),
+      ),
+    ).toEqual({ kind: 'ask' });
+  });
+
+  it.each([
+    ['a non-MCP target', 'xd://bash'],
+    ['a target with a path segment', 'xd://mcp__foo/../../etc/hosts'],
+    ['a target with a query string', 'xd://mcp__foo?x=1'],
+    ['a dotted target', 'xd://mcp__foo.bar'],
+    ['a bare scheme', 'xd://'],
+    ['a different scheme', 'ssh://mcp__foo'],
+  ])('asks for %s — only an exact `mcp__<name>` remainder is verified', (_label, path) => {
+    expect(decideToolCall({ toolName: 'write', input: { path } }, config({ permissionMode: 'auto' }))).toEqual({
+      kind: 'ask',
+    });
+  });
+
+  it('leaves a real local write on its ordinary rung', () => {
+    expect(
+      decideToolCall(
+        { toolName: 'write', input: { path: 'src/index.ts', content: 'export {};' } },
+        config({ permissionMode: 'auto', editTools: ['write'] }),
+      ),
+    ).toEqual({ kind: 'allow', rule: 'edit-tool' });
+  });
+});

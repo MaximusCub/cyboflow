@@ -1425,7 +1425,9 @@ export type OmpGateAllowRule =
   /** `auto` mode's allow-unless-hazardous tool tier. */
   | 'auto-tool'
   /** `auto` mode's allow-unless-hazardous bash tier. */
-  | 'auto-bash';
+  | 'auto-bash'
+  /** OMP's `xd://mcp__*` dispatch wrapper, decided by its target ({@link xdMcpDispatchTarget}). */
+  | 'xd-mcp-dispatch';
 
 export type OmpGateDecision =
   | { kind: 'allow'; rule: OmpGateAllowRule }
@@ -1500,6 +1502,61 @@ function scanForUriScheme(
 }
 
 /**
+ * OMP's internal tool-dispatch scheme.
+ *
+ * OMP does not call an MCP tool directly: it dispatches through a pseudo-path,
+ * so `mcp__fal_ai_search_models({query})` arrives at this gate as
+ * `write({ path: 'xd://mcp__fal_ai_search_models', content: '{"query":…}' })`
+ * and the real call follows a beat later under its own name.
+ */
+const XD_DISPATCH_PREFIX = 'xd://';
+
+/**
+ * An `xd://` target that is EXACTLY one MCP tool name — no slash, dot, query or
+ * fragment. A remainder of any other shape is not a shape this gate has
+ * verified, so it gets today's behaviour (the scheme scan disqualifies it and it
+ * reaches the human).
+ */
+const XD_MCP_TARGET = /^mcp__[A-Za-z0-9_]+$/;
+
+/**
+ * The MCP tool an `xd://` dispatch wrapper targets, or `null` when the call is
+ * not one.
+ *
+ * WHY THE WRAPPER IS NOT THE DECISION POINT (the defect this closes). Every
+ * auto-allow rung is narrowed by {@link hasUriSchemeTarget}, and `xd://` is a
+ * URI scheme, so before this existed EVERY MCP call cost the human TWO
+ * approvals: one for the wrapper (a `write` to an opaque URI, which is what the
+ * review card showed) and one for the real call. Measured live on 2026-08-23 in
+ * an `auto` session: 11 of 21 escalations were wrappers.
+ *
+ * Worse, the duplication defeated rule 3. A dispatch of cyboflow's OWN MCP tool
+ * escalated, because at the wrapper the tool name is `write`, not
+ * `mcp__cyboflow_*`. The same run's log carries both halves —
+ * `allowed \`mcp__cyboflow_list_workflows\` (cyboflow-mcp)` next to a human
+ * approval for the `write` that carried it.
+ *
+ * WHY ALLOWING THE WRAPPER COSTS NOTHING. The target is gated independently,
+ * under its true name, with its real arguments — that is what the log line
+ * above proves — so the wrapper decides nothing the target does not decide
+ * again with full fidelity: `disallowedTools`, rule 3, and
+ * {@link isAutoModeAllowedTool}'s blanket `mcp__*` refusal all still apply
+ * there. What changes is only that the human is asked ONCE, at the gate that
+ * can name the tool they are being asked about.
+ *
+ * SCOPED TO `mcp__` TARGETS, deliberately. Re-gating of the target is a
+ * property this gate has OBSERVED for the MCP path and for no other. An
+ * `xd://` dispatch of anything else keeps the unnarrowed behaviour, because
+ * "we have no reason to think it is re-gated" is not evidence that it is.
+ */
+function xdMcpDispatchTarget(input: Record<string, unknown>): string | null {
+  const target = input['path'];
+  if (typeof target !== 'string' || !target.startsWith(XD_DISPATCH_PREFIX)) return null;
+  const name = target.slice(XD_DISPATCH_PREFIX.length);
+  return XD_MCP_TARGET.test(name) ? name : null;
+}
+
+/**
  * Apply cyboflow's predicate to one tool call. Pure — the socket round-trip
  * lives in {@link requestSocketDecision}, driven by an `'ask'` result.
  *
@@ -1509,6 +1566,9 @@ function scanForUriScheme(
  *  3. cyboflow's own MCP tools, by EXACT name — always allowed (our tools, our
  *     server, reached through our own socket).
  *  4. `dontAsk` — allow (log-only), rules 1-2 having already applied.
+ *  4b. OMP's `xd://mcp__*` dispatch wrapper — decided by the tool it targets,
+ *     because the target is gated again under its own name
+ *     ({@link xdMcpDispatchTarget}).
  *  5. the mode-scoped allowlists, each narrowed by {@link hasUriSchemeTarget}:
  *     `auto`'s allow-unless-hazardous tier ({@link isAutoModeAllowedTool} /
  *     {@link isAutoModeAllowedBashCommand}), then `autoAllowTools`, `editTools`,
@@ -1551,6 +1611,26 @@ export function decideToolCall(
   // 4. dontAsk — log-only.
   if (config.permissionMode === 'dontAsk') {
     return { kind: 'allow', rule: 'dont-ask' };
+  }
+
+  // 4b. An `xd://mcp__*` dispatch wrapper is not a decision point — the tool it
+  //     targets is, and OMP gates that separately under its own name. Deciding
+  //     the wrapper by the target collapses the double-approval, and keeps a
+  //     BLOCK at the earliest gate so the model learns immediately instead of
+  //     after a human has already approved the wrapper.
+  //
+  //     The recursion terminates in one step: the target's input is `{}`, which
+  //     carries no `path`, so it cannot itself be a dispatch. `{}` is the honest
+  //     input, too — the wrapper's `content` is the target's arguments in
+  //     SERIALISED form, and a decision taken on a hand-parsed copy of them
+  //     could disagree with the one taken on the real call. Nothing is lost by
+  //     leaving them out: the only verdict consumed here is `block`, which no
+  //     argument can produce.
+  const dispatchTarget = xdMcpDispatchTarget(input);
+  if (dispatchTarget !== null) {
+    const targetDecision = decideToolCall({ toolName: dispatchTarget, input: {} }, config);
+    if (targetDecision.kind === 'block') return targetDecision;
+    return { kind: 'allow', rule: 'xd-mcp-dispatch' };
   }
 
   // 5. Mode-scoped allowlists — every one of them NARROWED by the argument scan.
