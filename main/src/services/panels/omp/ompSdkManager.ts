@@ -122,6 +122,22 @@ export const OMP_TURN_TIMEOUT_MS = 30 * 60_000;
  */
 const OMP_TURN_ABORT_GRACE_MS = 10_000;
 
+/**
+ * What the model and the transcript are told when the turn ceiling stopped the
+ * turn. Shared by the aborted-`agent_end` rewrite and the outright failure, so
+ * the two paths cannot drift into describing the same event differently.
+ *
+ * Says WAITING COUNTS, because it does: the ceiling is wall clock, and a turn
+ * parked on a human approval ages it exactly as fast as one doing work.
+ */
+function describeTurnCeilingAbort(): string {
+  return (
+    `cyboflow stopped this turn: it exceeded the ${Math.round(OMP_TURN_TIMEOUT_MS / 60_000)}-minute ` +
+    'ceiling. This was NOT a user interrupt. The ceiling is wall clock, so time spent waiting on ' +
+    'human tool approvals counts against it. Start a new turn to continue.'
+  );
+}
+
 /** Budget for the RPC handshake (ready frame + optional v2 negotiation). */
 const OMP_HANDSHAKE_TIMEOUT_MS = 20_000;
 
@@ -214,6 +230,16 @@ interface OmpTurnContext {
   turnError: string | null;
   /** Accurate replacement for OMP's generic "Interrupted by user" after bridge failure. */
   questionBridgeError: string | null;
+  /**
+   * Set when {@link OMP_TURN_TIMEOUT_MS} expired and WE aborted the turn.
+   *
+   * The ceiling stops the turn through OMP's `abort` command — the same command
+   * a real user interrupt uses — so without this the turn reports OMP's generic
+   * "Interrupted by user" and blames the human for a stop they did not make.
+   * Observed live on 2026-08-23: a run whose only visible failure was that
+   * phrase, 30 minutes to the second after the turn began.
+   */
+  turnCeilingAborted: boolean;
 }
 
 /** A warm (persistent) `omp --mode rpc-ui` child parked between turns. */
@@ -968,6 +994,7 @@ export class OmpSdkManager extends AbstractCliManager {
       completedCleanly: false,
       turnError: null,
       questionBridgeError: null,
+      turnCeilingAborted: false,
     };
     entry.currentContext = ctx;
 
@@ -1178,13 +1205,17 @@ export class OmpSdkManager extends AbstractCliManager {
         this.logger?.warn(
           `[OmpSdkManager] turn exceeded ${OMP_TURN_TIMEOUT_MS}ms — aborting run ${entry.runId}`,
         );
+        // Recorded BEFORE the abort: OMP's aborted `agent_end` is what carries
+        // the misleading "Interrupted by user", and it can arrive as soon as
+        // the abort lands.
+        if (entry.currentContext) entry.currentContext.turnCeilingAborted = true;
         void entry.client.abort().catch(() => undefined);
         grace = setTimeout(
           () =>
             reject(
               new Error(
-                `OMP turn exceeded ${OMP_TURN_TIMEOUT_MS}ms and did not stop within ` +
-                  `${OMP_TURN_ABORT_GRACE_MS}ms of an abort`,
+                `${describeTurnCeilingAbort()} (OMP did not stop within ` +
+                  `${OMP_TURN_ABORT_GRACE_MS}ms of the abort.)`,
               ),
             ),
           OMP_TURN_ABORT_GRACE_MS,
@@ -1296,12 +1327,18 @@ export class OmpSdkManager extends AbstractCliManager {
     if (!ctx) return; // stray event while parked
 
     for (const projected of ctx.projector.project(event)) {
+      // OMP reports every abort as "Interrupted by user", including the ones we
+      // caused. Name the real cause when we know it — a bridge failure first,
+      // since it is the more specific diagnosis, then our own turn ceiling.
+      const trueCause =
+        ctx.questionBridgeError ??
+        (ctx.turnCeilingAborted ? describeTurnCeilingAbort() : null);
       const effective =
         projected.type === 'agent_result' &&
         projected.is_error &&
         projected.result === 'Interrupted by user' &&
-        ctx.questionBridgeError !== null
-          ? { ...projected, result: ctx.questionBridgeError }
+        trueCause !== null
+          ? { ...projected, result: trueCause }
           : projected;
       if (effective.type === 'agent_result') {
         if (ctx.terminalResultEmitted) continue;

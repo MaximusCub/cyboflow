@@ -15,6 +15,7 @@ import type { SessionManager } from '../../../sessionManager';
 import { OMP_RAW_EVENT_TYPE } from '../ompRawEventSink';
 import {
   assertOmpSdkSpawnFlags,
+  OMP_TURN_TIMEOUT_MS,
   OmpSdkManager,
   type OmpRpcClientLike,
   type OmpSdkManagerDeps,
@@ -1235,6 +1236,64 @@ describe('OmpSdkManager — concurrent fan-out lanes', () => {
       const args = clients[0].options.args ?? [];
       expect(args[args.indexOf('--session-dir') + 1]).toContain('panel-1');
       await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The turn ceiling
+// ---------------------------------------------------------------------------
+
+describe('OmpSdkManager — the turn ceiling', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('names itself as the cause instead of reporting OMP\'s "Interrupted by user"', async () => {
+    vi.useFakeTimers();
+    const db = createDb();
+    try {
+      // `hangTurn` parks the turn; the ceiling's own `abort()` releases it, and
+      // the fake then ends the turn the way OMP really does — an error result
+      // reading "Interrupted by user", which is the text under test.
+      const { manager, results, clients } = makeManager(db, {
+        hangTurn: true,
+        errorTurn: true,
+        errorMessage: 'Interrupted by user',
+      });
+
+      const spawned = manager.spawnCliProcess(turn());
+      const settled = spawned.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(OMP_TURN_TIMEOUT_MS);
+      const outcome = await settled;
+
+      expect(clients[0].abort).toHaveBeenCalledOnce();
+      expect(results).toHaveLength(1);
+      expect(results[0].is_error).toBe(true);
+      expect(results[0].result).not.toBe('Interrupted by user');
+      expect(results[0].result).toContain('NOT a user interrupt');
+      expect(results[0].result).toContain('30-minute');
+      // The wall-clock property is the one a reader has to know to act on this.
+      expect(results[0].result).toContain('human tool approvals');
+      expect(String(outcome)).toContain('NOT a user interrupt');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('leaves a real user interrupt attributed to the user', async () => {
+    const db = createDb();
+    try {
+      const { manager, results } = makeManager(db, {
+        errorTurn: true,
+        errorMessage: 'Interrupted by user',
+      });
+
+      await expect(manager.spawnCliProcess(turn())).rejects.toThrow(/interrupted by user/i);
+      expect(results).toHaveLength(1);
+      expect(results[0].result).toBe('Interrupted by user');
     } finally {
       db.close();
     }
