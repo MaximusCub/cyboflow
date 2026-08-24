@@ -198,7 +198,13 @@ class FakeAdapter implements TrackerAdapter {
   }
   async getIssue(externalId: string): Promise<TrackerIssue | null> {
     this.calls.push('getIssue');
-    return this.issuesById.get(externalId) ?? null;
+    // Point lookup and list serve the SAME store, as on a real provider — the
+    // content drain's pre-send divergence read must see what listIssues shows.
+    return (
+      this.issuesById.get(externalId) ??
+      this.issues.find((issue) => issue.externalId === externalId) ??
+      null
+    );
   }
   async createSubIssue(
     parentExternalId: string,

@@ -2945,6 +2945,7 @@ function appendWriteBackLines(
   const pushed = ambiguous.pushedIdeas + (drained?.pushedIdeas ?? 0);
   const mirrored = created - pushed;
   const contentWritten = ambiguous.contentWritten + (drained?.contentWritten ?? 0);
+  const contentWithheld = ambiguous.contentWithheld + (drained?.contentWithheld ?? 0);
   const archived = ambiguous.archived + (drained?.archived ?? 0);
   const recovered = ambiguous.ambiguousResolved;
   const retries = ambiguous.retriesScheduled + (drained?.retriesScheduled ?? 0);
@@ -2960,6 +2961,14 @@ function appendWriteBackLines(
   if (mirrored > 0) entries.push({ marker: '✓', line: `mirrored ${plural(mirrored, 'sub-issue')}` });
   if (contentWritten > 0) {
     entries.push({ marker: '✓', line: `updated ${plural(contentWritten, 'issue')} in the tracker` });
+  }
+  // The lost-update guard fired: a tracker-side edit landed after the baseline
+  // stamp, so the write was withheld and the inbound conflict machinery owns it.
+  if (contentWithheld > 0) {
+    entries.push({
+      marker: '⚠',
+      line: `held back ${plural(contentWithheld, 'write')} · concurrent tracker edit — next sync resolves it`,
+    });
   }
   // "archived" is the local vocabulary; what the provider actually performs is
   // its trash or archive, never a delete — see the locked scope decision.

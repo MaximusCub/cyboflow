@@ -146,6 +146,13 @@ export interface OutboxReport {
   pushedIdeas: number;
   /** `update_content` rows whose patch actually reached the tracker. */
   contentWritten: number;
+  /**
+   * `update_content` rows withheld by the pre-send divergence check: the
+   * tracker's current value for a patched field no longer matches the baseline,
+   * so a concurrent remote edit exists and sending would silently overwrite it.
+   * The row settles unsent and the next inbound pass surfaces the conflict.
+   */
+  contentWithheld: number;
   /** `archive_issue` rows the provider confirmed (a 404 counts — the twin was already gone). */
   archived: number;
   /** Rows that will never be retried (4xx, unresolvable state, malformed payload). */
@@ -172,6 +179,7 @@ function emptyReport(): OutboxReport {
     created: 0,
     pushedIdeas: 0,
     contentWritten: 0,
+    contentWithheld: 0,
     archived: 0,
     failedTerminal: 0,
     retriesScheduled: 0,
@@ -532,6 +540,42 @@ async function processContentWrite(
     return false;
   }
 
+  // THE LOST-UPDATE GUARD. The patch above was composed against the last
+  // STAMPED baseline, but a tracker-side edit since that stamp is invisible
+  // here: full passes drain writes BEFORE the inbound fetch, and the debounced
+  // drain never fetches at all. Sending anyway would overwrite the remote edit
+  // and then stamp the response as the new baseline — erasing the only evidence
+  // a conflict ever existed, beyond even Manual mode's reach. So the issue is
+  // re-read and every field THIS patch touches is compared against the
+  // baseline: any mismatch is a concurrent remote edit, and the write is
+  // withheld WITHOUT stamping. Local ≠ baseline ≠ remote then holds, which is
+  // exactly the shape the next inbound pass's conflict machinery consumes
+  // (auto: remote wins + convergence; manual: queued for the human). The
+  // read-to-send window is still a race, but it is milliseconds where the pass
+  // cadence was minutes — and none of the three providers offers a conditional
+  // write to close it outright.
+  let current: TrackerIssue | null;
+  try {
+    current = await adapter.getIssue(externalId);
+  } catch (err) {
+    // Nothing has been sent — an ordinary backoff retry is safe.
+    return recordAdapterFailure(deps, connection, row, report, err);
+  }
+  if (current === null) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'the issue is gone remotely — nothing to write onto',
+    });
+    return false;
+  }
+  const diverged = contentDivergence(patch, parseJsonObject(link.baseline_json), current);
+  if (diverged.length > 0) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: `withheld: concurrent tracker edit on ${diverged.join(', ')} — the next inbound pass resolves the conflict`,
+    });
+    report.contentWithheld += 1;
+    return false;
+  }
+
   let written: TrackerIssue | null;
   try {
     written = await adapter.updateIssueContent(externalId, patch);
@@ -660,6 +704,46 @@ function composeContentPatch(
   }
 
   return { patch, sentDescription };
+}
+
+/**
+ * The fields of `patch` whose CURRENT remote value no longer matches the
+ * baseline — i.e. the fields a concurrent tracker edit has moved since the
+ * last stamp. Only patched fields are examined: a remote edit to a field this
+ * write does not touch is not endangered by it (every provider takes partial
+ * patches), and blocking on it would deadlock disjoint edits.
+ *
+ * Comparison semantics deliberately MIRROR {@link composeContentPatch}'s own
+ * diffs — exact string for title, {@link normalizeDescription} for the
+ * description, case-insensitive provider tokens for priority/category — so
+ * "diverged" here means precisely "compose would have produced a different
+ * patch had the baseline been current".
+ */
+function contentDivergence(
+  patch: IssueContentPatch,
+  baseline: Record<string, unknown>,
+  current: TrackerIssue,
+): string[] {
+  const diverged: string[] = [];
+  if (patch.title !== undefined) {
+    const stored = typeof baseline.title === 'string' ? baseline.title : null;
+    if (current.title !== stored) diverged.push('title');
+  }
+  if (patch.description !== undefined) {
+    const stored = typeof baseline.description === 'string' ? baseline.description : null;
+    if (normalizeDescription(current.description) !== normalizeDescription(stored)) {
+      diverged.push('description');
+    }
+  }
+  if (patch.priority !== undefined) {
+    const stored = typeof baseline.priority === 'string' ? baseline.priority : null;
+    if (!providerTokensEqual(current.priority, stored)) diverged.push('priority');
+  }
+  if (patch.category !== undefined) {
+    const stored = typeof baseline.category === 'string' ? baseline.category : null;
+    if (!providerTokensEqual(current.category, stored)) diverged.push('category');
+  }
+  return diverged;
 }
 
 /**

@@ -638,6 +638,31 @@ function linkTask(
   });
 }
 
+/**
+ * Seed the fake tracker's CURRENT issue to agree with a link's stamped
+ * baseline — the steady state the lost-update guard's pre-send read expects.
+ * Tests modelling a concurrent remote edit pass `overrides` for the moved
+ * field instead.
+ */
+function seedRemote(
+  adapter: FakeAdapter,
+  externalId: string,
+  baseline: Record<string, unknown>,
+  overrides: Partial<TrackerIssue> = {},
+): void {
+  adapter.issuesById.set(
+    externalId,
+    makeIssue(externalId, {
+      title: typeof baseline.title === 'string' ? baseline.title : 'Sub issue',
+      description: typeof baseline.description === 'string' ? baseline.description : null,
+      priority: typeof baseline.priority === 'string' ? baseline.priority : null,
+      category: typeof baseline.category === 'string' ? baseline.category : null,
+      stateId: typeof baseline.stateId === 'string' ? baseline.stateId : 'state-backlog',
+      ...overrides,
+    }),
+  );
+}
+
 function enqueueContentWrite(
   connectionId: string,
   externalId: string,
@@ -1481,15 +1506,17 @@ describe('drainOutbox — update_content', () => {
   it('sends ONLY the fields that differ from the baseline and stamps the response back', async () => {
     const connection = seedConnection();
     seedTask('tsk_1', { title: 'New title', body: 'New body', priority: 'P0' });
-    linkTask(connection.id, 'ext-1', {
+    const baseline = {
       title: 'Old title',
       description: 'New body',
       stateId: 'state-backlog',
       priority: '3',
       category: null,
-    });
+    };
+    linkTask(connection.id, 'ext-1', baseline);
     const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', baseline);
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
@@ -1514,23 +1541,25 @@ describe('drainOutbox — update_content', () => {
   it('stamps the PROVIDER-NORMALIZED text, not what we sent, and realigns the local body', async () => {
     const connection = seedConnection();
     seedTask('tsk_1', { title: 'T', body: '*emphasis*' });
-    linkTask(connection.id, 'ext-1', {
+    const baseline = {
       title: 'T',
       description: 'was',
       stateId: 'state-backlog',
       priority: '3',
       category: null,
-    });
+    };
+    linkTask(connection.id, 'ext-1', baseline);
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', baseline);
     // Dart's measured behaviour: the markdown it stores is not the markdown it
     // was handed.
     adapter.normalizeStored = (description) => description?.replace('*emphasis*', '_emphasis_') ?? null;
 
     await drainOutbox(makeDeps(adapter), connection);
 
-    const baseline = baselineOf('tsk_1') as { description: string };
-    expect(baseline.description).toBe('_emphasis_');
+    const stamped = baselineOf('tsk_1') as { description: string };
+    expect(stamped.description).toBe('_emphasis_');
     // …and the LOCAL body is corrected to match, so the next genuine remote
     // edit merges cleanly instead of reading as "both sides moved".
     expect(bodyOf('tsk_1')).toBe('_emphasis_');
@@ -1569,6 +1598,7 @@ describe('drainOutbox — update_content', () => {
     );
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', { title: 'Old title', description: null, stateId: 'state-backlog' });
     adapter.provider = 'dart';
     // Category IS writable on this provider — the omission below is the
     // backfill arm, not a capability gate.
@@ -1623,6 +1653,7 @@ describe('drainOutbox — update_content', () => {
     });
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', { title: 'T', description: 'stale', priority: '3', category: null });
     adapter.provider = 'plane';
 
     await drainOutbox(makeDeps(adapter), connection);
@@ -1644,6 +1675,7 @@ describe('drainOutbox — update_content', () => {
     );
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', { title: 'T', description: 'stale', priority: '3', category: null });
     adapter.provider = 'plane';
 
     await drainOutbox(makeDeps(adapter), connection);
@@ -1682,6 +1714,7 @@ describe('drainOutbox — update_content', () => {
     linkTask(connection.id, 'ext-1', BASE_BASELINE);
     const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE);
     adapter.failContent = new TrackerApiError('linear', 'boom', 500);
 
     const report = await drainOutbox(makeDeps(adapter), connection);
@@ -1705,15 +1738,17 @@ describe('drainOutbox — update_content', () => {
     // compose its patch from the clobbered body and push the loss remotely.
     const connection = seedConnection();
     seedTask('tsk_1', { title: 'T', body: 'first draft' });
-    linkTask(connection.id, 'ext-1', {
+    const baseline = {
       title: 'T',
       description: 'was',
       stateId: 'state-backlog',
       priority: '3',
       category: null,
-    });
+    };
+    linkTask(connection.id, 'ext-1', baseline);
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', baseline);
     // The provider normalizes, so the alignment WOULD fire but for the guard…
     adapter.normalizeStored = (description) => description?.toUpperCase() ?? null;
     // …and the user edits while the request is on the wire.
@@ -1742,7 +1777,12 @@ describe('drainOutbox — update_content', () => {
     enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
     adapter.contentReturnsNull = true;
-    adapter.issuesById.set('ext-1', makeIssue('ext-1', { title: 'New title' }));
+    // The pre-send read must see the baseline; only the POST-write re-read may
+    // see the written state (contentReturnsNull skips the fake's own store).
+    seedRemote(adapter, 'ext-1', BASE_BASELINE);
+    adapter.onContentWrite = () => {
+      adapter.issuesById.set('ext-1', makeIssue('ext-1', { title: 'New title' }));
+    };
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     const report = await drainOutbox(makeDeps(adapter), connection);
@@ -1752,6 +1792,106 @@ describe('drainOutbox — update_content', () => {
     expect(logged).toHaveBeenCalledOnce();
     expect((baselineOf('tsk_1') as { title: string }).title).toBe('New title');
     logged.mockRestore();
+  });
+
+  it('WITHHOLDS the write when the tracker moved a patched field since the stamp', async () => {
+    // The lost-update race: local edits title, a tracker user ALSO edits title
+    // after the last inbound stamp. Sending would overwrite their edit and the
+    // response stamp would erase the evidence — so nothing may be sent.
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'Local new title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE, { title: 'Remote new title' });
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(report.contentWritten).toBe(0);
+    expect(report.contentWithheld).toBe(1);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('done');
+    expect(settled.last_error).toContain('withheld');
+    expect(settled.last_error).toContain('title');
+    // The baseline is untouched: local ≠ baseline ≠ remote survives for the
+    // next inbound pass's conflict machinery to consume.
+    expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
+  });
+
+  it('does NOT withhold on a remote edit to a field the patch never touches', async () => {
+    // Disjoint edits must not deadlock: the tracker moved priority, the local
+    // edit moved only the title — partial patches cannot endanger the former.
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'Local new title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const adapter = new FakeAdapter();
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    seedRemote(adapter, 'ext-1', BASE_BASELINE, { priority: '1' });
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.contentWithheld).toBe(0);
+    expect(adapter.contentCalls).toEqual([
+      { externalId: 'ext-1', patch: { title: 'Local new title' } },
+    ]);
+  });
+
+  it('compares provider tokens case-insensitively in the divergence check', async () => {
+    // Dart writes 'critical', reads back 'Critical' — casing alone is an echo,
+    // never a concurrent edit.
+    const connection = seedConnection({ provider: 'dart' });
+    seedTask('tsk_1', { title: 'New title', priority: 'P0' });
+    const baseline = {
+      title: 'Old title',
+      description: null,
+      stateId: 'state-backlog',
+      priority: 'high',
+      category: null,
+    };
+    linkTask(connection.id, 'ext-1', baseline, 'dart');
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    adapter.provider = 'dart';
+    seedRemote(adapter, 'ext-1', baseline, { priority: 'High' });
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.contentWithheld).toBe(0);
+    expect(adapter.contentCalls).toHaveLength(1);
+  });
+
+  it('settles `done` unsent when the issue is gone remotely at the pre-send read', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    // issuesById deliberately NOT seeded: getIssue returns null.
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(report.failedTerminal).toBe(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    expect(fetchOutbox(row.id).last_error).toContain('gone remotely');
+  });
+
+  it('retries when the pre-send read itself fails — nothing was sent', async () => {
+    const connection = seedConnection();
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+    const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE);
+    adapter.failLookup = new TrackerApiError('linear', 'boom', 500);
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls).toHaveLength(0);
+    expect(report.retriesScheduled).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('pending');
+    expect(baselineOf('tsk_1')).toEqual(BASE_BASELINE);
   });
 });
 
@@ -1871,6 +2011,7 @@ describe('drainOutbox — the supersession matrix', () => {
     const stateWrite = enqueueStateWrite(connection.id, 'ext-1', 'completed');
     const freshContent = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE);
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
@@ -1955,6 +2096,7 @@ describe('drainOutbox — every kind has an explicit handler', () => {
       archive_issue: enqueueArchiveRow(connection.id, 'ext-archive', 'tsk_archive').id,
     };
     const adapter = new FakeAdapter();
+    seedRemote(adapter, 'ext-content', BASE_BASELINE);
 
     const report = await drainOutbox(makeDeps(adapter), connection);
 
