@@ -1088,6 +1088,13 @@ export const runsRouter = router({
       // substrate-keyed selection cap N is enforced here (defense in depth — the
       // picker also enforces it client-side).
       taskIds: z.array(z.string().min(1)).optional(),
+      // Optional idea-session lineage for a launch whose SEED is not an idea —
+      // the idea canvas's "Launch sprint" tile (taskIds seed). Rides the trailing
+      // launchOptions bag; the launcher stamps sessions.origin_idea_id (sidebar
+      // nesting + tile greying) and applies the max-one-running-per-idea guard.
+      // NO seed semantics: seed_idea_id stays untouched, no `# Selected idea`
+      // block. Redundant next to a singular ideaId seed (which already stamps).
+      originIdeaId: z.string().min(1).optional(),
       // Optional compound seed findings (findings-triage redesign / migration 034).
       // When supplied, the launcher writes workflow_runs.seed_finding_ids (a JSON
       // string array) directly; RunExecutor.getPrompt injects the selected findings
@@ -1382,7 +1389,8 @@ export const runsRouter = router({
         input.variantId !== undefined ||
         input.baseline ||
         input.ideaIds !== undefined ||
-        input.seedPrompt !== undefined
+        input.seedPrompt !== undefined ||
+        input.originIdeaId !== undefined
           ? {
               ...(input.variantId !== undefined
                 ? { requestedVariantId: input.variantId }
@@ -1391,6 +1399,7 @@ export const runsRouter = router({
                   : {}),
               ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
               ...(input.seedPrompt !== undefined ? { seedPrompt: input.seedPrompt } : {}),
+              ...(input.originIdeaId !== undefined ? { originIdeaId: input.originIdeaId } : {}),
             }
           : undefined;
       const { runId, worktreePath, branchName } = launchWithAgentSelection

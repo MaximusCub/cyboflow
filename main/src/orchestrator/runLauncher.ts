@@ -365,6 +365,14 @@ export class RunLauncher {
       // planner-only ideaIds guard). RunExecutor.getPrompt reads this column to
       // inject the `# What you are building` block.
       seedPrompt?: string;
+      // Idea-session lineage for a launch whose SEED is not an idea (e.g. the
+      // idea canvas's "Launch sprint" tile, seeded with taskIds). Carries only
+      // the origin_idea_id session stamp + the max-one-running-per-idea guard —
+      // NO seed semantics: workflow_runs.seed_idea_id stays untouched, so the
+      // run's prompt never grows a `# Selected idea` block. When a singular
+      // ideaId seed is also present it wins (they should never disagree; the
+      // seed path already stamps).
+      originIdeaId?: string;
     },
     // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
     // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime
@@ -440,6 +448,16 @@ export class RunLauncher {
     // for a stale/scripted caller that never saw the greying.
     if (singularSeedIdeaId !== undefined) {
       assertIdeaNotBusy(this.db, singularSeedIdeaId);
+    }
+
+    // The non-seed lineage variant of the same guard: a taskIds-seeded sprint
+    // launched FROM an idea canvas carries originIdeaId instead of an idea seed,
+    // and must respect the same max-one-running rule (its origin stamp below is
+    // what makes the canvas grey / the sidebar nest, so the guard and the stamp
+    // key off the same id). Skipped when it duplicates the singular seed.
+    const originIdeaId = launchOptions?.originIdeaId;
+    if (originIdeaId !== undefined && originIdeaId !== singularSeedIdeaId) {
+      assertIdeaNotBusy(this.db, originIdeaId);
     }
 
     // Launch pre-launch seed-prompt validation (migration 100) — BEFORE createRun
@@ -675,18 +693,22 @@ export class RunLauncher {
       //
       // Fail-soft: lineage is presentation, not correctness. A pre-112 schema
       // (or any write failure) must never abort a launch that is otherwise fine.
-      if (singularSeedIdeaId !== undefined) {
+      // `?? originIdeaId`: the taskIds-seeded sprint path (idea canvas "Launch
+      // sprint") has no idea seed but the same lineage — stamp from the explicit
+      // launch option instead. Seed wins when both are present.
+      const lineageIdeaId = singularSeedIdeaId ?? originIdeaId;
+      if (lineageIdeaId !== undefined) {
         try {
           const stamped = this.db
             .prepare('UPDATE sessions SET origin_idea_id = ? WHERE id = ? AND origin_idea_id IS NULL')
-            .run(singularSeedIdeaId, sessionId);
+            .run(lineageIdeaId, sessionId);
           // Raw UPDATEs never reach the renderer; refresh so the sidebar regroups now.
           if (stamped.changes > 0) this.sessionRefresher?.refreshSessionFromDatabase(sessionId);
         } catch (err) {
           this.logger.warn('RunLauncher: origin_idea_id lineage stamp failed (best-effort)', {
             runId,
             sessionId,
-            ideaId: singularSeedIdeaId,
+            ideaId: lineageIdeaId,
             error: err instanceof Error ? err.message : String(err),
           });
         }

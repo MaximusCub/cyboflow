@@ -286,3 +286,92 @@ describe('RunLauncher.launch — max-one-running-per-idea guard', () => {
     });
   });
 });
+
+/**
+ * The NON-SEED lineage variant (idea canvas "Launch sprint"): a taskIds-seeded
+ * launch carries `launchOptions.originIdeaId` — same origin stamp + same busy
+ * guard as a singular idea seed, but seed_idea_id stays NULL (no `# Selected
+ * idea` block in the run prompt).
+ */
+describe('RunLauncher.launch — launchOptions.originIdeaId (non-seed lineage)', () => {
+  const launchWithOrigin = (
+    f: Fixture,
+    tmpDir: string,
+    originIdeaId: string,
+  ): ReturnType<RunLauncher['launch']> =>
+    f.launcher.launch(
+      f.workflowId,
+      tmpDir,
+      undefined,
+      undefined,
+      undefined, // no ideaId seed
+      f.sessionId,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { originIdeaId },
+    );
+
+  it('stamps origin_idea_id + refreshes, WITHOUT writing seed_idea_id', async () => {
+    await withTempDir('runlauncher-lineage-', async (tmpDir) => {
+      const db = ideaLineageDb();
+      const f = makeFixture(db, tmpDir);
+
+      await launchWithOrigin(f, tmpDir, 'idea-1');
+
+      expect(readOrigin(db, f.sessionId)).toBe('idea-1');
+      expect(f.refreshed).toEqual([f.sessionId]);
+      const run = db
+        .prepare('SELECT seed_idea_id FROM workflow_runs WHERE id = ?')
+        .get(f.cannedRunId) as { seed_idea_id: string | null };
+      expect(run.seed_idea_id).toBeNull();
+    });
+  });
+
+  it('rejects with IdeaBusyError while the idea already holds a non-terminal run', async () => {
+    await withTempDir('runlauncher-lineage-', async (tmpDir) => {
+      const db = ideaLineageDb();
+      const f = makeFixture(db, tmpDir);
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id) VALUES ('run-live', ?, 1, 'running', 'default', 'idea-1')",
+      ).run(f.workflowId);
+
+      await expect(launchWithOrigin(f, tmpDir, 'idea-1')).rejects.toBeInstanceOf(IdeaBusyError);
+      expect(f.createRun).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a singular idea seed WINS over a disagreeing originIdeaId (seed path stamps)', async () => {
+    await withTempDir('runlauncher-lineage-', async (tmpDir) => {
+      const db = ideaLineageDb();
+      const f = makeFixture(db, tmpDir);
+
+      await f.launcher.launch(
+        f.workflowId,
+        tmpDir,
+        undefined,
+        undefined,
+        'idea-seed',
+        f.sessionId,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { originIdeaId: 'idea-origin' },
+      );
+
+      expect(readOrigin(db, f.sessionId)).toBe('idea-seed');
+    });
+  });
+});
