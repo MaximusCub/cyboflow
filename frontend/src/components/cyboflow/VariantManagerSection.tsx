@@ -6,7 +6,8 @@
  *
  * Lists the workflow's variants (label, status pill, weight) and offers:
  *   - "Create variant from current" — snapshots the resolved definition
- *     (`variants.create`), seeded status='draft'.
+ *     (`variants.create`), seeded status='draft', then opens the new row in
+ *     {@link VariantEditorModal} so naming it flows straight into editing it.
  *   - Edit — opens {@link VariantEditorModal} (graph + agent-delta editor).
  *   - Add to rotation / Pause — `variants.setStatus('active' | 'paused')`.
  *   - Retire — `variants.setStatus('retired')` (hidden from pickers + rotation,
@@ -257,8 +258,13 @@ export function VariantManagerSection({
       setCreateDialogOpen(false);
       setActionError(null);
       try {
-        await trpc.cyboflow.variants.create.mutate({ workflowId, label });
+        // Naming a variant is the START of authoring it, not the end: open the
+        // fresh row in the editor straight away rather than leaving the user to
+        // find it in the list and click Edit. `create` returns the inserted row,
+        // so this needs no extra read.
+        const created = await trpc.cyboflow.variants.create.mutate({ workflowId, label });
         await invalidate();
+        setEditingVariant(created);
       } catch (err: unknown) {
         setActionError(err instanceof Error ? err.message : 'Failed to create variant');
       }

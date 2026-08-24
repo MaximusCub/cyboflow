@@ -4,6 +4,7 @@
  *
  * Verifies:
  *   (a) create-from-current calls variants.create then invalidates the list.
+ *   (a2) create-from-current then OPENS the newly created row in the editor.
  *   (b) "Add to rotation" calls setStatus('active').
  *   (c) "Pause" calls setStatus('paused').
  *   (d) "Retire" calls setStatus('retired').
@@ -133,6 +134,22 @@ describe('VariantManagerSection', () => {
       expect(mockCreate).toHaveBeenCalledWith({ workflowId: 'wf-1', label: 'My Variant' });
     });
     expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('(a2) create-from-current opens the new variant in the editor', async () => {
+    mockUseWorkflowVariants.mockReturnValue({ variants: [], baseline: null, loading: false, error: null });
+    mockCreate.mockResolvedValue(makeVariant({ id: 'wfv_new', label: 'My Variant' }));
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('variant-manager-create-button'));
+    fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'My Variant' } });
+    fireEvent.click(screen.getByTestId('flow-name-confirm'));
+
+    // The editor is seeded from the row `create` RETURNED — not from the list,
+    // which the mocked store never repopulates.
+    await waitFor(() => {
+      expect(screen.getByTestId('mock-variant-editor-modal')).toHaveTextContent('My Variant');
+    });
   });
 
   it('(b) "Add to rotation" calls setStatus active', async () => {
