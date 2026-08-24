@@ -1,29 +1,36 @@
 import { useEffect, useRef, useState } from 'react';
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS, ONBOARDING_STEP_COUNT } from '../../utils/onboarding';
+import {
+  ONBOARDING_ANCHOR_ATTR,
+  ONBOARDING_ANCHORS,
+  visibleStepNumber,
+  visibleStepTotal,
+} from '../../utils/onboarding';
 import { ONBOARDING_TITLES } from './copy';
 import { OnboardingDots } from './OnboardingDots';
 
 /**
- * Coachmark — the anchored popover for every coach step (5-10). Resolves its
+ * Coachmark — the anchored popover for every coach step (6-11). Resolves its
  * target exclusively by the `data-onboarding` attribute, tracks the target rect
  * on a rAF loop (robust to layout shifts / scroll), and draws a 4-rectangle
  * scrim that leaves a transparent hole over the target so the real element stays
  * clickable — no z-index mutation of the (cross-lane) target is required.
  *
  * Two flavors, per the spec's `pointer` flag:
- * - "try it" do-steps (5/9/10): a capture-phase document click listener detects
+ * - "try it" do-steps (6/10/11): a capture-phase document click listener detects
  *   the real action on the target and calls anchorActioned(); no Next button.
- * - pointer steps (6-8, the wizard-Configure trio): informational — a Next
+ * - pointer steps (7-9, the wizard-Configure trio): informational — a Next
  *   button advances via onNext(); interacting with the anchored control (e.g.
  *   picking a permission option through the hole) never advances.
  *
  * If the anchor is absent (e.g. the wizard hasn't mounted the card yet) the
- * overlay renders nothing and retries next frame — the gate's step-4 wizard
+ * overlay renders nothing and retries next frame — the gate's step-6 wizard
  * precondition re-creates the anchor.
  */
 interface CoachmarkProps {
   step: number;
   maxVisitedStep: number;
+  /** Step indices this run does not show (see OnboardingDots). */
+  skippedSteps?: ReadonlySet<number>;
   onBack: () => void;
   onSkip: () => void;
   onGoTo: (step: number) => void;
@@ -53,7 +60,7 @@ const POPOVER_WIDTH = 298;
 const HOLE_PAD = 6;
 
 const COACH: Record<number, CoachSpec> = {
-  5: {
+  6: {
     // The card sits near the wizard's right edge — popover goes to its LEFT.
     anchorId: ONBOARDING_ANCHORS.quickSessionCard,
     arrow: 'right',
@@ -64,18 +71,19 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  6: {
+  7: {
     anchorId: ONBOARDING_ANCHORS.substrateSelect,
     arrow: 'up',
     pointer: true,
     body: (
       <>
-        Choose the provider and how it runs. Claude and Codex both support structured SDK sessions; interactive CLI
-        mode is available for quick sessions. Runtime comes first because it determines which models are available.
+        Choose the provider and how it runs. This starts from the default agent you picked earlier — change it here
+        for this session only. Claude and Codex both support structured SDK sessions; interactive CLI mode is
+        available for quick sessions. Runtime comes first because it determines which models are available.
       </>
     ),
   },
-  7: {
+  8: {
     anchorId: ONBOARDING_ANCHORS.sessionPermission,
     arrow: 'up',
     pointer: true,
@@ -86,7 +94,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  8: {
+  9: {
     anchorId: ONBOARDING_ANCHORS.modelSelect,
     arrow: 'up',
     pointer: true,
@@ -98,7 +106,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  9: {
+  10: {
     anchorId: ONBOARDING_ANCHORS.shipChip,
     arrow: 'up',
     body: (
@@ -108,7 +116,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  10: {
+  11: {
     anchorId: ONBOARDING_ANCHORS.humanReview,
     arrow: 'left',
     body: (
@@ -136,9 +144,9 @@ interface Rect {
  * scroll container — which is the portal host (`fixed inset-0`) and then `body`,
  * neither scrollable — and never the surface underneath. Nothing moves.
  *
- * That dead-ends the tour on a short (non-fullscreen) window: steps 6-8 anchor
+ * That dead-ends the tour on a short (non-fullscreen) window: steps 7-9 anchor
  * into the wizard's Configure column, whose "Start quick session" CTA — the very
- * control step 8's copy tells you to press next — sits below the fold, reachable
+ * control step 9's copy tells you to press next — sits below the fold, reachable
  * only by scrolling the wizard's own `overflow-y-auto` root. So we resolve that
  * container from the ANCHOR (not from the scrim) and drive it ourselves.
  */
@@ -168,9 +176,12 @@ function rectsEqual(a: Rect | null, b: Rect | null): boolean {
 /** Frames without an anchor before the centered fallback shell appears (~0.5s). */
 const ANCHOR_LOST_FRAMES = 30;
 
+const NO_SKIPPED: ReadonlySet<number> = new Set<number>();
+
 export function Coachmark({
   step,
   maxVisitedStep,
+  skippedSteps,
   onBack,
   onSkip,
   onGoTo,
@@ -179,9 +190,10 @@ export function Coachmark({
   onForward,
 }: CoachmarkProps): React.JSX.Element | null {
   const spec = COACH[step];
+  const visible = skippedSteps ?? NO_SKIPPED;
   const [rect, setRect] = useState<Rect | null>(null);
   const rectRef = useRef<Rect | null>(null);
-  // Anchor-lost fallback: a coach step can be re-entered (Back from step 9,
+  // Anchor-lost fallback: a coach step can be re-entered (Back from step 10,
   // dot navigation) after its target unmounted — e.g. the /ship chip disappears
   // once the run takes over the canvas. The tour must NEVER render nothing
   // while 'active' (all its controls live inside this component), so after a
@@ -245,7 +257,7 @@ export function Coachmark({
     <>
       <div className="px-[17px] pb-1 pt-[15px]">
         <div className="mb-1.5 text-[9px] font-bold uppercase tracking-[.16em] text-interactive">
-          Step {step + 1} / {ONBOARDING_STEP_COUNT}
+          Step {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
           {!spec.pointer && ' · try it'}
         </div>
         <div className="mb-[7px] text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</div>
@@ -262,7 +274,12 @@ export function Coachmark({
           pointer steps overflowed the card). Two rows scale to any step count;
           both rows are centered so the dots and buttons stay visually aligned. */}
       <div className="flex flex-col items-center gap-2.5 px-[17px] pb-3.5 pt-[11px]">
-        <OnboardingDots step={step} maxVisitedStep={maxVisitedStep} onGoTo={onGoTo} />
+        <OnboardingDots
+          step={step}
+          maxVisitedStep={maxVisitedStep}
+          skippedSteps={visible}
+          onGoTo={onGoTo}
+        />
         <div className="flex items-center justify-center gap-2">
           <button
             type="button"

@@ -47,11 +47,11 @@ function mountAnchor(): { scroller: HTMLElement; anchor: HTMLElement; scrollTop:
 const noop = (): void => {};
 
 function renderCoach() {
-  // Step 6 (substrate) — a pointer step anchored into the wizard Configure column.
+  // Step 7 (substrate) — a pointer step anchored into the wizard Configure column.
   return render(
     <Coachmark
-      step={6}
-      maxVisitedStep={6}
+      step={7}
+      maxVisitedStep={7}
       onBack={noop}
       onSkip={noop}
       onGoTo={noop}
