@@ -53,3 +53,23 @@ export const PROVIDER_ARCHIVE_CAPABILITY: Record<
 export function providerSupportsRemoteArchive(provider: TrackerProvider): boolean {
   return PROVIDER_ARCHIVE_CAPABILITY[provider] !== 'none';
 }
+
+/**
+ * What a removal ruling's "cancel it in the tracker" ACTUALLY does for one
+ * link: the provider's trash/archive, or the cancelled-state fallback. The
+ * single decision both {@link import('./trackerSyncService').TrackerSyncService}'s
+ * enqueue and the removal dialog's disclosure consult — the dialog promising
+ * one action while the enqueue performs the other was adversarial round 3's
+ * finding 2. `'off'` forces the fallback because an `archive_issue` row is
+ * undrainable while the archive direction is off (the claim filter excludes
+ * its kind), and invariant 5 says "Sync now" must never drain a direction the
+ * user declined.
+ */
+export function removalWriteBackAction(
+  provider: TrackerProvider,
+  archiveSyncMode: 'auto' | 'manual' | 'off',
+): 'archive' | 'cancel' {
+  return archiveSyncMode !== 'off' && providerSupportsRemoteArchive(provider)
+    ? 'archive'
+    : 'cancel';
+}

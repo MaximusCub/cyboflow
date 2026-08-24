@@ -47,12 +47,14 @@ const LINK: TrackerEntityLinkRef = {
   provider: 'linear',
   externalIdentifier: 'CORE-142',
   externalUrl: 'https://linear.app/acme/issue/CORE-142',
+  removalAction: 'archive',
 };
 
 const DART_LINK: TrackerEntityLinkRef = {
   provider: 'dart',
   externalIdentifier: 'DART-7',
   externalUrl: 'https://app.itsdart.com/t/DART-7',
+  removalAction: 'archive',
 };
 
 const onClose = vi.fn();
@@ -119,6 +121,35 @@ describe('TrackerUnlinkDialog', () => {
     const dialog = screen.getByTestId('tracker-unlink-dialog');
     expect(dialog).toHaveTextContent('CORE-142');
     expect(dialog).toHaveTextContent('DART-7');
+  });
+
+  it('promises "Mark cancelled", never "Archive", when every link would only cancel', () => {
+    // Finding 2 of adversarial round 3: under the DEFAULT archive_sync_mode
+    // 'off' (and for Plane always), the ruling's remote action is the
+    // cancelled-state write — a button that says "Archive" would promise an
+    // action the service does not perform.
+    renderDialog({ links: [{ ...LINK, removalAction: 'cancel' }] });
+    expect(screen.getByTestId('tracker-unlink-cancel-remote')).toHaveTextContent(
+      'Mark cancelled in Linear',
+    );
+    expect(screen.getByTestId('tracker-unlink-fine-print')).toHaveTextContent(
+      /marked cancelled instead/i,
+    );
+    expect(screen.getByTestId('tracker-unlink-fine-print')).not.toHaveTextContent(
+      /trash or archive/i,
+    );
+  });
+
+  it('a MIXED archive/cancel link set annotates each issue with its real outcome', () => {
+    renderDialog({
+      links: [LINK, { ...DART_LINK, removalAction: 'cancel' }],
+    });
+    expect(screen.getByTestId('tracker-unlink-cancel-remote')).toHaveTextContent(
+      'Archive / mark cancelled',
+    );
+    const list = screen.getByTestId('tracker-unlink-issue-list');
+    expect(list).toHaveTextContent('CORE-142 in Linear · moved to trash/archive');
+    expect(list).toHaveTextContent('DART-7 in Dart · marked cancelled');
   });
 
   it('the single-link case still reads exactly as it did before the array change', () => {

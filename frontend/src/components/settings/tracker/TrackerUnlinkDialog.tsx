@@ -11,17 +11,18 @@
  *   Keep in <trackers>    -> unlink only; every issue is left exactly as it is.
  *   Archive in <trackers> -> unlink AND queue the strongest non-destructive
  *                            write each provider offers: its own trash/archive
- *                            where one exists (Linear, Dart), and a move into
- *                            the tracker's CANCELLED group where none does
- *                            (Plane, whose public v1 API has no archive
- *                            endpoint).
+ *                            where one exists (Linear, Dart) AND the
+ *                            connection's archive sync is on, and a move into
+ *                            the tracker's CANCELLED group otherwise (Plane,
+ *                            whose public v1 API has no archive endpoint — or
+ *                            any connection whose archive sync is 'off', where
+ *                            an archive row could never drain).
  *
  * We never hard-delete on the remote side, so archiving is deliberately the
- * strongest option offered. The copy stays PROVIDER-AGNOSTIC beyond NAMING
- * which trackers are involved: the archive capability lives on the adapter seam
- * in the main process and does not cross IPC, so the dialog says what is true
- * of every provider — nothing is deleted, and the fallback is named in the body
- * rather than guessed at in the button.
+ * strongest option offered. Each link arrives with `removalAction` — computed
+ * server-side by the SAME `removalWriteBackAction` decision the enqueue uses —
+ * so the copy and the confirm button promise exactly the action the service
+ * performs, never an archive that would silently degrade to a cancelled state.
  *
  * DISCLOSURE. `links` is EVERY live link this entity has (never just one) —
  * the whole reason this dialog takes an array: the ruling below is applied to
@@ -127,6 +128,18 @@ export function TrackerUnlinkDialog({
   const multiple = links.length > 1;
   const entityLabel = entityType === 'idea' ? 'idea' : entityType === 'epic' ? 'epic' : 'task';
   const actionLabel = action === 'archive' ? 'Archiving' : 'Deleting';
+  // What the ruling ACTUALLY does per link, decided server-side by the same
+  // logic that enqueues it (removalWriteBackAction): the provider's
+  // trash/archive, or the cancelled-state fallback when it has no archive OR
+  // the connection's archive sync is off. The copy below is built from this so
+  // the dialog never promises an archive the service will not perform.
+  const anyArchives = links.some((l) => l.removalAction === 'archive');
+  const anyCancels = links.some((l) => l.removalAction === 'cancel');
+  const confirmLabel = !anyArchives
+    ? `Mark cancelled in ${joinedProviders}`
+    : anyCancels
+      ? 'Archive / mark cancelled'
+      : `Archive in ${joinedProviders}`;
   // Children only ever go with a DELETE — archiving an idea leaves its epics and
   // tasks on the board, so the ruling has nothing to inherit it.
   const rulesChildren = action === 'delete' && hasLinkedDescendants;
@@ -185,7 +198,8 @@ export function TrackerUnlinkDialog({
                     <span className="font-semibold text-text-primary">
                       {l.externalIdentifier ?? 'the linked issue'}
                     </span>{' '}
-                    in {providerMeta(l.provider).name}
+                    in {providerMeta(l.provider).name} ·{' '}
+                    {l.removalAction === 'archive' ? 'moved to trash/archive' : 'marked cancelled'}
                   </li>
                 ))}
               </ul>
@@ -206,12 +220,21 @@ export function TrackerUnlinkDialog({
               applies to their issues too.
             </p>
           )}
-          <p className="text-xs text-text-tertiary">
-            Archiving moves {multiple ? 'each issue' : 'the issue'} to{' '}
-            {multiple ? 'its tracker' : providerNames[0]}&apos;s trash or archive; where{' '}
-            {multiple ? 'a tracker' : providerNames[0]} has no archive, it is marked cancelled
-            instead. Either way the {entityLabel} stops syncing with {joinedProviders}, and
-            nothing happens until you confirm the {action} on the next step.
+          <p className="text-xs text-text-tertiary" data-testid="tracker-unlink-fine-print">
+            {!anyCancels &&
+              `Archiving moves ${multiple ? 'each issue' : 'the issue'} to ${
+                multiple ? 'its tracker' : providerNames[0]
+              }'s trash or archive. `}
+            {!anyArchives &&
+              `${joinedProviders} ${multiple ? 'are' : 'is'} not archived from here — archive
+              sync is off for the connection, or the tracker has no archive — so the
+              ${multiple ? 'issues are' : 'issue is'} marked cancelled instead. `}
+            {anyArchives &&
+              anyCancels &&
+              `Issues marked above move to their tracker's trash or archive; the others are
+              marked cancelled (archive sync off, or no archive support). `}
+            Either way the {entityLabel} stops syncing with {joinedProviders}, and nothing
+            happens until you confirm the {action} on the next step.
           </p>
           {error && (
             <p className="text-xs text-status-error" role="alert">
@@ -246,7 +269,7 @@ export function TrackerUnlinkDialog({
           className="inline-flex items-center gap-1 rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Archive className="h-3.5 w-3.5" />
-          Archive in {joinedProviders}
+          {confirmLabel}
         </button>
       </ModalFooter>
     </Modal>

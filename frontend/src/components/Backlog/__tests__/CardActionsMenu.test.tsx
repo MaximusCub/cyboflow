@@ -249,11 +249,13 @@ describe('CardActionsMenu', () => {
       provider: 'linear' as const,
       externalIdentifier: 'CORE-142',
       externalUrl: 'https://linear.app/acme/issue/CORE-142',
+      removalAction: 'archive' as const,
     };
     const DART_LINK = {
       provider: 'dart' as const,
       externalIdentifier: 'DART-7',
       externalUrl: 'https://app.itsdart.com/t/DART-7',
+      removalAction: 'archive' as const,
     };
 
     it('asks for the link on the CLICK, and an unlinked item deletes with no extra dialog', async () => {

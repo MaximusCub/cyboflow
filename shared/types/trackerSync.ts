@@ -582,4 +582,13 @@ export interface TrackerEntityLinkRef {
   provider: TrackerProvider;
   externalUrl: string | null;
   externalIdentifier: string | null;
+  /**
+   * What a removal ruling's "cancel it in the tracker" would ACTUALLY do to
+   * this issue: the provider's trash/archive, or the cancelled-state fallback
+   * (provider has no archive, OR the connection's archive sync is 'off' — an
+   * archive row would be undrainable there, so the fallback is forced). The
+   * removal dialog's copy is built from this so it promises exactly the action
+   * the service enqueues.
+   */
+  removalAction: 'archive' | 'cancel';
 }

@@ -2393,6 +2393,9 @@ describe('TrackerSyncService.reconcilePreview', () => {
         provider: 'linear',
         externalIdentifier: 'CORE-142',
         externalUrl: 'https://linear.app/acme/issue/CORE-142',
+        // makeConnection's default archive_sync_mode is 'off' — a ruling would
+        // fall back to the cancelled-state write, and the ref must say so.
+        removalAction: 'cancel',
       },
     ]);
     await expect(service.linksForEntity('idea', 'ide_missing')).resolves.toEqual([]);
@@ -2430,6 +2433,50 @@ describe('TrackerSyncService.reconcilePreview', () => {
     expect(links.map((l) => l.provider).sort()).toEqual(['dart', 'linear']);
     expect(links.find((l) => l.provider === 'dart')?.externalIdentifier).toBe('DART-7');
     expect(links.find((l) => l.provider === 'linear')?.externalIdentifier).toBe('CORE-142');
+  });
+
+  it('stamps each link with the removal action the ruling would ACTUALLY take', async () => {
+    // Round 3's finding 2: the dialog must promise exactly what
+    // enqueueRemovalWriteBack performs. Three connections, three answers:
+    // Linear with archive sync ON archives; Linear with the default 'off'
+    // falls back to cancel (an archive row could never drain); Plane cancels
+    // regardless because its API has no archive at all.
+    makeConnection({ archive_sync_mode: 'auto' });
+    const connOff = makeConnection({ id: 'conn-off', provider: 'dart', archive_sync_mode: 'off' });
+    const connPlane = makeConnection({
+      id: 'conn-plane',
+      provider: 'plane',
+      archive_sync_mode: 'auto',
+    });
+    const ideaId = await createEntity('idea', { title: 'Everywhere idea' });
+    upsertLink(raw, {
+      connection_id: CONN_ID,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'linear',
+      external_id: 'ext-lin',
+    });
+    upsertLink(raw, {
+      connection_id: connOff.id,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'dart',
+      external_id: 'ext-dart',
+    });
+    upsertLink(raw, {
+      connection_id: connPlane.id,
+      entity_type: 'idea',
+      entity_id: ideaId,
+      provider: 'plane',
+      external_id: 'ext-plane',
+    });
+
+    const links = await service.linksForEntity('idea', ideaId);
+    const actionOf = (p: string): string | undefined =>
+      links.find((l) => l.provider === p)?.removalAction;
+    expect(actionOf('linear')).toBe('archive');
+    expect(actionOf('dart')).toBe('cancel');
+    expect(actionOf('plane')).toBe('cancel');
   });
 });
 

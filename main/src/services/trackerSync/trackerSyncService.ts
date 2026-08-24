@@ -189,7 +189,7 @@ import {
   type WriteBackGroup,
   type WriteBackListener,
 } from './writeBack';
-import { providerSupportsRemoteArchive } from './providerCapabilities';
+import { removalWriteBackAction } from './providerCapabilities';
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -2536,10 +2536,11 @@ export class TrackerSyncService implements TrackerSyncFacade {
     connection: TrackerConnectionRow,
     link: EntityExternalLinkRow,
   ): boolean {
-    if (
-      connection.archive_sync_mode !== 'off' &&
-      providerSupportsRemoteArchive(connection.provider)
-    ) {
+    // The SAME decision linksForEntity discloses to the removal dialog — the
+    // two must never disagree, or the dialog promises an action this enqueue
+    // does not perform.
+    const action = removalWriteBackAction(connection.provider, connection.archive_sync_mode);
+    if (action === 'archive') {
       return enqueueArchiveWrite(
         { db: this.db, nowIso: this.nowIso },
         { link, connection },
@@ -2612,11 +2613,24 @@ export class TrackerSyncService implements TrackerSyncFacade {
     entityType: TrackerEntityType,
     entityId: string,
   ): Promise<TrackerEntityLinkRef[]> {
-    return this.liveLinksForEntity(entityType, entityId).map((link) => ({
-      provider: link.provider,
-      externalUrl: link.external_url,
-      externalIdentifier: link.external_identifier,
-    }));
+    return this.liveLinksForEntity(entityType, entityId).map((link) => {
+      const connection = getConnection(this.db, link.connection_id);
+      return {
+        provider: link.provider,
+        externalUrl: link.external_url,
+        externalIdentifier: link.external_identifier,
+        // What a removal ruling would ACTUALLY do to this issue — the removal
+        // dialog's copy must promise the action enqueueRemovalWriteBack
+        // performs, not assume the archive path (adversarial round 3, finding
+        // 2: under the default archive_sync_mode 'off' every ruling falls back
+        // to the cancelled-state write). A connection row that vanished mid-read
+        // gets the conservative 'cancel'.
+        removalAction:
+          connection === null
+            ? ('cancel' as const)
+            : removalWriteBackAction(connection.provider, connection.archive_sync_mode),
+      };
+    });
   }
 
   /**
