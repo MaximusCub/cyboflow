@@ -40,7 +40,6 @@ import {
   usageTier,
 } from '../../../../shared/types/providerUsage';
 import type { CodexRateLimits } from '../panels/codex/appServer/rateLimits';
-import type { Logger } from '../../utils/logger';
 
 /** The `user_preferences` key holding the persisted blob. */
 export const PROVIDER_USAGE_PREFERENCE_KEY = 'providerUsage.snapshotV1';
@@ -57,6 +56,11 @@ const PERSIST_DEBOUNCE_MS = 2_000;
  * `resetsAt` nor `rateLimitType` would be immortal.
  */
 const NO_RESET_MAX_AGE_MS = 12 * 60 * 60 * 1_000;
+
+/** The narrow log surface this store needs — `console` satisfies it. */
+export interface ProviderUsageLogger {
+  warn(message: string): void;
+}
 
 /** The narrow DB surface this store needs — nothing else from Database. */
 export interface ProviderUsagePreferences {
@@ -123,7 +127,7 @@ export class ProviderUsageStore {
 
   constructor(
     private readonly preferences?: ProviderUsagePreferences,
-    private readonly logger?: Logger,
+    private readonly logger?: ProviderUsageLogger,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -385,7 +389,7 @@ let singleton: ProviderUsageStore | null = null;
 
 export function initProviderUsageStore(
   preferences: ProviderUsagePreferences,
-  logger?: Logger,
+  logger?: ProviderUsageLogger,
 ): ProviderUsageStore {
   singleton = new ProviderUsageStore(preferences, logger);
   singleton.hydrate();

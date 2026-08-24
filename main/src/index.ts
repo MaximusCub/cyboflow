@@ -192,6 +192,8 @@ import type {
   VlmJudge,
 } from '../../shared/types/visualVerification';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
+import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
+import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
 import {
   setReviewItemsRunProbe,
   setResolveVerdictNudgeDeps,
@@ -6142,6 +6144,12 @@ app.whenReady().then(async () => {
 
     setHealthProvider(orchestratorHealth);
     console.log('[Main] health.mcpServer deps wired');
+
+    // Subscription-usage meters. The store hydrates its last-known readings from
+    // user_preferences so the review queue shows something before the first turn
+    // of this session produces a fresh one.
+    setProviderUsageSource(initProviderUsageStore(databaseService, console));
+    console.log('[Main] providerUsage deps wired');
   }
 
   // Create the window only now — after ALL router deps above are wired — so a
@@ -6180,6 +6188,14 @@ app.on('will-quit', () => {
 });
 
 app.on('before-quit', async (event) => {
+  // Drain the debounced provider-usage write before anything can preventDefault
+  // or tear the DB down — a trailing 2s debounce is otherwise lost on quit.
+  try {
+    tryGetProviderUsageStore()?.flush();
+  } catch (error) {
+    console.warn('[Main] providerUsage flush on quit failed:', error);
+  }
+
   // Check if there are active archive tasks
   if (archiveProgressManager && archiveProgressManager.hasActiveTasks()) {
     event.preventDefault();

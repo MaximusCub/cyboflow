@@ -19,6 +19,7 @@ import { filesRouter } from './routers/files';
 import { healthRouter } from './routers/health';
 import { ideaComponentsRouter } from './routers/ideaComponents';
 import { insightsRouter } from './routers/insights';
+import { providerUsageRouter } from './routers/providerUsage';
 import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { trackerRouter } from './routers/tracker';
@@ -50,6 +51,7 @@ export const appRouter = router({
     mcps: mcpsRouter,
     monitor: monitorRouter,
     plugins: pluginsRouter,
+    providerUsage: providerUsageRouter,
     questions: questionsRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,
