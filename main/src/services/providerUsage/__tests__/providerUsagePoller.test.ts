@@ -166,6 +166,45 @@ describe('ProviderUsageStore.recordClaudeUsagePoll', () => {
     store.recordClaudeUsagePoll(CLAUDE_USAGE, NOW);
     expect(store.getState(NOW).claude?.planType).toBe('max');
   });
+
+  it('parses the MICROSECOND-precision offset timestamp the API actually sends', () => {
+    // Captured verbatim from a live /usage response — the SDK's own docs say
+    // "ISO 8601" but the wire carries 6 fractional digits and a +00:00 offset.
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          five_hour: { utilization: 42, resets_at: '2026-08-24T19:00:00.951640+00:00' },
+        },
+      },
+      NOW,
+    );
+    const five = store.getState(NOW).claude?.windows[0];
+    expect(five?.resetsAtMs).toBe(1787598000951);
+    // A NaN here would prune the window instantly and empty the card forever.
+    expect(Number.isFinite(five?.resetsAtMs ?? NaN)).toBe(true);
+  });
+
+  it('IGNORES undocumented windows rather than rendering them', () => {
+    // A live response carries keys the typings do not mention — seven_day_cowork,
+    // tangelo, nimbus_quill, extra_usage (a different shape entirely). Showing an
+    // unlabelled internal codename as a quota meter would be worse than useless.
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          five_hour: { utilization: 42, resets_at: null },
+          nimbus_quill: { utilization: 0, resets_at: null },
+          tangelo: null,
+          extra_usage: { utilization: 100, resets_at: null },
+        } as unknown as NonNullable<ClaudeUsagePoll['rateLimits']>,
+      },
+      NOW,
+    );
+    expect(store.getState(NOW).claude?.windows.map((w) => w.kind)).toEqual(['claude_five_hour']);
+  });
 });
 
 describe('ProviderUsageStore — percentage provenance', () => {
