@@ -15,6 +15,7 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     status: 'completed',
     chat_run_id: 'run-1',
     updated_at_iso: '2026-07-16T10:00:00Z',
+    idle_since_iso: '2026-07-16T09:00:00Z',
     unviewed: 1,
     ...overrides,
   };
@@ -51,10 +52,29 @@ describe('deriveQuickSessionState', () => {
 describe('toQuickSessionRow', () => {
   it('sets idleSince only for idle rows', () => {
     expect(toQuickSessionRow(row({ status: 'completed' }), new Set()).idleSince).toBe(
-      '2026-07-16T10:00:00Z',
+      '2026-07-16T09:00:00Z',
     );
     expect(toQuickSessionRow(row({ status: 'running' }), new Set()).idleSince).toBeNull();
     expect(toQuickSessionRow(row({ status: 'running' }), new Set(['run-1'])).idleSince).toBeNull();
+  });
+
+  it('idleSince reads idle_since_iso, NOT updated_at_iso', () => {
+    // The whole point of migration 116: updated_at is bumped by writes that are
+    // not activity (a rename, a folder move, the boot sweep), so a row whose
+    // updated_at is newer than its rest boundary must still report the boundary.
+    const r = toQuickSessionRow(
+      row({ status: 'completed', updated_at_iso: '2026-07-16T23:59:00Z', idle_since_iso: '2026-07-16T09:00:00Z' }),
+      new Set(),
+    );
+    expect(r.idleSince).toBe('2026-07-16T09:00:00Z');
+  });
+
+  it('tolerates a null idle_since_iso without falling back to updated_at_iso', () => {
+    // The COALESCE to updated_at happens in SQL, so a null here means the
+    // timestamp itself was unparseable — surface null rather than a wrong time.
+    expect(
+      toQuickSessionRow(row({ status: 'completed', idle_since_iso: null }), new Set()).idleSince,
+    ).toBeNull();
   });
 
   it('maps identity fields through', () => {
@@ -105,6 +125,20 @@ describe('listQuickSessions', () => {
     ]);
     expect(capture.params[0]).toEqual([7]);
     expect(capture.sql[0]).toContain('s.project_id = ?');
+  });
+
+  it('selects idle_since with an updated_at COALESCE fallback, normalized like updated_at', () => {
+    const capture = { sql: [] as string[], params: [] as unknown[][] };
+    listQuickSessions(fakeDb([row()], capture), new Set());
+    // Pre-116 rows (idle_since NULL) must read exactly as they did before.
+    expect(capture.sql[0]).toContain(
+      "strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.idle_since, s.updated_at)) AS idle_since_iso",
+    );
+    // datetime('now') writes space-separated UTC, so the column needs the same
+    // strftime normalization updated_at gets — the alias must be produced once,
+    // by that expression, and never by a raw `s.idle_since AS idle_since_iso`.
+    expect(capture.sql[0]).not.toContain('s.idle_since AS idle_since_iso');
+    expect(capture.sql[0].match(/AS idle_since_iso/g)).toHaveLength(1);
   });
 
   it('passes no params and omits the project clause when unscoped', () => {

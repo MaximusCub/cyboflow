@@ -34,8 +34,16 @@ export interface QuickSessionRow {
   /** Derived live state. */
   state: QuickSessionState;
   /**
-   * ISO timestamp the session last rested (sessions.updated_at). Present for
-   * `idle` rows so the UI can show "idle for N min"; null for `running`/`blocked`.
+   * ISO timestamp the session last rested — `sessions.idle_since`, stamped at
+   * the busy→resting status transition (migration 116), falling back to
+   * `sessions.updated_at` for a row that has not transitioned since the column
+   * landed. Present for `idle` rows so the UI can show "idle for N min"; null
+   * for `running`/`blocked`.
+   *
+   * It reads `idle_since` rather than `updated_at` because `updated_at` is
+   * bumped by ANY write to the session row — a rename, a folder move, the boot
+   * sweep, a status refinement — which used to restart the quiet clock on
+   * events that were not activity.
    */
   idleSince: string | null;
   /**

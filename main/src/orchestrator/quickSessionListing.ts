@@ -28,6 +28,18 @@ export interface QuickSessionCandidateRow {
   /** sessions.updated_at normalized to UTC ISO (may be null for a malformed timestamp). */
   updated_at_iso: string | null;
   /**
+   * The session's real last-REST boundary (migration 116) normalized to UTC ISO:
+   * `COALESCE(sessions.idle_since, sessions.updated_at)`.
+   *
+   * `idle_since` is stamped only at the busy→resting status transition, so —
+   * unlike `updated_at`, which any write to the row bumps — a rename, a folder
+   * move, the boot sweep or a status refinement no longer resets the quiet
+   * clock. The COALESCE is the pre-migration fallback: a row that has not
+   * transitioned since the column landed reads exactly as it did before.
+   * May be null for a malformed timestamp, same as `updated_at_iso`.
+   */
+  idle_since_iso: string | null;
+  /**
    * 1 when NOT viewed since the last update (last_viewed_at null or < updated_at).
    * Computed in SQL via datetime() so the ' ' vs 'T' timestamp-format mismatch
    * (CURRENT_TIMESTAMP vs ISO) can't corrupt the comparison — mirrors
@@ -53,6 +65,7 @@ const QUICK_SESSION_PREDICATE = `
 const SELECT_COLS = `
   s.id, s.project_id, s.name, s.status, s.chat_run_id,
   strftime('%Y-%m-%dT%H:%M:%SZ', s.updated_at) AS updated_at_iso,
+  strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.idle_since, s.updated_at)) AS idle_since_iso,
   CASE WHEN s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at)
        THEN 1 ELSE 0 END AS unviewed
 `;
@@ -72,7 +85,11 @@ export function deriveQuickSessionState(
   return 'idle';
 }
 
-/** Map a candidate row + blocked set to a board row. `idleSince` is set only for idle rows. */
+/**
+ * Map a candidate row + blocked set to a board row. `idleSince` is set only for
+ * idle rows, and comes from `idle_since_iso` (the real rest boundary), NOT from
+ * `updated_at_iso` — see the field docs on {@link QuickSessionCandidateRow}.
+ */
 export function toQuickSessionRow(
   row: QuickSessionCandidateRow,
   blockedRunIds: ReadonlySet<string>,
@@ -84,7 +101,7 @@ export function toQuickSessionRow(
     projectId: row.project_id,
     runId: row.chat_run_id,
     state,
-    idleSince: state === 'idle' ? row.updated_at_iso : null,
+    idleSince: state === 'idle' ? row.idle_since_iso : null,
     // A blocked row always needs you (a pending gate), independent of viewed-ness.
     unviewed: state === 'blocked' ? false : row.unviewed === 1,
   };
