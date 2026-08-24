@@ -1,7 +1,7 @@
--- Migration 114: tracker content/archive write-back modes + mapping overlays,
+-- Migration 118: tracker content/archive write-back modes + mapping overlays,
 -- and the tracker_outbox kind widening they need.
 --
--- Design: docs/proposals/tracker-field-writeback.md ("Phase 3 — Migration 114
+-- Design: docs/proposals/tracker-field-writeback.md ("Phase 3 — Migration 118
 -- + direction modes + outbox kinds"). Two independent additions to
 -- tracker_connections, each gated OFF for every connection that predates this
 -- feature — neither existing connection consented to writing local edits back

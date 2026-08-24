@@ -158,7 +158,7 @@ interface TaskDbRow {
   title: string;
   summary: string | null;
   body: string | null;
-  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 113 widen
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   /** Entity classification (migration 059); NOT NULL DEFAULT 'feature' on every table. */
   category: EntityCategory;
   repo: string | null;

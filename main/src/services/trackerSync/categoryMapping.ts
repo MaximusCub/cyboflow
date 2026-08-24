@@ -143,7 +143,7 @@ function resolveType(title: string, live: string[] | null): string | null {
 
 /**
  * The persisted overlay's JSON shape
- * (`tracker_connections.category_mapping_json`, migration 114). Both halves are
+ * (`tracker_connections.category_mapping_json`, migration 118). Both halves are
  * stored for the reason priorityMapping's header gives: `toProvider` is not
  * invertible in general, so the inbound direction is its own stored decision.
  */
@@ -161,7 +161,7 @@ interface CategoryMappingOverlay {
  * {@link import('./stateMapping').resolveEffectiveMapping} contract: a corrupt
  * blob must not wedge sync, and one bad value must not cost the whole mapping.
  *
- * `overlayJson` is null until migration 114 adds the column; every Phase-2
+ * `overlayJson` is null until migration 118 adds the column; every Phase-2
  * caller passes null and gets the seed.
  *
  * OVERLAY TITLES ARE RE-VALIDATED against the live type list whenever there is

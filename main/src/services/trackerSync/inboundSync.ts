@@ -870,7 +870,7 @@ export async function runInboundSync(
   // provider — Linear and Plane state their fixed scales, and Dart serves this
   // off the same cached `/config` listStates just used.
   const fieldOptions = await adapter.listFieldOptions();
-  // Migration 114 columns: an empty '{}' overlay (every pre-Phase-6 connection)
+  // Migration 118 columns: an empty '{}' overlay (every pre-Phase-6 connection)
   // resolves to the seed, exactly like Phase 2's `null` placeholder did.
   // A persisted mapping entry the workspace no longer offers is dropped rather
   // than sent, and counted like the inbound values it cannot express: both are

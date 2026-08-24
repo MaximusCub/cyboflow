@@ -1,4 +1,4 @@
--- Migration 113: widen the entity `priority` CHECK on ideas/epics/tasks from
+-- Migration 117: widen the entity `priority` CHECK on ideas/epics/tasks from
 -- the 3-level P0-P2 scale (migration 015) to a 7-level P0-P6 scale.
 --
 -- WHY. docs/proposals/tracker-field-writeback.md Phase 1: the tracker
@@ -33,37 +33,37 @@
 -- ideas.priority
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE ideas ADD COLUMN priority_widen_113 TEXT;
-UPDATE ideas SET priority_widen_113 = priority;
+ALTER TABLE ideas ADD COLUMN priority_widen_117 TEXT;
+UPDATE ideas SET priority_widen_117 = priority;
 ALTER TABLE ideas DROP COLUMN priority;
 ALTER TABLE ideas
   ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2'
     CHECK (priority IN ('P0','P1','P2','P3','P4','P5','P6'));
-UPDATE ideas SET priority = COALESCE(priority_widen_113, 'P2');
-ALTER TABLE ideas DROP COLUMN priority_widen_113;
+UPDATE ideas SET priority = COALESCE(priority_widen_117, 'P2');
+ALTER TABLE ideas DROP COLUMN priority_widen_117;
 
 -- ---------------------------------------------------------------------------
 -- epics.priority
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE epics ADD COLUMN priority_widen_113 TEXT;
-UPDATE epics SET priority_widen_113 = priority;
+ALTER TABLE epics ADD COLUMN priority_widen_117 TEXT;
+UPDATE epics SET priority_widen_117 = priority;
 ALTER TABLE epics DROP COLUMN priority;
 ALTER TABLE epics
   ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2'
     CHECK (priority IN ('P0','P1','P2','P3','P4','P5','P6'));
-UPDATE epics SET priority = COALESCE(priority_widen_113, 'P2');
-ALTER TABLE epics DROP COLUMN priority_widen_113;
+UPDATE epics SET priority = COALESCE(priority_widen_117, 'P2');
+ALTER TABLE epics DROP COLUMN priority_widen_117;
 
 -- ---------------------------------------------------------------------------
 -- tasks.priority
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE tasks ADD COLUMN priority_widen_113 TEXT;
-UPDATE tasks SET priority_widen_113 = priority;
+ALTER TABLE tasks ADD COLUMN priority_widen_117 TEXT;
+UPDATE tasks SET priority_widen_117 = priority;
 ALTER TABLE tasks DROP COLUMN priority;
 ALTER TABLE tasks
   ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2'
     CHECK (priority IN ('P0','P1','P2','P3','P4','P5','P6'));
-UPDATE tasks SET priority = COALESCE(priority_widen_113, 'P2');
-ALTER TABLE tasks DROP COLUMN priority_widen_113;
+UPDATE tasks SET priority = COALESCE(priority_widen_117, 'P2');
+ALTER TABLE tasks DROP COLUMN priority_widen_117;

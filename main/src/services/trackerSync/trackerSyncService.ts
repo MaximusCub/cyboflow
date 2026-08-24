@@ -255,7 +255,7 @@ function directionRuns(mode: TrackerDirectionMode, trigger: TrackerSyncTrigger):
 }
 
 /**
- * The outbox kinds the CONTENT direction owns (field write-back, migration 114).
+ * The outbox kinds the CONTENT direction owns (field write-back, migration 118).
  */
 const CONTENT_OUTBOX_KINDS = ['update_content'] as const;
 

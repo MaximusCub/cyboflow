@@ -1,12 +1,12 @@
 /**
- * Migration 114_tracker_content_archive_modes.sql — content_sync_mode /
+ * Migration 118_tracker_content_archive_modes.sql — content_sync_mode /
  * archive_sync_mode / priority_mapping_json / category_mapping_json on
  * tracker_connections, plus tracker_outbox.kind widened to accept
  * 'update_content' and 'archive_issue'.
  *
- * Mirrors migration113.test.ts / migration110.test.ts's two-boot real-upgrade
+ * Mirrors migration117.test.ts / migration110.test.ts's two-boot real-upgrade
  * pattern: a DB is migrated by a DatabaseService whose migrations dir omits
- * 114, rows are seeded in the pre-114 shape, then a second DatabaseService
+ * 118, rows are seeded in the pre-118 shape, then a second DatabaseService
  * pointed at the full dir boots on the same file — exactly what happens when
  * a user updates the app.
  */
@@ -18,13 +18,13 @@ import { join } from 'node:path';
 import { DatabaseService } from '../database';
 
 const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
-const MIGRATION_114 = '114_tracker_content_archive_modes.sql';
+const MIGRATION_118 = '118_tracker_content_archive_modes.sql';
 
 let tmpDir: string;
 let dbPath: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration114-'));
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration118-'));
   dbPath = join(tmpDir, 'test.db');
 });
 
@@ -32,12 +32,12 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 114 — i.e. the pre-114 app. */
-function migrationsDirWithout114(): string {
-  const dir = join(tmpDir, 'migrations-pre-114');
+/** A migrations dir holding every real migration except 118 — i.e. the pre-118 app. */
+function migrationsDirWithout118(): string {
+  const dir = join(tmpDir, 'migrations-pre-118');
   mkdirSync(dir);
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_114) continue;
+    if (name === MIGRATION_118) continue;
     if (!/^\d{3}_.*\.sql$/.test(name)) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
@@ -104,11 +104,11 @@ const ALL_OUTBOX_KINDS = [
   'archive_issue',
 ];
 
-describe('Migration 114: tracker content/archive modes + outbox kind widening', () => {
-  it('(a) upgrades a pre-114 DB: the four new tracker_connections columns land at their defaults', () => {
-    const pre114 = migrationsDirWithout114();
-    const pre = openAt(pre114);
-    seedProject(pre.getDb(), 1, '/tmp/p114');
+describe('Migration 118: tracker content/archive modes + outbox kind widening', () => {
+  it('(a) upgrades a pre-118 DB: the four new tracker_connections columns land at their defaults', () => {
+    const pre118 = migrationsDirWithout118();
+    const pre = openAt(pre118);
+    seedProject(pre.getDb(), 1, '/tmp/p118');
     seedConnection(pre.getDb(), 'conn-legacy');
     expect(columnNames(pre.getDb(), 'tracker_connections')).not.toContain('content_sync_mode');
     pre.close();
@@ -147,7 +147,7 @@ describe('Migration 114: tracker content/archive modes + outbox kind widening', 
   it('(b) content_sync_mode / archive_sync_mode accept auto/manual/off and reject anything else', () => {
     const svc = openAt(MIGRATIONS_DIR);
     const db = svc.getDb();
-    seedProject(db, 1, '/tmp/p114');
+    seedProject(db, 1, '/tmp/p118');
 
     for (const mode of ['auto', 'manual', 'off'] as const) {
       expect(() =>
@@ -191,7 +191,7 @@ describe('Migration 114: tracker content/archive modes + outbox kind widening', 
   it('(c) a fresh insert omitting the two mapping columns defaults to an empty JSON object', () => {
     const svc = openAt(MIGRATIONS_DIR);
     const db = svc.getDb();
-    seedProject(db, 1, '/tmp/p114');
+    seedProject(db, 1, '/tmp/p118');
     seedConnection(db, 'conn-fresh');
 
     const row = db
@@ -206,7 +206,7 @@ describe('Migration 114: tracker content/archive modes + outbox kind widening', 
   it('(d) tracker_outbox accepts one row of every kind — old and new — and rejects a bogus kind', () => {
     const svc = openAt(MIGRATIONS_DIR);
     const db = svc.getDb();
-    seedProject(db, 1, '/tmp/p114');
+    seedProject(db, 1, '/tmp/p118');
     seedConnection(db, 'conn-1');
 
     for (const kind of ALL_OUTBOX_KINDS) {
@@ -231,9 +231,9 @@ describe('Migration 114: tracker content/archive modes + outbox kind widening', 
   });
 
   it('(f) existing outbox rows survive the recreate verbatim', () => {
-    const pre114 = migrationsDirWithout114();
-    const pre = openAt(pre114);
-    seedProject(pre.getDb(), 1, '/tmp/p114');
+    const pre118 = migrationsDirWithout118();
+    const pre = openAt(pre118);
+    seedProject(pre.getDb(), 1, '/tmp/p118');
     seedConnection(pre.getDb(), 'conn-1');
     pre
       .getDb()
@@ -267,7 +267,7 @@ describe('Migration 114: tracker content/archive modes + outbox kind widening', 
   it('(g) a fresh-install DB (schema.sql + all migrations from scratch) also gets both features', () => {
     const svc = openAt(MIGRATIONS_DIR);
     const db = svc.getDb();
-    seedProject(db, 1, '/tmp/p114');
+    seedProject(db, 1, '/tmp/p118');
     seedConnection(db, 'conn-fresh');
 
     expect(

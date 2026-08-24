@@ -49,7 +49,7 @@ export function TypeTag({ type }: { type: TaskType }): React.JSX.Element {
 }
 
 /**
- * 7-level ramp (migration 113 widen; was P0-P2). P0/P1/P2 keep their original
+ * 7-level ramp (migration 117 widen; was P0-P2). P0/P1/P2 keep their original
  * colors (hottest red -> warning amber -> the existing neutral) as the TOP of
  * the ramp; P3-P6 continue it downward by fading the SAME neutral tokens
  * P2 already uses, so the scale reads as one continuous cool-down rather than

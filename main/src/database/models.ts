@@ -318,7 +318,7 @@ export interface IdeaRow {
   summary: string | null;
   body: string | null;
   scope: 'small' | 'large' | null;
-  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 113 widen
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
@@ -342,7 +342,7 @@ export interface EpicRow {
   title: string;
   summary: string | null;
   body: string | null;
-  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 113 widen
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
@@ -368,7 +368,7 @@ export interface TaskRow {
   title: string;
   summary: string | null;
   body: string | null;
-  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 113 widen
+  priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
@@ -516,18 +516,18 @@ export interface TrackerConnectionRow {
   push_target: number; // 0 | 1
   /**
    * Field write-back ("Sync task fields": title/description/priority/category)
-   * for LINKED items, OUTBOUND only (migration 114). A SEPARATE three-state
+   * for LINKED items, OUTBOUND only (migration 118). A SEPARATE three-state
    * schema from status_sync_mode/pull_mode/push_mode above — 'off' is a real
    * third answer here ("never"), not something those two-state columns can
    * express — see TrackerContentSyncMode in shared/types/trackerSync.ts.
    * Defaults 'off': an existing connection never consented to write-back.
    */
   content_sync_mode: 'auto' | 'manual' | 'off';
-  /** Remote trash/archive on a local archive/delete (migration 114). Same three-state shape as content_sync_mode, same default reasoning. */
+  /** Remote trash/archive on a local archive/delete (migration 118). Same three-state shape as content_sync_mode, same default reasoning. */
   archive_sync_mode: 'auto' | 'manual' | 'off';
   /**
    * The persisted OVERLAY half of priorityMapping.ts's seed-then-overlay
-   * contract (migration 114) — `{}` until the wizard's mapping table (Phase 6)
+   * contract (migration 118) — `{}` until the wizard's mapping table (Phase 6)
    * writes one. See PriorityMappingOverlay / resolveEffectivePriorityMapping.
    */
   priority_mapping_json: string;
@@ -586,7 +586,7 @@ export interface EntityExternalLinkRow {
  * the connection's source container for a locally-created idea, as opposed to
  * `create_sub_issue`'s mirrored child of an existing issue.
  *
- * `update_content` / `archive_issue` (migration 114) are the field write-back
+ * `update_content` / `archive_issue` (migration 118) are the field write-back
  * and archive/trash kinds (docs/proposals/tracker-field-writeback.md Phase 5
  * drains them; Phase 3 only widens the CHECK and the row type — a claimed row
  * of either kind terminally fails with a "no handler until Phase 5" error

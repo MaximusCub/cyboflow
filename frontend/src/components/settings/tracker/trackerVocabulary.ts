@@ -188,7 +188,7 @@ export function seedStateMapping(
 }
 
 // ---------------------------------------------------------------------------
-// Field write-back cadence (migration 114) — a THREE-state cousin of the
+// Field write-back cadence (migration 118) — a THREE-state cousin of the
 // direction controls above. `contentSyncMode`/`archiveSyncMode` are a
 // SEPARATE type (TrackerContentSyncMode) from TrackerDirectionMode precisely
 // so 'off' cannot leak onto status/pull/push — see trackerSync.ts's header —
@@ -210,7 +210,7 @@ export function contentModeLabel(mode: TrackerContentSyncMode): string {
 }
 
 // ---------------------------------------------------------------------------
-// Priority / category mapping (migration 114, Phase 6) — the wizard's value
+// Priority / category mapping (migration 118, Phase 6) — the wizard's value
 // pickers. Both tables edit only `toProvider`; `toLocal` is never sent (the
 // resolver falls back to the seed's own inbound table — see
 // TrackerPriorityMappingOverlay's header in shared/types/trackerSync.ts), so
