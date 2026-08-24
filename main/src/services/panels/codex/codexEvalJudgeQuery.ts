@@ -29,6 +29,7 @@ import {
   type TurnSessionEvent,
 } from './appServer/turnSession';
 import { toStrictOutputSchema } from './appServer/strictOutputSchema';
+import { observeCodexNotification } from '../../providerUsage/codexUsageObserver';
 
 // 10 min (was 5), matching the Claude juror deadline (EVAL_JUDGE_TIMEOUT_MS): the
 // Codex app-server juror can also miss the wall under host contention, and a
@@ -240,7 +241,13 @@ export function makeCodexEvalJudgeQuery(
       command: executable.executablePath,
       ...(cwd ? { cwd } : {}),
       env: prependCodexPathToEnvironment(process.env, executable.pathDir),
-      onNotification: (notification) => turnSession?.handleNotification(notification),
+      onNotification: (notification) => {
+        turnSession?.handleNotification(notification);
+        // Never allowed to throw: an exception escaping this handler reaches
+        // CodexAppServerClient.fail(), which SIGTERMs the app-server's whole
+        // process group mid-turn.
+        observeCodexNotification(notification.method, notification.params);
+      },
       onStderr: (chunk) => logger?.warn('[codexEvalJudgeQuery] app-server stderr', {
         stderr: chunk.trimEnd(),
       }),
