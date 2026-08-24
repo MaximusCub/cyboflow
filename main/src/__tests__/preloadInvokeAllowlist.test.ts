@@ -150,12 +150,11 @@ describe('allowlist covers the renderer’s actual generic-invoke usage', () => 
     expect(missing).toEqual([]);
   });
 
-  it('includes the onboarding-detection channels the renderer passes as constants', async () => {
-    const { CLAUDE_DETECT_CHANNEL, CODEX_DETECT_CHANNEL } = await import(
+  it('includes the onboarding-detection channel the renderer passes as a constant', async () => {
+    const { PROVIDERS_DETECT_CHANNEL } = await import(
       '../../../shared/types/onboarding'
     );
-    expect(GENERIC_INVOKE_CHANNELS).toContain(CLAUDE_DETECT_CHANNEL);
-    expect(GENERIC_INVOKE_CHANNELS).toContain(CODEX_DETECT_CHANNEL);
+    expect(GENERIC_INVOKE_CHANNELS).toContain(PROVIDERS_DETECT_CHANNEL);
   });
 
   it('every allowlisted channel has a real ipcMain.handle registration', () => {
@@ -180,9 +179,9 @@ describe('allowlist covers the renderer’s actual generic-invoke usage', () => 
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) handled.add(m[1]);
     }
-    // The detection channels are registered via their imported constant, not a
-    // literal, so the regex above cannot see them.
-    const registeredViaConstant = new Set(['claude:detect', 'codex:detect']);
+    // The detection channel is registered via its imported constant, not a
+    // literal, so the regex above cannot see it.
+    const registeredViaConstant = new Set(['providers:detect']);
     const orphans = GENERIC_INVOKE_CHANNELS.filter(
       (c) => !handled.has(c) && !registeredViaConstant.has(c),
     );
