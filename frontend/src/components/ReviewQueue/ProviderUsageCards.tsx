@@ -12,10 +12,15 @@
  * ## The two providers do not report the same thing
  *
  * Codex always sends a real `usedPercent`. Claude sends `utilization` only
- * sometimes — so each card LEADS with the window reset clock, which we always
- * have, and treats the percentage as an enrichment. A window with no
- * percentage renders an EMPTY track and a status word; it must never render as
- * 0%, which would read as "plenty left".
+ * sometimes — so the RESET COUNTDOWN, which we always have, carries each row,
+ * and the percentage is an enrichment. A window with no percentage renders an
+ * EMPTY track and a status word; it must never render as 0%, which would read
+ * as "plenty left".
+ *
+ * Every window counts down SEPARATELY. A single headline countdown could only
+ * describe one window, and the windows expire on unrelated clocks — the weekly
+ * one is usually the most constrained, so a headline would systematically hide
+ * the thing most often asked for: when the 5-hour session comes back.
  *
  * Expiry is evaluated at render against a ticking clock rather than trusted from
  * the store: a mounted card would otherwise sit past a window's reset until the
@@ -103,8 +108,20 @@ function formatAge(observedAtMs: number, nowMs: number): string {
   return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }
 
-function UsageMeterRow({ window: usageWindow }: { window: ProviderUsageWindow }): React.ReactElement {
+function UsageMeterRow({
+  window: usageWindow,
+  nowMs,
+}: {
+  window: ProviderUsageWindow;
+  nowMs: number;
+}): React.ReactElement {
   const fillClass = usageWindowFillClass(usageWindow);
+  // Every window carries its OWN countdown, not just the leading one: the
+  // 5-hour session and the weekly window expire on completely different clocks,
+  // and "how long until the session resets" is the question this card is most
+  // often opened to answer.
+  const timeLeft = formatTimeLeft(usageWindow.resetsAtMs, nowMs);
+  const resetClock = formatResetClock(usageWindow.resetsAtMs, nowMs);
   return (
     <div className="flex items-center gap-2.5 text-xs" data-testid={`usage-window-${usageWindow.kind}`}>
       <span className="w-[104px] shrink-0 truncate text-text-secondary">{usageWindow.label}</span>
@@ -128,22 +145,29 @@ function UsageMeterRow({ window: usageWindow }: { window: ProviderUsageWindow })
           {STATUS_WORD[usageWindow.status]}
         </span>
       ) : (
-        <span className="flex items-center gap-1.5">
-          <span className="tabular-nums text-text-primary">
-            {Math.round(usageWindow.usedPercent)}%
-          </span>
-          {isPercentPossiblyStale(usageWindow) && (
-            // This number fell out of a turn's event stream rather than a direct
-            // poll, so it only refreshed when a turn happened to run. Say so
-            // rather than presenting it with the same confidence as a poll.
-            <span
-              className="text-[10px] uppercase tracking-[0.08em] text-status-warning"
-              title="Read from a running turn rather than a direct query — may be out of date"
-              data-testid="usage-stale-flag"
-            >
-              may be stale
-            </span>
-          )}
+        <span className="w-9 shrink-0 text-right tabular-nums text-text-primary">
+          {Math.round(usageWindow.usedPercent)}%
+        </span>
+      )}
+      {timeLeft !== null && (
+        <span
+          className="truncate tabular-nums text-text-tertiary"
+          title={resetClock === null ? undefined : `Resets ${resetClock}`}
+          data-testid="usage-window-time-left"
+        >
+          {timeLeft} left
+        </span>
+      )}
+      {isPercentPossiblyStale(usageWindow) && (
+        // This number fell out of a turn's event stream rather than a direct
+        // poll, so it only refreshed when a turn happened to run. Say so
+        // rather than presenting it with the same confidence as a poll.
+        <span
+          className="shrink-0 text-[10px] uppercase tracking-[0.08em] text-status-warning"
+          title="Read from a running turn rather than a direct query — may be out of date"
+          data-testid="usage-stale-flag"
+        >
+          may be stale
         </span>
       )}
     </div>
@@ -157,11 +181,6 @@ function ProviderCard({
   snapshot: ProviderUsageSnapshot;
   nowMs: number;
 }): React.ReactElement {
-  // The most-constrained window leads (windows arrive sorted by pressure), so
-  // the lead is NOT necessarily the session window — it must name itself.
-  const lead = snapshot.windows.find((w) => w.resetsAtMs !== null) ?? snapshot.windows[0];
-  const timeLeft = lead === undefined ? null : formatTimeLeft(lead.resetsAtMs, nowMs);
-  const resetClock = lead === undefined ? null : formatResetClock(lead.resetsAtMs, nowMs);
   const isStale = nowMs - snapshot.observedAtMs > STALE_AFTER_MS;
 
   return (
@@ -178,20 +197,8 @@ function ProviderCard({
         )}
       </div>
 
-      <div className="mt-0.5 text-xs text-text-secondary">
-        {timeLeft !== null && lead !== undefined
-          ? (
-            <>
-              <b className="font-bold text-text-primary">{timeLeft}</b>
-              {` left in ${lead.label}`}
-              {resetClock !== null && ` · resets ${resetClock}`}
-            </>
-          )
-          : 'No reset window reported'}
-      </div>
-
-      <div className="mt-2.5 flex flex-col gap-1.5">
-        {snapshot.windows.map((w) => <UsageMeterRow key={w.kind} window={w} />)}
+      <div className="mt-2 flex flex-col gap-1.5">
+        {snapshot.windows.map((w) => <UsageMeterRow key={w.kind} window={w} nowMs={nowMs} />)}
       </div>
 
       <div className={`mt-2 text-[11px] ${isStale ? 'text-status-warning' : 'text-text-muted'}`}>

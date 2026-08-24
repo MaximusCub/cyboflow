@@ -77,6 +77,84 @@ describe('ProviderUsageCards', () => {
     expect(screen.queryByText('0%')).not.toBeInTheDocument();
   });
 
+  it('counts down EVERY window, not just the leading one', () => {
+    // The 5-hour session and the weekly window reset on different clocks. A
+    // countdown attached only to the lead line answers for whichever window
+    // happens to be most constrained — which is usually the weekly one, and
+    // never tells you when the session comes back.
+    mockUsage.current = {
+      claude: {
+        provider: 'claude',
+        planType: 'max',
+        observedAtMs: NOW,
+        windows: [
+          {
+            kind: 'claude_seven_day',
+            label: 'Weekly',
+            status: 'ok',
+            usedPercent: 13,
+            percentSource: 'poll',
+            percentObservedAtMs: NOW,
+            resetsAtMs: NOW + 100 * 60 * 60 * 1_000,
+            windowMinutes: 10_080,
+            observedAtMs: NOW,
+          },
+          {
+            kind: 'claude_five_hour',
+            label: '5-hour session',
+            status: 'ok',
+            usedPercent: 7,
+            percentSource: 'poll',
+            percentObservedAtMs: NOW,
+            resetsAtMs: NOW + (2 * 60 + 30) * 60 * 1_000,
+            windowMinutes: 300,
+            observedAtMs: NOW,
+          },
+        ],
+      },
+    };
+    render(<ProviderUsageCards />);
+    expect(screen.getByTestId('usage-window-claude_five_hour')).toHaveTextContent('2h 30m left');
+    expect(screen.getByTestId('usage-window-claude_seven_day')).toHaveTextContent('100h 0m left');
+  });
+
+  it('omits a row countdown when the window reported no reset', () => {
+    mockUsage.current = {
+      claude: {
+        provider: 'claude',
+        planType: null,
+        observedAtMs: NOW,
+        windows: [
+          {
+            kind: 'claude_five_hour',
+            label: '5-hour session',
+            status: 'ok',
+            usedPercent: 7,
+            percentSource: 'poll',
+            percentObservedAtMs: NOW,
+            resetsAtMs: IN_AN_HOUR,
+            windowMinutes: 300,
+            observedAtMs: NOW,
+          },
+          {
+            kind: 'claude_overage',
+            label: 'Extra usage',
+            status: 'ok',
+            usedPercent: 2,
+            percentSource: 'poll',
+            percentObservedAtMs: NOW,
+            resetsAtMs: null,
+            windowMinutes: null,
+            observedAtMs: NOW,
+          },
+        ],
+      },
+    };
+    render(<ProviderUsageCards />);
+    expect(screen.getAllByTestId('usage-window-time-left')).toHaveLength(1);
+    expect(screen.getByTestId('usage-window-claude_overage')).not.toHaveTextContent('left');
+  });
+
   it('renders the percentage when the provider reported one', () => {
     mockUsage.current = claudeState(91);
     render(<ProviderUsageCards />);
@@ -84,17 +162,20 @@ describe('ProviderUsageCards', () => {
     expect(screen.queryByTestId('usage-no-percent')).not.toBeInTheDocument();
   });
 
-  it('leads with the time left in the window, NAMING the window', () => {
+  it('counts down the window on its own row', () => {
     mockUsage.current = claudeState(91);
     render(<ProviderUsageCards />);
-    const card = screen.getByTestId('usage-card-claude');
-    expect(card).toHaveTextContent('1h 0m');
-    // The lead is the most-CONSTRAINED window, not necessarily the session one —
-    // labelling a weekly window "of session left" was simply wrong.
-    expect(card).toHaveTextContent('left in 5-hour session');
+    const row = screen.getByTestId('usage-window-claude_five_hour');
+    // Label and countdown live together, so the number can never be read
+    // against the wrong window.
+    expect(row).toHaveTextContent('5-hour session');
+    expect(row).toHaveTextContent('1h 0m left');
   });
 
-  it('names the leading window when it is the weekly one, not "session"', () => {
+  it('does not repeat a window countdown as a card-level headline', () => {
+    // A headline could only describe ONE window — in practice the weekly one,
+    // which is usually the most constrained. It restated that row verbatim
+    // while saying nothing about the session.
     mockUsage.current = {
       claude: {
         provider: 'claude',
@@ -115,12 +196,11 @@ describe('ProviderUsageCards', () => {
       },
     };
     render(<ProviderUsageCards />);
-    const card = screen.getByTestId('usage-card-claude');
-    expect(card).toHaveTextContent('left in Weekly');
-    expect(card).not.toHaveTextContent('of session left');
+    expect(screen.getAllByTestId('usage-window-time-left')).toHaveLength(2);
+    expect(screen.getByTestId('usage-card-claude')).not.toHaveTextContent('left in');
   });
 
-  it('includes a weekday for a reset more than a day out', () => {
+  it('carries the wall-clock reset, with a weekday when it is more than a day out', () => {
     const resetsAtMs = NOW + 5 * 24 * 60 * 60 * 1_000;
     mockUsage.current = {
       claude: {
@@ -133,9 +213,10 @@ describe('ProviderUsageCards', () => {
       },
     };
     render(<ProviderUsageCards />);
-    // A bare "resets 9:00 AM" for a window five days out reads as this morning.
+    // A bare "9:00 AM" for a window five days out reads as this morning.
     const weekday = new Date(resetsAtMs).toLocaleDateString([], { weekday: 'short' });
-    expect(screen.getByTestId('usage-card-claude')).toHaveTextContent(`resets ${weekday}`);
+    expect(screen.getByTestId('usage-window-time-left').getAttribute('title'))
+      .toContain(`Resets ${weekday}`);
   });
 
   it('drops a card whose window resets while it stays mounted', () => {
