@@ -68,6 +68,20 @@ function seedRun(
 const ageMsToIso = (ageMs: number): string => new Date(Date.now() - ageMs).toISOString();
 
 /**
+ * The SAME instant in SQLite's `DEFAULT CURRENT_TIMESTAMP` spelling:
+ * 'YYYY-MM-DD HH:MM:SS' — space separator, no fractional seconds, no zone.
+ * transitions.ts used to leave created_at to that default while the detector
+ * compared it as a STRING against a toISOString() cutoff. ' ' (0x20) sorts
+ * below 'T' (0x54), so any same-date row in this spelling compared as older
+ * than the cutoff no matter the clock time, and a fresh approval was stamped
+ * stale on its first scan. Rows in this format still exist in databases
+ * written before the fix, which is why the detector normalizes rather than
+ * merely trusting the writer.
+ */
+const ageMsToSqliteDatetime = (ageMs: number): string =>
+  new Date(Date.now() - ageMs).toISOString().replace('T', ' ').slice(0, 19);
+
+/**
  * Mirror of the production STALE_THRESHOLD_MS (stuckDetector.ts). Ages below
  * are expressed RELATIVE to it so a future threshold change fails loudly here
  * instead of silently making every "stale" fixture young again — which is
@@ -199,9 +213,9 @@ describe('StuckDetector staleness filter', () => {
     seedRun(rawDb, 'run-young', 'awaiting_review');
     seedRun(rawDb, 'run-old', 'awaiting_review');
 
-    // young approval: 4 minutes old — should NOT be evaluated
+    // young approval: short of the threshold — should NOT be evaluated
     seedApproval(rawDb, { id: 'approval-young', runId: 'run-young', toolName: 'Bash', createdAt: ageMsToIso(FRESH_AGE_MS) });
-    // old approval: 6 minutes old — SHOULD be evaluated
+    // old approval: past the threshold — SHOULD be evaluated
     seedApproval(rawDb, { id: 'approval-old', runId: 'run-old', toolName: 'Bash', createdAt: ageMsToIso(STALE_AGE_MS) });
 
     // claudeManager: run-old is active (so orphan_pty doesn't fire),
@@ -227,6 +241,88 @@ describe('StuckDetector staleness filter', () => {
     expect(classifySpy).toHaveBeenCalledTimes(1);
     const calledWith = classifySpy.mock.calls[0][0] as { id: string };
     expect(calledWith.id).toBe('approval-old');
+
+    classifySpy.mockRestore();
+    detector.stop();
+    rawDb.close();
+  });
+
+  it('does not treat a fresh CURRENT_TIMESTAMP-format approval as stale', async () => {
+    // REGRESSION: the stale predicate was a raw string compare
+    // (`created_at < ?`) against a toISOString() cutoff, which silently assumed
+    // every writer stamps the same format. transitions.ts did not — it left the
+    // column to DEFAULT CURRENT_TIMESTAMP. Because ' ' < 'T', this row compared
+    // as older than the cutoff on identical calendar dates whatever the times
+    // were, so a seconds-old approval was classified stale and its run stamped
+    // 'stuck'. The 45-minute threshold never applied to that writer at all.
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+
+    seedRun(rawDb, 'run-fresh-sqlite-fmt', 'awaiting_review');
+    seedApproval(rawDb, {
+      id: 'approval-fresh-sqlite-fmt',
+      runId: 'run-fresh-sqlite-fmt',
+      toolName: 'Bash',
+      createdAt: ageMsToSqliteDatetime(FRESH_AGE_MS),
+    });
+
+    // Pin the premise: this fixture really is in the format that used to break
+    // the compare, so the test cannot quietly pass by seeding an ISO string.
+    const stored = rawDb
+      .prepare(`SELECT created_at FROM approvals WHERE id = 'approval-fresh-sqlite-fmt'`)
+      .get() as { created_at: string };
+    expect(stored.created_at).not.toContain('T');
+    expect(stored.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    const classifySpy = vi.spyOn(StuckDetector.prototype, 'classifyStaleApproval');
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set(['run-fresh-sqlite-fmt'])),
+      emitter: new EventEmitter(),
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(classifySpy).not.toHaveBeenCalled();
+    const row = rawDb
+      .prepare(`SELECT status, stuck_reason FROM workflow_runs WHERE id = 'run-fresh-sqlite-fmt'`)
+      .get() as { status: string; stuck_reason: string | null };
+    expect(row.status).toBe('awaiting_review');
+    expect(row.stuck_reason).toBeNull();
+
+    classifySpy.mockRestore();
+    detector.stop();
+    rawDb.close();
+  });
+
+  it('still evaluates a genuinely stale CURRENT_TIMESTAMP-format approval', async () => {
+    // The normalization must not overshoot into ignoring the old format: a row
+    // in the space spelling that really is past the threshold stays detectable.
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+
+    seedRun(rawDb, 'run-stale-sqlite-fmt', 'awaiting_review');
+    seedApproval(rawDb, {
+      id: 'approval-stale-sqlite-fmt',
+      runId: 'run-stale-sqlite-fmt',
+      toolName: 'Bash',
+      createdAt: ageMsToSqliteDatetime(STALE_AGE_MS),
+    });
+
+    const classifySpy = vi.spyOn(StuckDetector.prototype, 'classifyStaleApproval');
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set(['run-stale-sqlite-fmt'])),
+      emitter: new EventEmitter(),
+      logger: makeSpyLogger(),
+    });
+
+    await detector.scan();
+
+    expect(classifySpy).toHaveBeenCalledTimes(1);
+    const calledWith = classifySpy.mock.calls[0][0] as { id: string };
+    expect(calledWith.id).toBe('approval-stale-sqlite-fmt');
 
     classifySpy.mockRestore();
     detector.stop();

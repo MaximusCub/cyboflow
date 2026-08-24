@@ -113,9 +113,22 @@ export class StuckDetector {
     // waiting — the omp-sdk gate hangs up at ~25s and the model may never
     // retry. Only the first is evidence a run is wedged. Counting the second
     // is how an OMP run that had long since moved on looked deadlocked.
+    // `unixepoch(created_at) < unixepoch(?)`, not `created_at < ?`. A raw string
+    // comparison silently assumed every writer stamps the same format, and they
+    // did not: transitions.ts left the column to `DEFAULT CURRENT_TIMESTAMP`
+    // ('2026-08-23 20:43:58') while the cutoff here is toISOString()
+    // ('2026-08-23T19:58:58.545Z'). ' ' (0x20) < 'T' (0x54), so a same-date row
+    // in the space form ALWAYS compared as older than the cutoff regardless of
+    // clock time — a brand-new approval read as 45 minutes stale and stamped its
+    // run 'stuck' on the first scan. transitions.ts now writes ISO, so new rows
+    // agree; unixepoch() parses both spellings to the same integer and keeps
+    // rows written before that fix honest. `status = 'pending'` still uses
+    // idx_approvals_status_created for its equality prefix; only the range on
+    // created_at gives up the index, and pending rows are few.
     this.stmtStaleApprovals = this.db.prepare(
       `SELECT id, run_id, status, created_at FROM approvals
-       WHERE status = 'pending' AND awaited = 1 AND created_at < ?`,
+       WHERE status = 'pending' AND awaited = 1
+         AND unixepoch(created_at) < unixepoch(?)`,
     );
     // Rung 3 additionally: orphanPendingForRun deliberately permits a SECOND
     // pending approval per run on the OMP lane (it restores the run to
@@ -140,7 +153,7 @@ export class StuckDetector {
             WHERE a.run_id = wr.id
               AND a.status = 'pending'
               AND a.awaited = 1
-              AND a.created_at < ?
+              AND unixepoch(a.created_at) < unixepoch(?)
          )
        LIMIT 1`,
     );
@@ -199,10 +212,10 @@ export class StuckDetector {
     try {
       const cutoff = Date.now() - STALE_THRESHOLD_MS;
 
-      // SQLite stores created_at as an ISO datetime string or unix ms integer
-      // depending on how it was inserted.  The approvalRouter inserts as ISO
-      // (new Date().toISOString()), so we compare against the ISO representation
-      // of the cutoff timestamp.
+      // The cutoff goes to SQLite as ISO-8601. Both approval predicates wrap it
+      // and the column in unixepoch() rather than trusting a string compare —
+      // see the note on stmtStaleApprovals for the format mismatch that made a
+      // fresh approval read as stale.
       const cutoffIso = new Date(cutoff).toISOString();
       const rows = this.stmtStaleApprovals.all(cutoffIso) as ApprovalRow[];
 
