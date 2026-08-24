@@ -77,9 +77,9 @@ export function overrideRunningForActiveWorkflows(
  * resetting a counter (idleSince is preserved, so elapsed keeps climbing from
  * the real rest time).
  *
- * This window survives migration 116 unchanged: the flap it suppresses follows
+ * This window survives migration 119 unchanged: the flap it suppresses follows
  * a GENUINE rest boundary, so a more accurate boundary does not remove it.
- * What 116 did fix is the "never resetting a counter" promise above — idleSince
+ * What 119 did fix is the "never resetting a counter" promise above — idleSince
  * used to be `updated_at`, so an unrelated write landing mid-window (a rename,
  * a folder move) really could push the row back to "quiet 0s". It no longer can.
  */

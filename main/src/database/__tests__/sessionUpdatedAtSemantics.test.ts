@@ -1,10 +1,11 @@
 /**
  * sessions.updated_at doubles as the session's last-ACTIVITY clock: the
  * sidebar's relative time reads it as lastActivity, and it is still the
- * quick-sessions board's FALLBACK for a row whose idle_since has not been
- * stamped yet (migration 116 moved the board's primary "quiet for N" source to
- * sessions.idle_since — see sessionIdleSinceSemantics.test.ts — but the
- * COALESCE keeps updated_at load-bearing for pre-116 rows).
+ * quick-sessions board's FALLBACK for a row whose idle_since is NULL
+ * (migration 119 moved the board's primary "quiet for N" source to
+ * sessions.idle_since — see sessionIdleSinceSemantics.test.ts — and 120
+ * backfilled the rows that predated it, so the fallback now only catches
+ * currently-BUSY rows).
  * These tests pin the rule that presentation-only writes must
  * NOT bump it — the regression they guard: a sidebar drag (reorderSessions)
  * rewrote display_order + updated_at for EVERY session in one transaction,

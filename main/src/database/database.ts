@@ -61,7 +61,7 @@ function isAlreadyAppliedSchemaStatement(statement: string, err: unknown): boole
 
 /**
  * The `sessions.idle_since` write, appended to updateSession's SET list whenever
- * the caller supplies a status (migration 116).
+ * the caller supplies a status (migration 119).
  *
  * idle_since is the session's real LAST-ACTIVITY boundary — the moment it came
  * to rest after a turn. It exists because the quick-session board's "quiet for

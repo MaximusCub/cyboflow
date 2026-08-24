@@ -35,7 +35,7 @@ export interface QuickSessionRow {
   state: QuickSessionState;
   /**
    * ISO timestamp the session last rested — `sessions.idle_since`, stamped at
-   * the busy→resting status transition (migration 116), falling back to
+   * the busy→resting status transition (migration 119), falling back to
    * `sessions.updated_at` for a row that has not transitioned since the column
    * landed. Present for `idle` rows so the UI can show "idle for N min"; null
    * for `running`/`blocked`.

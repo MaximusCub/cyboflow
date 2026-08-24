@@ -14,7 +14,6 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     name: 'smooth-falcon',
     status: 'completed',
     chat_run_id: 'run-1',
-    updated_at_iso: '2026-07-16T10:00:00Z',
     idle_since_iso: '2026-07-16T09:00:00Z',
     unviewed: 1,
     ...overrides,
@@ -58,18 +57,7 @@ describe('toQuickSessionRow', () => {
     expect(toQuickSessionRow(row({ status: 'running' }), new Set(['run-1'])).idleSince).toBeNull();
   });
 
-  it('idleSince reads idle_since_iso, NOT updated_at_iso', () => {
-    // The whole point of migration 116: updated_at is bumped by writes that are
-    // not activity (a rename, a folder move, the boot sweep), so a row whose
-    // updated_at is newer than its rest boundary must still report the boundary.
-    const r = toQuickSessionRow(
-      row({ status: 'completed', updated_at_iso: '2026-07-16T23:59:00Z', idle_since_iso: '2026-07-16T09:00:00Z' }),
-      new Set(),
-    );
-    expect(r.idleSince).toBe('2026-07-16T09:00:00Z');
-  });
-
-  it('tolerates a null idle_since_iso without falling back to updated_at_iso', () => {
+  it('tolerates a null idle_since_iso rather than substituting another time', () => {
     // The COALESCE to updated_at happens in SQL, so a null here means the
     // timestamp itself was unparseable — surface null rather than a wrong time.
     expect(
@@ -130,7 +118,8 @@ describe('listQuickSessions', () => {
   it('selects idle_since with an updated_at COALESCE fallback, normalized like updated_at', () => {
     const capture = { sql: [] as string[], params: [] as unknown[][] };
     listQuickSessions(fakeDb([row()], capture), new Set());
-    // Pre-116 rows (idle_since NULL) must read exactly as they did before.
+    // The COALESCE is the safety net for a row 120's backfill did not cover
+    // (a busy row, idle_since NULL by design) — never a silent second source.
     expect(capture.sql[0]).toContain(
       "strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.idle_since, s.updated_at)) AS idle_since_iso",
     );

@@ -1,4 +1,4 @@
--- Migration 116: Add nullable idle_since to sessions — the session's real
+-- Migration 119: Add nullable idle_since to sessions — the session's real
 -- LAST-ACTIVITY boundary, so the quick-session board's "quiet for N" label
 -- stops being reset by unrelated writes.
 --
@@ -14,16 +14,23 @@
 -- omp-sdk / omp-pty) without a per-manager wire point.
 --
 -- Semantics:
---   NULL            = busy (running/pending), or a pre-migration row that has
---                     not transitioned since. Readers COALESCE to updated_at,
---                     which is byte-identical to the pre-migration behavior —
---                     which is also why this file carries NO backfill: a
---                     backfill would write exactly the value COALESCE already
---                     yields.
+--   NULL            = busy (running/pending). Readers COALESCE to updated_at,
+--                     which keeps a not-yet-stamped row reading exactly as it
+--                     did before this column existed.
 --   datetime('now') = the moment the session came to rest. Same space-separated
 --                     UTC format as CURRENT_TIMESTAMP/updated_at, so readers
 --                     normalize it with the same strftime() the ' ' vs 'T'
 --                     ordering trap already forces them to use.
+--
+-- Pre-existing resting rows are backfilled by 120, NOT here. The COALESCE
+-- fallback alone is not enough for them: it is only equivalent to a real stamp
+-- at the INSTANT of migration. A legacy row keeps idle_since NULL until its
+-- next busy→resting transition, and in the meantime any write that bumps
+-- updated_at without supplying a status — a rename, a folder move — drags the
+-- COALESCE forward and resets the quiet clock, which is the original bug
+-- verbatim. A parked idle chat session (exactly the population the board
+-- renders) may never transition again, so that window is permanent, not
+-- transient. See 120's header for why it is a separate file.
 --
 -- Plain nullable ADD COLUMN, no FK/CHECK, same rationale as 113/114 and
 -- design_idea_id (082): sessions is a legacy table and integrity is

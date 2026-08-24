@@ -1,5 +1,5 @@
 /**
- * sessions.idle_since (migration 116) — the session's real last-REST boundary,
+ * sessions.idle_since (migration 119) — the session's real last-REST boundary,
  * and the reason it is not `updated_at`.
  *
  * `updated_at` is bumped by ANY write to the row, so the quick-sessions board's
@@ -194,7 +194,7 @@ describe('markSessionsAsStopped (boot sweep) stamps last-known activity, not boo
 });
 
 describe('the board read', () => {
-  it('COALESCEs a pre-116 row (idle_since NULL) back to updated_at', () => {
+  it('COALESCEs a NULL idle_since (a busy row) back to updated_at', () => {
     createSession('s1', { status: 'completed', idleSince: null });
     const row = db
       .getDb()

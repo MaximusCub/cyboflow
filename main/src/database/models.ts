@@ -51,7 +51,7 @@ export interface Session {
   created_at: string;
   updated_at: string;
   /**
-   * When the session last came to REST (migration 116), space-separated UTC as
+   * When the session last came to REST (migration 119), space-separated UTC as
    * written by datetime('now') — DISTINCT from `updated_at`, which any write to
    * the row bumps and so cannot serve as an activity clock. Written only inside
    * updateSession's status transition (see IDLE_SINCE_ON_STATUS_CHANGE in

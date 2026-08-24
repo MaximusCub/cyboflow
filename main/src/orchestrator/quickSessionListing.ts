@@ -25,18 +25,18 @@ export interface QuickSessionCandidateRow {
   name: string;
   status: string;
   chat_run_id: string | null;
-  /** sessions.updated_at normalized to UTC ISO (may be null for a malformed timestamp). */
-  updated_at_iso: string | null;
   /**
-   * The session's real last-REST boundary (migration 116) normalized to UTC ISO:
+   * The session's real last-REST boundary (migration 119) normalized to UTC ISO:
    * `COALESCE(sessions.idle_since, sessions.updated_at)`.
    *
    * `idle_since` is stamped only at the busy→resting status transition, so —
    * unlike `updated_at`, which any write to the row bumps — a rename, a folder
    * move, the boot sweep or a status refinement no longer resets the quiet
-   * clock. The COALESCE is the pre-migration fallback: a row that has not
-   * transitioned since the column landed reads exactly as it did before.
-   * May be null for a malformed timestamp, same as `updated_at_iso`.
+   * clock. Migration 120 backfilled every row that was already at rest, so the
+   * COALESCE arm is reached only by a row that is currently BUSY (idle_since
+   * NULL by design) — and such a row never reports idleSince anyway, since
+   * toQuickSessionRow returns it for `idle` rows only.
+   * May be null for a malformed timestamp.
    */
   idle_since_iso: string | null;
   /**
@@ -64,7 +64,6 @@ const QUICK_SESSION_PREDICATE = `
 
 const SELECT_COLS = `
   s.id, s.project_id, s.name, s.status, s.chat_run_id,
-  strftime('%Y-%m-%dT%H:%M:%SZ', s.updated_at) AS updated_at_iso,
   strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.idle_since, s.updated_at)) AS idle_since_iso,
   CASE WHEN s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at)
        THEN 1 ELSE 0 END AS unviewed
@@ -88,7 +87,7 @@ export function deriveQuickSessionState(
 /**
  * Map a candidate row + blocked set to a board row. `idleSince` is set only for
  * idle rows, and comes from `idle_since_iso` (the real rest boundary), NOT from
- * `updated_at_iso` — see the field docs on {@link QuickSessionCandidateRow}.
+ * `updated_at` — see the field docs on {@link QuickSessionCandidateRow}.
  */
 export function toQuickSessionRow(
   row: QuickSessionCandidateRow,
