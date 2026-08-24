@@ -31,7 +31,7 @@ import { useOmpModelCatalog } from '../../stores/ompModelCatalogStore';
 import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
-import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
+import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import {
   AGENT_PROVIDER_LABELS,
@@ -127,8 +127,17 @@ export function VariantEditorModal({
     () => agentEntries.filter((e) => e.isCustom).map((e) => e.agentKey),
     [agentEntries],
   );
-  const agentModelPins = useMemo<Record<string, AgentModelAlias | null>>(
-    () => Object.fromEntries(agentEntries.map((e) => [e.agentKey, e.model])),
+  // The canvas step cards fold runtime + model + providerModel into ONE run-target
+  // label, so they need all three — a model-alias-only map rendered a non-Claude
+  // pinned agent as "run model".
+  const agentRunTargets = useMemo<Record<string, AgentRunTarget>>(
+    () =>
+      Object.fromEntries(
+        agentEntries.map((e) => [
+          e.agentKey,
+          { runtime: e.runtime, model: e.model, providerModel: e.providerModel },
+        ]),
+      ),
     [agentEntries],
   );
 
@@ -439,7 +448,7 @@ export function VariantEditorModal({
             selectedStepId={state.selectedStepId}
             selectedFanOutInner={state.selectedFanOutInner}
             dispatch={dispatch}
-            agentModelPins={agentModelPins}
+            agentRunTargets={agentRunTargets}
           />
           <WorkflowStepInspector
             definition={state.definition}
