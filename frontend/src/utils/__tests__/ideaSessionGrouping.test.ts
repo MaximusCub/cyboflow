@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Session } from '../../types/session';
-import { groupIdeaSessions } from '../ideaSessionGrouping';
+import type { ActiveRunRow } from '../../stores/activeRunsStore';
+import { anyIdeaChildSessionActive, groupIdeaSessions } from '../ideaSessionGrouping';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -135,5 +136,47 @@ describe('groupIdeaSessions', () => {
 
     expect(groups).toHaveLength(0);
     expect(ungroupedSessions).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// anyIdeaChildSessionActive / isIdeaChildSessionActive
+// ---------------------------------------------------------------------------
+
+describe('anyIdeaChildSessionActive', () => {
+  const mkRun = (sessionId: string, status: string): ActiveRunRow =>
+    ({ id: `run-${sessionId}`, session_id: sessionId, status } as ActiveRunRow);
+
+  it('false when the idea has no children (home alone)', () => {
+    const home = mkSession('home-1', { homeIdeaId: 'idea-1', status: 'running' });
+    expect(anyIdeaChildSessionActive([home], undefined, 'idea-1', 'home-1')).toBe(false);
+  });
+
+  it('true when a child session row is running', () => {
+    const home = mkSession('home-1', { homeIdeaId: 'idea-1', status: 'stopped' });
+    const child = mkSession('child-1', { originIdeaId: 'idea-1', status: 'running' });
+    expect(anyIdeaChildSessionActive([home, child], undefined, 'idea-1', 'home-1')).toBe(true);
+  });
+
+  it("true when a child's run is non-terminal even though its session row lags", () => {
+    const home = mkSession('home-1', { homeIdeaId: 'idea-1', status: 'stopped' });
+    const child = mkSession('child-1', { originIdeaId: 'idea-1', status: 'stopped' });
+    const runs = [mkRun('child-1', 'awaiting_review')];
+    expect(anyIdeaChildSessionActive([home, child], runs, 'idea-1', 'home-1')).toBe(true);
+  });
+
+  it('false when every child is settled (stopped rows, terminal runs only)', () => {
+    const home = mkSession('home-1', { homeIdeaId: 'idea-1', status: 'stopped' });
+    const child = mkSession('child-1', { originIdeaId: 'idea-1', status: 'stopped' });
+    const runs = [mkRun('child-1', 'completed'), mkRun('other', 'running')];
+    expect(anyIdeaChildSessionActive([home, child], runs, 'idea-1', 'home-1')).toBe(false);
+  });
+
+  it("ignores the home session itself and other ideas' sessions", () => {
+    // The home is running (its own clarify chat) and a FOREIGN idea's child is
+    // running — neither counts as one of THIS idea's active children.
+    const home = mkSession('home-1', { homeIdeaId: 'idea-1', originIdeaId: 'idea-1', status: 'running' });
+    const foreign = mkSession('child-x', { originIdeaId: 'idea-2', status: 'running' });
+    expect(anyIdeaChildSessionActive([home, foreign], undefined, 'idea-1', 'home-1')).toBe(false);
   });
 });

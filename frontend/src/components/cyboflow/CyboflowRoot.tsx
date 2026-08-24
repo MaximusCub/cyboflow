@@ -59,6 +59,7 @@ import { disposeInteractiveTerminal } from './InteractiveTerminalView';
 import { RunEndDialog } from './RunEndDialog';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { useErrorStore } from '../../stores/errorStore';
+import { API } from '../../utils/api';
 import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { resolveRunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import { useRunSummaryDismissStore, useRunSummaryDismissed } from '../../stores/runSummaryDismissStore';
@@ -284,6 +285,33 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
     useNavigationStore.getState().goHome();
   }, [projectId]);
 
+  // Direct close for an idea HOME session (SessionLifecycleActionBar's Close
+  // button). Deliberately NO dialog: the home session is in-place — nothing to
+  // merge, nothing lost — and reopening from the backlog recreates it, so the
+  // dismiss dialog's merge warning/probe would be pure noise. Same archive
+  // route + close-out cleanup as a dismiss, different toast.
+  const handleCloseIdeaSession = useCallback(() => {
+    const sessionId = lifecycleTarget?.session.id;
+    if (sessionId === undefined) return;
+    void API.sessions.delete(sessionId)
+      .then((result) => {
+        if (result.success) {
+          handleActionSuccess('Session closed');
+        } else {
+          useErrorStore.getState().showError({
+            title: 'Close failed',
+            error: result.error ?? 'Unknown error',
+          });
+        }
+      })
+      .catch((err: unknown) => {
+        useErrorStore.getState().showError({
+          title: 'Close failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }, [lifecycleTarget?.session.id, handleActionSuccess]);
+
   useEffect(() => useQuestionStore.getState().init(), []);
 
   // In-canvas completion banner: the SAME eligibility the RunActionBar End
@@ -368,6 +396,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           onMerge={() => setIsMergeOpen(true)}
           onCreatePR={() => setIsCreatePrOpen(true)}
           onDismiss={() => setIsDismissOpen(true)}
+          onCloseSession={handleCloseIdeaSession}
         />
       </div>
 

@@ -44,7 +44,8 @@ import { useDesignLaunch } from '../../hooks/useDesignLaunch';
 import { usePanelStore } from '../../stores/panelStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
-import { useActiveRunsStore, isTerminalRunStatus } from '../../stores/activeRunsStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { isIdeaChildSessionActive } from '../../utils/ideaSessionGrouping';
 import { TypeTag, PriorityTag, ScopeTag, ledgerChipVisualState } from '../Backlog/markers';
 import type { LedgerChipVisualState } from '../Backlog/markers';
 import {
@@ -357,14 +358,7 @@ export function IdeaSessionCanvas({
   );
   const clarifyActive = session.status === 'running';
   const anyLaunchedChildActive = useMemo(
-    () =>
-      children.some(
-        (child) =>
-          child.status === 'running' ||
-          (runsForProject ?? []).some(
-            (run) => run.session_id === child.id && !isTerminalRunStatus(run.status),
-          ),
-      ),
+    () => children.some((child) => isIdeaChildSessionActive(child, runsForProject)),
     [children, runsForProject],
   );
 

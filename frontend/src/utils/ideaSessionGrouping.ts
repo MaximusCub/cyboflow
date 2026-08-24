@@ -31,6 +31,8 @@
  * twice (once as an arm row, once as an idea-group child).
  */
 import type { Session } from '../types/session';
+import { isTerminalRunStatus } from '../stores/activeRunsStore';
+import type { ActiveRunRow } from '../stores/activeRunsStore';
 
 /** One idea-session group: the idea's home row + the sessions it launched. */
 export interface IdeaSessionGroup {
@@ -44,6 +46,45 @@ export interface IdeaSessionGroup {
 export interface IdeaSessionGroupingResult {
   groups: IdeaSessionGroup[];
   ungroupedSessions: Session[];
+}
+
+/**
+ * Whether one idea-launched child session is still actively working.
+ * sessions.status is the BASE signal — activeRunsStore is lossy by construction
+ * (it excludes the '__quick__' sentinel and drops rail-dismissed rows), so the
+ * run scan only ever ADDS a busy signal for a child whose session row has not
+ * caught up yet. Shared by IdeaSessionCanvas (tile greying) and
+ * SessionLifecycleActionBar (the home session's Close gating) so the two
+ * surfaces can never disagree about liveness.
+ */
+export function isIdeaChildSessionActive(
+  child: Session,
+  runsForProject: readonly ActiveRunRow[] | undefined,
+): boolean {
+  return (
+    child.status === 'running' ||
+    (runsForProject ?? []).some(
+      (run) => run.session_id === child.id && !isTerminalRunStatus(run.status),
+    )
+  );
+}
+
+/**
+ * Whether ANY of an idea's origin-linked sessions (excluding the home session
+ * itself) is still actively working — see {@link isIdeaChildSessionActive}.
+ */
+export function anyIdeaChildSessionActive(
+  sessions: readonly Session[],
+  runsForProject: readonly ActiveRunRow[] | undefined,
+  ideaId: string,
+  homeSessionId: string,
+): boolean {
+  return sessions.some(
+    (s) =>
+      s.originIdeaId === ideaId &&
+      s.id !== homeSessionId &&
+      isIdeaChildSessionActive(s, runsForProject),
+  );
 }
 
 /**
