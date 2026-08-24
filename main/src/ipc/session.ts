@@ -1325,7 +1325,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // resolved-substrate belt confirms 'sdk'.
         db.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(designIdeaId, session.id);
 
-        // `origin_idea_id` (migration 112): a design session IS a session
+        // `origin_idea_id` (migration 114): a design session IS a session
         // launched from the idea, and the sidebar's idea-session nesting groups
         // children by that column. Lineage, not a claim (no unique index), so it
         // never conflicts with design_idea_id's own meaning — and it stays a

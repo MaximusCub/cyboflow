@@ -3710,7 +3710,7 @@ async function initializeServices(): Promise<boolean> {
     // variant (explicit pin or weighted random over active variants) pre-createRun
     // so every launch surface inherits rotation from one place.
     new VariantResolver(cyboflowDb),
-    // Idea-session nesting lineage (migration 112): launch() stamps
+    // Idea-session nesting lineage (migration 114): launch() stamps
     // sessions.origin_idea_id for a SINGULAR idea-seeded launch, then refreshes
     // the session so the sidebar regroups it under the idea immediately.
     sessionManager,
@@ -5776,7 +5776,7 @@ app.whenReady().then(async () => {
           stampDesignIdeaId: () => {
             const dbHandle = databaseService.getDb();
             dbHandle.prepare(`UPDATE sessions SET design_idea_id = ? WHERE id = ?`).run(ideaId, session.id);
-            // `origin_idea_id` (migration 112): a design session IS a session
+            // `origin_idea_id` (migration 114): a design session IS a session
             // launched from the idea, and the sidebar nests children by that
             // column. Lineage, not a claim — no unique index. Kept a SEPARATE
             // statement, mirroring the sessions:create-quick design branch.

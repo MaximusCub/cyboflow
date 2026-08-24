@@ -195,7 +195,7 @@ export class RunLauncher {
      */
     private readonly variantResolver?: VariantResolver,
     /**
-     * Optional session-refresh seam (idea sessions, migration 112). When
+     * Optional session-refresh seam (idea sessions, migration 114). When
      * injected AND a launch carries a SINGULAR seed idea, the launcher stamps
      * `sessions.origin_idea_id` on the host session and refreshes it so the
      * sidebar regroups the new session under the idea immediately. When absent
@@ -683,7 +683,7 @@ export class RunLauncher {
           .run(JSON.stringify(ideaIds), runId);
       }
 
-      // Idea-session nesting lineage (migration 112). A SINGULAR idea-seeded
+      // Idea-session nesting lineage (migration 114). A SINGULAR idea-seeded
       // launch records which idea minted this host session so the sidebar can
       // nest it under that idea's home session. `AND origin_idea_id IS NULL`
       // makes it first-writer-wins: a session that hosts several runs over its

@@ -177,7 +177,7 @@ export interface Session {
   design_idea_id?: string | null;
   /**
    * Idea this session is the persistent home for (sessions.home_idea_id,
-   * migration 111; idea sessions feature). At most one live session per idea
+   * migration 113; idea sessions feature). At most one live session per idea
    * holds this. undefined/null → not an idea-home session. Mirror of
    * main/src/types/session.ts Session.
    */

@@ -1,5 +1,5 @@
--- Migration 113: partial unique index enforcing "at most one live idea-home
--- session per idea" — the other half of 111's home_idea_id contract.
+-- Migration 115: partial unique index enforcing "at most one live idea-home
+-- session per idea" — the other half of 113's home_idea_id contract.
 --
 -- WHERE home_idea_id IS NOT NULL AND (archived = 0 OR archived IS NULL): a
 -- NULL home_idea_id never participates (SQLite treats every NULL as distinct
@@ -12,7 +12,7 @@
 -- CREATE UNIQUE INDEX IF NOT EXISTS (not a bare ALTER) is naturally idempotent
 -- — no duplicate-column hazard here — but this still gets its own file to
 -- keep the three-migration set uniform and because it must run strictly after
--- 111 adds the column it indexes.
+-- 113 adds the column it indexes.
 --
 -- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
 -- this.transaction(...) call, so no explicit BEGIN/COMMIT here.

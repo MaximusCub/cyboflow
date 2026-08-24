@@ -1,15 +1,15 @@
--- Migration 111: Add nullable home_idea_id to sessions — the idea-session
+-- Migration 113: Add nullable home_idea_id to sessions — the idea-session
 -- home concept (persistent per-idea session, card CTA "Open").
 --
 -- home_idea_id points at the idea this session is the PERSISTENT HOME for:
 -- at most one live (non-archived) session per idea may claim it (enforced by
--- migration 113's partial unique index, not here — see that file). Plain
+-- migration 115's partial unique index, not here — see that file). Plain
 -- nullable ADD COLUMN, no FK/CHECK: sessions is a legacy table and integrity
 -- is chokepoint-enforced, mirroring design_idea_id (082) and the 021/027/031
 -- nullable-ALTER family. NULL means "not an idea-home session" (byte-identical
 -- behavior to before this column existed).
 --
--- Kept in its own single-statement file (rather than combined with 112/113):
+-- Kept in its own single-statement file (rather than combined with 114/115):
 -- runFileBasedMigrations() execs a whole file inside one transaction, and a
 -- duplicate-column ALTER on a re-run rolls that transaction back before later
 -- statements in the same file apply — see migration 088's header for the full

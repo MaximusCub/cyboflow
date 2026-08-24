@@ -136,7 +136,7 @@ interface HomeSessionRow {
 
 /**
  * The idea's live home session, if any. Scoped to non-archived rows for the same
- * reason migration 113's partial-unique index is: archiving a home RELEASES the
+ * reason migration 115's partial-unique index is: archiving a home RELEASES the
  * idea's slot, so an archived row must not satisfy a later Open.
  */
 function findLiveHomeSession(
@@ -196,7 +196,7 @@ export function resolveIdeaSessionIdentity(db: Database.Database, ideaId: string
 }
 
 /**
- * better-sqlite3 surfaces the partial-unique index (migration 113) as an
+ * better-sqlite3 surfaces the partial-unique index (migration 115) as an
  * SqliteError carrying `code: 'SQLITE_CONSTRAINT_UNIQUE'`. The message test is a
  * belt for builds/adapters that only populate the text.
  */
@@ -317,7 +317,7 @@ export async function openIdeaSessionCore(
   } catch (err) {
     await deps.dismissSession(session.id).catch(() => {});
     if (isUniqueConstraintViolation(err)) {
-      // A concurrent Open won the partial-unique index (migration 113). We are
+      // A concurrent Open won the partial-unique index (migration 115). We are
       // the loser and have just swept ourselves — hand the user the WINNER.
       const winner = findLiveHomeSession(db, opts.ideaId);
       if (winner) {

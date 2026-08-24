@@ -127,7 +127,7 @@ export interface FinishDesignSessionCreateArgs {
   resolvedSubstrate: string;
   /**
    * Stamp the session's idea links — `design_idea_id` (the design claim) AND
-   * `origin_idea_id` (migration 112 nesting lineage: a design session IS a
+   * `origin_idea_id` (migration 114 nesting lineage: a design session IS a
    * session launched from the idea). A thin closure over the concrete DB
    * handle, injected so this module stays standalone-typecheck-clean (no
    * `better-sqlite3` import here). Throws on failure exactly like the raw

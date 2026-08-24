@@ -1,11 +1,11 @@
 /**
- * Migrations 111/112/113 — sessions.home_idea_id, sessions.origin_idea_id, and
+ * Migrations 113/114/115 — sessions.home_idea_id, sessions.origin_idea_id, and
  * the partial unique index enforcing at most one live idea-home session per idea.
  *
  * Exercises the REAL migrations dir (mirrors migration110.test.ts's pattern):
  * a fresh boot proves the columns + index land, and a ledger-wiped replay
  * proves the duplicate-column tolerance each single-statement file relies on
- * (see 111's header for why the ALTERs and the index are split into three
+ * (see 113's header for why the ALTERs and the index are split into three
  * files instead of one).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -21,7 +21,7 @@ let tmpDir: string;
 let dbPath: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration111-'));
+  tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-migration113-'));
   dbPath = join(tmpDir, 'test.db');
 });
 
@@ -64,7 +64,7 @@ function wipeLedger(path: string): void {
   raw.close();
 }
 
-describe('Migrations 111/112/113: sessions home/origin idea columns', () => {
+describe('Migrations 113/114/115: sessions home/origin idea columns', () => {
   it('a fresh apply adds both columns and the partial unique index', () => {
     const svc = openFresh();
     const db = svc.getDb();
@@ -117,9 +117,9 @@ describe('Migrations 111/112/113: sessions home/origin idea columns', () => {
     ).toBe('idea-1');
 
     for (const name of [
-      '111_session_home_idea.sql',
-      '112_session_origin_idea.sql',
-      '113_session_home_idea_unique.sql',
+      '113_session_home_idea.sql',
+      '114_session_origin_idea.sql',
+      '115_session_home_idea_unique.sql',
     ]) {
       expect(
         db

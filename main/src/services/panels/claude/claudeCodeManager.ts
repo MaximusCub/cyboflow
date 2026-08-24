@@ -4423,7 +4423,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const designIdeaId = this.sessionManager.getDbSession(sessionId)?.design_idea_id;
     const isDesignSession = typeof designIdeaId === 'string' && designIdeaId.length > 0;
     // Idea session (idea-session.md): a quick session linked to an idea via
-    // sessions.home_idea_id (migration 111) is that idea's persistent home —
+    // sessions.home_idea_id (migration 113) is that idea's persistent home —
     // Read/Grep/Glob only (no code-writing tools; this is a thinking space, not
     // an implementation session) plus the idea-session first-turn prompt and a
     // per-spawn "Linked idea" line. Design branch checked FIRST and left

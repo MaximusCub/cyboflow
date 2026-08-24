@@ -136,9 +136,9 @@ export interface Session {
    * non-design session and for a design session whose link has been broken.
    */
   design_idea_id?: string | null;
-  /** Idea this session is the persistent home for (migration 111; idea sessions feature). NO FK. */
+  /** Idea this session is the persistent home for (migration 113; idea sessions feature). NO FK. */
   home_idea_id?: string | null;
-  /** Idea whose launch minted this session (migration 112; sidebar nesting lineage). NO FK. */
+  /** Idea whose launch minted this session (migration 114; sidebar nesting lineage). NO FK. */
   origin_idea_id?: string | null;
 }
 
