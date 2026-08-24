@@ -6,6 +6,34 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-08-24
+
+### Added
+
+- **Idea home sessions.** A backlog idea card now has an **Open** entry that finds-or-creates a persistent, in-place SDK "home" session for that idea (`IdeaSessionCanvas` surface with external-artifact tabs, sidebar nesting under its idea, `home_idea_id` partial-unique so re-opening lands on the same session). Sprints can be launched from the canvas with `originIdeaId` lineage even when the idea isn't a seed, artifacts resolve per-idea, and the home session gets **Close** instead of Dismiss (migrations 113–115).
+- **Tracker field write-back.** Entity priority widens to the full **P0–P6** range (migration 117); priority and category now sync **inbound** from the tracker, and content/archive changes sync **outbound** to it, with per-connection content/archive sync modes, mapping overlays, and new outbox kinds (migration 118). The wizard gains mapping tables and content/archive toggles. Outbound writes carry a lost-update guard (pre-send divergence check) and the removal ruling dialog discloses every linked provider and its real action (archive vs cancelled-state fallback).
+- **Provider usage meters.** A provider-usage store captures Claude `rate_limit_event` at the SDK chokepoint and Codex account/rate-limit snapshots, exposes them over tRPC, and renders live Claude/Codex subscription-quota meters in the human review queue — each usage window counting down on its own row, with direct polling and stale-reading flags when a stream can't be wired.
+- **Assistant long-term memory + flow advisor.** `cyboflow_history` gives the assistant durable recall over its own past transcripts, and a flow advisor recommends the right built-in flow and surfaces compound pressure.
+- **Per-lane sprint rewind.** A confirm-gated monitor action (`rewind_lane_to_step`) un-sticks a *single* sprint lane — validated per-lane business logic, a `RunExecutor` mutator, and honoring in the fan-out inner loop — without disturbing its siblings or bumping the attempt cap.
+- **Workflow variant archiving.** Variants can be archived behind a "Show archived" toggle (migration 116); creating a variant opens its editor immediately, a draft variant reads "Not in rotation", and a step's non-Claude model pin shows on the editor card.
+- **Renderer security hardening.** A production CSP for the packaged renderer (build-time meta injection), centralized IPC-sender validation on every `ipcMain.handle` channel, a channel allowlist gating the generic preload invoke bridges, scheme-allowlisted `shell.openExternal`, realpath containment + an argv git allowlist in project file handlers, and migration of all shell-string git execution to argv-based `runGit`.
+
+### Changed
+
+- **E2E smoke tier is now a blocking PR gate** (and a release gate), joined by real-API canaries.
+- Plain-language idea tile labels and captions.
+- Cyboflow no longer honors `allow` rules from repo-controlled `.claude` settings, and no longer trusts repo-supplied allow rules over the repo-trust model.
+
+### Fixed
+
+- **OMP dispatch and turn accounting.** OMP subagent dispatch is allowed (the hook-scope premise having been tested false), the 30-minute turn ceiling no longer reports itself as a user interrupt, auto-mode bash may redirect to a plain path inside the working tree, and the `xd://` MCP dispatch wrapper is decided by the tool it targets.
+- A fresh approval no longer reads as 45 minutes stale.
+- A failed summarizer run now salvages a complete session summary instead of losing it.
+- The updater no longer advertises an older feed version as an available update.
+- Epics/stories `complete` stamps are downgraded when their underlying entities were deleted.
+- The outbox drain stops when its connection is no longer active; an inbound unset-priority resolves against the canonical seed; overlay tokens are validated live.
+- The `stale_socket` liveness rung was retired rather than wired.
+
 ## [0.2.5] — 2026-08-21
 
 ### Added
