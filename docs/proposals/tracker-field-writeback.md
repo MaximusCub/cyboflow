@@ -423,3 +423,34 @@ fallbacks: Plane ships with `archive: 'none'` (UI caption "unsupported"), and th
 content-write arm is implemented from the documented lowercase priority enum + the existing
 create-path `description_html` precedent, with P1–P3 re-run before any Plane live smoke once a
 fresh token is connected. No plan-shape change.
+
+## Review findings absorbed (Codex adversarial round 3, final tree, 2026-08-24)
+
+Both findings were confirmed against the code and fixed:
+
+1. **[high] Outbound content writes overwrote unobserved remote changes.** The drain composed its
+   patch against the last stamped baseline and sent blind; a tracker edit landing between the
+   inbound stamp and the send was overwritten, and the response stamp erased the evidence. Fix:
+   `drainContentWrite` re-reads the issue (`adapter.getIssue`) before sending and compares every
+   patched field against the baseline with `composeContentPatch`'s own semantics
+   (`contentDivergence`); any divergence settles the row unsent WITHOUT stamping, so
+   local ≠ baseline ≠ remote survives for the inbound conflict machinery (auto: remote wins;
+   manual: queued). Withheld writes surface in the sync log ("held back N writes · concurrent
+   tracker edit"). A gone-remotely pre-read settles done unsent; a failed pre-read retries with
+   backoff (nothing was sent). The accept-LOCAL conflict ruling still converges: it stamps the
+   ADJUDICATED remote value, which the guard correctly treats as non-divergent — only a FURTHER
+   remote edit after the ruling withholds. The read-to-send window remains a race (no provider
+   offers conditional writes), but it is milliseconds where the pass cadence was minutes.
+
+2. **[high] The removal dialog promised an archive the default configuration never performs.**
+   Under `archive_sync_mode = 'off'` (the migration default) a ruled "Archive in <tracker>"
+   fell back to the cancelled-state write — correctly, since an `archive_issue` row is
+   undrainable while the direction is off (invariant 5's claim filter) — but the dialog never
+   disclosed it. Fix (disclosure, not behavior — mirrors round 2's finding 4): the decision now
+   lives once in `removalWriteBackAction(provider, archiveSyncMode)`, consulted by BOTH
+   `enqueueRemovalWriteBack` and `linksForEntity`, which stamps each `TrackerEntityLinkRef` with
+   `removalAction: 'archive' | 'cancel'`; the dialog's fine print, per-issue list, and confirm
+   button ("Archive in X" / "Mark cancelled in X" / "Archive / mark cancelled") are built from
+   it. Treating an explicit ruling as consent to pierce the 'off' gate was considered and
+   rejected for now: it would need a drain-filter exemption for ruled rows and weakens
+   invariant 5's "off means never" — recorded as a possible follow-up.
