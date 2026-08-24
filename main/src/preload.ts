@@ -227,10 +227,9 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   'openExternal',
   'app:consume-open-update-settings',
 
-  // Onboarding detection (renderer passes these as imported constants —
-  // CLAUDE_DETECT_CHANNEL / CODEX_DETECT_CHANNEL from shared/types/onboarding).
-  CLAUDE_DETECT_CHANNEL,
-  CODEX_DETECT_CHANNEL,
+  // Onboarding detection (renderer passes this as an imported constant —
+  // PROVIDERS_DETECT_CHANNEL from shared/types/onboarding).
+  PROVIDERS_DETECT_CHANNEL,
 
   // Preferences (onboarding gate snapshot)
   'preferences:get',
