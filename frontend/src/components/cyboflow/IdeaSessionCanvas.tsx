@@ -214,29 +214,29 @@ interface TileMeta {
 const TILE_META: Record<IdeaTileKey, TileMeta> = {
   clarify: {
     label: 'Clarify',
-    caption: 'In this session · stamps Idea spec',
+    caption: 'Clarify high level requirements',
     dot: 'var(--color-phase-refine)',
   },
   design: {
     label: 'Design',
-    caption: 'New design session · stamps Prototype',
+    caption: 'Create a draft design',
     // The design deliverable's own accent (the rust in the prototype family) —
     // reused so the tile and the artifact it produces read as the same thing.
     dot: ARTIFACT_COLORS['interactive-prototype'],
   },
   planner: {
-    label: 'Full planner',
-    caption: 'New run session · stamps Architecture · Epics · Stories',
+    label: 'Plan',
+    caption: 'Break down the feature into tasks',
     dot: 'var(--color-phase-plan)',
   },
   sprint: {
-    label: 'Launch sprint',
-    caption: 'New run session · executes the ready tasks',
+    label: 'Sprint',
+    caption: 'Build the feature',
     dot: 'var(--color-phase-execute)',
   },
   ship: {
     label: 'Ship',
-    caption: 'New run session · worktree',
+    caption: 'Plan and sprint combined',
     dot: 'var(--color-phase-execute)',
   },
 };
