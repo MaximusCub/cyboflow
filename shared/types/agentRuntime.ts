@@ -103,6 +103,22 @@ export const WORKFLOW_AGENT_RUNTIMES = WORKFLOW_LAUNCHABLE_RUNTIMES;
 export type WorkflowAgentRuntime = WorkflowLaunchableRuntime;
 
 export const DEFAULT_AGENT_PROVIDER: AgentProvider = 'claude';
+
+/**
+ * The runtime a PROVIDER-level choice resolves to — the structured (SDK) lane
+ * of each provider, which is the one every launch surface can honour (workflow
+ * runs included; the CLI runtimes are quick-session-only).
+ *
+ * Exists for surfaces that ask "which agent?" rather than "which transport?" —
+ * today the onboarding Default-agent step, which writes the answer into
+ * `AppConfig.defaultAgentRuntime`. `providerForRuntime` is the inverse and is
+ * what seeds such a surface back off a persisted runtime.
+ */
+export const PROVIDER_DEFAULT_RUNTIME: Readonly<Record<AgentProvider, WorkflowLaunchableRuntime>> = {
+  claude: 'claude-sdk',
+  codex: 'codex-sdk',
+  omp: 'omp-sdk',
+};
 export const DEFAULT_SESSION_AGENT_RUNTIME: SessionAgentRuntime = 'claude-sdk';
 export const DEFAULT_WORKFLOW_AGENT_RUNTIME: WorkflowLaunchableRuntime = 'claude-sdk';
 

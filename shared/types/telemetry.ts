@@ -27,6 +27,7 @@ export type TelemetryEnvironment = 'local' | 'dev' | 'stable';
 export type OnboardingStepName =
   | 'welcome'
   | 'connect'
+  | 'default_runtime'
   | 'permission'
   | 'telemetry'
   | 'add_project'
