@@ -6,6 +6,58 @@ import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
 import { reconcileSessionsPluginsColumn } from './reconcileSessionsPluginsColumn';
+import { splitSqlStatements, stripLeadingSqlComments } from './splitSqlStatements';
+
+/**
+ * A .sql migration file did not apply. Thrown by runFileBasedMigrations() and
+ * propagated out of DatabaseService.initialize() so boot ABORTS instead of
+ * running application code against a schema that is missing whatever the
+ * migration was supposed to add. The boot sequence in main/src/index.ts catches
+ * this and shows a blocking dialog before quitting.
+ */
+export class MigrationFailedError extends Error {
+  constructor(readonly migration: string, cause: unknown) {
+    super(
+      `Migration ${migration} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = 'MigrationFailedError';
+  }
+}
+
+/**
+ * True when `err` is SQLite refusing a statement whose effect is ALREADY in the
+ * schema — the only class of failure a re-applied migration is allowed to skip.
+ *
+ * Two shapes, and only these two:
+ *   - `ALTER TABLE … ADD [COLUMN]` → "duplicate column name: X"
+ *   - `CREATE TABLE|INDEX|VIEW|TRIGGER` → "… already exists"
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, and the older migrations predate
+ * the `CREATE … IF NOT EXISTS` habit, so these are how an already-applied
+ * statement announces itself.
+ *
+ * Both directions are checked on purpose: the message must be the idempotence
+ * signal AND the statement that raised it must be the DDL that signal belongs
+ * to. A failed backfill, a constraint violation, or a typo does not match
+ * either shape and fails the boot.
+ *
+ * This matters beyond re-numbered files: the migration chain carries a
+ * documented re-run convergence property (see the header of
+ * 088_artifacts_revision_ensure.sql) — a ledger-wiped database must be able to
+ * replay every file against the final schema — and several table-recreate
+ * migrations rebuild indexes that the replay then finds already present.
+ */
+function isAlreadyAppliedSchemaStatement(statement: string, err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const head = stripLeadingSqlComments(statement);
+  if (message.includes('duplicate column name:')) {
+    return /^ALTER\s+TABLE\b[\s\S]*\bADD\b/i.test(head);
+  }
+  if (/\balready exists\b/i.test(message)) {
+    return /^CREATE\s+(?:\w+\s+){0,2}(?:TABLE|INDEX|VIEW|TRIGGER)\b/i.test(head);
+  }
+  return false;
+}
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -1664,9 +1716,25 @@ export class DatabaseService {
   /**
    * Scans the migrations directory for numeric-prefix .sql files and applies
    * any that have not yet been recorded as applied in user_preferences.
-   * Each file is applied in its own transaction so a single failure does not
-   * prevent subsequent files from running (matching Cyboflow's existing migration
-   * tolerance pattern).
+   *
+   * Each file runs STATEMENT BY STATEMENT inside one transaction, and the ledger
+   * marker is written inside that same transaction — so the marker exists if and
+   * only if every statement in the file landed.
+   *
+   * Idempotence is per STATEMENT, not per file. The ledger tracks by FILENAME,
+   * so renumbering a migration (113-118 were renumbered twice in Aug 2026) makes
+   * the file re-apply against a database where some of its statements already
+   * ran. An `ALTER TABLE … ADD COLUMN` whose column is already there is skipped
+   * and the rest of the file continues. Stamping the marker on a FILE-level
+   * catch — what this used to do — was silent data loss: the throw had already
+   * rolled the whole transaction back, so every other statement in the file was
+   * discarded while the ledger claimed the migration was applied.
+   *
+   * Every other failure is FAIL-CLOSED: the transaction rolls back, nothing is
+   * stamped, and a MigrationFailedError propagates out of initialize() so boot
+   * stops. Continuing would run application code against a schema that does not
+   * match it, which surfaces later as scattered "no such column" errors with no
+   * trace back to the migration that never applied.
    */
   private runFileBasedMigrations(): void {
     // Bootstrap: legacy inline migrations 003-005 ran before this runner existed.
@@ -1719,8 +1787,9 @@ export class DatabaseService {
       try {
         sql = readFileSync(sqlPath, 'utf-8');
       } catch (err) {
-        console.error(`[Database] Could not read migration ${name}:`, err);
-        continue;
+        // Fail-closed like a failing statement: the file is listed in the
+        // directory but unreadable, so we cannot know the schema is complete.
+        throw new MigrationFailedError(name, err);
       }
 
       // SQLite docs: PRAGMA foreign_keys toggles are no-ops inside a transaction
@@ -1733,27 +1802,30 @@ export class DatabaseService {
       if (needsFkOff) this.db.pragma('foreign_keys = OFF');
       try {
         this.transaction(() => {
-          this.db.exec(sql);
+          for (const statement of splitSqlStatements(sql)) {
+            try {
+              this.db.exec(statement);
+            } catch (err) {
+              // A re-applied migration (renumbered file, or a ledger-wiped
+              // replay) hits the column or index it already added. Skip THAT
+              // statement only — the rest of the file still has to run, inside
+              // this same transaction.
+              if (!isAlreadyAppliedSchemaStatement(statement, err)) throw err;
+              const errMsg = err instanceof Error ? err.message : String(err);
+              console.warn(
+                `[Database] Migration ${name}: statement already applied, skipping (${errMsg})`,
+              );
+            }
+          }
           insertApplied.run(key);
         });
         console.log(`[Database] Applied file migration: ${name}`);
       } catch (err) {
-        // Detect idempotent ALTER TABLE failures (e.g. "duplicate column name: X").
-        // SQLite does not support ADD COLUMN IF NOT EXISTS; when a migration that only
-        // adds a column is re-executed after the ledger marker was erased (e.g. in tests
-        // that selectively reset the migration ledger), the column already exists and
-        // SQLite throws "SqliteError: duplicate column name: <col>".  Treat this as a
-        // successful idempotent application: record the ledger marker so subsequent
-        // initialize() calls skip cleanly, and log at warn (not error).
-        const errMsg = err instanceof Error ? err.message : String(err);
-        if (errMsg.includes('duplicate column name:')) {
-          insertApplied.run(key);
-          console.warn(`[Database] Migration ${name} column already exists (idempotent ok): ${errMsg}`);
-        } else {
-          // Match Cyboflow's existing tolerance pattern (try/catch around 004/005):
-          // log + continue so a single broken file does not brick the app boot.
-          console.error(`[Database] Migration ${name} failed:`, err);
-        }
+        // Fail-closed. The transaction rolled back and nothing was stamped, so
+        // the schema is missing what this file adds; booting on would run the
+        // app against a schema its code does not match.
+        console.error(`[Database] Migration ${name} failed — aborting boot:`, err);
+        throw err instanceof MigrationFailedError ? err : new MigrationFailedError(name, err);
       } finally {
         // Always restore FK enforcement, even if the transaction threw.
         if (needsFkOff) this.db.pragma('foreign_keys = ON');

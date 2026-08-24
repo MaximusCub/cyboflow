@@ -663,6 +663,12 @@ Schema in `main/src/database/schema.sql`; incremental migrations run in two phas
   On upgrade installs, `runFileBasedMigrations()` also backfills
   `file_migration_applied:003_add_tool_panels.sql`, `...004...`, and `...005...` when
   the corresponding inline markers are present, so those files are never double-applied.
+  Each file runs STATEMENT BY STATEMENT inside one transaction, with the ledger stamp
+  written in that same transaction, and the runner is FAIL-CLOSED: only an
+  already-applied `ALTER … ADD COLUMN` / `CREATE …` is skipped, and any other error
+  aborts boot with a blocking dialog rather than running the app against a schema its
+  code does not match. Authoring rules: `docs/CODE-PATTERNS.md` → "SQLite migrations:
+  idempotence is per STATEMENT".
 
 Central tables (Crystal baseline): `sessions`, `panels`, `execution_diffs`, `projects`.
 Cyboflow-era run-substrate tables (migration `006_cyboflow_schema.sql`): `workflows`,

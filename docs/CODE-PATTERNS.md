@@ -531,6 +531,36 @@ EXISTS` must be a no-op after `schema.sql` runs. When adding a column to a shipp
 migration, also search every test file's INSERT/SELECT for the old column list — missing
 columns surface as runtime `undefined`, not typecheck errors.
 
+### SQLite migrations: idempotence is per STATEMENT, and a real error stops the boot
+
+`runFileBasedMigrations()` splits each `.sql` file into statements
+(`splitSqlStatements.ts` — literal- and comment-aware, so a semicolon in a header
+comment or a string does not cut a statement in half) and runs them one at a time
+inside ONE transaction, stamping the ledger inside that same transaction.
+
+Exactly two failures are tolerated, and only on the statement that raised them —
+`ALTER TABLE … ADD COLUMN` → `duplicate column name:`, and
+`CREATE TABLE|INDEX|VIEW|TRIGGER` → `… already exists`. That statement is skipped
+and the REST OF THE FILE still runs. Everything else rolls the file back, stamps
+nothing, and throws `MigrationFailedError` out of `initialize()`; `index.ts` turns
+that into a blocking dialog and quits. Booting on a half-migrated schema surfaces
+later as scattered `no such column` errors that trace back to nothing.
+
+This runner used to be file-level: it caught `duplicate column name` around the
+whole `.exec(file)` and stamped the ledger from the catch — but the transaction
+had ALREADY rolled back, so every other statement in that file was discarded
+while the ledger claimed success. Any migration header still describing that
+"rolls back and ledger-marks the WHOLE file" behaviour is describing the bug.
+
+**Consequence for migration authors:** every statement must be safe to re-run,
+because the ledger tracks by FILENAME and renumbering a file (113-118 were
+renumbered twice) re-applies it, as does a ledger-wiped replay. Prefer
+`CREATE … IF NOT EXISTS` and `WHERE col IS NULL`-style guarded backfills. An
+unconditional backfill needs an explicit gate on whether the columns it fills
+are actually new — `094_tracker_direction_modes.sql` shows the pattern: probe
+`pragma_table_info` into a TEMP table BEFORE the `ALTER`s, then gate the `UPDATE`
+on it. Never rely on an early abort to protect the statements below it.
+
 ### SQLite migrations: `PRAGMA foreign_keys` must toggle OUTSIDE `db.transaction()`
 
 SQLite silently no-ops `PRAGMA foreign_keys` issued inside a transaction

@@ -1393,9 +1393,10 @@ function runSchemaVersionGate(): boolean {
 }
 
 /**
- * Stand up every service. Resolves false when boot was aborted at the
- * schema-version gate, in which case NOTHING further was constructed and the
- * caller must return immediately.
+ * Stand up every service. Resolves false when boot was aborted at one of the two
+ * database gates — a migration that failed to apply, or the schema-version gate —
+ * in which case NOTHING further was constructed and the caller must return
+ * immediately.
  */
 async function initializeServices(): Promise<boolean> {
   configManager = new ConfigManager();
@@ -1449,7 +1450,39 @@ async function initializeServices(): Promise<boolean> {
   }
 
   databaseService = new DatabaseService(dbPath);
-  databaseService.initialize();
+  try {
+    databaseService.initialize();
+  } catch (err) {
+    // Fail-closed migration gate. A .sql migration that did not apply leaves the
+    // database missing whatever it was supposed to add, and the code below is
+    // about to run against it — which surfaces as scattered "no such column"
+    // failures that trace back to nothing. Stop here, loudly, while aborting is
+    // still free: nothing cross-instance (above all the orch socket) is bound
+    // yet, exactly as at the schema-version gate below.
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error(`[Main] Database migration failed — refusing to boot: ${error.message}`);
+    captureSeamError('boot-migration-failed', error, { platform: process.platform });
+    dialog.showMessageBoxSync({
+      type: 'error',
+      buttons: ['Quit'],
+      defaultId: 0,
+      noLink: true,
+      title: 'Cyboflow',
+      message: 'Cyboflow could not update its database',
+      detail:
+        `A database migration failed, so Cyboflow cannot safely open your data:\n\n${error.message}\n\n` +
+        'Nothing was changed — the failed migration was rolled back. Updating to ' +
+        'the latest version of Cyboflow usually resolves this; if it persists, ' +
+        'please report it with the log at ~/.cyboflow/logs.',
+    });
+    try {
+      databaseService.close();
+    } catch {
+      // Already failing; a close error must not mask the migration error.
+    }
+    app.quit();
+    return false;
+  }
 
   // The DB is open and its pre-migration user_version is known — gate NOW, while
   // aborting is still free. Everything below this line either owns cross-instance
