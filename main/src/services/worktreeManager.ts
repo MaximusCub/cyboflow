@@ -596,31 +596,36 @@ export class WorktreeManager {
   ): Promise<{ landed: boolean; ownCommits: number; commitsAhead: number }> {
     const notLanded = { landed: false, ownCommits: 0, commitsAhead: 0 };
     try {
-      const branch = escapeShellArg(mainBranch);
+      const branch = assertNotOptionLike(mainBranch, 'main branch');
 
       // git's own fork-point heuristic (it consults main's reflog, so it still
       // answers after a fast-forward landing swallowed the branch); plain
       // merge-base is the fallback when there is no reflog to consult.
       let fork = '';
       try {
-        const { stdout } = await execWithShellPath(`git merge-base --fork-point ${branch} HEAD`, { cwd: worktreePath });
+        const { stdout } = await runGitCapture(worktreePath, [
+          'merge-base', '--fork-point', END_OF_OPTIONS, branch, 'HEAD',
+        ]);
         fork = stdout.trim();
       } catch {
         fork = '';
       }
       if (fork === '') {
-        const { stdout } = await execWithShellPath(`git merge-base ${branch} HEAD`, { cwd: worktreePath });
+        const { stdout } = await runGitCapture(worktreePath, [
+          'merge-base', END_OF_OPTIONS, branch, 'HEAD',
+        ]);
         fork = stdout.trim();
       }
       if (fork === '') return notLanded;
 
-      const { stdout: ownRaw } = await execWithShellPath(
-        `git rev-list --count ${escapeShellArg(fork)}..HEAD`,
-        { cwd: worktreePath },
-      );
+      const { stdout: ownRaw } = await runGitCapture(worktreePath, [
+        'rev-list', '--count', END_OF_OPTIONS, `${assertNotOptionLike(fork, 'fork point')}..HEAD`,
+      ]);
       let ownCommits = Number.parseInt(ownRaw.trim(), 10) || 0;
 
-      const { stdout: aheadRaw } = await execWithShellPath(`git rev-list --count ${branch}..HEAD`, { cwd: worktreePath });
+      const { stdout: aheadRaw } = await runGitCapture(worktreePath, [
+        'rev-list', '--count', END_OF_OPTIONS, `${branch}..HEAD`,
+      ]);
       const commitsAhead = Number.parseInt(aheadRaw.trim(), 10) || 0;
 
       if (ownCommits === 0) {
@@ -639,15 +644,15 @@ export class WorktreeManager {
       if (commitsAhead === 0) return { landed: true, ownCommits, commitsAhead };
 
       // Patch-equivalence: '+' marks a commit with no equivalent in main.
-      const { stdout: cherry } = await execWithShellPath(`git cherry ${branch} HEAD`, { cwd: worktreePath });
-      const unapplied = cherry.split('\n').filter((line) => line.trim().startsWith('+'));
+      const { stdout: cherry } = await runGitCapture(worktreePath, ['cherry', END_OF_OPTIONS, branch, 'HEAD']);
+      const unapplied = cherry.split('\n').filter((line: string) => line.trim().startsWith('+'));
       if (cherry.trim() !== '' && unapplied.length === 0) {
         return { landed: true, ownCommits, commitsAhead };
       }
 
       // Identical trees — the shape a squash landing leaves behind.
       try {
-        await execWithShellPath(`git diff --quiet ${branch} HEAD`, { cwd: worktreePath });
+        await runGitCapture(worktreePath, ['diff', '--quiet', END_OF_OPTIONS, branch, 'HEAD']);
         return { landed: true, ownCommits, commitsAhead };
       } catch {
         // Non-zero exit means the trees differ: real unmerged work.
@@ -672,8 +677,8 @@ export class WorktreeManager {
    */
   private async countOwnCommitsFromReflog(worktreePath: string): Promise<number> {
     try {
-      const { stdout } = await execWithShellPath('git reflog show --format=%gs HEAD', { cwd: worktreePath });
-      return stdout.split('\n').filter((line) => /^commit(\s|:)/.test(line.trim())).length;
+      const { stdout } = await runGitCapture(worktreePath, ['reflog', 'show', '--format=%gs', 'HEAD']);
+      return stdout.split('\n').filter((line: string) => /^commit(\s|:)/.test(line.trim())).length;
     } catch {
       return 0;
     }
