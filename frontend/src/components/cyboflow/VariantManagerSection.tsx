@@ -53,9 +53,18 @@ export interface VariantManagerSectionProps {
 /** Synthetic busy-set key for the baseline row (it has no variant id). */
 const BASELINE_BUSY_KEY = '__baseline__';
 
-/** Display label + badge tone per variant status. */
+/**
+ * Display label + badge tone per variant status.
+ *
+ * `draft` reads "Not in rotation", not "Draft": saving edits in the variant
+ * editor deliberately never changes a variant's status (rotation is explicit
+ * opt-in), so a fully-saved variant that was never added to rotation kept a
+ * pill that looked like "unsaved". The lifecycle value is unchanged — only the
+ * word is, so the pill describes rotation membership like every other value
+ * in this map.
+ */
 const STATUS_LABEL: Record<WorkflowVariantStatus, string> = {
-  draft: 'Draft',
+  draft: 'Not in rotation',
   active: 'Active',
   paused: 'Paused',
   retired: 'Retired',

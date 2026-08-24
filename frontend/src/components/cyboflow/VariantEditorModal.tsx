@@ -342,7 +342,10 @@ export function VariantEditorModal({
               className="rounded-badge border border-border-primary bg-bg-primary px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.08em] text-text-tertiary"
               data-testid="variant-editor-draft-chip"
             >
-              Draft
+              {/* status='draft' means "never added to rotation", NOT "unsaved" —
+                  saving here never changes the status. Worded to match
+                  VariantManagerSection's STATUS_LABEL. */}
+              Not in rotation
             </span>
           )}
           <div className="flex-1" />
