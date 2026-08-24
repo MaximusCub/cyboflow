@@ -1159,6 +1159,45 @@ export class RunExecutor {
   }
 
   /**
+   * Operator action: REWIND ONE fan-out LANE to an earlier step of its inner
+   * chain, without touching the run, the outer walk, or any sibling lane (the
+   * whole-run counterpart is `rewindRunHandler`). Records the request in the run's
+   * `laneRewinds` directive — the controller's fan-out inner loop consumes it and
+   * jumps that lane's chain index back to `stepId` — then fires the lane's
+   * registered UNPARK hook (`laneInterrupts`) so a lane blocked on the async
+   * visual merge-gate wakes immediately instead of at the next verdict.
+   *
+   * Two things this does NOT do, both by design: it does not validate `stepId`
+   * against the run's chain (the caller — `laneRewindHandler` — owns validation
+   * against the FROZEN spec and the lane's live position), and it does not kill
+   * the lane's in-flight agent turn (the caller owns that too, via the substrate
+   * facade's per-lane spawn key). Recording the request FIRST and interrupting
+   * SECOND is load-bearing: the interrupt must never wake a lane before the
+   * request it is supposed to observe exists, or the lane reads an empty map and
+   * treats the wake as a genuine failure.
+   *
+   * Fail-soft on the hook: a throwing interrupt is logged and swallowed — the
+   * request is already durable in the map, so the lane still honors it at its
+   * next consult point.
+   */
+  requestLaneRewind(runId: string, itemId: string, stepId: string): void {
+    const directives = this.getOrCreateRunDirectives(runId);
+    directives.laneRewinds.set(itemId, stepId);
+    const interrupt = directives.laneInterrupts.get(itemId);
+    if (!interrupt) return;
+    try {
+      interrupt();
+    } catch (err) {
+      this.logger.warn('[RunExecutor] lane rewind interrupt threw (fail-soft)', {
+        runId,
+        itemId,
+        stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * Ensure (idempotently) the programmatic monitor's PERSIST+PUBLISH inject
    * bridge exists for `runId` and return its `injectEvent` fn. Shared by
    * executeProgrammatic() (the live-walk path, called once per turn) AND
