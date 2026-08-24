@@ -31,6 +31,13 @@ vi.mock('../../trpc/client', () => ({
           subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
         },
       },
+      // The usage meters mount inside this view and wire their own feed.
+      providerUsage: {
+        get: { query: vi.fn().mockResolvedValue({}) },
+        onChanged: {
+          subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }),
+        },
+      },
     },
   },
 }));

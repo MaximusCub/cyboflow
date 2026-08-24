@@ -107,6 +107,15 @@ describe('providerUsageSlice.init', () => {
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
+  it('degrades to disconnected when the feed cannot be wired at all', () => {
+    // These meters are an accessory to the review queue; a telemetry feed that
+    // throws on subscribe must not take the whole view down with it.
+    subscribe.mockImplementation(() => { throw new Error('no such procedure'); });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => useProviderUsageSlice.getState().init()).not.toThrow();
+    expect(useProviderUsageSlice.getState().connectionStatus).toBe('disconnected');
+  });
+
   it('marks the feed disconnected on a subscription error', () => {
     useProviderUsageSlice.getState().init();
     const onError = subscribe.mock.calls[0][1].onError as (e: unknown) => void;

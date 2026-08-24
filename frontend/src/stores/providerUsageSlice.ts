@@ -78,40 +78,20 @@ export const useProviderUsageSlice = create<ProviderUsageSliceState>((set, get) 
       pushReceived = false;
       set({ connectionStatus: 'connecting' });
 
-      const { replaceUsage, setConnectionStatus } = get();
+      const { setConnectionStatus } = get();
 
-      // 1. Subscribe FIRST — see the module docstring.
-      const subscription = trpc.cyboflow.providerUsage.onChanged.subscribe(undefined, {
-        onData: (usage) => {
-          if (generation !== myGeneration) return;
-          pushReceived = true;
-          replaceUsage(usage);
-          setConnectionStatus('connected');
-        },
-        onError: (err: unknown) => {
-          if (generation !== myGeneration) return;
-          console.error('[providerUsageSlice] onChanged subscription error:', err);
-          setConnectionStatus('disconnected');
-          subscription.unsubscribe();
-          subscriptionTeardown = null;
-          refCount = 0;
-          generation += 1;
-        },
-      });
-      subscriptionTeardown = () => { subscription.unsubscribe(); };
-
-      // 2. Then seed, discarding the result if it lost the race.
-      trpc.cyboflow.providerUsage.get
-        .query()
-        .then((usage) => {
-          if (generation !== myGeneration || pushReceived) return;
-          replaceUsage(usage);
-          setConnectionStatus('connected');
-        })
-        .catch((err: unknown) => {
-          if (generation !== myGeneration) return;
-          console.error('[providerUsageSlice] seed query failed:', err);
-        });
+      // The whole wiring is guarded: these meters are an ACCESSORY to the review
+      // queue, and a telemetry feed that cannot connect must degrade to "no
+      // cards", never take the queue down with it.
+      try {
+        wire(myGeneration);
+      } catch (err: unknown) {
+        console.error('[providerUsageSlice] failed to wire the usage feed:', err);
+        setConnectionStatus('disconnected');
+        subscriptionTeardown = null;
+        refCount = 0;
+        generation += 1;
+      }
 
       return makeRelease(myGeneration);
     },
@@ -125,4 +105,41 @@ export const useProviderUsageSlice = create<ProviderUsageSliceState>((set, get) 
       set({ usage: {}, connectionStatus: 'idle' });
     },
   };
+
+  function wire(myGeneration: number): void {
+    const { replaceUsage, setConnectionStatus } = get();
+
+    // 1. Subscribe FIRST — see the module docstring.
+    const subscription = trpc.cyboflow.providerUsage.onChanged.subscribe(undefined, {
+      onData: (usage) => {
+        if (generation !== myGeneration) return;
+        pushReceived = true;
+        replaceUsage(usage);
+        setConnectionStatus('connected');
+      },
+      onError: (err: unknown) => {
+        if (generation !== myGeneration) return;
+        console.error('[providerUsageSlice] onChanged subscription error:', err);
+        setConnectionStatus('disconnected');
+        subscription.unsubscribe();
+        subscriptionTeardown = null;
+        refCount = 0;
+        generation += 1;
+      },
+    });
+    subscriptionTeardown = () => { subscription.unsubscribe(); };
+
+    // 2. Then seed, discarding the result if it lost the race.
+    trpc.cyboflow.providerUsage.get
+      .query()
+      .then((usage) => {
+        if (generation !== myGeneration || pushReceived) return;
+        replaceUsage(usage);
+        setConnectionStatus('connected');
+      })
+      .catch((err: unknown) => {
+        if (generation !== myGeneration) return;
+        console.error('[providerUsageSlice] seed query failed:', err);
+      });
+  }
 });
