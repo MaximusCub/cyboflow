@@ -1075,7 +1075,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_list_variants',
         description:
-          "List a workflow's A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). NOTE: `has_agent_overrides` reflects only the `agent_overrides_json` blob (Claude prompt/model tweaks); a variant can still carry per-agent model pins or Codex routing via its `definition_json` `agentConfigs` and show `has_agent_overrides: false` — fetch the variant's definition to see those. Use before creating/editing variants to see what already exists.",
+          "List a workflow's A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). NOTE: `has_agent_overrides` reflects only the `agent_overrides_json` blob (Claude prompt/model tweaks); a variant can still carry per-agent model pins or Codex routing via its `definition_json` `agentConfigs` and show `has_agent_overrides: false` — fetch the variant's definition to see those. ARCHIVED variants (migration 116) are OMITTED — an archived variant still exists, still holds its status and run history, and is still pinnable by id; it is just hidden from this listing, so an empty result is not proof the workflow has no variants. Use before creating/editing variants to see what already exists.",
         inputSchema: {
           type: 'object',
           properties: {

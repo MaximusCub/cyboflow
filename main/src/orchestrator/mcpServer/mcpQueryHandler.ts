@@ -1598,7 +1598,7 @@ export interface WorkflowConfigLike {
     permissionMode?: PermissionMode;
   }): WorkflowRow;
   deleteWorkflow(workflowId: string): void;
-  listVariants(workflowId: string): WorkflowVariantRow[];
+  listVariants(workflowId: string, opts?: { includeArchived?: boolean }): WorkflowVariantRow[];
   createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow;
   updateVariant(
     variantId: string,

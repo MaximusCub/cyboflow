@@ -2846,7 +2846,7 @@ async function initializeServices(): Promise<boolean> {
         resetSpec: (id) => workflowRegistry.resetSpec(id),
         createCustom: (params) => workflowRegistry.createCustom(params),
         deleteWorkflow: (id) => workflowRegistry.deleteWorkflow(id),
-        listVariants: (id) => workflowRegistry.listVariants(id),
+        listVariants: (id, opts) => workflowRegistry.listVariants(id, opts),
         createVariantFromCurrent: (id, label) => workflowRegistry.createVariantFromCurrent(id, label),
         updateVariant: (variantId, patch) => workflowRegistry.updateVariant(variantId, patch),
         setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),

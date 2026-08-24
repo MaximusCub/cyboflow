@@ -12,6 +12,10 @@
  *   - Add to rotation / Pause — `variants.setStatus('active' | 'paused')`.
  *   - Retire — `variants.setStatus('retired')` (hidden from pickers + rotation,
  *     kept for stats).
+ *   - Archive — `variants.setArchived` (migration 116): drops the row out of this
+ *     list, the pickers and the rotation pool WITHOUT touching its status or run
+ *     history. Archived rows come back under the "Show archived" toggle, each
+ *     with Unarchive + Delete.
  *   - Delete — `variants.delete`; a CONFLICT (run history) surfaces the
  *     registry's own message, which already suggests retiring instead.
  *   - A weight numeric input — `variants.update({ weight })`.
@@ -86,7 +90,11 @@ function BaselinePill({ inRotation }: { inRotation: boolean }): React.JSX.Elemen
   );
 }
 
-/** Minimal per-variant fields the rotation-pool prediction needs. */
+/**
+ * Minimal per-variant fields the rotation-pool prediction needs. Callers pass the
+ * LIVE set — an archived variant (migration 116) is out of the pool by virtue of
+ * being absent from the list, exactly like a deleted one.
+ */
 export type RotationPoolVariant = Pick<WorkflowVariantRow, 'id' | 'status' | 'weight'>;
 
 /**
@@ -182,12 +190,19 @@ export function VariantManagerSection({
   projectId,
   editorDirty = false,
 }: VariantManagerSectionProps): React.JSX.Element {
-  const { variants, baseline, loading, error: loadError } = useWorkflowVariants(workflowId);
+  const {
+    variants,
+    archivedVariants,
+    baseline,
+    loading,
+    error: loadError,
+  } = useWorkflowVariants(workflowId);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renamingVariant, setRenamingVariant] = useState<WorkflowVariantRow | null>(null);
   const [editingVariant, setEditingVariant] = useState<WorkflowVariantRow | null>(null);
   const [weightDrafts, setWeightDrafts] = useState<Record<string, string>>({});
+  const [showArchived, setShowArchived] = useState(false);
   const [baselineWeightDraft, setBaselineWeightDraft] = useState<string | null>(null);
   const busySetRef = useRef<Set<string>>(new Set());
   const [, forceRerender] = useState(0);
@@ -316,6 +331,36 @@ export function VariantManagerSection({
       guardSupersede(run, `Deleting "${label}".`, withoutVariant(variants, variantId), baseline);
     },
     [withBusy, invalidate, variants, baseline, guardSupersede],
+  );
+
+  /**
+   * Archive / unarchive (migration 116). Archiving takes the variant out of the
+   * live list, so the predicted pool is the list WITHOUT it — the same shape a
+   * delete predicts. Unarchiving puts it back with whatever status it kept, so an
+   * ACTIVE weight>0 row rejoins rotation and the supersede gate must see it.
+   */
+  const handleSetArchived = useCallback(
+    (variantId: string, archived: boolean) => {
+      const run = () =>
+        withBusy(variantId, async () => {
+          await trpc.cyboflow.variants.setArchived.mutate({ variantId, archived });
+          await invalidate();
+        });
+      const row = (archived ? variants : archivedVariants).find((v) => v.id === variantId);
+      const label = row?.label ?? variantId;
+      const nextVariants: RotationPoolVariant[] = archived
+        ? withoutVariant(variants, variantId)
+        : row === undefined
+          ? variants
+          : [...variants, row];
+      guardSupersede(
+        run,
+        archived ? `Archiving "${label}".` : `Unarchiving "${label}".`,
+        nextVariants,
+        baseline,
+      );
+    },
+    [withBusy, invalidate, variants, archivedVariants, baseline, guardSupersede],
   );
 
   const commitWeight = useCallback(
@@ -555,6 +600,16 @@ export function VariantManagerSection({
                   )}
                   <button
                     type="button"
+                    onClick={() => void handleSetArchived(variant.id, true)}
+                    disabled={isBusy}
+                    title="Hide from this list, the pickers and rotation — keeps the variant and its run history."
+                    data-testid={`variant-archive-button-${variant.id}`}
+                    className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-secondary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Archive
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void handleDelete(variant.id)}
                     disabled={isBusy}
                     data-testid={`variant-delete-button-${variant.id}`}
@@ -572,6 +627,63 @@ export function VariantManagerSection({
             </p>
           )}
           </div>
+
+          {/* Archived variants (migration 116) — collapsed by default so a long-lived
+              workflow's dead rows stop crowding the live ones. The toggle is a local
+              filter: the store always fetches archived rows too. */}
+          {archivedVariants.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowArchived((v) => !v)}
+                aria-expanded={showArchived}
+                data-testid="variant-manager-show-archived-toggle"
+                className="self-start rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-secondary hover:bg-bg-hover"
+              >
+                {showArchived ? 'Hide archived' : `Show archived (${archivedVariants.length})`}
+              </button>
+
+              {showArchived &&
+                archivedVariants.map((variant) => {
+                  const isBusy = busySetRef.current.has(variant.id);
+                  return (
+                    <div
+                      key={variant.id}
+                      className="flex items-center gap-2 rounded-input border border-border-secondary bg-surface-secondary/20 px-2 py-1.5 opacity-75"
+                      data-testid={`variant-archived-row-${variant.id}`}
+                    >
+                      <span className="text-xs font-medium text-text-primary truncate">{variant.label}</span>
+                      {/* The status the variant was archived UNDER — archiving never
+                          overwrote it, which is the point of the separate column. */}
+                      <StatusPill status={variant.status} />
+                      <span className="text-[10px] uppercase tracking-[0.08em] text-text-tertiary">
+                        Archived
+                      </span>
+                      <div className="ml-auto flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleSetArchived(variant.id, false)}
+                          disabled={isBusy}
+                          data-testid={`variant-unarchive-button-${variant.id}`}
+                          className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Unarchive
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDelete(variant.id)}
+                          disabled={isBusy}
+                          data-testid={`variant-delete-button-${variant.id}`}
+                          className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-status-error hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          )}
         </>
       )}
 

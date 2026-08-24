@@ -94,8 +94,15 @@ export interface WorkflowRegistryLike {
   /** Reverse `archiveWorkflow`. Same guards; a no-op if never archived. */
   unarchiveWorkflow(workflowId: string): void;
   // --- Workflow variants (A/B testing, migration 048) ---
-  /** List a workflow's variants (newest-first). */
-  listVariants(workflowId: string): WorkflowVariantRow[];
+  /** List a workflow's variants (newest-first). Archived rows need `includeArchived`. */
+  listVariants(workflowId: string, opts?: { includeArchived?: boolean }): WorkflowVariantRow[];
+  /**
+   * Archive a variant (migration 116): hides it from the list/pickers/rotation
+   * without touching its status or run history. Throws 'not found' when missing.
+   */
+  archiveVariant(variantId: string): void;
+  /** Reverse `archiveVariant`; a no-op if never archived. */
+  unarchiveVariant(variantId: string): void;
   /**
    * Create a variant snapshotting the workflow's current resolved definition
    * (seeds status='draft'). Throws distinguishable Errors: 'not found' / reserved

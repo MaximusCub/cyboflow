@@ -26,6 +26,10 @@ import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
  *               active, weight>0 variants.
  * - `paused`  — temporarily out of rotation; still explicitly pinnable.
  * - `retired` — hidden from pickers and rotation; kept for historical stats.
+ *
+ * Archiving is a SEPARATE axis ({@link WorkflowVariantRow.archived_at}, migration
+ * 116): it hides a variant of ANY status from the list/pickers/rotation without
+ * overwriting the status it had.
  */
 export type WorkflowVariantStatus = 'draft' | 'active' | 'paused' | 'retired';
 
@@ -80,6 +84,14 @@ export interface WorkflowVariantRow {
   /** Rotation weight (>= 0). */
   weight: number;
   status: WorkflowVariantStatus;
+  /**
+   * Archive stamp (migration 116), or NULL when live. ORTHOGONAL to
+   * {@link status}: archiving hides a variant from the management list, the
+   * launch pickers and the rotation pool while preserving its status, weight
+   * and run history. An explicit pin (a restart reproducing a historical run)
+   * still resolves an archived variant by id.
+   */
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
