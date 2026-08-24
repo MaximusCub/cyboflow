@@ -121,6 +121,7 @@ import {
 } from './orchestrator/programmatic/monitor';
 import { retryRunHandler, type RetryRunDeps } from './orchestrator/retryRunHandler';
 import { rewindRunHandler, type RewindRunDeps } from './orchestrator/rewindRunHandler';
+import { laneRewindHandler, type LaneRewindDeps } from './orchestrator/laneRewindHandler';
 import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
@@ -422,12 +423,12 @@ let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorAction
 let monitorSwitchToOrchestrated:
   | ((runId: string, reason: string) => Promise<MonitorActionResult>)
   | null = null;
-// Monitor-actuation seam (the 9 confirm-gated steering actions: add/remove/edit
-// task, skip/unskip/steer step, the whole-run rewind, resolve review item, file
-// note). Same late-binding pattern as the two above — bound in the tRPC
-// dep-wiring block where db / runExecutor / the routers are all live. Grouped
-// into one holder object (rather than 9 separate module vars) since they share a
-// wiring site. Null until wired → each action reports "not available yet"
+// Monitor-actuation seam (the 10 confirm-gated steering actions: add/remove/edit
+// task, skip/unskip/steer step, the whole-run rewind, the PER-LANE rewind,
+// resolve review item, file note). Same late-binding pattern as the two above —
+// bound in the tRPC dep-wiring block where db / runExecutor / the routers are all
+// live. Grouped into one holder object (rather than 10 separate module vars)
+// since they share a wiring site. Null until wired → each action reports "not available yet"
 // instead of acting.
 interface MonitorSteeringActions {
   addTask(runId: string, input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
@@ -443,6 +444,10 @@ interface MonitorSteeringActions {
     input: { stepId: string; guidance: string; taskRef?: string },
   ): Promise<MonitorActionResult>;
   rewindToStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
+  rewindLaneToStep(
+    runId: string,
+    input: { taskRef: string; stepId: string },
+  ): Promise<MonitorActionResult>;
   resolveReviewItem(
     runId: string,
     input: { reviewItemId: string; outcome?: 'approve' | 'reject'; resolution?: string },
@@ -3326,6 +3331,10 @@ async function initializeServices(): Promise<boolean> {
               monitorSteeringActions
                 ? monitorSteeringActions.rewindToStep(ctx.runId, input)
                 : Promise.resolve(STEERING_NOT_WIRED),
+            rewindLaneToStep: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.rewindLaneToStep(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
             resolveReviewItem: (input) =>
               monitorSteeringActions
                 ? monitorSteeringActions.resolveReviewItem(ctx.runId, input)
@@ -5031,6 +5040,21 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     };
 
+    // Lane-rewind deps bag (monitor rewind_lane_to_step). Deliberately tiny next to
+    // the rewind bag above: a lane rewind mutates nothing durable — it records an
+    // in-memory directive and interrupts ONE lane — so it needs no queue, no
+    // step_results purge, and no batch/lane writers. `abortLaneSpawn` is the SAME
+    // facade abort the whole-run rewind uses as `stopLiveRun`, keyed here on the
+    // PER-LANE spawn key (`${runId}:${taskId}`) the fan-out driver spawns under
+    // rather than the run id, so exactly one lane's process dies.
+    const laneRewindDepsBag: LaneRewindDeps = {
+      db,
+      requestLaneRewind: (runId, itemId, stepId) => runExecutor.requestLaneRewind(runId, itemId, stepId),
+      listLiveSpawnKeys: (runId) => substrateFacade.listLiveSpawnKeys(runId),
+      abortLaneSpawn: (spawnKey) => substrateFacade.abort(spawnKey),
+      logger: loggerLike,
+    };
+
     monitorSteeringActions = {
       addTask: (runId, input) => addTaskToRun(runId, input, taskMutationDeps).then(mapTaskResult),
       removeTask: (runId, input) => removeTaskFromRun(runId, input, taskMutationDeps).then(mapTaskResult),
@@ -5130,6 +5154,41 @@ app.whenReady().then(async () => {
           race: 'The run changed state mid-rewind — try again.',
         };
         return { ok: false, message: messages[result.reason] ?? `Rewind refused (${result.reason}).` };
+      },
+      rewindLaneToStep: async (runId, input) => {
+        const result = await laneRewindHandler(runId, input, laneRewindDepsBag);
+        if ('delivered' in result) {
+          // Distinguish the two interrupt paths in the message: a killed agent turn
+          // is visible to the user (the lane's transcript stops mid-thought), while a
+          // directive that lands at the lane's next step boundary is not.
+          const stopNote = result.abortedSpawn
+            ? " Stopped that lane's current agent first."
+            : ' It takes effect as soon as the lane finishes what it is doing.';
+          const fromNote = result.fromStepId !== null ? ` (was on '${result.fromStepId}')` : '';
+          return {
+            ok: true,
+            message: `Rewound ${result.ref}'s lane to step '${result.stepId}'${fromNote} — only that lane re-runs; the rest of the sprint keeps going.${stopNote}`,
+          };
+        }
+        const laneStatusHint =
+          result.laneStatus === 'queued'
+            ? "that lane hasn't started yet, so it will run from the top of its chain anyway"
+            : result.laneStatus === 'integrated'
+              ? 'that lane already finished and integrated — re-running it needs a whole-run rewind to the fan-out step'
+              : `that lane has already settled (${result.laneStatus ?? 'unknown'}) — re-driving a settled lane needs a whole-run rewind or a retry`;
+        const messages: Record<string, string> = {
+          not_found: 'Run not found.',
+          not_programmatic: 'Only programmatic runs have sprint lanes to rewind.',
+          run_not_running:
+            "The run isn't executing right now, so there is no live lane to rewind. Use retry or the whole-run rewind to revive it first.",
+          no_fan_out: "This run has no sprint task fan-out, so there are no lanes to rewind.",
+          unknown_task: `No task matching '${input.taskRef}' in this project.`,
+          lane_not_found: `${input.taskRef} isn't one of this run's sprint lanes.`,
+          lane_not_live: `Can't rewind ${input.taskRef}'s lane — ${laneStatusHint}.`,
+          unknown_step: `'${input.stepId}' isn't one of this run's lane steps — a lane rewind targets a task's INNER steps (e.g. 'implement', 'code-review'), not the run's phase steps. Use the whole-run rewind for those.`,
+          target_not_prior: `'${input.stepId}' is ahead of where that lane is now — a lane rewind only goes backward.`,
+        };
+        return { ok: false, message: messages[result.reason] ?? `Lane rewind refused (${result.reason}).` };
       },
       resolveReviewItem: async (runId, input) => {
         const projectId = runProjectId(runId);
