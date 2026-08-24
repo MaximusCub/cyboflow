@@ -169,7 +169,29 @@ function readBundleExecutableName(appPath, execFile = defaultExecFile) {
   return { name: match[1].trim() };
 }
 
-/** Collect every `*.node` under `dir`, ignoring symlinks. */
+/**
+ * Is this `.node` a prebuilt binary for a non-macOS platform?
+ *
+ * node-pty-prebuilt-multiarch ships prebuilds for every platform it supports
+ * under `prebuilds/<platform>-<arch>/` (linux, win32, android, …), and they all
+ * ride along in the asar even on a macOS build. Those are ELF/PE, not Mach-O, so
+ * `lipo -archs` cannot read them — feeding them to the arch check produces dozens
+ * of spurious "could not read the architecture" failures. Only `darwin`
+ * prebuilds are Mach-O and worth verifying; the rest are dead weight on macOS and
+ * must be skipped, not judged.
+ */
+function isForeignPrebuild(file) {
+  const segments = file.split(path.sep);
+  const idx = segments.lastIndexOf('prebuilds');
+  if (idx === -1 || idx + 1 >= segments.length) return false;
+  const platform = segments[idx + 1].split('-')[0];
+  return platform !== 'darwin';
+}
+
+/**
+ * Collect every macOS `*.node` under `dir`, ignoring symlinks and the bundled
+ * foreign-platform prebuilds (see `isForeignPrebuild`).
+ */
 function collectNodeAddons(dir, found = []) {
   if (!fs.existsSync(dir)) return found;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -178,6 +200,7 @@ function collectNodeAddons(dir, found = []) {
     if (entry.isDirectory()) {
       collectNodeAddons(fullPath, found);
     } else if (entry.isFile() && entry.name.endsWith('.node')) {
+      if (isForeignPrebuild(fullPath)) continue;
       found.push(fullPath);
     }
   }
@@ -494,6 +517,7 @@ exports._helpers = {
   ARCH_NAME_BY_ORDINAL,
   archMatches,
   collectNodeAddons,
+  isForeignPrebuild,
   computeDirectorySize,
   lipoArchs,
   probeNativeModule,

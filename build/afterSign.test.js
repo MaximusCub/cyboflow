@@ -895,6 +895,55 @@ async function caseU() {
   });
 }
 
+// Case V: foreign-platform prebuilds are skipped, not fed to lipo.
+// node-pty-prebuilt-multiarch bundles linux/win32/etc prebuilds that are ELF/PE,
+// not Mach-O. They must be excluded from the arch check (they crashed lipo and
+// produced 48 spurious failures on the 0.2.6 build).
+async function caseV() {
+  const { isForeignPrebuild, collectNodeAddons } = helpers;
+
+  assert(isForeignPrebuild(`root/node-pty/prebuilds/linux-arm/node.abi127.node`),
+    'Case V: linux-arm prebuild is foreign');
+  assert(isForeignPrebuild(`root/node-pty/prebuilds/linux-x64/node.abi127.musl.node`),
+    'Case V: linux-x64 musl prebuild is foreign');
+  assert(isForeignPrebuild(`root/node-pty/prebuilds/win32-x64/node.abi127.node`),
+    'Case V: win32-x64 prebuild is foreign');
+  assert(!isForeignPrebuild(`root/node-pty/prebuilds/darwin-arm64/node.abi127.node`),
+    'Case V: darwin-arm64 prebuild is NOT foreign');
+  assert(!isForeignPrebuild(`root/node-pty/prebuilds/darwin-x64/node.abi127.node`),
+    'Case V: darwin-x64 prebuild is NOT foreign');
+  assert(!isForeignPrebuild(`root/better-sqlite3/build/Release/better_sqlite3.node`),
+    'Case V: a non-prebuild addon is NOT foreign');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aftersign-test-'));
+  try {
+    const root = path.join(tmpDir, 'app.asar.unpacked');
+    const layout = {
+      'better-sqlite3/build/Release/better_sqlite3.node': 'x',
+      'node-pty/prebuilds/darwin-arm64/node.abi127.node': 'x',
+      'node-pty/prebuilds/darwin-x64/node.abi127.node': 'x',
+      'node-pty/prebuilds/linux-arm/node.abi127.node': 'x',
+      'node-pty/prebuilds/linux-x64/node.abi127.musl.node': 'x',
+      'node-pty/prebuilds/win32-x64/node.abi127.node': 'x',
+    };
+    for (const [rel, body] of Object.entries(layout)) {
+      const full = path.join(root, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, body);
+    }
+
+    const collected = collectNodeAddons(root).map((f) => path.basename(path.dirname(f)));
+    assert(collected.length === 3,
+      `Case V: only the 3 macOS addons are collected (got ${collected.length}: ${collected.join(', ')})`);
+    assert(!collected.includes('linux-arm') && !collected.includes('linux-x64') && !collected.includes('win32-x64'),
+      'Case V: no foreign prebuild survives collection');
+    assert(collected.includes('darwin-arm64') && collected.includes('darwin-x64'),
+      'Case V: both darwin prebuilds survive collection');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -921,6 +970,7 @@ async function caseU() {
   await caseS();
   await caseT();
   await caseU();
+  await caseV();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
