@@ -35,18 +35,25 @@ import { trpc } from '../trpc/client';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
 import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
 import type { IdeaArtifactLink } from '../../../shared/types/ideaArtifacts';
+import { ideaReadyTaskIds } from '../components/Backlog/backlogSelectors';
 
 export interface UseIdeaSessionDataResult {
   idea: BacklogTaskItem | null;
   /** The merged hybrid ledger, from the idea's own `components` overlay. */
   components: IdeaComponentState[];
   artifactLinks: IdeaArtifactLink[];
+  /**
+   * The idea's decomposed tasks currently ready to seed a sprint batch —
+   * drives the "Launch sprint" tile's gate and its picker pre-selection.
+   */
+  readyTaskIds: string[];
   /** True until the initial seed for the current idea resolves (or fails). */
   loading: boolean;
 }
 
 const NO_COMPONENTS: IdeaComponentState[] = [];
 const NO_LINKS: IdeaArtifactLink[] = [];
+const NO_TASK_IDS: string[] = [];
 
 export function useIdeaSessionData(
   ideaId: string | null,
@@ -54,12 +61,14 @@ export function useIdeaSessionData(
 ): UseIdeaSessionDataResult {
   const [idea, setIdea] = useState<BacklogTaskItem | null>(null);
   const [artifactLinks, setArtifactLinks] = useState<IdeaArtifactLink[]>(NO_LINKS);
+  const [readyTaskIds, setReadyTaskIds] = useState<string[]>(NO_TASK_IDS);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (ideaId === null || projectId === null) {
       setIdea(null);
       setArtifactLinks(NO_LINKS);
+      setReadyTaskIds(NO_TASK_IDS);
       setLoading(false);
       return;
     }
@@ -69,9 +78,11 @@ export function useIdeaSessionData(
     // over a newer one (the useArtifactData convention).
     let latestIdeaFetch = 0;
     let latestLinksFetch = 0;
+    let latestReadyFetch = 0;
 
     setIdea(null);
     setArtifactLinks(NO_LINKS);
+    setReadyTaskIds(NO_TASK_IDS);
     setLoading(true);
 
     const fetchIdea = (): Promise<void> => {
@@ -102,12 +113,31 @@ export function useIdeaSessionData(
       );
     };
 
+    const fetchReadyTasks = (): Promise<void> => {
+      const fetchId = ++latestReadyFetch;
+      return trpc.cyboflow.tasks.list.query({ projectId }).then(
+        (rows) => {
+          if (cancelled || fetchId !== latestReadyFetch) return;
+          setReadyTaskIds(ideaReadyTaskIds(rows, ideaId));
+        },
+        (err: unknown) => {
+          if (cancelled || fetchId !== latestReadyFetch) return;
+          console.warn('[useIdeaSessionData] tasks.list failed:', err);
+        },
+      );
+    };
+
     // ── Subscriptions FIRST, seed queries after (race policy) ────────────────
     const taskSub = trpc.cyboflow.tasks.onTaskChanged.subscribe(
       { projectId },
       {
         onData: (event) => {
           if (event.task.id === ideaId) void fetchIdea();
+          // The ready-batch set moves when ANY task changes (a child task's
+          // stage move carries the child's id, not the idea's) — there is
+          // nothing local to filter on, so refetch project-wide, exactly like
+          // the artifact subscription below.
+          void fetchReadyTasks();
         },
         onError: (err: unknown) => console.warn('[useIdeaSessionData] onTaskChanged error:', err),
       },
@@ -137,7 +167,7 @@ export function useIdeaSessionData(
       },
     );
 
-    void Promise.all([fetchIdea(), fetchLinks()]).then(() => {
+    void Promise.all([fetchIdea(), fetchLinks(), fetchReadyTasks()]).then(() => {
       if (!cancelled) setLoading(false);
     });
 
@@ -157,6 +187,7 @@ export function useIdeaSessionData(
     // canonical key list either way).
     components: idea?.components ?? NO_COMPONENTS,
     artifactLinks,
+    readyTaskIds,
     loading,
   };
 }

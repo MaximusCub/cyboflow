@@ -1,7 +1,7 @@
 /**
  * deriveIdeaTileStates — the EXPLICIT tile↔component mapping behind the idea
- * session canvas's four direction tiles (Clarify / Design / Full planner /
- * Ship).
+ * session canvas's five direction tiles (Clarify / Design / Full planner /
+ * Launch sprint / Ship).
  *
  * Pure and unit-tested on purpose: the canvas renders whatever this returns, so
  * "which tile does the app recommend next, and why is that one greyed" is
@@ -11,6 +11,9 @@
  *   clarify ← idea-spec
  *   design  ← prototype
  *   planner ← architecture + epics + stories
+ *   sprint  ← stories (it EXECUTES the decomposed tasks; its real gate is
+ *             `hasReadyTasks` below — the stories mapping only feeds the
+ *             stale-hint scan)
  *   ship    ← all five (it is the build gate — it runs the planner AND the
  *             sprint, so every upstream component is in its scope)
  *
@@ -18,7 +21,9 @@
  * The FIRST tile in clarify → design → planner order whose mapped component(s)
  * are not ALL settled ('complete' or 'skipped' — a deliberately skipped
  * component is a decision, not a gap). When all three are settled the
- * recommendation moves to Ship. Exactly one tile is ever recommended.
+ * recommendation moves to Sprint when the idea has ready-for-development tasks
+ * to execute (planning is done — build what was planned, don't re-plan via
+ * Ship), else to Ship. Exactly one tile is ever recommended.
  *
  * ## Hints (amber, advisory — they never disable anything)
  *   - "spec not ready" on Planner + Ship while `idea-spec.state !== 'complete'`:
@@ -47,8 +52,8 @@ import {
   type IdeaComponentState,
 } from '../../../shared/types/ideaComponents';
 
-/** The four directions an idea session can take. */
-export type IdeaTileKey = 'clarify' | 'design' | 'planner' | 'ship';
+/** The five directions an idea session can take. */
+export type IdeaTileKey = 'clarify' | 'design' | 'planner' | 'sprint' | 'ship';
 
 /** An advisory line under a tile. Amber is the only tone v1 uses. */
 export interface IdeaTileHint {
@@ -79,15 +84,24 @@ export const IDEA_TILE_COMPONENTS: Record<IdeaTileKey, readonly IdeaComponentKey
   clarify: ['idea-spec'],
   design: ['prototype'],
   planner: ['architecture', 'epics', 'stories'],
+  sprint: ['stories'],
   ship: ['idea-spec', 'prototype', 'architecture', 'epics', 'stories'],
 };
 
 /** Tile order — also the recommendation-scan order for the first three. */
-export const IDEA_TILE_ORDER: readonly IdeaTileKey[] = ['clarify', 'design', 'planner', 'ship'];
+export const IDEA_TILE_ORDER: readonly IdeaTileKey[] = [
+  'clarify',
+  'design',
+  'planner',
+  'sprint',
+  'ship',
+];
 
 /** Reason text per liveness arm. */
 export const CLARIFY_BUSY_REASON = 'waiting on clarify…';
 export const CHILD_BUSY_REASON = 'a session for this idea is running';
+/** Sprint's own gate: nothing decomposed and ready to execute. */
+export const NO_READY_TASKS_REASON = 'no ready tasks — run the planner first';
 
 const SPEC_NOT_READY_HINT: IdeaTileHint = { tone: 'amber', text: 'spec not ready' };
 const NEEDS_REVIEW_HINT: IdeaTileHint = { tone: 'amber', text: 'needs review' };
@@ -108,9 +122,19 @@ function isStale(entry: IdeaComponentState | undefined): boolean {
   return entry !== undefined && entry.state === 'incomplete' && entry.staleAt !== null;
 }
 
+/** Readiness inputs that are not component-ledger state. */
+export interface IdeaTileReadiness {
+  /**
+   * The idea has ready-for-development, un-pulled decomposed tasks — Sprint's
+   * real gate (its components mapping only feeds the stale-hint scan).
+   */
+  hasReadyTasks: boolean;
+}
+
 export function deriveIdeaTileStates(
   components: IdeaComponentState[],
   liveness: IdeaTileLiveness,
+  readiness: IdeaTileReadiness,
 ): IdeaTileState[] {
   const byKey = new Map<IdeaComponentKey, IdeaComponentState>();
   for (const entry of components) byKey.set(entry.component, entry);
@@ -118,15 +142,17 @@ export function deriveIdeaTileStates(
   const allSettled = (key: IdeaTileKey): boolean =>
     IDEA_TILE_COMPONENTS[key].every((c) => isSettled(byKey.get(c)));
 
-  // First unsettled of clarify → design → planner; all settled ⇒ Ship.
+  // First unsettled of clarify → design → planner; all settled ⇒ Sprint when
+  // there is a decomposed batch to execute (build what was planned), else Ship.
   const recommendedKey: IdeaTileKey =
-    (['clarify', 'design', 'planner'] as const).find((key) => !allSettled(key)) ?? 'ship';
+    (['clarify', 'design', 'planner'] as const).find((key) => !allSettled(key)) ??
+    (readiness.hasReadyTasks ? 'sprint' : 'ship');
 
   const specComplete = byKey.get('idea-spec')?.state === 'complete';
-  const disabled = liveness.clarifyActive || liveness.anyLaunchedChildActive;
+  const busy = liveness.clarifyActive || liveness.anyLaunchedChildActive;
   // clarifyActive is reported first: it is the more specific explanation when
   // both arms are live (the user is looking at the session that is mid-turn).
-  const disabledReason = liveness.clarifyActive ? CLARIFY_BUSY_REASON : CHILD_BUSY_REASON;
+  const busyReason = liveness.clarifyActive ? CLARIFY_BUSY_REASON : CHILD_BUSY_REASON;
 
   return IDEA_TILE_ORDER.map((key) => {
     // Downstream-stale scan. 'idea-spec' is excluded EVERYWHERE (it is never
@@ -135,6 +161,12 @@ export function deriveIdeaTileStates(
     const stale = IDEA_TILE_COMPONENTS[key].some((c) => c !== 'idea-spec' && isStale(byKey.get(c)));
     const specGated = (key === 'planner' || key === 'ship') && !specComplete;
     const hint = specGated ? SPEC_NOT_READY_HINT : stale ? NEEDS_REVIEW_HINT : undefined;
+
+    // Sprint alone also greys on its OWN gate — nothing ready to execute. The
+    // busy reason wins when both apply: it explains every tile at once.
+    const noBatch = key === 'sprint' && !readiness.hasReadyTasks;
+    const disabled = busy || noBatch;
+    const disabledReason = busy ? busyReason : NO_READY_TASKS_REASON;
 
     return {
       key,

@@ -48,6 +48,25 @@ vi.mock('../../../hooks/useDesignLaunch', () => ({
 vi.mock('../../../trpc/client', () => ({
   trpc: { cyboflow: { workflows: { list: { query: mockListQuery } } } },
 }));
+// The real picker self-loads tasks/boards over trpc; the canvas contract under
+// test is "opens with the idea's ready pre-selection, hands back the picked
+// ids" — stub it to a confirm button that returns the pre-selection.
+vi.mock('../TaskBatchPickerModal', () => ({
+  TaskBatchPickerModal: ({
+    preselectedTaskIds,
+    onPicked,
+  }: {
+    preselectedTaskIds?: string[];
+    onPicked: (ids: string[]) => void;
+  }) => (
+    <button
+      data-testid="stub-batch-picker-confirm"
+      onClick={() => onPicked(preselectedTaskIds ?? [])}
+    >
+      confirm
+    </button>
+  ),
+}));
 
 import { IdeaSessionCanvas } from '../IdeaSessionCanvas';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
@@ -150,6 +169,7 @@ function baseData() {
       component('stories', 'incomplete'),
     ],
     artifactLinks: LINKS,
+    readyTaskIds: ['task-r1'],
     loading: false,
   };
 }
@@ -172,6 +192,7 @@ describe('IdeaSessionCanvas', () => {
     vi.clearAllMocks();
     mockListQuery.mockResolvedValue([
       { id: 'wf-planner', name: 'planner', spec_json: '' },
+      { id: 'wf-sprint', name: 'sprint', spec_json: '' },
       { id: 'wf-ship', name: 'ship', spec_json: '' },
     ]);
     mockEnsurePanel.mockResolvedValue(undefined);
@@ -263,6 +284,28 @@ describe('IdeaSessionCanvas', () => {
       { ideaId: 'idea-42' },
       { forceNewSession: true },
     );
+  });
+
+  it('Sprint opens the batch picker (idea pre-selection), then launches taskIds + originIdeaId', async () => {
+    await renderCanvas();
+    await waitFor(() => expect(mockListQuery).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId('idea-tile-sprint'));
+    // No launch yet — the picker mediates the batch.
+    expect(mockLaunch).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('stub-batch-picker-confirm'));
+    expect(mockLaunch).toHaveBeenCalledWith(
+      'wf-sprint',
+      { taskIds: ['task-r1'], originIdeaId: 'idea-42' },
+      { forceNewSession: true },
+    );
+  });
+
+  it('greys the Sprint tile with its own reason when the idea has no ready tasks', async () => {
+    setIdeaData({ readyTaskIds: [] });
+    await renderCanvas();
+    const tile = screen.getByTestId('idea-tile-sprint');
+    expect(tile).toBeDisabled();
+    expect(screen.getByTestId('idea-tile-sprint-reason').textContent).toContain('no ready tasks');
   });
 
   it('Ship launches the ship workflow the same way', async () => {

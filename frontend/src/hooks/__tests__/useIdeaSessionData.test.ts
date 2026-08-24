@@ -21,6 +21,7 @@ import type { IdeaArtifactLink } from '../../../../shared/types/ideaArtifacts';
 import type { ArtifactChangedEvent } from '../../../../shared/types/artifacts';
 
 const taskGetSpy = vi.fn();
+const taskListSpy = vi.fn();
 const listForIdeaSpy = vi.fn();
 const ideaComponentsGetSpy = vi.fn();
 const unsubscribeSpies = { task: vi.fn(), components: vi.fn(), artifacts: vi.fn() };
@@ -36,6 +37,7 @@ vi.mock('../../trpc/client', () => ({
     cyboflow: {
       tasks: {
         get: { query: (...a: unknown[]) => taskGetSpy(...a) as Promise<BacklogTaskItem | null> },
+        list: { query: (...a: unknown[]) => taskListSpy(...a) as Promise<BacklogTaskItem[]> },
         onTaskChanged: {
           subscribe: (_i: unknown, h: { onData: (e: TaskChangedEvent) => void }) => {
             taskHandler = h.onData;
@@ -103,6 +105,7 @@ describe('useIdeaSessionData', () => {
     artifactHandler = null;
     queryCallsAtSubscribe = -1;
     taskGetSpy.mockResolvedValue(IDEA);
+    taskListSpy.mockResolvedValue([]);
     listForIdeaSpy.mockResolvedValue(LINKS);
   });
 
@@ -182,6 +185,40 @@ describe('useIdeaSessionData', () => {
     });
     expect(listForIdeaSpy).toHaveBeenCalledTimes(2);
     expect(taskGetSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('derives readyTaskIds from tasks.list and re-derives on ANY task change', async () => {
+    // One ready task directly under the idea; one ready task belonging elsewhere.
+    const readyTask = {
+      id: 'task-r1',
+      type: 'task',
+      originating_idea_id: 'idea-42',
+      stage_position: 6,
+      isDone: false,
+      archived_at: null,
+      inFlow: [],
+      children: [],
+    } as unknown as BacklogTaskItem;
+    const foreignTask = {
+      ...readyTask,
+      id: 'task-x',
+      originating_idea_id: 'idea-other',
+    } as BacklogTaskItem;
+    taskListSpy.mockResolvedValue([readyTask, foreignTask]);
+
+    const { result } = renderHook(() => useIdeaSessionData('idea-42', 7));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(taskListSpy).toHaveBeenCalledWith({ projectId: 7 });
+    expect(result.current.readyTaskIds).toEqual(['task-r1']);
+
+    // A CHILD task's stage move carries the child's id — the ready set must
+    // still refresh (project-wide refetch, nothing local to filter on).
+    taskListSpy.mockResolvedValue([foreignTask]);
+    await act(async () => {
+      taskHandler?.({ task: { id: 'task-r1' } } as TaskChangedEvent);
+    });
+    expect(taskListSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.readyTaskIds).toEqual([]));
   });
 
   it('is inert (no queries, no subscriptions) without an idea or a project', () => {

@@ -53,6 +53,8 @@ import {
   type IdeaTileState,
 } from '../../utils/ideaTileStates';
 import { buildClarifyKickoffPrompt } from '../../../../shared/types/ideaSessionKickoff';
+import { TaskBatchPickerModal } from './TaskBatchPickerModal';
+import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import {
   IDEA_COMPONENT_KEYS,
   IDEA_COMPONENT_LABELS,
@@ -227,6 +229,11 @@ const TILE_META: Record<IdeaTileKey, TileMeta> = {
     caption: 'New run session · stamps Architecture · Epics · Stories',
     dot: 'var(--color-phase-plan)',
   },
+  sprint: {
+    label: 'Launch sprint',
+    caption: 'New run session · executes the ready tasks',
+    dot: 'var(--color-phase-execute)',
+  },
   ship: {
     label: 'Ship',
     caption: 'New run session · worktree',
@@ -332,7 +339,10 @@ export function IdeaSessionCanvas({
   ideaId,
   sessionKey,
 }: IdeaSessionCanvasProps) {
-  const { idea, components, artifactLinks, loading } = useIdeaSessionData(ideaId, projectId);
+  const { idea, components, artifactLinks, readyTaskIds, loading } = useIdeaSessionData(
+    ideaId,
+    projectId,
+  );
 
   // ── Liveness (the max-one-running-per-idea rule, UI half) ─────────────────
   // sessions.status is the BASE signal — activeRunsStore is lossy by
@@ -359,8 +369,13 @@ export function IdeaSessionCanvas({
   );
 
   const tiles = useMemo(
-    () => deriveIdeaTileStates(components, { clarifyActive, anyLaunchedChildActive }),
-    [components, clarifyActive, anyLaunchedChildActive],
+    () =>
+      deriveIdeaTileStates(
+        components,
+        { clarifyActive, anyLaunchedChildActive },
+        { hasReadyTasks: readyTaskIds.length > 0 },
+      ),
+    [components, clarifyActive, anyLaunchedChildActive, readyTaskIds],
   );
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -463,16 +478,44 @@ export function IdeaSessionCanvas({
     [workflows, launch, ideaId],
   );
 
+  /**
+   * Launch sprint — the batch picker first (pre-checked with the idea's ready
+   * tasks, adjustable exactly like an epic Run from the backlog), then a
+   * taskIds-seeded Sprint into a fresh worktree session. `originIdeaId` rides
+   * along so the run's host session nests under this idea and trips the same
+   * busy guard/greying as the other launched directions.
+   */
+  const [sprintPickerOpen, setSprintPickerOpen] = useState(false);
+  const handleSprintPicked = useCallback(
+    (taskIds: string[]) => {
+      setSprintPickerOpen(false);
+      setActionError(null);
+      const row = workflows.find((w) => w.name === 'sprint');
+      if (!row) {
+        setActionError('The sprint workflow is not available in this project.');
+        return;
+      }
+      void launch(row.id, { taskIds, originIdeaId: ideaId }, { forceNewSession: true });
+    },
+    [workflows, launch, ideaId],
+  );
+
   const busyByTile: Record<IdeaTileKey, boolean> = {
     clarify: clarifying,
     design: isLaunchingDesign,
     planner: isLaunching,
+    sprint: isLaunching,
     ship: isLaunching,
   };
 
   const onTileClick = (key: IdeaTileKey): void => {
     if (key === 'clarify') return handleClarify();
     if (key === 'design') return handleDesign();
+    if (key === 'sprint') {
+      setActionError(null);
+      setSprintPickerOpen(true);
+      return;
+    }
     return handleRunLaunch(key === 'planner' ? 'planner' : 'ship');
   };
 
@@ -800,6 +843,20 @@ export function IdeaSessionCanvas({
           </NodeCard>
         </div>
       </div>
+
+      {/* Sprint batch picker — same modal + pre-selection contract as an epic
+          Run from the backlog (pass a STABLE ids reference: readyTaskIds is
+          hook state). */}
+      {sprintPickerOpen && (
+        <TaskBatchPickerModal
+          isOpen
+          projectId={projectId}
+          substrate={DEFAULT_SUBSTRATE}
+          preselectedTaskIds={readyTaskIds}
+          onClose={() => setSprintPickerOpen(false)}
+          onPicked={handleSprintPicked}
+        />
+      )}
     </div>
   );
 }
