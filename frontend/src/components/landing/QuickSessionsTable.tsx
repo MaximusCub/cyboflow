@@ -69,13 +69,19 @@ export function overrideRunningForActiveWorkflows(
 /**
  * Grace window before a rested session is labeled `idle` / "quiet".
  *
- * A turn ending stamps `sessions.updated_at`, so a session that JUST finished
+ * A turn ending stamps `sessions.idle_since`, so a session that JUST finished
  * derives to `idle` with "quiet 0s" — noisy, since a follow-up turn often lands
  * within a few seconds. Within this window after its last turn the row is shown
  * `running` instead, and only flips to `idle` once it has actually been quiet
  * for the full window. At the boundary the label reads "quiet 1m", never
  * resetting a counter (idleSince is preserved, so elapsed keeps climbing from
  * the real rest time).
+ *
+ * This window survives migration 116 unchanged: the flap it suppresses follows
+ * a GENUINE rest boundary, so a more accurate boundary does not remove it.
+ * What 116 did fix is the "never resetting a counter" promise above — idleSince
+ * used to be `updated_at`, so an unrelated write landing mid-window (a rename,
+ * a folder move) really could push the row back to "quiet 0s". It no longer can.
  */
 export const QUIET_GRACE_MS = 60_000;
 
