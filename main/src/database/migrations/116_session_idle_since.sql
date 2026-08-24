@@ -1,0 +1,40 @@
+-- Migration 116: Add nullable idle_since to sessions — the session's real
+-- LAST-ACTIVITY boundary, so the quick-session board's "quiet for N" label
+-- stops being reset by unrelated writes.
+--
+-- Until now the board derived idleSince from sessions.updated_at, which is a
+-- proxy: updated_at is bumped by ANY write to the row (a rename, a folder move,
+-- the boot sweep, a status refinement), so the quiet clock restarted on events
+-- that were not activity at all. idle_since is written ONLY at the busy→resting
+-- status transition, inside Database.updateSession's single UPDATE — the one
+-- chokepoint every session-status write in the app already funnels through
+-- (sessionManager.updateSession, sessionManager's system/result writer,
+-- events.ts's all-panels-stopped check, the facade rester) — so it inherits
+-- every substrate (claude-sdk / claude-interactive / codex-sdk / codex-pty /
+-- omp-sdk / omp-pty) without a per-manager wire point.
+--
+-- Semantics:
+--   NULL            = busy (running/pending), or a pre-migration row that has
+--                     not transitioned since. Readers COALESCE to updated_at,
+--                     which is byte-identical to the pre-migration behavior —
+--                     which is also why this file carries NO backfill: a
+--                     backfill would write exactly the value COALESCE already
+--                     yields.
+--   datetime('now') = the moment the session came to rest. Same space-separated
+--                     UTC format as CURRENT_TIMESTAMP/updated_at, so readers
+--                     normalize it with the same strftime() the ' ' vs 'T'
+--                     ordering trap already forces them to use.
+--
+-- Plain nullable ADD COLUMN, no FK/CHECK, same rationale as 113/114 and
+-- design_idea_id (082): sessions is a legacy table and integrity is
+-- chokepoint-enforced.
+--
+-- Single-statement file for the replay hazard documented in 113's and 088's
+-- headers: runFileBasedMigrations() execs a whole file in one transaction, and
+-- a duplicate-column ALTER on re-run rolls that transaction back before any
+-- later statement in the same file can apply.
+--
+-- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here.
+
+ALTER TABLE sessions ADD COLUMN idle_since TEXT;

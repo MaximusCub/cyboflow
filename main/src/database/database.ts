@@ -59,6 +59,49 @@ function isAlreadyAppliedSchemaStatement(statement: string, err: unknown): boole
   return false;
 }
 
+/**
+ * The `sessions.idle_since` write, appended to updateSession's SET list whenever
+ * the caller supplies a status (migration 116).
+ *
+ * idle_since is the session's real LAST-ACTIVITY boundary — the moment it came
+ * to rest after a turn. It exists because the quick-session board's "quiet for
+ * N" label used to read `updated_at`, which ANY write to the row bumps (a
+ * rename, a folder move, the boot sweep, a status refinement), so the quiet
+ * clock restarted on things that were not activity at all.
+ *
+ * This is deliberately a chokepoint rather than a per-substrate event. Every
+ * session-status write in the app already funnels through updateSession —
+ * sessionManager.updateSession (the ipc/events callers), sessionManager's
+ * system/result writer, events.ts's all-panels-stopped check, and the facade
+ * rester — so stamping here inherits all six lanes (claude-sdk,
+ * claude-interactive, codex-sdk, codex-pty, omp-sdk, omp-pty) with no new event
+ * type and no per-manager emission. Writing it in the SAME UPDATE as the status
+ * also makes disagreement between idle_since and the status the board derives
+ * `idle` from structurally impossible.
+ *
+ * Three arms, in order:
+ *   1. new status is busy (`running`/`pending`) → NULL. A busy session has no
+ *      idle time; clearing it also means a NULL can be read as "not resting".
+ *   2. OLD status was busy and the new one is not → this is the busy→resting
+ *      transition, the only real boundary; stamp `datetime('now')`.
+ *   3. otherwise (resting → resting, e.g. `stopped` → `failed`) → preserve. A
+ *      status REFINEMENT is not a new boundary and must not reset the clock.
+ *
+ * Arm 2 depends on SQLite evaluating every expression in an UPDATE's SET list
+ * against the PRE-update row, so the bare `status` here is the old value even
+ * though `status = ?` is assigned in the same statement.
+ *
+ * The single `?` binds the NEW status; callers must push it a second time.
+ * `datetime('now')` yields the same space-separated UTC form as
+ * CURRENT_TIMESTAMP/updated_at, so readers normalize it with the same
+ * strftime() the ' ' vs 'T' ordering trap already forces on updated_at.
+ */
+const IDLE_SINCE_ON_STATUS_CHANGE = `idle_since = CASE
+      WHEN ? IN ('running', 'pending') THEN NULL
+      WHEN status IN ('running', 'pending') THEN datetime('now')
+      ELSE idle_since
+    END`;
+
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
   id: number;
@@ -2475,6 +2518,10 @@ export class DatabaseService {
     if (data.status !== undefined) {
       updates.push('status = ?');
       values.push(data.status);
+      // Stamp/clear the last-activity clock in the SAME statement, so it can
+      // never disagree with the status the board derives `idle` from.
+      updates.push(IDLE_SINCE_ON_STATUS_CHANGE);
+      values.push(data.status);
     }
     if (data.status_message !== undefined) {
       updates.push('status_message = ?');
@@ -2803,9 +2850,18 @@ export class DatabaseService {
     if (sessionIds.length === 0) return;
     
     const placeholders = sessionIds.map(() => '?').join(',');
+    // idle_since = COALESCE(idle_since, updated_at) — the sweep stamps LAST KNOWN
+    // ACTIVITY, not boot time. These rows were `running`/`pending` when the app
+    // died, so their idle_since is NULL and updated_at holds the last thing the
+    // session actually did; using CURRENT_TIMESTAMP here would tell the board
+    // every crashed session went quiet the instant the app relaunched. The
+    // COALESCE also makes the sweep non-destructive if an already-rested row is
+    // ever passed in.
     this.db.prepare(`
-      UPDATE sessions 
-      SET status = 'stopped', updated_at = CURRENT_TIMESTAMP 
+      UPDATE sessions
+      SET status = 'stopped',
+          idle_since = COALESCE(idle_since, updated_at),
+          updated_at = CURRENT_TIMESTAMP
       WHERE id IN (${placeholders})
     `).run(...sessionIds);
   }

@@ -50,6 +50,16 @@ export interface Session {
   status_message?: string;
   created_at: string;
   updated_at: string;
+  /**
+   * When the session last came to REST (migration 116), space-separated UTC as
+   * written by datetime('now') — DISTINCT from `updated_at`, which any write to
+   * the row bumps and so cannot serve as an activity clock. Written only inside
+   * updateSession's status transition (see IDLE_SINCE_ON_STATUS_CHANGE in
+   * database.ts) and by the boot sweep. NULL means the session is busy
+   * (`running`/`pending`) or predates the column; readers COALESCE to
+   * `updated_at`, which is the pre-migration behavior.
+   */
+  idle_since?: string | null;
   last_output?: string;
   exit_code?: number;
   pid?: number;

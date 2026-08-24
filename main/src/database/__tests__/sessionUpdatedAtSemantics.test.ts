@@ -1,8 +1,11 @@
 /**
  * sessions.updated_at doubles as the session's last-ACTIVITY clock: the
- * quick-sessions board derives its "quiet for N" label from it
- * (quickSessionListing.ts idleSince), and the sidebar's relative time reads it
- * as lastActivity. These tests pin the rule that presentation-only writes must
+ * sidebar's relative time reads it as lastActivity, and it is still the
+ * quick-sessions board's FALLBACK for a row whose idle_since has not been
+ * stamped yet (migration 116 moved the board's primary "quiet for N" source to
+ * sessions.idle_since — see sessionIdleSinceSemantics.test.ts — but the
+ * COALESCE keeps updated_at load-bearing for pre-116 rows).
+ * These tests pin the rule that presentation-only writes must
  * NOT bump it — the regression they guard: a sidebar drag (reorderSessions)
  * rewrote display_order + updated_at for EVERY session in one transaction,
  * stamping the whole project with a single identical timestamp and collapsing
