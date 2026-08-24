@@ -15,6 +15,19 @@
  * legacy/hand-edited ideas so nothing shows a blank checklist, without a
  * risky data migration.
  *
+ * ONE deliberate carve-out to that rule — the ENTITY-EXISTENCE override: an
+ * 'epics' or 'stories' ledger row stamped 'complete' while the idea has ZERO
+ * corresponding child entities is downgraded on read to 'incomplete' (staleAt
+ * from the stamp's updatedAt, staleReason naming the deletion). Those two
+ * components' "complete" means "the decomposition EXISTS as entities" — done
+ * and archived children still have rows, so zero rows can only mean the
+ * decomposition was hard-deleted after the stamp (a failed run's cleanup, a
+ * manual delete), and nothing ever invalidates the ledger on entity deletion.
+ * The override is read-side and self-healing: re-decomposing re-creates the
+ * entities and the stamp reads 'complete' again without any write. It NEVER
+ * fires the other way ('incomplete'/'skipped' rows stay verbatim — forcing a
+ * redo and deliberate skips are judgments the ledger owns).
+ *
  * DERIVATION CAN ONLY EVER YIELD 'complete' OR 'incomplete' — never
  * 'skipped', because absence is not evidence of an explicit skip decision
  * (see migration 101 and shared/types/ideaComponents.ts headers). A derived
@@ -392,7 +405,23 @@ export function resolveIdeaComponentsBatch(
       // A ledger row ALWAYS wins over derivation, even when derivation would
       // disagree — see the module header's precedence rule.
       const ledgerRow = ledger?.get(component);
-      if (ledgerRow) return ledgerRow;
+      if (ledgerRow) {
+        // Entity-existence override (module header): a 'complete' stamp for a
+        // decomposition that no longer exists as entities reads as stale
+        // incomplete work, not as done.
+        const entitiesGone =
+          ledgerRow.state === 'complete' &&
+          ((component === 'epics' && !hasEpics) || (component === 'stories' && !hasStories));
+        if (entitiesGone) {
+          return {
+            ...ledgerRow,
+            state: 'incomplete',
+            staleAt: ledgerRow.staleAt ?? ledgerRow.updatedAt,
+            staleReason: `stamped complete but the idea has no ${component === 'epics' ? 'epics' : 'tasks'} — decomposition deleted after the stamp`,
+          };
+        }
+        return ledgerRow;
+      }
 
       switch (component) {
         case 'idea-spec':

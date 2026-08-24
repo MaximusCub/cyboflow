@@ -814,6 +814,21 @@ describe('TaskChangeRouter (3-table entity model)', () => {
           source: 'flow',
         });
       }
+      // Back the epics/stories stamps with real entities — the resolver's
+      // entity-existence override downgrades a 'complete' stamp with zero
+      // children, which is not what this test is about.
+      const epic = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'e',
+        originatingIdeaId: ideaId,
+      });
+      await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 't',
+        parentEpicId: epic.taskId,
+      });
 
       // Title-only update — no body delta, so the hook must not fire.
       await taskRouter.applyChange(1, {

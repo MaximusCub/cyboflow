@@ -165,12 +165,80 @@ describe('resolveIdeaComponents / resolveIdeaComponentsBatch', () => {
   it('a ledger row overrides derivation: complete row wins while nothing exists', () => {
     const db = buildDb();
     insertIdea(db, 'idea-1', 'no headings here');
-    insertLedgerRow(db, 'idea-1', 'epics', { state: 'complete', source: 'flow', sourceRunId: 'run-1' });
+    // 'architecture' — not 'epics'/'stories', which carry the entity-existence
+    // override (their own describe block below).
+    insertLedgerRow(db, 'idea-1', 'architecture', {
+      state: 'complete',
+      source: 'flow',
+      sourceRunId: 'run-1',
+    });
 
-    const epics = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'epics');
-    expect(epics.state).toBe('complete');
-    expect(epics.source).toBe('flow');
-    expect(epics.sourceRunId).toBe('run-1');
+    const arch = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'architecture');
+    expect(arch.state).toBe('complete');
+    expect(arch.source).toBe('flow');
+    expect(arch.sourceRunId).toBe('run-1');
+  });
+
+  describe('entity-existence override (epics/stories complete with zero entities)', () => {
+    it("downgrades a 'stories' complete stamp to stale incomplete when the idea has NO tasks", () => {
+      const db = buildDb();
+      insertIdea(db, 'idea-1', 'body');
+      insertLedgerRow(db, 'idea-1', 'stories', { state: 'complete', source: 'flow', sourceRunId: 'run-1' });
+
+      const stories = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'stories');
+      expect(stories.state).toBe('incomplete');
+      // staleAt falls back to the stamp's updatedAt so the UI's "needs review"
+      // (incomplete + staleAt non-null) fires.
+      expect(stories.staleAt).toBe('2026-01-01T00:00:00Z');
+      expect(stories.staleReason).toContain('decomposition deleted');
+      // Lineage survives the downgrade — the stamp is still the row of record.
+      expect(stories.sourceRunId).toBe('run-1');
+    });
+
+    it("downgrades an 'epics' complete stamp the same way when the idea has NO epics", () => {
+      const db = buildDb();
+      insertIdea(db, 'idea-1', 'body');
+      insertLedgerRow(db, 'idea-1', 'epics', { state: 'complete' });
+
+      const epics = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'epics');
+      expect(epics.state).toBe('incomplete');
+      expect(epics.staleAt).not.toBeNull();
+    });
+
+    it('does NOT fire while the entities exist (done/archived rows still count)', () => {
+      const db = buildDb();
+      insertIdea(db, 'idea-1', 'body');
+      insertLedgerRow(db, 'idea-1', 'stories', { state: 'complete' });
+      db.prepare('INSERT INTO tasks (id, originating_idea_id) VALUES (?, ?)').run('t1', 'idea-1');
+
+      expect(pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'stories').state).toBe('complete');
+    });
+
+    it("leaves 'skipped' and 'incomplete' rows verbatim (judgments the ledger owns)", () => {
+      const db = buildDb();
+      insertIdea(db, 'idea-1', 'body');
+      insertLedgerRow(db, 'idea-1', 'epics', { state: 'skipped', source: 'manual' });
+      insertLedgerRow(db, 'idea-1', 'stories', { state: 'incomplete' });
+
+      const states = resolveIdeaComponents(dbAdapter(db), 'idea-1');
+      expect(pick(states, 'epics')).toMatchObject({ state: 'skipped', staleAt: null });
+      expect(pick(states, 'stories')).toMatchObject({ state: 'incomplete', staleAt: null });
+    });
+
+    it('a pre-existing staleAt on the row is preserved rather than overwritten', () => {
+      const db = buildDb();
+      insertIdea(db, 'idea-1', 'body');
+      insertLedgerRow(db, 'idea-1', 'stories', {
+        state: 'complete',
+        staleAt: '2026-03-01T00:00:00Z',
+        staleReason: 'idea body changed',
+      });
+
+      const stories = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'stories');
+      expect(stories.state).toBe('incomplete');
+      expect(stories.staleAt).toBe('2026-03-01T00:00:00Z');
+      expect(stories.staleReason).toContain('decomposition deleted');
+    });
   });
 
   it('returns skipped only from a ledger row, and derivation never produces it', () => {
