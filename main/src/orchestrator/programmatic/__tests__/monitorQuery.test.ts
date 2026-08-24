@@ -71,6 +71,15 @@ describe('makeSdkStructuredQuery', () => {
     expect(opts.cwd).toBe('/wt');
     expect(opts.model).toBe('opus');
     expect(opts.allowedTools).toEqual(['Read', 'Grep', 'Glob']);
+    // Regression guard (`allowedTools` is AUTO-APPROVAL ONLY): `tools` is what
+    // removes Write/Edit/Bash and the user's MCP servers from the model's
+    // context. Without it a speculative tool_use spends a turn this query
+    // cannot spare. See the option block's comment for the measured numbers.
+    expect(opts.tools).toEqual(['Read', 'Grep', 'Glob']);
+    expect(opts.disallowedTools).toEqual(['mcp__*']);
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.strictMcpConfig).toBe(true);
+    expect(opts.mcpServers).toEqual({});
     expect(opts.outputFormat).toEqual({ type: 'json_schema', schema: { type: 'object' } });
     expect(opts.pathToClaudeCodeExecutable).toBe('/fake/claude');
     expect(typeof opts.maxTurns).toBe('number');
@@ -143,6 +152,15 @@ describe('makeSdkTextQuery', () => {
     const opts = lastOptions as Record<string, unknown>;
     expect(opts.outputFormat).toBeUndefined();
     expect(opts.allowedTools).toEqual(['Read', 'Grep', 'Glob']);
+    // Regression guard (`allowedTools` is AUTO-APPROVAL ONLY): `tools` is what
+    // removes Write/Edit/Bash and the user's MCP servers from the model's
+    // context. Without it a speculative tool_use spends a turn this query
+    // cannot spare. See the option block's comment for the measured numbers.
+    expect(opts.tools).toEqual(['Read', 'Grep', 'Glob']);
+    expect(opts.disallowedTools).toEqual(['mcp__*']);
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.strictMcpConfig).toBe(true);
+    expect(opts.mcpServers).toEqual({});
   });
 
   it('throws when the SDK iterator throws BEFORE the monitor speaks (no partial to show)', async () => {

@@ -246,6 +246,15 @@ describe('makeSessionSummarizer', () => {
     expect(opts.model).toBe('claude-haiku-4-5');
     expect(opts.maxTurns).toBe(1);
     expect(opts.allowedTools).toEqual([]);
+    // Regression guard (`allowedTools` is AUTO-APPROVAL ONLY): `tools` is what
+    // removes Write/Edit/Bash and the user's MCP servers from the model's
+    // context. Without it a speculative tool_use spends a turn this query
+    // cannot spare. See the option block's comment for the measured numbers.
+    expect(opts.tools).toEqual([]);
+    expect(opts.disallowedTools).toEqual(['mcp__*']);
+    expect(opts.settingSources).toEqual([]);
+    expect(opts.strictMcpConfig).toBe(true);
+    expect(opts.mcpServers).toEqual({});
     expect(opts.pathToClaudeCodeExecutable).toBe('/exe/claude');
     expect('cwd' in opts).toBe(false);
     expect(opts.abortController).toBeInstanceOf(AbortController);

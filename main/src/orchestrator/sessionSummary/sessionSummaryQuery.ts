@@ -272,7 +272,30 @@ export function makeSessionSummarizer(
         prompt,
         options: {
           maxTurns: 1,
+          // HARD availability floor. `allowedTools` governs AUTO-APPROVAL ONLY
+          // (SDK contract, `Options.allowedTools`: "To restrict which tools are
+          // available, use the `tools` option instead") — on its own it leaves
+          // the FULL Claude Code toolset plus every user-configured MCP server
+          // in the model's context. That is load-bearing here for two reasons:
+          //   1. Correctness. `maxTurns: 1` buys exactly ONE agentic turn, so a
+          //      single speculative tool_use spends it and the run ends as
+          //      `error_max_turns` with NO assistant text — which is why the
+          //      salvage path below could not rescue the observed production
+          //      failures (there was nothing to salvage).
+          //   2. Containment. The prompt embeds a VERBATIM user/assistant chat
+          //      transcript, i.e. untrusted text, and a transcript line can
+          //      steer the summarizer into calling a tool. Removing the tools
+          //      from context is the fix; the turn cap is not a security
+          //      boundary and must not be treated as one.
+          // All four levers are required — measured against SDK 0.3.224:
+          // baseline 121 tools, `settingSources: []` alone still leaves 68 MCP
+          // tools, and only strictMcpConfig + empty mcpServers clears them.
+          tools: [],
           allowedTools: [],
+          disallowedTools: ['mcp__*'],
+          settingSources: [],
+          strictMcpConfig: true,
+          mcpServers: {},
           model: deps.modelId,
           pathToClaudeCodeExecutable: deps.claudeExecutablePath,
           abortController: controller,

@@ -149,7 +149,18 @@ export function makeEvalJudgeQuery(
           ...(cwd ? { cwd } : {}),
           ...(model ? { model } : {}),
           maxTurns: JUDGE_MAX_TURNS,
+          // HARD availability ceiling. `allowedTools` governs AUTO-APPROVAL ONLY
+          // (SDK contract: "To restrict which tools are available, use the
+          // `tools` option instead"), so listing the read-only set there alone
+          // left Write/Edit/Bash — and every user-configured MCP server — in
+          // this query's context. `tools` is what makes the restriction real.
+          // Same hermetic set as `orchestrator/verify/verificationAgentQuery.ts`.
+          tools: [...JUDGE_ALLOWED_TOOLS],
           allowedTools: [...JUDGE_ALLOWED_TOOLS],
+          disallowedTools: ['mcp__*'],
+          settingSources: [],
+          strictMcpConfig: true,
+          mcpServers: {},
           pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
           outputFormat: { type: 'json_schema', schema },
           abortController: controller,
