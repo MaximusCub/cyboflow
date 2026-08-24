@@ -2619,12 +2619,15 @@ export class DatabaseService {
   }
 
   markSessionAsViewed(id: string): Session | undefined {
-    // Deliberately does NOT bump updated_at: updated_at doubles as the
-    // session's last-ACTIVITY clock (the quick-sessions board derives its
-    // "quiet for N" label from it), and merely viewing a session is not
-    // activity — bumping it here reset the idle clock on every open.
-    // Viewed-ness stays correct: unviewed is last_viewed_at < updated_at,
-    // and stamping last_viewed_at alone flips that to viewed.
+    // Deliberately does NOT bump updated_at. This guard is still load-bearing
+    // after migration 119 moved the board's "quiet for N" label onto
+    // idle_since — the reason simply changed: unviewed is
+    // `last_viewed_at < updated_at`, so bumping updated_at here would mark the
+    // session unviewed again the instant it was opened, re-arming the blue dot
+    // and the landing "waiting on you" count. (updated_at also still feeds the
+    // sidebar's lastActivity, which idle_since does not yet reach.)
+    // Viewed-ness stays correct as written: stamping last_viewed_at alone
+    // flips the predicate to viewed.
     this.db.prepare(`
       UPDATE sessions
       SET last_viewed_at = CURRENT_TIMESTAMP
@@ -3213,9 +3216,12 @@ export class DatabaseService {
 
   reorderSessions(sessionOrders: Array<{ id: string; displayOrder: number }>): void {
     // No updated_at bump: a sidebar drag rewrites EVERY session's row in one
-    // transaction, so bumping updated_at here stamped the whole project with
-    // an identical timestamp and collapsed the quick-sessions board's
-    // "quiet for N" labels (idleSince = updated_at) to a single shared value.
+    // transaction. The original symptom — the whole project stamped with one
+    // identical timestamp, collapsing the board's "quiet for N" labels — is now
+    // fixed at the source (migration 119 put those labels on idle_since, which
+    // a display_order write never touches), but the guard stays: a bump here
+    // would still mark every session in the project unviewed at once, and
+    // would still stamp the sidebar's lastActivity.
     const stmt = this.db.prepare(`
       UPDATE sessions
       SET display_order = ?

@@ -193,6 +193,49 @@ describe('markSessionsAsStopped (boot sweep) stamps last-known activity, not boo
   });
 });
 
+describe('why migration 120 backfills instead of leaning on the read-side COALESCE', () => {
+  // These two pin the defect an adversarial review caught: the COALESCE
+  // fallback is equivalent to a real stamp only at the INSTANT of migration.
+  // A row left NULL drifts away from its true boundary on the very writes 119
+  // was built to stop mattering — so the backfill is load-bearing, not cosmetic.
+  function boardIdleSince(id: string): string {
+    return (
+      db
+        .getDb()
+        .prepare(
+          `SELECT strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(idle_since, updated_at)) AS v
+             FROM sessions WHERE id = ?`,
+        )
+        .get(id) as { v: string }
+    ).v;
+  }
+
+  it('an UNSTAMPED resting row still resets its quiet clock on a rename', () => {
+    createSession('legacy', { status: 'completed', idleSince: null });
+    expect(boardIdleSince('legacy')).toBe('2026-01-01T00:00:00Z');
+
+    // A rename carries no status, so it never reaches the idle_since CASE —
+    // but it does bump updated_at, and COALESCE follows it forward.
+    db.updateSession('legacy', { name: 'renamed' });
+    expect(boardIdleSince('legacy')).not.toBe('2026-01-01T00:00:00Z');
+  });
+
+  it('an UNSTAMPED resting row also resets on a resting→resting status write', () => {
+    createSession('legacy', { status: 'completed', idleSince: null });
+    // The ELSE arm preserves NULL, and updated_at is bumped in the same UPDATE.
+    db.updateSession('legacy', { status: 'stopped' });
+    expect(read('legacy').idle_since).toBeNull();
+    expect(boardIdleSince('legacy')).not.toBe('2026-01-01T00:00:00Z');
+  });
+
+  it('the same row, once stamped, is immune to both', () => {
+    createSession('stamped', { status: 'completed', idleSince: SEEDED_IDLE_SINCE });
+    db.updateSession('stamped', { name: 'renamed' });
+    db.updateSession('stamped', { status: 'stopped' });
+    expect(boardIdleSince('stamped')).toBe('2026-01-01T00:00:00Z');
+  });
+});
+
 describe('the board read', () => {
   it('COALESCEs a NULL idle_since (a busy row) back to updated_at', () => {
     createSession('s1', { status: 'completed', idleSince: null });
