@@ -120,7 +120,9 @@
       "package.json",
       "node_modules/**/*",
       "build/**/*",
-      "LICENSE"
+      "LICENSE",
+      "!node_modules/better-sqlite3/bin/**",
+      "!node_modules/@homebridge/node-pty-prebuilt-multiarch/bin/**"
     ],
     "npmRebuild": true,
     "buildDependenciesFromSource": false,
