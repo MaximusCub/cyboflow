@@ -83,9 +83,16 @@ function formatTimeLeft(resetsAtMs: number | null, nowMs: number): string | null
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-function formatResetClock(resetsAtMs: number | null): string | null {
+/**
+ * A reset more than a day out needs a DATE, not just a clock: "resets 9:00 AM"
+ * for a window that resets five days from now reads as this morning.
+ */
+function formatResetClock(resetsAtMs: number | null, nowMs: number): string | null {
   if (resetsAtMs === null) return null;
-  return new Date(resetsAtMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const at = new Date(resetsAtMs);
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (resetsAtMs - nowMs < 24 * 60 * 60 * 1_000) return time;
+  return `${at.toLocaleDateString([], { weekday: 'short' })} ${time}`;
 }
 
 function formatAge(observedAtMs: number, nowMs: number): string {
@@ -150,9 +157,11 @@ function ProviderCard({
   snapshot: ProviderUsageSnapshot;
   nowMs: number;
 }): React.ReactElement {
+  // The most-constrained window leads (windows arrive sorted by pressure), so
+  // the lead is NOT necessarily the session window — it must name itself.
   const lead = snapshot.windows.find((w) => w.resetsAtMs !== null) ?? snapshot.windows[0];
   const timeLeft = lead === undefined ? null : formatTimeLeft(lead.resetsAtMs, nowMs);
-  const resetClock = lead === undefined ? null : formatResetClock(lead.resetsAtMs);
+  const resetClock = lead === undefined ? null : formatResetClock(lead.resetsAtMs, nowMs);
   const isStale = nowMs - snapshot.observedAtMs > STALE_AFTER_MS;
 
   return (
@@ -170,8 +179,14 @@ function ProviderCard({
       </div>
 
       <div className="mt-0.5 text-xs text-text-secondary">
-        {timeLeft !== null
-          ? <><b className="font-bold text-text-primary">{timeLeft}</b> of session left{resetClock !== null && ` · resets ${resetClock}`}</>
+        {timeLeft !== null && lead !== undefined
+          ? (
+            <>
+              <b className="font-bold text-text-primary">{timeLeft}</b>
+              {` left in ${lead.label}`}
+              {resetClock !== null && ` · resets ${resetClock}`}
+            </>
+          )
           : 'No reset window reported'}
       </div>
 

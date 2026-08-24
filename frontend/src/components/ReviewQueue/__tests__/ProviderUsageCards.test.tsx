@@ -84,10 +84,58 @@ describe('ProviderUsageCards', () => {
     expect(screen.queryByTestId('usage-no-percent')).not.toBeInTheDocument();
   });
 
-  it('leads with the time left in the window', () => {
+  it('leads with the time left in the window, NAMING the window', () => {
     mockUsage.current = claudeState(91);
     render(<ProviderUsageCards />);
-    expect(screen.getByTestId('usage-card-claude')).toHaveTextContent('1h 0m');
+    const card = screen.getByTestId('usage-card-claude');
+    expect(card).toHaveTextContent('1h 0m');
+    // The lead is the most-CONSTRAINED window, not necessarily the session one —
+    // labelling a weekly window "of session left" was simply wrong.
+    expect(card).toHaveTextContent('left in 5-hour session');
+  });
+
+  it('names the leading window when it is the weekly one, not "session"', () => {
+    mockUsage.current = {
+      claude: {
+        provider: 'claude',
+        planType: 'max',
+        observedAtMs: NOW,
+        windows: [
+          {
+            kind: 'claude_seven_day', label: 'Weekly', status: 'ok', usedPercent: 13,
+            percentSource: 'poll', percentObservedAtMs: NOW,
+            resetsAtMs: NOW + 5 * 24 * 60 * 60 * 1_000, windowMinutes: null, observedAtMs: NOW,
+          },
+          {
+            kind: 'claude_five_hour', label: '5-hour session', status: 'ok', usedPercent: 3,
+            percentSource: 'poll', percentObservedAtMs: NOW,
+            resetsAtMs: IN_AN_HOUR, windowMinutes: null, observedAtMs: NOW,
+          },
+        ],
+      },
+    };
+    render(<ProviderUsageCards />);
+    const card = screen.getByTestId('usage-card-claude');
+    expect(card).toHaveTextContent('left in Weekly');
+    expect(card).not.toHaveTextContent('of session left');
+  });
+
+  it('includes a weekday for a reset more than a day out', () => {
+    const resetsAtMs = NOW + 5 * 24 * 60 * 60 * 1_000;
+    mockUsage.current = {
+      claude: {
+        provider: 'claude', planType: 'max', observedAtMs: NOW,
+        windows: [{
+          kind: 'claude_seven_day', label: 'Weekly', status: 'ok', usedPercent: 13,
+          percentSource: 'poll', percentObservedAtMs: NOW,
+          resetsAtMs, windowMinutes: null, observedAtMs: NOW,
+        }],
+      },
+    };
+    render(<ProviderUsageCards />);
+    // A bare "resets 9:00 AM" for a window five days out reads as this morning.
+    const weekday = new Date(resetsAtMs).toLocaleDateString([], { weekday: 'short' });
+    expect(screen.getByTestId('usage-card-claude')).toHaveTextContent(`resets ${weekday}`);
   });
 
   it('drops a card whose window resets while it stays mounted', () => {
