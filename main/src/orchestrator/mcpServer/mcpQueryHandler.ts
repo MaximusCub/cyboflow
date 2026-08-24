@@ -135,6 +135,12 @@ import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowR
 import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../agentThread/specHash';
 import {
+  extractTurnText,
+  excerptAround,
+  truncateHead,
+  TURN_TEXT_MAX_CHARS,
+} from '../agentThread/transcriptSearch';
+import {
   AGENT_PROPOSAL_KINDS,
   AGENT_THREAD_SPAWN_PREFIX,
   isAgentThreadSpawnId,
@@ -918,6 +924,44 @@ export type McpQueryMessage =
       maxResults?: number;
     }
   | {
+      /**
+       * READ-ONLY search/paging over the CALLING assistant thread's own durable
+       * transcript (`agent_thread_events`) — the assistant's LONG-TERM MEMORY.
+       * Its live SDK context is reset daily, but every turn it ever exchanged
+       * with the user persists in that table forever, and this is the only way
+       * back to it.
+       *
+       * THREAD-SCOPED, always: the thread comes from
+       * resolveGlobalAgentContext(runId), never from a caller argument, so one
+       * assistant thread can never read another's transcript.
+       *
+       * `query` is a case-insensitive PLAIN-TEXT substring — deliberately NOT a
+       * regex, unlike mcp-fs-grep: the pattern is model-authored and this
+       * handler runs synchronously on the Electron main thread, so a
+       * backtracking blowup in a caller regex would wedge the whole app
+       * (measured: one pathological 15-char pattern froze it for ~110s against
+       * a 61-char turn). indexOf is O(n) unconditionally. Omitted, the tool
+       * BROWSES newest-first instead. `beforeId` is the id-descending paging
+       * cursor (`id < beforeId`) returned as nextBeforeId. Rows are paged in
+       * batches — the table is never loaded whole — under a hard scan cap, a
+       * limit clamped to [1, HISTORY_MAX_LIMIT], and a ~100KB
+       * serialized-payload ceiling.
+       */
+      type: 'mcp-history';
+      requestId: string;
+      runId: string;
+      /** Case-insensitive plain-text substring; omitted/empty = browse mode (no filtering). */
+      query?: string;
+      /** Narrow to one side of the conversation. */
+      role?: 'user' | 'assistant';
+      /** Only turns newer than N days ago (bound into datetime('now', ?)). */
+      daysBack?: number;
+      /** Id-descending cursor: return only turns with id < beforeId. */
+      beforeId?: number;
+      /** Matches to return; clamped to [1, HISTORY_MAX_LIMIT], default HISTORY_DEFAULT_LIMIT. */
+      limit?: number;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -984,6 +1028,54 @@ export function resolveGlobalAgentContext(
     return { ok: false, error: 'not_a_global_agent_run' };
   }
   return { ok: true, threadId: runId.slice(AGENT_THREAD_SPAWN_PREFIX.length) };
+}
+
+// ---------------------------------------------------------------------------
+// cyboflow_history caps (mcp-history). The transcript table grows without
+// bound — it is the assistant's permanent memory — so every read of it is
+// bounded on FOUR independent axes: how many turns come back (limit), how many
+// rows may be examined to find them (scan cap), how many rows are pulled per
+// round-trip (batch), and how large the serialized reply may get (payload
+// ceiling). Whichever binds first stops the walk and sets `truncated`, with
+// `nextBeforeId` telling the caller exactly where to resume.
+// ---------------------------------------------------------------------------
+
+/** Default number of turns returned when the caller passes no `limit`. */
+const HISTORY_DEFAULT_LIMIT = 20;
+/** Hard ceiling on `limit` — a memory search is a lookup, not a bulk export. */
+const HISTORY_MAX_LIMIT = 50;
+/** Rows fetched per SQL round-trip while paging id-descending. */
+const HISTORY_BATCH_ROWS = 500;
+/** Rows examined before the walk gives up (mostly-plumbing threads page fast). */
+const HISTORY_MAX_SCAN_ROWS = 10_000;
+/** Serialized-turn budget for one reply, mirroring cyboflow_db_query's ceiling. */
+const HISTORY_MAX_PAYLOAD_BYTES = 100_000;
+/**
+ * Ceiling on `daysBack` (~100 years). Not a usability limit — a guard against
+ * SQLite's datetime() overflow: datetime('now', '-N days') silently returns
+ * NULL once N leaves the julian-day range (measured: N=3,650,000 → NULL), and
+ * `created_at >= NULL` filters out EVERY row, so an assistant reaching for a
+ * huge number to mean "search everything" would get a confident false
+ * "no memory of it". Clamped, the widest window just includes the whole table.
+ */
+const HISTORY_MAX_DAYS_BACK = 36_500;
+
+/** One row of the transcript scan (the four columns mcp-history selects). */
+interface AgentThreadEventScanRow {
+  id: number;
+  event_type: string;
+  payload_json: string;
+  created_at: string;
+}
+
+/** One turn as returned to the assistant by cyboflow_history. */
+interface HistoryTurn {
+  eventId: number;
+  at: string;
+  role: 'user' | 'assistant';
+  text: string;
+  /** Present (true) only in search mode, where `text` is a match excerpt. */
+  matched?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,6 +1950,9 @@ export class McpQueryHandler {
           break;
         case 'mcp-fs-grep':
           this.handleFsGrep(msg, client);
+          break;
+        case 'mcp-history':
+          this.handleAgentHistory(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -7587,6 +7682,236 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { matches, truncated, filesScanned },
+    });
+  }
+
+  /**
+   * cyboflow_history (mcp-history) — READ-ONLY search/paging over the CALLING
+   * assistant thread's own `agent_thread_events` rows.
+   *
+   * THREAD SCOPING IS THE LOAD-BEARING GUARANTEE: `thread_id` is bound from
+   * resolveGlobalAgentContext(msg.runId), which rejects any non-`agent:` runId
+   * BEFORE a single DB read (mirroring handleAgentQueue). There is no
+   * caller-supplied thread argument at all, so no argument can widen the scope
+   * past the thread that is asking.
+   *
+   * TWO MODES over one walk:
+   *   search (query given) — keep turns whose decoded text contains the
+   *                          case-insensitive substring, each returned as an
+   *                          excerpt around its FIRST occurrence, `matched:
+   *                          true`. Plain indexOf, NEVER a caller regex — see
+   *                          the mcp-history union member's doc for why.
+   *   browse (no query)    — keep every decoded turn, head-truncated.
+   *
+   * The walk pages id-DESCENDING in HISTORY_BATCH_ROWS batches (never
+   * `SELECT *` over the whole table — this table is append-only and permanent)
+   * and stops at the first cap it hits: HISTORY_MAX_SCAN_ROWS rows examined,
+   * HISTORY_MAX_PAYLOAD_BYTES of serialized turns, or a (limit+1)th qualifying
+   * turn FOUND — the page is full and that unreturned find is the proof more
+   * exists. Any of those sets `truncated` and reports `nextBeforeId` — the id
+   * of the last FULLY PROCESSED row — so a follow-up call resumes exactly
+   * where this one stopped, never re-emitting and never skipping. A walk that
+   * fills the page exactly and then runs out of rows is NOT truncated: the
+   * scan keeps going after the limit is reached purely to learn whether more
+   * qualifying turns exist (bounded by the same scan cap), so `truncated:true`
+   * always means "there is more". Rows running out ends the walk with
+   * `truncated:false`, `nextBeforeId:null`.
+   *
+   * Rows whose payload carries no turn text (SDK tool_result plumbing, tool_use
+   * -only assistant events, corrupt JSON) decode to null and are skipped — they
+   * still count toward `scanned`, which is why the scan cap exists separately
+   * from `limit`.
+   */
+  private handleAgentHistory(
+    msg: Extract<McpQueryMessage, { type: 'mcp-history' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // --- argument validation ------------------------------------------------
+    if (msg.role !== undefined && msg.role !== 'user' && msg.role !== 'assistant') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: "invalid_arguments: role must be 'user' or 'assistant'",
+      });
+      return;
+    }
+    for (const [name, value] of [
+      ['daysBack', msg.daysBack],
+      ['beforeId', msg.beforeId],
+      ['limit', msg.limit],
+    ] as const) {
+      if (value === undefined) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: `invalid_arguments: ${name} must be a positive finite number`,
+        });
+        return;
+      }
+    }
+
+    // An omitted OR empty query means browse mode (an empty needle would match
+    // every turn, making the two modes differ only in excerpt shape — browsing
+    // is the clearer contract for "no search term"). The needle is matched as
+    // a case-insensitive PLAIN SUBSTRING via indexOf on lowercased text —
+    // deliberately not a RegExp: this handler runs synchronously on the main
+    // process, and a model-authored pattern with catastrophic backtracking
+    // would wedge the entire app (see the mcp-history union member's doc).
+    let needle: string | null = null;
+    if (msg.query !== undefined) {
+      if (typeof msg.query !== 'string') {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: 'invalid_arguments: query must be a string',
+        });
+        return;
+      }
+      if (msg.query.length > 0) {
+        needle = msg.query.toLowerCase();
+      }
+    }
+
+    const limit = Math.max(
+      1,
+      Math.min(msg.limit !== undefined ? Math.floor(msg.limit) : HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT),
+    );
+    const roleFilter = msg.role;
+    // Bound as a PARAMETER to datetime('now', ?) — never interpolated into the
+    // SQL text, even though it is derived from a validated number. Clamped to
+    // HISTORY_MAX_DAYS_BACK: past the julian-day range datetime() returns NULL
+    // and `created_at >= NULL` silently filters out EVERY row (see the
+    // constant's doc) — a clamped huge value instead means "the whole table".
+    const dayModifier =
+      msg.daysBack !== undefined
+        ? `-${Math.min(Math.max(1, Math.floor(msg.daysBack)), HISTORY_MAX_DAYS_BACK)} days`
+        : null;
+
+    // --- the id-descending walk ---------------------------------------------
+    const turns: HistoryTurn[] = [];
+    let cursor: number | null = msg.beforeId !== undefined ? Math.floor(msg.beforeId) : null;
+    /** Id of the last row processed to completion — the resume point. */
+    let lastProcessedId: number | null = null;
+    let scanned = 0;
+    let payloadBytes = 0;
+    let truncated = false;
+    let stopped = false;
+
+    while (!stopped) {
+      const clauses = [
+        'thread_id = ?',
+        "event_type IN ('user', 'assistant', 'agent_user', 'agent_assistant')",
+      ];
+      const params: unknown[] = [ctx.threadId];
+      if (cursor !== null) {
+        clauses.push('id < ?');
+        params.push(cursor);
+      }
+      if (dayModifier !== null) {
+        clauses.push("created_at >= datetime('now', ?)");
+        params.push(dayModifier);
+      }
+      params.push(HISTORY_BATCH_ROWS);
+
+      const rows = this.db
+        .prepare(
+          `SELECT id, event_type, payload_json, created_at
+             FROM agent_thread_events
+            WHERE ${clauses.join(' AND ')}
+            ORDER BY id DESC
+            LIMIT ?`,
+        )
+        .all(...params) as AgentThreadEventScanRow[];
+      if (rows.length === 0) break; // exhausted — no more transcript to page
+
+      for (const row of rows) {
+        if (scanned >= HISTORY_MAX_SCAN_ROWS) {
+          truncated = true;
+          stopped = true;
+          break;
+        }
+        scanned += 1;
+        cursor = row.id;
+
+        const turn = extractTurnText(row.event_type, row.payload_json);
+        if (turn !== null && (roleFilter === undefined || turn.role === roleFilter)) {
+          let text: string;
+          let matched = false;
+          if (needle !== null) {
+            // Lowercase-both indexOf: unconditionally O(n), immune to the
+            // backtracking blowups a caller regex could smuggle in. The rare
+            // Unicode where toLowerCase changes string length can drift the
+            // excerpt window a few chars — excerptAround clamps, so the worst
+            // case is a slightly off-center excerpt, never a crash or a miss.
+            const matchIndex = turn.text.toLowerCase().indexOf(needle);
+            if (matchIndex === -1) {
+              lastProcessedId = row.id;
+              continue; // searched and missed — row is fully processed
+            }
+            text = excerptAround(turn.text, matchIndex);
+            matched = true;
+          } else {
+            text = truncateHead(turn.text, TURN_TEXT_MAX_CHARS);
+          }
+
+          // Page already full? Then THIS qualifying turn is the proof that
+          // more exists: report truncated WITHOUT emitting it, leaving
+          // lastProcessedId pointing above it so the next page starts here.
+          // (The scan deliberately continues past `limit` to reach this point
+          // — an exact-limit walk that runs out of rows instead is complete,
+          // not truncated, and never costs the caller a wasted empty page.)
+          if (turns.length >= limit) {
+            truncated = true;
+            stopped = true;
+            break;
+          }
+
+          const entry: HistoryTurn = {
+            eventId: row.id,
+            at: row.created_at,
+            role: turn.role,
+            text,
+            ...(matched ? { matched: true } : {}),
+          };
+          const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8');
+          // A single oversized turn is still returned when it would otherwise
+          // be the empty answer — returning nothing would look like "no such
+          // memory" rather than "one very long memory".
+          if (turns.length > 0 && payloadBytes + entryBytes > HISTORY_MAX_PAYLOAD_BYTES) {
+            truncated = true;
+            stopped = true;
+            break; // row NOT processed — lastProcessedId still points above it
+          }
+          turns.push(entry);
+          payloadBytes += entryBytes;
+        }
+
+        lastProcessedId = row.id;
+      }
+
+      if (!stopped && rows.length < HISTORY_BATCH_ROWS) break; // short batch = exhausted
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        turns,
+        truncated,
+        nextBeforeId: truncated ? lastProcessedId : null,
+        scanned,
+      },
     });
   }
 

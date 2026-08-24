@@ -348,6 +348,32 @@ const GLOBAL_AGENT_TOOLS = [
     },
   },
   {
+    name: 'cyboflow_history',
+    description:
+      "READ-ONLY search over YOUR OWN past conversation transcripts with this user — your long-term memory. Your live context resets daily, but every past turn is durably kept; this tool reaches all of it. Without query: pages back through past turns newest-first (before_id continues a listing). With query (case-insensitive PLAIN-TEXT substring, not a regex): returns past turns whose text contains it, newest first, each as an excerpt around the first occurrence. role filters to 'user' or 'assistant' turns; days_back restricts to the last N days. Results are capped (limit clamps to 50, default 20, ~100KB payload) — truncated:true plus a numeric nextBeforeId mean there is more; pass nextBeforeId as before_id to continue. Use it when the user references a past conversation ('as we discussed', 'that thing from last week'), asks what was talked about before, or when earlier context would clearly help — never claim you don't remember without searching first.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Optional case-insensitive plain-text substring (not a regex). Omit to browse past turns newest-first.',
+        },
+        role: {
+          type: 'string',
+          enum: ['user', 'assistant'],
+          description: "Optional — return only your turns ('assistant') or only the user's ('user').",
+        },
+        days_back: { type: 'number', description: 'Optional — restrict to turns from the last N days.' },
+        before_id: {
+          type: 'number',
+          description: 'Optional paging cursor — pass a previous call\'s nextBeforeId to continue that listing.',
+        },
+        limit: { type: 'number', description: 'Optional turn count; clamped to <= 50 (default 20).' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'cyboflow_propose_action',
     description:
       "THE ONLY write-shaped tool available to the global agent. Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:'user'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:'run',runId}|{target:'quick-session',sessionId,runId?}}. An unrecognized kind or a payload missing a kind's required fields is rejected with 'invalid_payload'.",
@@ -1418,6 +1444,39 @@ async function handleGlobalAgentCallTool(request: {
       if (case_sensitive !== undefined) queryParams['caseSensitive'] = case_sensitive;
       if (max_results !== undefined) queryParams['maxResults'] = max_results;
       return executeMcpQuery('mcp-fs-grep', queryParams);
+    }
+
+    case 'cyboflow_history': {
+      const args = (request.params.arguments ?? {}) as {
+        query?: unknown;
+        role?: unknown;
+        days_back?: unknown;
+        before_id?: unknown;
+        limit?: unknown;
+      };
+      const { query, role, days_back, before_id, limit } = args;
+      if (query !== undefined && typeof query !== 'string') {
+        return invalidArgs('query: string (optional case-insensitive plain-text substring)');
+      }
+      if (role !== undefined && role !== 'user' && role !== 'assistant') {
+        return invalidArgs("role: 'user' | 'assistant' (optional)");
+      }
+      if (days_back !== undefined && typeof days_back !== 'number') {
+        return invalidArgs('days_back: number (optional)');
+      }
+      if (before_id !== undefined && typeof before_id !== 'number') {
+        return invalidArgs('before_id: number (optional)');
+      }
+      if (limit !== undefined && typeof limit !== 'number') {
+        return invalidArgs('limit: number (optional)');
+      }
+      const queryParams: Record<string, unknown> = {};
+      if (query !== undefined) queryParams['query'] = query;
+      if (role !== undefined) queryParams['role'] = role;
+      if (days_back !== undefined) queryParams['daysBack'] = days_back;
+      if (before_id !== undefined) queryParams['beforeId'] = before_id;
+      if (limit !== undefined) queryParams['limit'] = limit;
+      return executeMcpQuery('mcp-history', queryParams);
     }
 
     case 'cyboflow_propose_action': {

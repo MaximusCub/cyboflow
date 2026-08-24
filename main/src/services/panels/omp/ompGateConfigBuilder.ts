@@ -140,6 +140,7 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_get_task',
   'cyboflow_get_verifications',
   'cyboflow_get_workflow',
+  'cyboflow_history',
   'cyboflow_list_pending_approvals',
   'cyboflow_list_run_findings',
   'cyboflow_list_tasks',
