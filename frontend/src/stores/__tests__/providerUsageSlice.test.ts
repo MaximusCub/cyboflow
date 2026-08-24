@@ -10,12 +10,14 @@ import type { ProviderUsageState } from '../../../../shared/types/providerUsage'
 
 const subscribe = vi.fn();
 const query = vi.fn();
+const refreshMutate = vi.fn();
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       providerUsage: {
         get: { query: (...args: unknown[]) => query(...args) },
+        refresh: { mutate: (...args: unknown[]) => refreshMutate(...args) },
         onChanged: { subscribe: (...args: unknown[]) => subscribe(...args) },
       },
     },
@@ -35,6 +37,8 @@ function state(percent: number): ProviderUsageState {
         label: 'Weekly',
         status: 'ok',
         usedPercent: percent,
+        percentSource: 'poll',
+        percentObservedAtMs: 1,
         resetsAtMs: 2,
         windowMinutes: 10080,
         observedAtMs: 1,
@@ -48,11 +52,26 @@ const unsubscribe = vi.fn();
 beforeEach(() => {
   subscribe.mockReset();
   query.mockReset();
+  refreshMutate.mockReset();
+  refreshMutate.mockResolvedValue(undefined);
   unsubscribe.mockReset();
   subscribe.mockReturnValue({ unsubscribe });
   query.mockReturnValue(new Promise(() => {})); // pending unless a test resolves it
   useProviderUsageSlice.getState()._resetForTesting();
   unsubscribe.mockReset();
+});
+
+describe('providerUsageSlice.refresh', () => {
+  it('drives the refresh mutation', async () => {
+    await useProviderUsageSlice.getState().refresh();
+    expect(refreshMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows a failed poll rather than surfacing it in the review queue', async () => {
+    refreshMutate.mockRejectedValue(new Error('codex signed out'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(useProviderUsageSlice.getState().refresh()).resolves.toBeUndefined();
+  });
 });
 
 describe('providerUsageSlice.init', () => {

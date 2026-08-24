@@ -31,6 +31,7 @@ import type {
   ProviderUsageState,
   ProviderUsageWindow,
   UsageProvider,
+  UsageSource,
   UsageStatus,
   UsageWindowKind,
 } from '../../../../shared/types/providerUsage';
@@ -86,6 +87,36 @@ const STATUS_SEVERITY: Record<UsageStatus, number> = {
 
 function mostSevere(a: UsageStatus, b: UsageStatus): UsageStatus {
   return STATUS_SEVERITY[a] >= STATUS_SEVERITY[b] ? a : b;
+}
+
+/**
+ * The Claude `/usage` control-request payload, narrowed to what we consume.
+ * Declared here rather than imported: the SDK's own type is behind an
+ * explicitly-experimental method name and must not become a compile dependency.
+ */
+export interface ClaudeUsagePoll {
+  subscriptionType: string | null;
+  rateLimitsAvailable: boolean;
+  rateLimits: Partial<Record<
+    'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'seven_day_oauth_apps',
+    { utilization: number | null; resets_at: string | null } | null
+  >> | null;
+}
+
+/** Poll slot → the window kind it populates. */
+const CLAUDE_POLL_WINDOWS: ReadonlyArray<readonly [UsageWindowKind, keyof NonNullable<ClaudeUsagePoll['rateLimits']>]> = [
+  ['claude_five_hour', 'five_hour'],
+  ['claude_seven_day', 'seven_day'],
+  ['claude_seven_day_opus', 'seven_day_opus'],
+  ['claude_seven_day_sonnet', 'seven_day_sonnet'],
+  ['claude_seven_day_oauth_apps', 'seven_day_oauth_apps'],
+];
+
+/** The Claude poll reports ISO 8601; the stream reports epoch seconds. */
+function isoToMs(iso: string | null | undefined): number | null {
+  if (typeof iso !== 'string') return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 /** Wire timestamps are epoch SECONDS from both providers; the model is ms. */
@@ -188,7 +219,17 @@ export class ProviderUsageStore {
 
       const previous = this.windows.get('claude')?.get(kind);
       const sameWindow = previous !== undefined && previous.resetsAtMs === resetsAtMs;
-      const usedPercent = reported ?? (sameWindow ? previous.usedPercent : null);
+      const retained = sameWindow ? previous : undefined;
+      const usedPercent = reported ?? retained?.usedPercent ?? null;
+      // A RETAINED percentage keeps its original provenance and measurement time
+      // — the record is fresh, the number in it is not, and conflating the two
+      // is what the staleness warning exists to prevent.
+      const percentSource: UsageSource | null = reported !== null
+        ? 'stream'
+        : usedPercent === null ? null : retained?.percentSource ?? 'stream';
+      const percentObservedAtMs = reported !== null
+        ? nowMs
+        : usedPercent === null ? null : retained?.percentObservedAtMs ?? null;
 
       const fromStatus: UsageStatus = info.status === 'rejected'
         ? 'exhausted'
@@ -204,6 +245,8 @@ export class ProviderUsageStore {
         label: USAGE_WINDOW_LABELS[kind],
         status,
         usedPercent,
+        percentSource,
+        percentObservedAtMs,
         resetsAtMs,
         windowMinutes: null,
         observedAtMs: nowMs,
@@ -215,6 +258,58 @@ export class ProviderUsageStore {
   }
 
   /**
+   * Record a Claude `/usage` poll — the SDK's usage control request.
+   *
+   * AUTHORITATIVE: the response enumerates every window, so a window it omits is
+   * one the account does not have, and is deleted rather than left behind. This
+   * is the difference that matters versus the event stream, which reports one
+   * window at a time and withholds `utilization` below the warning threshold.
+   *
+   * `rateLimitsAvailable === false` (API key, Bedrock, Vertex, or a missing
+   * profile scope) means plan limits do not apply at all — the provider drops
+   * out entirely rather than showing an empty meter.
+   */
+  recordClaudeUsagePoll(usage: ClaudeUsagePoll, nowMs: number = Date.now()): void {
+    try {
+      if (!usage.rateLimitsAvailable || usage.rateLimits === null) {
+        this.windows.delete('claude');
+        this.planTypes.set('claude', usage.subscriptionType ?? null);
+        this.onChanged();
+        return;
+      }
+
+      const next = new Map<UsageWindowKind, ProviderUsageWindow>();
+      for (const [kind, slot] of CLAUDE_POLL_WINDOWS) {
+        const reading = usage.rateLimits[slot];
+        if (reading === undefined || reading === null) continue;
+        const usedPercent = clampPercent(reading.utilization);
+        if (usedPercent === null) continue;
+        next.set(kind, {
+          kind,
+          label: USAGE_WINDOW_LABELS[kind],
+          status: usageTier(usedPercent).status,
+          usedPercent,
+          percentSource: 'poll',
+          percentObservedAtMs: nowMs,
+          resetsAtMs: isoToMs(reading.resets_at),
+          windowMinutes: null,
+          observedAtMs: nowMs,
+        });
+      }
+
+      if (next.size === 0) {
+        this.windows.delete('claude');
+      } else {
+        this.windows.set('claude', next);
+      }
+      this.planTypes.set('claude', usage.subscriptionType ?? null);
+      this.onChanged();
+    } catch (error) {
+      this.warn('recordClaudeUsagePoll', error);
+    }
+  }
+
+  /**
    * Record a Codex `account/rateLimits/updated` payload.
    *
    * Each notification is AUTHORITATIVE for the whole Codex snapshot: a slot the
@@ -222,7 +317,11 @@ export class ProviderUsageStore {
    * rather than left behind stale. Only the `codex` limit is metered — a
    * `premium`/credits frame describes a different limit and must not clobber it.
    */
-  recordCodexRateLimits(rateLimits: CodexRateLimits, nowMs: number = Date.now()): void {
+  recordCodexRateLimits(
+    rateLimits: CodexRateLimits,
+    nowMs: number = Date.now(),
+    source: UsageSource = 'stream',
+  ): void {
     try {
       if (rateLimits.limitId !== 'codex') return;
 
@@ -239,6 +338,8 @@ export class ProviderUsageStore {
           label: codexWindowLabel(kind, slot.windowDurationMins),
           status: usageTier(usedPercent).status,
           usedPercent,
+          percentSource: source,
+          percentObservedAtMs: nowMs,
           resetsAtMs: secondsToMs(slot.resetsAt),
           windowMinutes: slot.windowDurationMins ?? null,
           observedAtMs: nowMs,

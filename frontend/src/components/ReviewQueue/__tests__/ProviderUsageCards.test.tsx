@@ -15,9 +15,10 @@ import type { ProviderUsageState } from '../../../../../shared/types/providerUsa
 const mockUsage = { current: {} as ProviderUsageState };
 const mockAccess = { current: undefined as unknown };
 
+const mockRefresh = vi.fn().mockResolvedValue(undefined);
 vi.mock('../../../stores/providerUsageSlice', () => ({
   useProviderUsageSlice: (selector: (s: unknown) => unknown) =>
-    selector({ usage: mockUsage.current, init: () => () => {} }),
+    selector({ usage: mockUsage.current, init: () => () => {}, refresh: mockRefresh }),
 }));
 
 vi.mock('../../../hooks/useAgentProviderAccess', () => ({
@@ -29,7 +30,10 @@ import { ProviderUsageCards } from '../ProviderUsageCards';
 const NOW = 1_800_000_000_000;
 const IN_AN_HOUR = NOW + 60 * 60 * 1_000;
 
-function claudeState(usedPercent: number | null): ProviderUsageState {
+function claudeState(
+  usedPercent: number | null,
+  percentSource: 'poll' | 'stream' = 'poll',
+): ProviderUsageState {
   return {
     claude: {
       provider: 'claude',
@@ -40,6 +44,8 @@ function claudeState(usedPercent: number | null): ProviderUsageState {
         label: '5-hour session',
         status: usedPercent === null ? 'ok' : 'critical',
         usedPercent,
+        percentSource: usedPercent === null ? null : percentSource,
+        percentObservedAtMs: usedPercent === null ? null : NOW,
         resetsAtMs: IN_AN_HOUR,
         windowMinutes: null,
         observedAtMs: NOW,
@@ -53,6 +59,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   mockUsage.current = {};
   mockAccess.current = undefined; // absent access config ⇒ claude/codex default ON
+  mockRefresh.mockClear();
 });
 
 afterEach(() => { vi.useRealTimers(); });
@@ -102,6 +109,33 @@ describe('ProviderUsageCards', () => {
     expect(screen.getByTestId('usage-card-claude')).toHaveTextContent('no recent reading');
   });
 
+  it('asks the providers directly on mount', () => {
+    mockUsage.current = claudeState(91);
+    render(<ProviderUsageCards />);
+    // Without a poll the meters would show only what a turn happened to mention.
+    expect(mockRefresh).toHaveBeenCalled();
+  });
+
+  it('flags a STREAM-sourced percentage as possibly stale', () => {
+    mockUsage.current = claudeState(91, 'stream');
+    render(<ProviderUsageCards />);
+    expect(screen.getByTestId('usage-stale-flag')).toHaveTextContent('may be stale');
+  });
+
+  it('does NOT flag a polled percentage', () => {
+    mockUsage.current = claudeState(91, 'poll');
+    render(<ProviderUsageCards />);
+    expect(screen.queryByTestId('usage-stale-flag')).not.toBeInTheDocument();
+  });
+
+  it('does not flag a window that has no percentage at all', () => {
+    // "Unknown" is a different statement from "possibly out of date".
+    mockUsage.current = claudeState(null, 'stream');
+    render(<ProviderUsageCards />);
+    expect(screen.queryByTestId('usage-stale-flag')).not.toBeInTheDocument();
+    expect(screen.getByTestId('usage-no-percent')).toBeInTheDocument();
+  });
+
   it('omits the card for a provider switched off in settings', () => {
     mockUsage.current = claudeState(91);
     mockAccess.current = { claude: false, codex: true };
@@ -121,6 +155,8 @@ describe('ProviderUsageCards', () => {
           label: 'Weekly',
           status: 'warning',
           usedPercent: 59,
+          percentSource: 'poll',
+          percentObservedAtMs: NOW,
           resetsAtMs: IN_AN_HOUR,
           windowMinutes: 10080,
           observedAtMs: NOW,

@@ -35,6 +35,13 @@ export interface ProviderUsageSliceState {
    * calling it twice is a no-op.
    */
   init: () => (() => void);
+  /**
+   * Ask the providers directly. Rate-limited and single-flight in the main
+   * process, so callers may invoke it on mount and on a timer without care.
+   * Never rejects — a provider that is signed out or absent leaves the previous
+   * reading in place.
+   */
+  refresh: () => Promise<void>;
   /** Tear the wiring down unconditionally. Test-only. */
   _resetForTesting: () => void;
 }
@@ -94,6 +101,16 @@ export const useProviderUsageSlice = create<ProviderUsageSliceState>((set, get) 
       }
 
       return makeRelease(myGeneration);
+    },
+
+    refresh: async () => {
+      try {
+        await trpc.cyboflow.providerUsage.refresh.mutate();
+      } catch (err: unknown) {
+        // These meters are an accessory; a failed poll must never surface as an
+        // error in the review queue.
+        console.error('[providerUsageSlice] usage refresh failed:', err);
+      }
     },
 
     _resetForTesting: () => {

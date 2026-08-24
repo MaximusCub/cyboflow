@@ -35,6 +35,7 @@ export type UsageWindowKind =
   | 'claude_seven_day'
   | 'claude_seven_day_opus'
   | 'claude_seven_day_sonnet'
+  | 'claude_seven_day_oauth_apps'
   | 'claude_seven_day_overage_included'
   | 'claude_overage'
   | 'codex_primary'
@@ -46,6 +47,17 @@ export type UsageWindowKind =
  */
 export type UsageStatus = 'ok' | 'warning' | 'critical' | 'exhausted';
 
+/**
+ * Where a reading came from.
+ *
+ * - `poll`  — we ASKED, just now. Codex `account/rateLimits/read`, or Claude's
+ *   `/usage` control request. Authoritative and current.
+ * - `stream` — it fell out of a turn that happened to be running. Correct WHEN
+ *   OBSERVED, but it only refreshes when a turn runs, so it can silently
+ *   describe a world that has moved on. The UI says so.
+ */
+export type UsageSource = 'poll' | 'stream';
+
 export interface ProviderUsageWindow {
   kind: UsageWindowKind;
   /** Display label ("5-hour session", "Weekly", "Weekly (Opus)"). */
@@ -53,12 +65,34 @@ export interface ProviderUsageWindow {
   status: UsageStatus;
   /** 0-100, or null when the provider reported no number. NEVER coerce to 0. */
   usedPercent: number | null;
+  /**
+   * Provenance of `usedPercent` specifically — null when there is no percentage.
+   *
+   * Tracked separately from the window record because the two can diverge: a
+   * stream reading that carries no `utilization` RETAINS the percentage from an
+   * earlier reading, so the record is fresh while the number it shows is not.
+   */
+  percentSource: UsageSource | null;
+  /**
+   * When `usedPercent` was measured. May PREDATE `observedAtMs` for the retained
+   * case above — that gap is exactly what the staleness warning is about.
+   */
+  percentObservedAtMs: number | null;
   /** Unix MILLISECONDS. Both providers report seconds on the wire; converted at ingest. */
   resetsAtMs: number | null;
   /** Window length in minutes. Codex reports it; Claude does not. */
   windowMinutes: number | null;
-  /** Unix ms at which this reading was observed. */
+  /** Unix ms at which this window record was last updated by any reading. */
   observedAtMs: number;
+}
+
+/**
+ * True when the displayed percentage came from a turn's event stream rather than
+ * a direct poll, and so may describe a world that has moved on. A window with no
+ * percentage is NOT "stale" — it is unknown, which the UI states differently.
+ */
+export function isPercentPossiblyStale(window: ProviderUsageWindow): boolean {
+  return window.usedPercent !== null && window.percentSource === 'stream';
 }
 
 export interface ProviderUsageSnapshot {
@@ -117,6 +151,7 @@ export const USAGE_WINDOW_LABELS: Record<UsageWindowKind, string> = {
   claude_seven_day: 'Weekly',
   claude_seven_day_opus: 'Weekly (Opus)',
   claude_seven_day_sonnet: 'Weekly (Sonnet)',
+  claude_seven_day_oauth_apps: 'Weekly (OAuth apps)',
   claude_seven_day_overage_included: 'Weekly (incl. overage)',
   claude_overage: 'Overage',
   codex_primary: 'Primary',

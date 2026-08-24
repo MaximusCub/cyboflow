@@ -28,6 +28,7 @@ import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import {
   USAGE_PROVIDER_LABELS,
+  isPercentPossiblyStale,
   usageWindowFillClass,
   type ProviderUsageSnapshot,
   type ProviderUsageWindow,
@@ -37,6 +38,13 @@ import {
 
 /** How often the render clock advances. Windows are minutes-to-days long. */
 const TICK_MS = 30_000;
+
+/**
+ * How often to ask the providers directly while this view is open. The poll is
+ * single-flight and rate-limited in the main process, so this only sets an upper
+ * bound on freshness — it cannot stampede a provider.
+ */
+const REFRESH_MS = 5 * 60_000;
 
 /** A reading older than this is called out as stale rather than shown plainly. */
 const STALE_AFTER_MS = 30 * 60 * 1_000;
@@ -113,8 +121,22 @@ function UsageMeterRow({ window: usageWindow }: { window: ProviderUsageWindow })
           {STATUS_WORD[usageWindow.status]}
         </span>
       ) : (
-        <span className="tabular-nums text-text-primary">
-          {Math.round(usageWindow.usedPercent)}%
+        <span className="flex items-center gap-1.5">
+          <span className="tabular-nums text-text-primary">
+            {Math.round(usageWindow.usedPercent)}%
+          </span>
+          {isPercentPossiblyStale(usageWindow) && (
+            // This number fell out of a turn's event stream rather than a direct
+            // poll, so it only refreshed when a turn happened to run. Say so
+            // rather than presenting it with the same confidence as a poll.
+            <span
+              className="text-[10px] uppercase tracking-[0.08em] text-status-warning"
+              title="Read from a running turn rather than a direct query — may be out of date"
+              data-testid="usage-stale-flag"
+            >
+              may be stale
+            </span>
+          )}
         </span>
       )}
     </div>
@@ -168,10 +190,20 @@ function ProviderCard({
 export function ProviderUsageCards(): React.ReactElement | null {
   const usage = useProviderUsageSlice((s) => s.usage);
   const init = useProviderUsageSlice((s) => s.init);
+  const refresh = useProviderUsageSlice((s) => s.refresh);
   const providerAccess = useAgentProviderAccess();
   const nowMs = useNow();
 
   useEffect(() => init(), [init]);
+
+  // Ask the providers on mount and periodically thereafter. Without this the
+  // meters would show only whatever a turn happened to mention — which for
+  // Claude means no percentage at all until it crosses its warning threshold.
+  useEffect(() => {
+    void refresh();
+    const id = setInterval(() => { void refresh(); }, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
 
   const visible = (['claude', 'codex'] as UsageProvider[])
     .filter((provider) => isAgentProviderEnabled(providerAccess, provider))

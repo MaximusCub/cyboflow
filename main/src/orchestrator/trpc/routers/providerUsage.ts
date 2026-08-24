@@ -17,10 +17,15 @@ import type { ProviderUsageState } from '../../../../../shared/types/providerUsa
 import { eventToAsyncIterable } from './events';
 import { throttleAsyncIterator } from '../throttle';
 
-/** The narrow surface this router needs from the provider-usage store. */
+/** The narrow surface this router needs from the provider-usage layer. */
 export interface ProviderUsageSource {
   getState(): ProviderUsageState;
   readonly events: EventEmitter;
+  /**
+   * Ask both providers for their current quota. Single-flight and rate-limited
+   * on the far side, so a caller may invoke it freely — on mount, on a timer.
+   */
+  refresh(): Promise<void>;
 }
 
 /** Emitted on the source's EventEmitter after every accepted reading. */
@@ -50,6 +55,18 @@ export const providerUsageRouter = router({
    * honest answer, not an error.
    */
   get: publicProcedure.query((): ProviderUsageState => _source?.getState() ?? {}),
+
+  /**
+   * Ask the providers directly, rather than waiting for a turn to mention their
+   * quota. Resolves once the poll settles; the fresh state arrives over
+   * `onChanged` like any other reading, so the caller need not use the return.
+   *
+   * Never rejects on a provider being signed out, disabled, or absent — those
+   * are ordinary outcomes that leave the previous reading in place.
+   */
+  refresh: protectedProcedure.mutation(async (): Promise<void> => {
+    await _source?.refresh();
+  }),
 
   /**
    * Whole-state pushes. Each event carries the complete state, so a dropped

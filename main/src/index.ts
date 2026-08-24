@@ -194,6 +194,8 @@ import type {
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setProviderUsageSource } from './orchestrator/trpc/routers/providerUsage';
 import { initProviderUsageStore, tryGetProviderUsageStore } from './services/providerUsage/providerUsageStore';
+import { ProviderUsagePoller } from './services/providerUsage/providerUsagePoller';
+import { pollClaudeUsage, pollCodexRateLimits } from './services/providerUsage/providerUsagePollAdapters';
 import {
   setReviewItemsRunProbe,
   setResolveVerdictNudgeDeps,
@@ -6146,9 +6148,24 @@ app.whenReady().then(async () => {
     console.log('[Main] health.mcpServer deps wired');
 
     // Subscription-usage meters. The store hydrates its last-known readings from
-    // user_preferences so the review queue shows something before the first turn
-    // of this session produces a fresh one.
-    setProviderUsageSource(initProviderUsageStore(databaseService, console));
+    // user_preferences so the review queue shows something before the first poll
+    // returns; the poller then asks both providers directly, which is the only
+    // way to get a percentage out of Claude below its warning threshold.
+    const providerUsageStore = initProviderUsageStore(databaseService, console);
+    const providerUsagePoller = new ProviderUsagePoller(
+      providerUsageStore,
+      {
+        pollClaude: pollClaudeUsage,
+        pollCodex: () => pollCodexRateLimits(app.getVersion()),
+        isProviderEnabled: (provider) => configManager.isAgentProviderEnabled(provider),
+      },
+      console,
+    );
+    setProviderUsageSource({
+      getState: () => providerUsageStore.getState(),
+      events: providerUsageStore.events,
+      refresh: () => providerUsagePoller.refresh(),
+    });
     console.log('[Main] providerUsage deps wired');
   }
 
