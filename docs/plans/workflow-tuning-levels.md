@@ -1,17 +1,20 @@
 # Workflow tuning levels — implementation plan
 
-Status: DRAFT r2 (pre-implementation; design approved via the "Workflow Tuning Levels" canvas
-artifact; revised after Codex adversarial review round 1 — see §8).
+Status: DRAFT r3 (pre-implementation; design approved via the "Workflow Tuning Levels" canvas
+artifact; r2 = Codex adversarial round 1 folded in (§8); r3 = user decisions: Standard =
+as-authored defaults, Custom = selectable 4th level, Advanced-save three-way prompt (§9)).
 Design reference: https://claude.ai/code/artifact/34cc2e25-2c27-415c-9acd-a893d68b62e1
 
 ## 1. What we're building
 
-One dial per workflow — **Efficient / Standard / Thorough** — that bundles the editor's existing
-knobs (per-agent model + reasoning-effort pins, optional-step toggles, per-step retries, step
-removal/merging, eval depth) into named presets. The deep editor (step graph, agents, MCPs,
-variants) moves behind an **Advanced** page. Any Advanced edit flips the workflow to **CUSTOM**
-with one-click reset back to the last applied level. The launch wizard gets a per-run level
-override. Level cards show a token estimate derived from real `run_usage` history.
+One dial per workflow — **Efficient / Standard / Thorough / Custom** — where Efficient and
+Thorough are named presets bundling the editor's existing knobs (per-agent model +
+reasoning-effort pins, optional-step toggles, per-step retries, step removal/merging, eval
+depth), **Standard is exactly today's as-authored built-in behavior**, and **Custom is a real
+selectable fourth slot** holding the user's own Advanced-edited definition. The deep editor
+(step graph, agents, MCPs, variants, A/B) lives on an **Advanced** page; saving there prompts
+overwrite-this-flow / save-as-new-flow / save-as-new-variant. The launch wizard gets a per-run
+level override. Level cards show a token estimate derived from real `run_usage` history.
 
 Per-flow calibrations (sprint + planner matrices) live in the design artifact; they are data,
 not architecture — this plan is about the machinery.
@@ -62,12 +65,55 @@ not architecture — this plan is about the machinery.
 
 ## 3. Core design decisions
 
-### D1. A level is a pure transform, applied through the existing spec chokepoint
+### D1. Levels are resolved at read/run time; Standard is the identity; spec_json is the Custom slot
+
+The pivotal decision (r3): selecting a level writes ONLY the `tuning_level` stamp. `spec_json`
+is never touched by the dial — it becomes the dedicated **Custom slot**, written exclusively by
+the Advanced editor (and the MCP writer). The effective definition is resolved wherever it's
+consumed:
+
+```ts
+effectiveDefinition(workflow) =
+  workflow.tuning_level === 'custom'
+    ? resolveWorkflowDefinition(name, workflow.spec_json)          // today's exact path
+    : applyTuningPreset(builtinFor(name), name, workflow.tuning_level);
+// where applyTuningPreset(def, flow, 'standard') === def (identity — as-authored)
+```
+
+Consequences, all favorable:
+- **Standard = today's behavior, byte for byte.** For a standard-level run,
+  `effectiveSpecJson` stays `'{}'` (built-in fallback), same spec_hash bucketing as today —
+  zero behavioral or stats change for anyone who never touches the dial.
+- **No divergence detection.** Custom isn't a derived "you diverged" state; it's a slot. The
+  whole serialize-and-compare machinery from r2 is deleted.
+- **Preset upgrades are automatic.** A recalibrated Efficient in a new app version applies on
+  the next run — no stale materialized copies, no "reads as CUSTOM after upgrade" (r2 risk #5
+  dissolves).
+- **Lossless switching.** Efficient → Custom → Efficient round-trips; the custom slot survives
+  untouched while other levels are selected.
+
+Materialization happens once per run, at `createRun`:
+`effectiveSpecJson = level === 'custom' ? spec_json : level === 'standard' ? '{}' :
+serializeDefinition(applyTuningPreset(...))`, then the existing freeze
+(`computeSpecHash` + idempotent `recordRevision`) proceeds unchanged, so restart/insights see a
+real revision for every efficient/thorough run.
+
+**Read paths that must route through `effectiveDefinition`** (the cost of resolve-at-read):
+the editor's Advanced canvas baseline, tRPC `getDefinition`, MCP `cyboflow_get_workflow`
+(returns the effective definition; response gains a `tuning_level` field so callers know what
+they're looking at), prompt building, `resolveRunFanOutInner` (already reads the frozen per-run
+spec — unaffected), and **`VariantResolver`'s baseline arm**, which today reads
+`workflow.spec_json` raw and must instead take the materialized level (a variant row's own
+frozen `spec_json` is unaffected).
+
+**MCP write semantics:** `cyboflow_update_workflow` writes the custom slot and stamps
+`tuning_level = 'custom'` in the same transaction — the exact mirror of the Advanced editor's
+"overwrite" save (D3).
 
 New module `shared/tuning/workflowTuning.ts` (shared so main + frontend agree byte-for-byte):
 
 ```ts
-type TuningLevel = 'efficient' | 'standard' | 'thorough';
+type TuningLevel = 'efficient' | 'standard' | 'thorough' | 'custom';
 
 interface TuningPreset {
   // per-agent-key model/effort pins → merged into definition.agentConfigs
@@ -87,69 +133,79 @@ applyTuningPreset(builtin: WorkflowDefinition, flow: CyboflowWorkflowName, level
 serializeDefinition(def: WorkflowDefinition): string   // THE canonical serializer (see D3)
 ```
 
-Applying a level = `updateSpec(workflowId, applyTuningPreset(builtinFor(name), name, level))` plus
-stamping `workflows.tuning_level`. It writes ordinary `spec_json`, so:
-- `computeSpecHash` versions each preset naturally (each level = a distinct spec revision —
-  desired: Insights/revisions history groups per level for free);
-- variants, A/B rotation, revisions, and the MCP surface all keep working unchanged;
-- no `spec_json` key additions, so nothing gets Zod-stripped.
+Preset tables initially calibrated for **sprint** and **planner** (from the design matrices —
+note the artifact's "standard" columns now document AS-AUTHORED behavior rather than a preset;
+efficient/thorough remain calibrated deltas relative to it). Other built-ins (launch, compound,
+ship, verify-setup) start with agentConfigs-only presets (model/effort tiers, no structural
+edits) until individually calibrated. Custom (non-built-in, "save as new") flows have no
+built-in baseline → only Standard-equivalent (their own spec) exists; the tuning selector is
+hidden for them and they open straight to Advanced.
 
-Preset tables initially calibrated for **sprint** and **planner** (from the design matrices).
-Other built-ins (launch, compound, ship, verify-setup) start with agentConfigs-only presets
-(model/effort tiers, no structural edits) until individually calibrated. Custom (non-built-in)
-flows have no preset baseline → the tuning page is hidden for them; they open straight to Advanced.
-
-### D2. Persistence: two nullable columns (migration 119)
+### D2. Persistence: two columns (migration 119)
 
 ```sql
-ALTER TABLE workflows     ADD COLUMN tuning_level TEXT;      -- last APPLIED level; NULL = never applied
-ALTER TABLE workflow_runs ADD COLUMN tuning_level TEXT;      -- frozen per-run effective level; NULL = pre-feature/custom
+ALTER TABLE workflows     ADD COLUMN tuning_level TEXT NOT NULL DEFAULT 'standard';
+UPDATE workflows SET tuning_level = 'custom'
+  WHERE TRIM(spec_json) != '' AND TRIM(spec_json) != '{}';   -- existing edited flows keep their behavior
+ALTER TABLE workflow_runs ADD COLUMN tuning_level TEXT;      -- frozen per-run level; NULL = pre-feature/variant
 ```
+
+The backfill preserves every existing flow's effective behavior exactly: untouched flows resolve
+the built-in via the standard identity; already-edited flows land on `'custom'` and keep
+resolving their `spec_json`.
 
 `workflow_runs.tuning_level` is stamped once in `createRun` (same immutable-snapshot pattern as
 `spec_hash`/`variant_id`): the wizard's per-run override if given, else the workflow's stamped
-level **iff the stored spec still matches that level's preset** (i.e. not custom), else NULL.
-Variant-pinned/rotation runs stamp NULL (a variant is its own frozen spec — attributing a level
-to it would poison the estimate buckets).
+level. Variant-pinned/rotation runs stamp NULL (a variant is its own frozen spec — attributing a
+level to it would poison the estimate buckets).
 
-### D3. CUSTOM is derived, never persisted
+### D3. Four-slot selector + the Advanced-save three-way prompt
 
-`isCustom(workflow) = tuning_level != null && workflow.spec_json !== serializeDefinition(applyTuningPreset(builtin, name, tuning_level))`.
+The selector shows four options: **Efficient / Standard / Thorough / Custom**. Selecting any of
+them is one cheap write (`tuning_level` stamp). Custom is disabled with a hint ("no custom
+definition yet — open Advanced") while the custom slot is empty; it lights up once a custom
+definition exists and shows the phase strip rendered from the slot's contents, exactly like the
+preset levels render theirs from `applyTuningPreset` output.
 
-One shared `serializeDefinition` (stable key order via explicit field-by-field construction, same
-function used by the apply path) makes the comparison byte-exact — both sides of the compare are
-produced by the same serializer, so `JSON.stringify` ordering is not a hazard. Computed in one
-main-process helper, exposed on the tRPC workflow read surface as `{ tuningLevel, isCustom }`
-(and on the MCP compact row alongside the existing `has_custom_spec`). No dirty bit to keep in
-sync; an edit from ANY writer (editor Advanced page, MCP `cyboflow_update_workflow`, variants
-promoting into baseline) flips CUSTOM automatically on next read.
+**Customization and A/B both live only on the Advanced page.** The Advanced editor opens seeded
+with the effective definition of the CURRENTLY SELECTED level (so "start from Efficient and
+tweak" works naturally). On save, a three-way prompt:
 
-Display state machine:
-- `tuning_level` set + spec matches → that level's badge.
-- `tuning_level` set + diverged → **CUSTOM** badge; "Reset to <level>" re-applies the stamped
-  level's preset (one `updateSpec`).
-- `tuning_level` NULL + `spec_json` empty → no badge ("as authored"); the selector highlights
-  nothing until the user applies a level. (We do NOT pretend the built-in equals Standard —
-  Standard's calibration intentionally differs from today's as-authored defaults.)
-- `tuning_level` NULL + `spec_json` non-empty (existing edited flows) → **CUSTOM**, reset offers
-  Standard.
+1. **Overwrite this flow** — write the edited definition into the custom slot
+   (`updateSpec`) and stamp `tuning_level = 'custom'` atomically. This is the only path that
+   changes what the flow runs by default. If the slot already held a different custom
+   definition, the prompt says so ("replaces your existing Custom definition").
+2. **Save as new flow** — the existing "save as new" path (`createWorkflow` /
+   `cyboflow_create_workflow`), unchanged: mints a separate flow seeded with the edited
+   definition; the original flow and its level stamp are untouched.
+3. **Save as new variant of this flow** — mints a `workflow_variants` row carrying the edited
+   graph as its frozen `definition_json` (status `draft`, per the existing variant lifecycle —
+   the user opts it into rotation from the variant manager). Server-side this is
+   `createVariant` + the definition payload; today's create snapshots the *current* resolved
+   definition and requires a follow-up `update_variant` to patch the graph, so the create seam
+   gains an optional `definition` parameter (both tRPC and MCP writers). The base flow and its
+   level stamp are untouched.
 
-**Reset coherence (review finding):** the existing `resetSpec` (tRPC + MCP
-`cyboflow_reset_workflow`) writes `'{}'` — under the rules above that would leave a stale
-`tuning_level` stamp and immediately read as CUSTOM ("reset" that lands on CUSTOM is a
-contradiction). Fix: `resetSpec` atomically clears `tuning_level` in the same statement/txn, on
-BOTH surfaces. The UI then offers two distinct actions where relevant: "Reset to authored
-default" (resetSpec — clears stamp, no badge) and "Reset to <level>" (re-apply the stamped
-preset). Both round-trips get tests.
+Cancel leaves everything as-is. This gives customization and A/B a single entry point with an
+explicit blast-radius choice at save time — no silent baseline mutation from an experiment
+edit, and no CUSTOM flip unless the user chose "overwrite".
+
+**Reset:** `resetSpec` (tRPC + MCP `cyboflow_reset_workflow`) keeps its meaning — clear the
+custom slot — and additionally flips `tuning_level` from `'custom'` to `'standard'` in the same
+transaction when it was `'custom'` (an empty slot has nothing for Custom to select). In the UI
+this surfaces as "Delete custom definition" on the Custom card / Advanced page rather than a
+generic "reset". Preset levels need no reset at all — they have no stored state to reset.
 
 ### D4. Per-run override: a `tuningSpecJson` sibling of `variantSpecJson`
 
-Extend `runs.start` input with `tuningLevel?: TuningLevel`. `RunLauncher.launch` computes
-`tuningSpecJson = serializeDefinition(applyTuningPreset(builtin, name, tuningLevel))` and threads
-it to `createRun`, whose freeze line becomes:
+Extend `runs.start` input with `tuningLevel?: TuningLevel` (all four values — overriding to
+`'custom'` is valid when the flow's custom slot is non-empty). `RunLauncher`/`createRun` resolve
+the effective level as `override ?? workflow.tuning_level` and materialize per D1:
 
 ```ts
-effectiveSpecJson = opts?.variantSpecJson ?? opts?.tuningSpecJson ?? workflow.spec_json ?? '{}';
+effectiveSpecJson =
+  opts?.variantSpecJson                                   // explicit variant still wins
+  ?? materializeForLevel(workflow, effectiveLevel);       // custom → slot; standard → '{}'; else preset
 ```
 
 Wizard rule: the level override and an explicit variant pin are **mutually exclusive** — picking
@@ -225,7 +281,9 @@ Fallback chain per level card:
 2. overall workflow median × the level's static multiplier (efficient ~0.5, thorough ~2.6);
 3. static per-flow default table (fresh install).
 Exposed via one tRPC read used by both the editor selector and the wizard. Estimates
-self-calibrate as stamped runs accumulate. Label estimates as `~` always.
+self-calibrate as stamped runs accumulate. Label estimates as `~` always. The Custom card uses
+only its own bucket (steps 1/3 — a multiplier over other levels says nothing about an arbitrary
+custom graph).
 
 **Scope caveat (review finding):** `run_usage` rolls up the run's own `raw_events`; eval jurors
 run through separate judge queries whose SDK usage is not persisted (`run_evals` records
@@ -249,30 +307,33 @@ appear nowhere operative.
 
 ## 4. UI work
 
-- **`WorkflowEditorModal`** becomes a two-page modal (matches the approved prototype):
-  - default page: level selector (3 cards + est. tokens + multiplier), the "what runs at this
-    level" phase strip (chips colored by model: haiku green / sonnet amber / opus red / fable
-    violet, sub-label `model · effort`, struck = removed/skipped, hatched = human gate) rendered
-    from `applyTuningPreset` output — no hand-maintained strip data; CUSTOM card + reset;
+- **`WorkflowEditorModal`** becomes a two-page modal (matches the approved prototype, updated
+  per r3 — the canvas artifact still shows the r2 derived-CUSTOM card and needs a refresh):
+  - default page: FOUR-slot level selector (Efficient / Standard / Thorough / Custom, est.
+    tokens + multiplier per card; Custom disabled-with-hint while its slot is empty), the "what
+    runs at this level" phase strip (chips colored by model: haiku green / sonnet amber / opus
+    red / fable violet, sub-label `model · effort`, struck = removed/skipped, hatched = human
+    gate) rendered from `effectiveDefinition` output — no hand-maintained strip data;
     "Open advanced editor →".
-  - advanced page: the ENTIRE existing editor body (canvas, inspector, agents, variants) moved
-    unchanged behind a `view: 'simple' | 'advanced'` state with a "← Tuning level" back nav.
-    Custom flows and flows with no preset open directly here.
-- **`SessionStartWizard`**: level segment defaulting to the workflow's stamped level (or "—"),
+  - advanced page: the ENTIRE existing editor body (canvas, inspector, agents, variants, A/B)
+    moved unchanged behind a `view: 'simple' | 'advanced'` state with a "← Tuning level" back
+    nav, seeded from the selected level's effective definition, plus the three-way save prompt
+    (D3). Custom "save as new" flows open directly here.
+- **`SessionStartWizard`**: level segment defaulting to the workflow's stamped level,
   "override for this run" affordance, est. tokens per option, mutual-exclusion with the variant
   picker; existing Advanced collapse unchanged.
-- Type-parity: `WorkflowRow`/tRPC additions (`tuningLevel`, `isCustom`) follow
+- Type-parity: `WorkflowRow`/tRPC additions (`tuningLevel`, `hasCustomSlot`) follow
   `docs/CODE-PATTERNS.md` IPC rules (mirror shared types, no drift).
 
 ## 5. Phasing (each phase = independently committable + green)
 
 | # | Phase | Contents | Size |
 |---|-------|----------|------|
-| 1 | Preset core | `shared/tuning/workflowTuning.ts`: types, sprint+planner preset tables, `applyTuningPreset`, `serializeDefinition`, `detectTuningState`; exhaustive unit tests incl. "every flow × level output passes `workflowDefinitionSchema`" | M |
-| 2 | Persistence | migration 119 (+ test), registry `applyTuningLevel` (spec write + stamp, atomic), `resetToLevel`, tRPC routes, read-surface fields, MCP compact-row exposure | M |
-| 3 | Run stamping + override | `runs.start.tuningLevel`, `RunLauncher` → `createRun` `tuningSpecJson` seam, override-launch `recordRevision`, restart provenance (D4), stamping rules (incl. variant-NULL rule), `evalDefault` consumption; lane-chain adaptation test for the efficient sprint preset | M–L |
+| 1 | Preset core | `shared/tuning/workflowTuning.ts`: types, sprint+planner preset tables, `applyTuningPreset` (standard = identity), `serializeDefinition`, `effectiveDefinition`; exhaustive unit tests incl. "every flow × level output passes `workflowDefinitionSchema`" | M |
+| 2 | Persistence + resolution | migration 119 + backfill (+ test), `setTuningLevel` registry write, read-path routing through `effectiveDefinition` (tRPC `getDefinition`, MCP `get_workflow`, `VariantResolver` baseline arm), MCP `update_workflow` stamps `'custom'`, `resetSpec` slot-clear semantics | M–L |
+| 3 | Run stamping + override | `runs.start.tuningLevel`, `materializeForLevel` in `createRun`, preset-launch `recordRevision`, restart provenance (D4), stamping rules (incl. variant-NULL rule), `evalDefault` consumption; lane-chain adaptation test for the efficient sprint preset | M–L |
 | 4 | Prompt derivation + addendum | D9 prompt scrubbing/derivation for sprint/ship; `promptAddendum` field (type + Zod + `resolveRunEffectiveAgents` append) (D5) | M |
-| 5 | Editor UI | two-page modal, selector, generated phase strip, CUSTOM + dual reset (D3) | L |
+| 5 | Editor UI | two-page modal, four-slot selector, generated phase strip, three-way save prompt, variant-create-with-definition seam (D3) | L |
 | 6 | Wizard UI | level segment, override plumbing, variant mutual exclusion | S–M |
 | 7 | Estimates | `selectTuningLevelUsage` + median helper + tRPC read + both UI surfaces, "excl. eval" labeling | S–M |
 | 8 | Eval juror filter | `EvalWorker` slot filter by run level (D6) | S |
@@ -283,12 +344,16 @@ safe on both planes; after phase 6 it is user-visible end-to-end; 7–9 are poli
 
 ## 6. Testing
 
-- Unit (phase-local, per the lane test policy): transform idempotence + schema-validity sweep;
-  detection truth table (all 4 display states); migration 119; `createRun` stamp matrix
-  (override/stamped/custom/variant); restart matrix (override / persistent / custom / variant /
-  post-preset-upgrade); dual-reset round-trips on tRPC + MCP; efficient-sprint
-  `resolveRunFanOutInner` + `current_step` validation adaptation; effective-prompt scrub test
-  (D9); `promptAddendum` append-preserves-policy test; median query fixture.
+- Unit (phase-local, per the lane test policy): transform idempotence + standard-identity +
+  schema-validity sweep; `effectiveDefinition` resolution matrix (4 levels × empty/non-empty
+  slot); migration 119 backfill (edited flows → `'custom'`, untouched → `'standard'`);
+  `createRun` stamp + materialization matrix (override/stamped/custom/variant);
+  restart matrix (override / persistent / custom / variant / post-preset-upgrade);
+  `resetSpec` slot-clear + stamp-flip on tRPC + MCP; three-way save prompt paths (overwrite
+  stamps custom; new-flow and new-variant leave base untouched); `VariantResolver` baseline
+  materialization; efficient-sprint `resolveRunFanOutInner` + `current_step` validation
+  adaptation; effective-prompt scrub test (D9); `promptAddendum` append-preserves-policy test;
+  median query fixture.
 - `pnpm test:unit` + `typecheck` + `lint` as the settled-tree gate per phase commit.
 - Phase 4 touches `agentOverlayWriter.ts` under `main/src/services/panels/claude/` →
   `pnpm test:integration` is REQUIRED for that phase (CLAUDE.md rule), and again at the end.
@@ -298,10 +363,11 @@ safe on both planes; after phase 6 it is user-visible end-to-end; 7–9 are poli
 
 ## 7. Risks / open questions
 
-1. **Standard ≠ as-authored.** The Standard calibration deliberately changes models vs today's
-   built-ins (e.g. code-review → opus). Users who never touch the dial keep as-authored behavior
-   (NULL stamp); the moment they click Standard they opt into the calibration. Confirm this is
-   the intended semantics vs "Standard = exactly today's defaults".
+1. **Read-path routing is the new blast radius.** Resolve-at-read means every consumer of a
+   workflow's definition must go through `effectiveDefinition` — a missed call site silently
+   runs Standard for an Efficient-stamped flow. Mitigate by making the raw `spec_json` read
+   awkward (registry exposes only the resolved accessor; grep-audit direct `spec_json` reads in
+   phase 2).
 2. **`promptAddendum` is a new spec key** (D5) — it must land in the TS interface AND the Zod
    schema in the same commit or every writer strips it; older app versions reading a newer
    spec_json will also strip it on their next save (acceptable: level re-apply restores it).
@@ -310,10 +376,11 @@ safe on both planes; after phase 6 it is user-visible end-to-end; 7–9 are poli
    editor's existing knobs already have.
 4. **Estimate bucket pollution**: failed/interrupted runs drag the median down. Filter to
    completed runs; consider trimming later.
-5. **Preset upgrades across app versions**: a shipped calibration change makes previously-applied
-   levels read as CUSTOM (spec no longer matches the new preset). Options: version presets and
-   treat "matches any known version of the stamped level" as non-custom, offering an "update to
-   latest calibration" nudge — decide before phase 1 lands (affects `detectTuningState`'s shape).
+5. **Preset upgrades change run behavior silently.** Resolve-at-read means a recalibrated
+   Efficient in a new app version changes what the next Efficient run does without any user
+   action. Intended (r3 decision — presets are the app's calibration), and each run still
+   freezes its exact spec (hash + revision), so history stays attributable; surface calibration
+   changes in release notes.
 6. **Launch wizard variant rotation × override** (D4's "force baseline") removes a run from
    rotation stats — acceptable since the user explicitly overrode, but Insights should exclude
    override runs from rotation experiment counts (they already will: no `rotation_experiment_id`).
@@ -330,3 +397,23 @@ Verdict: needs-attention; 4 high + 2 medium, all confirmed against the repo and 
 | [high] `runs.restart` loses a per-run tuning override (pins baseline when `variant_id` NULL) | Fixed — D4 restart semantics: revision-record at override launch + frozen-spec relaunch |
 | [medium] Existing `resetSpec` would strand a stale `tuning_level` → contradictory CUSTOM state | Fixed — D3: resetSpec atomically clears the stamp; dual reset actions |
 | [medium] `run_usage` medians exclude eval-jury tokens (level-dependent cost, unmetered) | Fixed — D8 labels estimates "execution tokens (excl. eval)"; jury metering = explicit future work |
+
+## 9. r3 revisions (user decisions, 2026-08-25)
+
+1. **Standard = today's as-authored defaults** — the standard preset is the identity transform;
+   `effectiveSpecJson` stays `'{}'` for standard runs (zero change for users who never touch the
+   dial). The design artifact's "standard" matrix columns are re-read as documentation of
+   as-authored behavior, not a calibration to apply.
+2. **Custom is a selectable 4th level**, not a derived divergence state. This flipped the
+   architecture from materialize-on-apply to **resolve-at-read** (D1): `spec_json` is now the
+   dedicated Custom slot, the dial writes only the `tuning_level` stamp, and the r2
+   divergence-detection/serialize-compare machinery is deleted. r2's reset-coherence and
+   preset-upgrade-reads-as-CUSTOM problems dissolve; the new cost is routing every definition
+   read path through `effectiveDefinition` (risk #1).
+3. **Advanced-save three-way prompt** (D3): customization and A/B live only on the Advanced
+   page; saving prompts overwrite-this-flow (writes the custom slot + stamps `'custom'`) /
+   save-as-new-flow (existing path) / save-as-new-variant (variant create gains an optional
+   definition payload).
+
+The canvas artifact predates r3 (shows a derived-CUSTOM card, 3-segment selector, no save
+prompt) — refresh it before implementation kickoff.
