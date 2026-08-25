@@ -425,7 +425,7 @@ describe('WorkflowCanvas', () => {
       .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
       .mockImplementation(function (this: HTMLElement) {
         const id = this.getAttribute('data-testid');
-        return (id && rects[id]) ?? new DOMRect(0, 0, 0, 0);
+        return (id ? rects[id] : undefined) ?? new DOMRect(0, 0, 0, 0);
       });
 
     try {
