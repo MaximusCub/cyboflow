@@ -28,9 +28,11 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
+import { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
@@ -454,10 +456,18 @@ export function WorkflowEditorModal({
       // so it REUSES the active session (no forceNew) — it is the "iterate on the
       // run I'm viewing" path, not an explicit new-session launch.
       const sessionId = await ensureSessionForLaunch(projectId);
+      // Best-effort (tier 2): resolved AFTER persist(), since a brand-new custom
+      // flow's id isn't known until persist() mints it. A miss (fresh id absent
+      // from runTypeDefaults) simply falls back to DEFAULT_WORKFLOW_MODEL — no
+      // attempt to chase down a "parent" workflow's stored default.
+      const model =
+        useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${targetWorkflowId}`]
+          ?.model ?? DEFAULT_WORKFLOW_MODEL;
       const result = await trpc.cyboflow.runs.start.mutate({
         workflowId: targetWorkflowId,
         projectId,
         sessionId,
+        model,
       });
       useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
       onSaved?.(targetWorkflowId);

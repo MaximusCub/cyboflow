@@ -156,9 +156,12 @@ vi.mock('../../../services/panelApi', () => ({
 // Import after mocks so vi.mock hoisting is in effect.
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useConfigStore } from '../../../stores/configStore';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 import { panelApi } from '../../../services/panelApi';
+import { DEFAULT_WORKFLOW_MODEL } from '../../../../../shared/types/sessionDefaults';
+import type { AppConfig } from '../../../types/config';
 
 const mockGetDefinition = vi.mocked(trpc.cyboflow.workflows.getDefinition.query);
 const mockGet = vi.mocked(trpc.cyboflow.workflows.get.query);
@@ -175,6 +178,7 @@ beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
+    useConfigStore.setState({ config: null });
   });
 
   vi.clearAllMocks();
@@ -431,10 +435,12 @@ describe('WorkflowEditorModal — edit mode', () => {
     // default (migration 047) — and substrate:'sdk' is pinned too so the
     // infrastructure host never inherits the quick-session PTY default.
     expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree', substrate: 'sdk' });
+    // No runTypeDefaults entry for this workflow id → falls back to DEFAULT_WORKFLOW_MODEL.
     expect(mockRunStart).toHaveBeenCalledWith({
       workflowId: EDIT_WORKFLOW_ID,
       projectId: 1,
       sessionId: 'session-quick-001',
+      model: DEFAULT_WORKFLOW_MODEL,
     });
 
     await waitFor(() => {
@@ -459,6 +465,7 @@ describe('WorkflowEditorModal — edit mode', () => {
       workflowId: EDIT_WORKFLOW_ID,
       projectId: 1,
       sessionId: 'session-quick-001',
+      model: DEFAULT_WORKFLOW_MODEL,
     });
 
     await waitFor(() => {
@@ -487,6 +494,7 @@ describe('WorkflowEditorModal — edit mode', () => {
       workflowId: EDIT_WORKFLOW_ID,
       projectId: 1,
       sessionId: 'session-existing-007',
+      model: DEFAULT_WORKFLOW_MODEL,
     });
 
     await waitFor(() => {
@@ -508,6 +516,57 @@ describe('WorkflowEditorModal — edit mode', () => {
     });
 
     expect(mockRunStart).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Run with modifications" threads a stored `workflow:<id>` model default into runs.start.mutate', async () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      runTypeDefaults: { [`workflow:${EDIT_WORKFLOW_ID}`]: { model: 'sonnet' } },
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    await renderEditMode();
+
+    const runBtn = screen.getByTestId('editor-run-button');
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-quick-001',
+      model: 'sonnet',
+    });
+  });
+
+  it('"Run with modifications" on a freshly-minted id absent from runTypeDefaults falls back to DEFAULT_WORKFLOW_MODEL', async () => {
+    // Stored defaults exist, but keyed to a DIFFERENT workflow id than the one
+    // persist() resolves to (mirrors "Save as new" minting a brand-new id) —
+    // the lookup misses and the floor applies, without throwing.
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      runTypeDefaults: { 'workflow:some-other-id': { model: 'sonnet' } },
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    await renderEditMode();
+
+    const runBtn = screen.getByTestId('editor-run-button');
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-quick-001',
+      model: DEFAULT_WORKFLOW_MODEL,
+    });
   });
 
   it('blocks Save with a friendly inline error when a workflow-copy prompt is empty', async () => {
