@@ -1081,3 +1081,492 @@ describe('taskListing — idea component ledger overlay (migration 101)', () => 
     expect(idea.components!.find((c) => c.component === 'architecture')!.state).toBe('incomplete');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Membership overlay (sprint-batch + experiment, IDEA-053 / TASK-202)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extends buildOverlayDb() (sprint-batch schema + sessions table) with the
+ * minimal experiment schema (migrations 048/049/051) the membership overlay
+ * hits: workflow_variants, experiments, experiment_seed_tasks, plus the
+ * workflow_runs.variant_id/variant_label denormalized columns. Hand-rolled
+ * (not the full migration files) because buildDb() already ALTERs
+ * ideas/epics/tasks.experiment_id (049's entity-sandbox columns) — re-running
+ * 049_experiments.sql's ALTERs on top would throw 'duplicate column name'.
+ */
+function buildMembershipDb(): Database.Database {
+  const db = buildOverlayDb();
+  db.exec(`
+    CREATE TABLE workflow_variants (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      spec_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE experiments (
+      id TEXT PRIMARY KEY,
+      project_id INTEGER,
+      workflow_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'side_by_side',
+      base_branch TEXT,
+      base_sha TEXT,
+      variant_a_id TEXT,
+      variant_b_id TEXT,
+      run_a_id TEXT,
+      run_b_id TEXT,
+      session_a_id TEXT,
+      session_b_id TEXT,
+      status TEXT NOT NULL DEFAULT 'running'
+    );
+    CREATE TABLE experiment_seed_tasks (
+      experiment_id TEXT NOT NULL,
+      arm TEXT NOT NULL,
+      original_task_id TEXT NOT NULL,
+      clone_task_id TEXT NOT NULL
+    );
+  `);
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_label TEXT');
+  return db;
+}
+
+/** Seed a sprint_batches row (status only; no hosting run). */
+function seedBatch(db: Database.Database, id: string, status: string): void {
+  db.prepare(
+    `INSERT INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', ?)`,
+  ).run(id, status);
+}
+
+/** Add `taskId` as a lane member of `batchId` (sprint_batch_tasks row). */
+function seedBatchTask(db: Database.Database, batchId: string, taskId: string): void {
+  db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'queued')`).run(
+    batchId,
+    taskId,
+  );
+}
+
+/** Seed a workflows row with an explicit name (buildMembershipDb has no default). */
+function seedNamedWorkflow(db: Database.Database, id: string, name: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+  ).run(id, name);
+}
+
+/** Seed the batch-owning workflow_runs row (workflow_runs.batch_id) — the hosting run resolveSprintBatchLabels reads. */
+function seedBatchOwningRun(
+  db: Database.Database,
+  opts: { runId: string; batchId: string; workflowId: string; sessionId?: string | null },
+): void {
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, session_id)
+     VALUES (?, ?, 1, 'running', 'default', ?, ?)`,
+  ).run(opts.runId, opts.workflowId, opts.batchId, opts.sessionId ?? null);
+}
+
+/** Seed an experiments row. */
+function seedExperiment(
+  db: Database.Database,
+  opts: {
+    id: string;
+    workflowId: string;
+    status: string;
+    variantAId: string;
+    variantBId: string;
+    runAId?: string | null;
+    runBId?: string | null;
+    sessionAId?: string | null;
+    sessionBId?: string | null;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO experiments
+       (id, project_id, workflow_id, kind, base_branch, base_sha, variant_a_id, variant_b_id,
+        run_a_id, run_b_id, session_a_id, session_b_id, status)
+     VALUES (?, 1, ?, 'side_by_side', 'main', 'sha1', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.id,
+    opts.workflowId,
+    opts.variantAId,
+    opts.variantBId,
+    opts.runAId ?? null,
+    opts.runBId ?? null,
+    opts.sessionAId ?? null,
+    opts.sessionBId ?? null,
+    opts.status,
+  );
+}
+
+/** Seed both arm mapping rows (A + B) for one original task -> its per-arm clones. */
+function seedExperimentSeedTask(
+  db: Database.Database,
+  opts: { experimentId: string; originalTaskId: string; cloneTaskIdA: string; cloneTaskIdB: string },
+): void {
+  db.prepare(
+    `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id) VALUES (?, 'A', ?, ?)`,
+  ).run(opts.experimentId, opts.originalTaskId, opts.cloneTaskIdA);
+  db.prepare(
+    `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id) VALUES (?, 'B', ?, ?)`,
+  ).run(opts.experimentId, opts.originalTaskId, opts.cloneTaskIdB);
+}
+
+describe('taskListing — sprint-batch membership overlay', () => {
+  it('a task in an active batch (running) projects exactly one sprint membership using the session-name label', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-sprint-1', 'sprint');
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', 'tsk_a');
+    seedSession(db, 'sess-1', 'quick-20260714-100000');
+    seedBatchOwningRun(db, { runId: 'run-1', batchId: 'bat_1', workflowId: 'wf-sprint-1', sessionId: 'sess-1' });
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const task = backlog.find((t) => t.id === 'tsk_a')!;
+    // The exact contract: label = `${base} · ${batchId.slice(0, 8)}` where base
+    // is the trimmed session name (session wins over workflow name).
+    expect(task.memberships).toEqual([
+      { kind: 'sprint', id: 'bat_1', label: 'quick-20260714-100000 · bat_1', status: 'running' },
+    ]);
+  });
+
+  it('a batch that has gone terminal (completed/failed/canceled) contributes NO membership', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 9);
+    seedBatch(db, 'bat_1', 'completed');
+    seedBatchTask(db, 'bat_1', 'tsk_a');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toEqual([]);
+  });
+
+  it('planning and finalizing (the other two active lifecycles) both project a membership', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_p', 'TASK-001', 1);
+    seedTask(db, 'tsk_f', 'TASK-002', 1);
+    seedBatch(db, 'bat_p', 'planning');
+    seedBatch(db, 'bat_f', 'finalizing');
+    seedBatchTask(db, 'bat_p', 'tsk_p');
+    seedBatchTask(db, 'bat_f', 'tsk_f');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_p')!.memberships).toEqual([
+      { kind: 'sprint', id: 'bat_p', label: 'Sprint · bat_p', status: 'planning' },
+    ]);
+    expect(backlog.find((t) => t.id === 'tsk_f')!.memberships).toEqual([
+      { kind: 'sprint', id: 'bat_f', label: 'Sprint · bat_f', status: 'finalizing' },
+    ]);
+  });
+
+  it('label falls back to the hosting run workflow name when no session is hosted', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-sprint-1', 'nightly-sprint');
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', 'tsk_a');
+    seedBatchOwningRun(db, { runId: 'run-1', batchId: 'bat_1', workflowId: 'wf-sprint-1' }); // no session
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships[0].label).toBe('nightly-sprint · bat_1');
+  });
+
+  it('label falls back to the literal "Sprint" when there is no hosting run at all', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', 'tsk_a');
+    // No workflow_runs row stamped with batch_id = 'bat_1' at all.
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships[0].label).toBe('Sprint · bat_1');
+  });
+
+  it('a task with no active batch reads back memberships: []', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toEqual([]);
+  });
+
+  it('ideas/epics never carry a sprint membership even when their nested task does', () => {
+    const db = buildMembershipDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', taskId);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const idea = backlog.find((t) => t.id === ideaId)!;
+    const epic = backlog.find((t) => t.id === epicId)!;
+    expect(idea.memberships).toEqual([]);
+    expect(epic.memberships).toEqual([]);
+    expect(epic.children![0].memberships).toEqual([
+      { kind: 'sprint', id: 'bat_1', label: 'Sprint · bat_1', status: 'running' },
+    ]);
+  });
+
+  it('selectTaskById and selectIdeaDecomposition agree with selectProjectBacklog on the same membership', () => {
+    const db = buildMembershipDb();
+    const { epicId, taskId } = seedFixture(db);
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', taskId);
+
+    const viaListing = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === epicId)!.children![0]
+      .memberships;
+    const viaTaskById = selectTaskById(dbAdapter(db), taskId)!.memberships;
+    const viaEpicChildren = selectTaskById(dbAdapter(db), epicId)!.children![0].memberships;
+
+    expect(viaTaskById).toEqual(viaListing);
+    expect(viaEpicChildren).toEqual(viaListing);
+  });
+});
+
+describe('taskListing — experiment membership overlay', () => {
+  it('a LIVE experiment (running) projects exactly ONE membership despite the two per-arm mapping rows', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: 'wfv_a',
+      variantBId: 'wfv_b',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_a', 'wf-1', 'Variant A')`).run();
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const task = backlog.find((t) => t.id === 'tsk_orig')!;
+    expect(task.memberships).toEqual([
+      { kind: 'experiment', id: 'exp_1', label: 'sprint: Variant A vs Variant B · exp_1', status: 'running' },
+    ]);
+  });
+
+  it('grading is also a live status; decided/abandoned/superseded are excluded', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, { id: 'exp_a', workflowId: 'wf-1', status: 'grading', variantAId: 'wfv_a', variantBId: 'wfv_b' });
+    seedExperiment(db, { id: 'exp_b', workflowId: 'wf-1', status: 'decided', variantAId: 'wfv_a', variantBId: 'wfv_b' });
+    seedExperimentSeedTask(db, { experimentId: 'exp_a', originalTaskId: 'tsk_a', cloneTaskIdA: 'c1', cloneTaskIdB: 'c2' });
+    seedExperimentSeedTask(db, { experimentId: 'exp_b', originalTaskId: 'tsk_b', cloneTaskIdA: 'c3', cloneTaskIdB: 'c4' });
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toHaveLength(1);
+    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships[0].status).toBe('grading');
+    expect(backlog.find((t) => t.id === 'tsk_b')!.memberships).toEqual([]);
+  });
+
+  it('only the VISIBLE ORIGINAL task gets a membership — a hidden per-arm clone does not', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, { id: 'exp_1', workflowId: 'wf-1', status: 'running', variantAId: 'wfv_a', variantBId: 'wfv_b' });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    // The clone tasks are real rows too (experiment-tagged, hence normally
+    // hidden from the default backlog) — pass includeExperimentTagged to make
+    // them visible here and prove they still carry NO membership entry.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, experiment_id, created_at)
+       VALUES ('tsk_clone_a', 1, 'TASK-CLONE-A', 'clone a', 'b', 'board-1-default', ?, 'exp_1', '2026-01-01T00:00:00.000Z')`,
+    ).run(stageId(6));
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1, { includeExperimentTagged: true });
+    expect(backlog.find((t) => t.id === 'tsk_clone_a')!.memberships).toEqual([]);
+  });
+
+  it('a real variant arm falls back to the run\'s denormalized variant_label when the variant row is gone', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, variant_label)
+       VALUES ('run-a', 'wf-1', 1, 'completed', 'default', 'Snapshot Label A')`,
+    ).run();
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: 'wfv_deleted',
+      variantBId: 'wfv_b',
+      runAId: 'run-a',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+    // No 'wfv_deleted' row in workflow_variants — the variant was deleted.
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships[0].label).toBe(
+      'sprint: Snapshot Label A vs Variant B · exp_1',
+    );
+  });
+
+  it('a real variant arm falls back to "Variant <id8>" when neither the variant row nor a run label exists', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: 'wfv_deleted1',
+      variantBId: 'wfv_b',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships[0].label).toBe(
+      'sprint: Variant wfv_dele vs Variant B · exp_1',
+    );
+  });
+
+  it('the baseline sentinel always renders "Current workflow"', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: '__baseline__',
+      variantBId: 'wfv_b',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships[0].label).toBe(
+      'sprint: Current workflow vs Variant B · exp_1',
+    );
+  });
+
+  it('the quick sentinel renders the arm session\'s trimmed name, falling back to "Quick session"', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedTask(db, 'tsk_orig2', 'TASK-002', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedSession(db, 'sess-quick', 'my-quick-session');
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: '__quick__',
+      variantBId: 'wfv_b',
+      sessionAId: 'sess-quick',
+    });
+    seedExperiment(db, {
+      id: 'exp_2',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: '__quick__',
+      variantBId: 'wfv_b',
+      // no sessionAId — the quick session was never hosted / already gone.
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_2',
+      originalTaskId: 'tsk_orig2',
+      cloneTaskIdA: 'tsk_clone_c',
+      cloneTaskIdB: 'tsk_clone_d',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships[0].label).toBe(
+      'sprint: my-quick-session vs Variant B · exp_1',
+    );
+    expect(backlog.find((t) => t.id === 'tsk_orig2')!.memberships[0].label).toBe(
+      'sprint: Quick session vs Variant B · exp_2',
+    );
+  });
+
+  it('the workflow-name base falls back to "Experiment" when the workflow row is gone', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-missing',
+      status: 'running',
+      variantAId: '__baseline__',
+      variantBId: '__quick__',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships[0].label).toBe(
+      'Experiment: Current workflow vs Quick session · exp_1',
+    );
+  });
+
+  it('a task with no live experiment reads back memberships: []', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.find((t) => t.id === 'tsk_orig')!.memberships).toEqual([]);
+  });
+
+  it('a task can carry BOTH a sprint and an experiment membership at once', () => {
+    const db = buildMembershipDb();
+    seedTask(db, 'tsk_orig', 'TASK-001', 6);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedBatch(db, 'bat_1', 'running');
+    seedBatchTask(db, 'bat_1', 'tsk_orig');
+    seedExperiment(db, {
+      id: 'exp_1',
+      workflowId: 'wf-1',
+      status: 'running',
+      variantAId: '__baseline__',
+      variantBId: '__quick__',
+    });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: 'tsk_orig',
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const memberships = backlog.find((t) => t.id === 'tsk_orig')!.memberships;
+    expect(memberships).toHaveLength(2);
+    expect(memberships.map((m) => m.kind).sort()).toEqual(['experiment', 'sprint']);
+  });
+});

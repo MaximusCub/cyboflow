@@ -239,6 +239,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     inFlow: [],
     awaitingReview: false,
     isDone: false,
+    memberships: [],
     created_at: '2026-06-18T00:00:00Z',
     updated_at: '2026-06-18T00:00:00Z',
     ...overrides,

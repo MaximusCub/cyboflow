@@ -46,6 +46,7 @@ function makeItem(overrides: Partial<BacklogTaskItem>): BacklogTaskItem {
     inFlow: [],
     awaitingReview: false,
     isDone: false,
+    memberships: [],
     created_at: '',
     updated_at: '',
     ...overrides,

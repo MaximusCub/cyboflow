@@ -166,6 +166,7 @@ function makeEvent(
     inFlow: [],
     awaitingReview: false,
     isDone: false,
+    memberships: [],
     created_at: NOW,
     updated_at: NOW,
     ...overrides,

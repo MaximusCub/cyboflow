@@ -133,6 +133,7 @@ function fakeItem(taskId: string, projectId: number): BacklogTaskItem {
     inFlow: [],
     awaitingReview: false,
     isDone: false,
+    memberships: [],
     created_at: now,
     updated_at: now,
   };

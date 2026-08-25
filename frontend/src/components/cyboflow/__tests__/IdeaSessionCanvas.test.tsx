@@ -131,6 +131,7 @@ const IDEA = {
   inFlow: [],
   awaitingReview: false,
   isDone: false,
+  memberships: [],
   created_at: '',
   updated_at: '',
 } as BacklogTaskItem;

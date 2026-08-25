@@ -75,6 +75,7 @@ function makeTask(overrides: Partial<BacklogTaskItem> & { id: string }): Backlog
     inFlow: overrides.inFlow ?? [],
     awaitingReview: overrides.awaitingReview ?? false,
     isDone: overrides.isDone ?? false,
+    memberships: overrides.memberships ?? [],
     children: overrides.children,
     childCount: overrides.childCount,
     pendingTasks: overrides.pendingTasks,

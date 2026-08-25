@@ -44,6 +44,7 @@ import { listRunIdsForEntity } from './entityRunLinks';
 import { ReviewItemRouter } from './reviewItemRouter';
 import type { DatabaseLike } from './types';
 import type {
+  BacklogMembership,
   BacklogTaskItem,
   EntityCategory,
   FlowOverlay,
@@ -56,7 +57,9 @@ import type {
   TaskType,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
-import type { ExperimentArm } from '../../../shared/types/experiments';
+import type { ExperimentArm, ExperimentStatus } from '../../../shared/types/experiments';
+import type { SprintBatchStatus } from '../../../shared/types/sprintBatch';
+import { isBaselineArm, isQuickArm } from '../../../shared/types/experiments';
 import type { IdeaComponentKey, IdeaComponentState } from '../../../shared/types/ideaComponents';
 import { IDEA_COMPONENTS_STALE_ON_BODY_CHANGE } from '../../../shared/types/ideaComponents';
 import { extractArchDesignSection, extractIdeaSpecSection } from '../../../shared/types/artifacts';
@@ -393,6 +396,70 @@ interface FieldDelta {
   field: string;
   from: unknown;
   to: unknown;
+}
+
+/** One row of the emit-path sprint-membership query — mirrors taskListing.ts's SprintMembershipRow. */
+interface SprintMembershipRow {
+  task_id: string;
+  batch_id: string;
+  status: SprintBatchStatus;
+}
+
+/** One row of the emit-path experiment-membership query — mirrors taskListing.ts's ExperimentMembershipRow. */
+interface ExperimentMembershipRow {
+  task_id: string;
+  experiment_id: string;
+  status: ExperimentStatus;
+  workflow_id: string;
+  variant_a_id: string;
+  variant_b_id: string;
+  run_a_id: string | null;
+  run_b_id: string | null;
+  session_a_id: string | null;
+  session_b_id: string | null;
+}
+
+/** Generic `id -> value` bulk lookup — mirrors taskListing.ts's fetchColumnMap. */
+function fetchColumnMap(
+  db: DatabaseLike,
+  table: string,
+  idColumn: string,
+  valueColumn: string,
+  ids: readonly string[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (ids.length === 0) return map;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT ${idColumn} AS id, ${valueColumn} AS value FROM ${table} WHERE ${idColumn} IN (${placeholders})`,
+    )
+    .all(...ids) as Array<{ id: string; value: string | null }>;
+  for (const r of rows) {
+    if (typeof r.value === 'string') map.set(r.id, r.value);
+  }
+  return map;
+}
+
+/** One arm's human label — mirrors taskListing.ts's resolveExperimentArmLabel exactly. */
+function resolveExperimentArmLabel(
+  variantId: string,
+  runId: string | null,
+  sessionId: string | null,
+  variantLabelById: Map<string, string>,
+  runVariantLabelById: Map<string, string>,
+  sessionNameById: Map<string, string>,
+): string {
+  if (isBaselineArm(variantId)) return 'Current workflow';
+  if (isQuickArm(variantId)) {
+    const sessionName = sessionId ? sessionNameById.get(sessionId)?.trim() : undefined;
+    return sessionName || 'Quick session';
+  }
+  const variantLabel = variantLabelById.get(variantId)?.trim();
+  if (variantLabel) return variantLabel;
+  const runVariantLabel = runId ? runVariantLabelById.get(runId)?.trim() : undefined;
+  if (runVariantLabel) return runVariantLabel;
+  return `Variant ${variantId.slice(0, 8)}`;
 }
 
 /** The board stage position considered "done" (merged & archived). */
@@ -3294,6 +3361,149 @@ export class TaskChangeRouter {
     }
   }
 
+  /**
+   * Sprint-membership entries for ONE task at emit time (IDEA-053, TASK-202).
+   * Query SHAPE mirrors taskListing.ts's gatherSprintMemberships exactly (an
+   * `IN (?)` bulk query, here with a single-element array) so the emit path and
+   * the full-read path can never disagree on which batches count or how a
+   * label is derived — only the CARDINALITY differs (one task per event vs a
+   * whole listing's worth). Fail-soft on a pre-022 schema.
+   */
+  private gatherSprintMemberships(taskId: string): BacklogMembership[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT sbt.task_id AS task_id, sb.id AS batch_id, sb.status AS status
+             FROM sprint_batch_tasks sbt
+             JOIN sprint_batches sb ON sb.id = sbt.batch_id
+            WHERE sbt.task_id = ?
+              AND sb.status IN ('planning', 'running', 'finalizing')`,
+        )
+        .all(taskId) as SprintMembershipRow[];
+      if (rows.length === 0) return [];
+
+      const hasSession = this.columnExists('workflow_runs', 'session_id') && this.columnExists('sessions', 'name');
+      const sessionSelect = hasSession ? 's.name AS session_name' : 'NULL AS session_name';
+      const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+      const batchIds = [...new Set(rows.map((r) => r.batch_id))];
+      const placeholders = batchIds.map(() => '?').join(',');
+      const labelRows = this.db
+        .prepare(
+          `SELECT sb.id AS batch_id, ${sessionSelect}, w.name AS workflow_name
+             FROM sprint_batches sb
+             LEFT JOIN workflow_runs wr ON wr.id = (
+               SELECT wr2.id FROM workflow_runs wr2
+                WHERE wr2.batch_id = sb.id
+                ORDER BY wr2.created_at DESC, wr2.id DESC
+                LIMIT 1
+             )
+             ${sessionJoin}
+             LEFT JOIN workflows w ON w.id = wr.workflow_id
+            WHERE sb.id IN (${placeholders})`,
+        )
+        .all(...batchIds) as Array<{ batch_id: string; session_name: string | null; workflow_name: string | null }>;
+      const labelByBatch = new Map<string, string>();
+      for (const r of labelRows) {
+        const base = r.session_name?.trim() || r.workflow_name?.trim() || 'Sprint';
+        labelByBatch.set(r.batch_id, `${base} · ${r.batch_id.slice(0, 8)}`);
+      }
+
+      return rows.map((r) => ({
+        kind: 'sprint' as const,
+        id: r.batch_id,
+        label: labelByBatch.get(r.batch_id) ?? `Sprint · ${r.batch_id.slice(0, 8)}`,
+        status: r.status,
+      }));
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) return [];
+      throw err;
+    }
+  }
+
+  /**
+   * Experiment-membership entries for ONE task at emit time (IDEA-053,
+   * TASK-202). Query SHAPE + label derivation mirror taskListing.ts's
+   * gatherExperimentMemberships/resolveExperimentLabels exactly — see those for
+   * the full fallback-chain doc. Fail-soft on a pre-049/pre-051 schema.
+   */
+  private gatherExperimentMemberships(taskId: string): BacklogMembership[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT DISTINCT est.original_task_id AS task_id, e.id AS experiment_id, e.status AS status,
+                  e.workflow_id AS workflow_id, e.variant_a_id AS variant_a_id, e.variant_b_id AS variant_b_id,
+                  e.run_a_id AS run_a_id, e.run_b_id AS run_b_id,
+                  e.session_a_id AS session_a_id, e.session_b_id AS session_b_id
+             FROM experiment_seed_tasks est
+             JOIN experiments e ON e.id = est.experiment_id
+            WHERE est.original_task_id = ?
+              AND e.status IN ('running', 'grading')`,
+        )
+        .all(taskId) as ExperimentMembershipRow[];
+      if (rows.length === 0) return [];
+
+      const workflowIds = [...new Set(rows.map((r) => r.workflow_id))];
+      const workflowNameById = fetchColumnMap(this.db, 'workflows', 'id', 'name', workflowIds);
+
+      const variantIds = [
+        ...new Set(
+          rows.flatMap((r) => [r.variant_a_id, r.variant_b_id]).filter((id) => !isBaselineArm(id) && !isQuickArm(id)),
+        ),
+      ];
+      const variantLabelById = fetchColumnMap(this.db, 'workflow_variants', 'id', 'label', variantIds);
+
+      const runIds = [
+        ...new Set(rows.flatMap((r) => [r.run_a_id, r.run_b_id]).filter((id): id is string => id !== null)),
+      ];
+      const runVariantLabelById = fetchColumnMap(this.db, 'workflow_runs', 'id', 'variant_label', runIds);
+
+      const sessionIds = [
+        ...new Set(rows.flatMap((r) => [r.session_a_id, r.session_b_id]).filter((id): id is string => id !== null)),
+      ];
+      const sessionNameById = this.columnExists('sessions', 'name')
+        ? fetchColumnMap(this.db, 'sessions', 'id', 'name', sessionIds)
+        : new Map<string, string>();
+
+      return rows.map((r) => {
+        const workflowBase = workflowNameById.get(r.workflow_id)?.trim() || 'Experiment';
+        const armALabel = resolveExperimentArmLabel(
+          r.variant_a_id,
+          r.run_a_id,
+          r.session_a_id,
+          variantLabelById,
+          runVariantLabelById,
+          sessionNameById,
+        );
+        const armBLabel = resolveExperimentArmLabel(
+          r.variant_b_id,
+          r.run_b_id,
+          r.session_b_id,
+          variantLabelById,
+          runVariantLabelById,
+          sessionNameById,
+        );
+        return {
+          kind: 'experiment' as const,
+          id: r.experiment_id,
+          label: `${workflowBase}: ${armALabel} vs ${armBLabel} · ${r.experiment_id.slice(0, 8)}`,
+          status: r.status,
+        };
+      });
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) return [];
+      throw err;
+    }
+  }
+
+  /**
+   * READ-ONLY overlay helper: the emit-path counterpart of taskListing.ts's
+   * loadMembershipsForTaskIds, scoped to the single task the event announces —
+   * see {@link gatherSprintMemberships} / {@link gatherExperimentMemberships}.
+   */
+  private gatherMemberships(taskId: string): BacklogMembership[] {
+    return [...this.gatherSprintMemberships(taskId), ...this.gatherExperimentMemberships(taskId)];
+  }
+
   private buildBacklogTaskItem(type: TaskType, taskId: string): BacklogTaskItem | null {
     const row = this.readEntity(type, this.projectIdOf(type, taskId) ?? -1, taskId);
     if (!row) return null;
@@ -3363,6 +3573,12 @@ export class TaskChangeRouter {
       // original while its arms run. Only a `tasks` row can be a seed, so this is
       // naturally false for ideas/epics.
       experimentSeed: type === 'task' ? this.isLiveExperimentSeed(taskId) : false,
+      // Exact sprint/experiment memberships (IDEA-053, TASK-202). Same
+      // silent-drop rationale as the stamps above — MUST be projected on the
+      // emit path (not just the seed-query path) or a card's membership badge
+      // would vanish the instant anything touches it. Ideas/epics never carry a
+      // sprint/experiment membership, so they stay [] (mirrors experimentSeed).
+      memberships: type === 'task' ? this.gatherMemberships(taskId) : [],
       // Idea component ledger (migration 101): stamped on the emit path for the
       // SAME "emit-path stamp parity" reason as decomposed_at/approved_at above —
       // a field present on the seed-query path (taskListing.ts) but absent here

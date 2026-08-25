@@ -14,6 +14,8 @@
  * (main process AND renderer).
  */
 import type { IdeaComponentState } from './ideaComponents';
+import type { SprintBatchStatus } from './sprintBatch';
+import type { ExperimentStatus } from './experiments';
 
 // ---------------------------------------------------------------------------
 // Scalar enums
@@ -123,6 +125,33 @@ export interface TaskDependencyRef {
 }
 
 /**
+ * One EXACT sprint-batch or experiment membership a task participates in right
+ * now (IDEA-053, TASK-202). Computed on read from `sprint_batch_tasks` +
+ * `sprint_batches` (sprint) and `experiment_seed_tasks` + `experiments`
+ * (experiment) — a pure view projection, never stored. `id` is the stable
+ * `sprint_batches.id` / `experiments.id`; `label` is a DERIVED display string
+ * (see loadMembershipsForTaskIds in taskListing.ts for the exact fallback
+ * chain) — there is no user-editable membership name. Entries are immutable
+ * (`Readonly<...>`) so a consumer cannot accidentally mutate a shared array
+ * element in place.
+ */
+export type BacklogMembership =
+  | Readonly<{
+      kind: 'sprint';
+      /** `sprint_batches.id` — restricted to planning/running/finalizing batches. */
+      id: string;
+      label: string;
+      status: SprintBatchStatus;
+    }>
+  | Readonly<{
+      kind: 'experiment';
+      /** `experiments.id` — restricted to running/grading experiments. */
+      id: string;
+      label: string;
+      status: ExperimentStatus;
+    }>;
+
+/**
  * The read-model item rendered by the backlog UI. Columns from `tasks` plus
  * the derived overlays computed on read (selectProjectBacklog / computeTaskOverlay).
  */
@@ -216,6 +245,15 @@ export interface BacklogTaskItem {
    * shape parity; consumers should treat `undefined` as "unknown / not gated".
    */
   readyToWork?: boolean;
+  /**
+   * Exact sprint-batch / experiment memberships this task belongs to RIGHT NOW
+   * (IDEA-053, TASK-202) — [] when none apply. REQUIRED on every constructor
+   * (full read AND live event), same silent-drop rationale as `decomposed_at`/
+   * `approved_at`/`sort_order` above: an omitted (undefined) array would break
+   * a consumer that filters/badges off it on a live upsert. Only ever computed
+   * for `type === 'task'`; ideas/epics always read back `[]`.
+   */
+  memberships: readonly BacklogMembership[];
   /**
    * The idea component ledger (migration 101, shared/types/ideaComponents.ts)
    * — one entry per tracked component, hybrid-resolved: an authoritative

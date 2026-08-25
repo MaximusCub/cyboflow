@@ -3498,6 +3498,214 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // buildBacklogTaskItem — memberships overlay (IDEA-053, TASK-202)
+  // -------------------------------------------------------------------------
+
+  describe('buildBacklogTaskItem — memberships overlay (IDEA-053, TASK-202)', () => {
+    /**
+     * Adds a minimal `sessions` table + `workflow_runs.session_id` column
+     * (mirrors the inFlow describe block above) PLUS the minimal experiment
+     * schema (migrations 048/049/051) the membership overlay hits:
+     * workflow_variants, experiments, experiment_seed_tasks, and the
+     * workflow_runs.variant_id/variant_label denormalized columns. Hand-rolled
+     * (not the full migration files) — buildDb() already ALTERs
+     * ideas/epics/tasks.experiment_id, so re-running 049's ALTERs would throw
+     * 'duplicate column name'.
+     */
+    function addMembershipSchema(db: Database.Database): void {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL)');
+      // taskListing.selectTaskById's UNION reads experiment_id unconditionally
+      // (migration 049's entity-sandbox columns) — needed for the shape-parity
+      // test below, which calls selectTaskById against this same fixture DB.
+      db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT;');
+      db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT;');
+      db.exec(`
+        CREATE TABLE workflow_variants (
+          id TEXT PRIMARY KEY,
+          workflow_id TEXT NOT NULL,
+          label TEXT NOT NULL,
+          spec_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE experiments (
+          id TEXT PRIMARY KEY,
+          project_id INTEGER,
+          workflow_id TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'side_by_side',
+          base_branch TEXT,
+          base_sha TEXT,
+          variant_a_id TEXT,
+          variant_b_id TEXT,
+          run_a_id TEXT,
+          run_b_id TEXT,
+          session_a_id TEXT,
+          session_b_id TEXT,
+          status TEXT NOT NULL DEFAULT 'running'
+        );
+        CREATE TABLE experiment_seed_tasks (
+          experiment_id TEXT NOT NULL,
+          arm TEXT NOT NULL,
+          original_task_id TEXT NOT NULL,
+          clone_task_id TEXT NOT NULL
+        );
+      `);
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_label TEXT');
+    }
+
+    function seedSession(db: Database.Database, id: string, name: string): void {
+      db.prepare('INSERT INTO sessions (id, name) VALUES (?, ?)').run(id, name);
+    }
+
+    function seedBatch(db: Database.Database, id: string, status: string): void {
+      db.prepare(
+        `INSERT INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', ?)`,
+      ).run(id, status);
+    }
+
+    function seedBatchTask(db: Database.Database, batchId: string, taskId: string): void {
+      db.prepare(
+        `INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'queued')`,
+      ).run(batchId, taskId);
+    }
+
+    function seedExperiment(
+      db: Database.Database,
+      opts: { id: string; workflowId: string; status: string; variantAId: string; variantBId: string },
+    ): void {
+      db.prepare(
+        `INSERT INTO experiments (id, project_id, workflow_id, kind, base_branch, base_sha, variant_a_id, variant_b_id, status)
+         VALUES (?, 1, ?, 'side_by_side', 'main', 'sha1', ?, ?, ?)`,
+      ).run(opts.id, opts.workflowId, opts.variantAId, opts.variantBId, opts.status);
+    }
+
+    function seedExperimentSeedTask(
+      db: Database.Database,
+      opts: { experimentId: string; originalTaskId: string; cloneTaskIdA: string; cloneTaskIdB: string },
+    ): void {
+      db.prepare(
+        `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id) VALUES (?, 'A', ?, ?)`,
+      ).run(opts.experimentId, opts.originalTaskId, opts.cloneTaskIdA);
+      db.prepare(
+        `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id) VALUES (?, 'B', ?, ?)`,
+      ).run(opts.experimentId, opts.originalTaskId, opts.cloneTaskIdB);
+    }
+
+    /** Force an emit without touching the stage (avoids the stage active-run guard). */
+    async function emitNoopUpdate(router: TaskChangeRouter, taskId: string): Promise<TaskChangedEvent> {
+      const events: TaskChangedEvent[] = [];
+      const off = (e: TaskChangedEvent): number => events.push(e);
+      taskChangeEvents.on(taskProjectChannel(1), off);
+      await router.applyChange(1, { actor: 'user', taskId, fields: { summary: 'noop' } });
+      taskChangeEvents.removeListener(taskProjectChannel(1), off);
+      return events[events.length - 1];
+    }
+
+    it('a task in an ACTIVE batch (running) emits exactly one sprint membership', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedBatch(db, 'bat-1', 'running');
+      seedBatchTask(db, 'bat-1', taskId);
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.memberships).toEqual([
+        { kind: 'sprint', id: 'bat-1', label: 'Sprint · bat-1', status: 'running' },
+      ]);
+    });
+
+    it('a TERMINAL batch (completed) emits NO sprint membership', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedBatch(db, 'bat-1', 'completed');
+      seedBatchTask(db, 'bat-1', taskId);
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.memberships).toEqual([]);
+    });
+
+    it('a LIVE experiment emits exactly ONE membership despite the two per-arm mapping rows', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      ).run();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedExperiment(db, { id: 'exp_1', workflowId: 'wf-1', status: 'running', variantAId: 'wfv_a', variantBId: 'wfv_b' });
+      seedExperimentSeedTask(db, {
+        experimentId: 'exp_1',
+        originalTaskId: taskId,
+        cloneTaskIdA: 'clone-a',
+        cloneTaskIdB: 'clone-b',
+      });
+      db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_a', 'wf-1', 'Variant A')`).run();
+      db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.memberships).toEqual([
+        { kind: 'experiment', id: 'exp_1', label: 'sprint: Variant A vs Variant B · exp_1', status: 'running' },
+      ]);
+    });
+
+    it('a task with no active batch/experiment emits memberships: []', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.memberships).toEqual([]);
+    });
+
+    it('an idea/epic never carries a membership (sprint/experiment membership is task-only)', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId: ideaId } = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+
+      const event = await emitNoopUpdate(router, ideaId);
+      expect(event.task.memberships).toEqual([]);
+    });
+
+    it('emit-path SHAPE PARITY: the emitted event agrees with taskListing.selectTaskById for the same fixture', async () => {
+      const db = buildDb();
+      addMembershipSchema(db);
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      ).run();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedSession(db, 'sess-1', 'quick-session-name');
+      seedBatch(db, 'bat-1', 'running');
+      seedBatchTask(db, 'bat-1', taskId);
+      // The batch's hosting run — resolveSprintBatchLabels reads its session name.
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, session_id)
+         VALUES ('run-batch', 'wf-1', 1, 'running', 'default', 'bat-1', 'sess-1')`,
+      ).run();
+      // Plus a live experiment on the SAME task, so both membership kinds are
+      // exercised in the parity check, not just sprint.
+      seedExperiment(db, { id: 'exp_1', workflowId: 'wf-1', status: 'grading', variantAId: '__baseline__', variantBId: '__quick__' });
+      seedExperimentSeedTask(db, {
+        experimentId: 'exp_1',
+        originalTaskId: taskId,
+        cloneTaskIdA: 'clone-a',
+        cloneTaskIdB: 'clone-b',
+      });
+
+      const event = await emitNoopUpdate(router, taskId);
+      const viaListing = selectTaskById(dbAdapter(db), taskId)!;
+      expect(event.task.memberships).toHaveLength(2);
+      expect(event.task.memberships).toEqual(viaListing.memberships);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // recomputeEpicStage — the ROLLUP over an epic's child tasks
   // -------------------------------------------------------------------------
 
