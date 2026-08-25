@@ -6,6 +6,7 @@ import { app } from 'electron';
 import { loadSdkQuery } from '../../../utils/lazyAgentSdk';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
+import { orchTokenEnv } from '../../../orchestrator/orchAuthToken';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
@@ -3230,6 +3231,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
           return mcpServers as Record<string, McpServerConfig>;
         }
 
+        // The run identity this MCP subprocess speaks for, resolved ONCE so the
+        // env var and the token minted for it cannot drift apart. For workflow
+        // runs this is the real workflow_runs.id; legacy quick sessions (no run)
+        // fall back to sessionId; the global agent's synthetic
+        // `agent:<threadId>` identity arrives as sessionId, which is what scopes
+        // its cross-project read family to its own thread.
+        const mcpRunId =
+          options.runId && options.runId.length > 0 ? options.runId : options.sessionId;
+
         const cyboflowEntry: McpServerConfig = {
           command: nodeCmd,
           args: [cyboflowMcpScriptPath],
@@ -3240,8 +3250,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // undefined/empty and we fall back to sessionId so the value is
             // always populated. Empty string is treated as absent. The global
             // agent's synthetic `agent:<threadId>` identity arrives as sessionId.
-            CYBOFLOW_RUN_ID: (options.runId && options.runId.length > 0) ? options.runId : options.sessionId,
+            CYBOFLOW_RUN_ID: mcpRunId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
+            // Bearer token proving this subprocess belongs to `mcpRunId`
+            // (orchAuthToken.ts). The socket server refuses to bind a
+            // self-declared runId without it. This entry is held in memory and
+            // handed to the SDK — unlike the interactive substrate, nothing
+            // here is written to disk, so the secret never lands in a file.
+            ...orchTokenEnv(mcpRunId),
             // S0.2(d) / Design Mode v0: tag the server's advertised tool scope so
             // cyboflowMcpServer surfaces the matching scoped family (and gates out
             // the run-scoped tools): 'global-agent' → the global-agent read/propose

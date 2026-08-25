@@ -13,6 +13,7 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
+import { mintOrchToken } from '../../../orchestrator/orchAuthToken';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
 import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentModelContext';
@@ -899,6 +900,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       });
       env.CYBOFLOW_RUN_ID = runId;
       env.CYBOFLOW_ORCH_SOCKET = this.orchSocketPath;
+      // Bearer token for `runId` (orchAuthToken.ts), proving to OrchSocketServer
+      // that this REPL's clients really belong to this run.
+      //
+      // ENV ONLY — deliberately absent from the `--mcp-config` file
+      // writeInteractiveMcpConfig writes, so the secret never lands on disk. It
+      // still reaches the cyboflow MCP subprocess because the claude CLI passes
+      // its full process env down to stdio MCP servers (merged under the
+      // config's own `env` block), and it reaches the PreToolUse/Stop/Question
+      // shell hooks the same way. The runId here and the one that config
+      // declares come from the SAME resolveGateRunId call inputs, so the token
+      // and the declared run can never disagree.
+      env.CYBOFLOW_ORCH_TOKEN = mintOrchToken(runId);
       // Per-run artifacts dir — SDK-substrate parity (claudeCodeManager.
       // composeRunEnv). The ui-prototype step writes its static prototype under
       // "$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype" and the visual-verify step

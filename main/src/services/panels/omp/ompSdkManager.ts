@@ -24,6 +24,7 @@ import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import type { Logger } from '../../../utils/logger';
 import { getShellPath } from '../../../utils/shellPath';
+import { orchTokenEnv } from '../../../orchestrator/orchAuthToken';
 import type { ConfigManager } from '../../configManager';
 import { perfBump } from '../../perfTracer';
 import type { SessionManager } from '../../sessionManager';
@@ -756,6 +757,11 @@ export class OmpSdkManager extends AbstractCliManager {
       [pathKey]: mergePathValue(getShellPath(), inherited[pathKey]),
       CYBOFLOW_RUN_ID: runId,
       CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
+      // Bearer token for `runId` (orchAuthToken.ts). `.omp/mcp.json` names this
+      // var rather than carrying its value (OMP's bare-name indirection), so
+      // the secret is resolved from THIS process env at spawn and never written
+      // into that shared, on-disk config file.
+      ...orchTokenEnv(runId),
       // Per-run artifacts dir — the omission codex-sdk shipped with and the
       // proposal explicitly says not to repeat (§5.4). Keyed by the same runId as
       // CYBOFLOW_RUN_ID so cyboflow_report_artifact and the artifact resolvers

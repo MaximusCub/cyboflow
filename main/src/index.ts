@@ -346,6 +346,9 @@ for (const key of [
   'CYBOFLOW_RUN_ID',
   'CYBOFLOW_SESSION_ID',
   'CYBOFLOW_ORCH_SOCKET',
+  // A hosting instance's bearer token is not only stale here, it is a live
+  // credential for ANOTHER app instance's run — strip it hardest of all.
+  'CYBOFLOW_ORCH_TOKEN',
   'CYBOFLOW_RUN_ARTIFACTS_DIR',
   'CYBOFLOW_SUBSTRATE',
   'CYBOFLOW_EXECUTION_MODEL',

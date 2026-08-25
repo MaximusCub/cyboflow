@@ -27,6 +27,7 @@ import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { makeRawEventsDb, countRawEvents } from '../../../../orchestrator/__test_fixtures__/rawEvents';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
+import { orchTokenRegistry } from '../../../../orchestrator/orchAuthToken';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
@@ -778,6 +779,23 @@ describe('InteractiveClaudeManager', () => {
       );
     });
 
+    // Bearer token (orchAuthToken.ts). The interactive substrate is the one
+    // path whose MCP config lives ON DISK, so the token deliberately travels in
+    // the PTY env instead — the claude CLI passes its full process env down to
+    // stdio MCP servers and to the PreToolUse/Stop/Question shell hooks.
+    it('exports a CYBOFLOW_ORCH_TOKEN that verifies against the resolved run id', async () => {
+      mgr.setOrchSocketPath('/tmp/orch.sock');
+      const env = await mgr.callInitializeCliEnvironment({ ...opts, runId: 'run-tok-i' });
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-tok-i');
+      expect(orchTokenRegistry.verify('run-tok-i', env.CYBOFLOW_ORCH_TOKEN)).toBe(true);
+      expect(orchTokenRegistry.verify('run-other', env.CYBOFLOW_ORCH_TOKEN)).toBe(false);
+    });
+
+    it('omits CYBOFLOW_ORCH_TOKEN when no orchestrator socket is injected', async () => {
+      const env = await mgr.callInitializeCliEnvironment(opts);
+      expect(env.CYBOFLOW_ORCH_TOKEN).toBeUndefined();
+    });
+
     it('omits CYBOFLOW_RUN_ARTIFACTS_DIR when no orchestrator socket is injected', async () => {
       const env = await mgr.callInitializeCliEnvironment(opts);
       expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
@@ -1031,6 +1049,9 @@ describe('InteractiveClaudeManager', () => {
           mcpServers?: { cyboflow?: { env?: Record<string, string> } };
         };
         expect(written.mcpServers?.cyboflow?.env?.CYBOFLOW_ORCH_SOCKET).toBe('/tmp/orch.sock');
+        // The bearer token must NOT be in the file — it rides the PTY env.
+        expect(written.mcpServers?.cyboflow?.env?.CYBOFLOW_ORCH_TOKEN).toBeUndefined();
+        expect(fs.readFileSync(appConfigPath, 'utf8')).not.toMatch(/[0-9a-f]{64}/);
 
         // …and the user's checkout was NOT touched: no .cyboflow dir, no
         // .git/info/exclude append.

@@ -14,6 +14,17 @@ import { startParentWatchdog, resolveWatchdogIntervalMs } from './parentWatchdog
 
 const runId = process.env.CYBOFLOW_RUN_ID;
 const socketPath = process.env.CYBOFLOW_ORCH_SOCKET;
+/**
+ * This process's bearer token for `runId`, minted by the orchestrator and
+ * handed over in the spawn env (orchAuthToken.ts). Every frame carries it: the
+ * server refuses to bind a self-declared runId without it.
+ *
+ * Deliberately NOT part of the fatal env check above — the socket server logs
+ * the refusal and closes the connection, which surfaces as a clear IPC failure,
+ * and a hard exit here would take down a session over a value the server may
+ * not even be enforcing (see CYBOFLOW_DISABLE_ORCH_SOCK_AUTH).
+ */
+const orchToken = process.env.CYBOFLOW_ORCH_TOKEN;
 
 if (!runId || !socketPath) {
   process.stderr.write(
@@ -183,7 +194,14 @@ function sendQuery(
       },
     });
 
-    const payload = JSON.stringify({ type, requestId, runId, ...params });
+    // `token` is spread LAST so a params key can never shadow it.
+    const payload = JSON.stringify({
+      type,
+      requestId,
+      runId,
+      ...params,
+      ...(orchToken !== undefined ? { token: orchToken } : {}),
+    });
     ipcClient.write(payload + '\n');
   });
 }
