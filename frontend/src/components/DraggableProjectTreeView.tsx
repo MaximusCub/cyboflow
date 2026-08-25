@@ -9,6 +9,7 @@ import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
 import { API } from '../utils/api';
+import { trpc } from '../trpc/client';
 import { debounce } from '../utils/debounce';
 import { throttle } from '../utils/performanceUtils';
 import type { Project } from '../types/project';
@@ -882,11 +883,9 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
       const newSet = new Set(prev);
       if (newSet.has(projectId)) {
         newSet.delete(projectId);
-        if (window.electronAPI?.git?.cancelStatusForProject) {
-          window.electronAPI.git.cancelStatusForProject(projectId).catch(error => {
-            console.error('[DraggableProjectTreeView] Failed to cancel git status:', error);
-          });
-        }
+        trpc.cyboflow.sessionGit.cancelStatusForProject.mutate({ projectId }).catch(error => {
+          console.error('[DraggableProjectTreeView] Failed to cancel git status:', error);
+        });
       } else {
         newSet.add(projectId);
       }

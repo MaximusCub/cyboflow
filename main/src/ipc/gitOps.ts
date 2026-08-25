@@ -1,5 +1,23 @@
-import { IpcMain } from 'electron';
+/**
+ * Concrete implementation of {@link SessionGitOpsLike} — the business logic
+ * behind the `cyboflow.sessionGit` tRPC router (slice 3, the final slice, of
+ * the IPC→tRPC migration; docs/CODE-PATTERNS.md).
+ *
+ * The 20 renderer-facing `sessions:*` / `git:*` git handlers moved here VERBATIM
+ * from main/src/ipc/git.ts (now deleted) — the only changes are mechanical: each
+ * registration of a channel handler taking `(_event, a, b)` became
+ * `const <method> = async ({ a, b }) => {…}` with the same body, and the
+ * closures are returned as one object at the end. `sessions:check-rebase-conflicts`
+ * was dropped (zero preload/frontend callers); the conflict probe itself lives
+ * on in WorktreeManager.checkForRebaseConflicts, which rebaseMainIntoWorktree
+ * still calls directly.
+ *
+ * Unlike the router and contract, this file is SERVICES-SIDE and may import
+ * anything — the panel manager, the main window, the orchestrator routers, the
+ * run-recovery stampers. That asymmetry is the whole point of the seam.
+ */
 import type { AppServices } from './types';
+import type { SessionGitOpsLike } from '../orchestrator/trpc/contracts/sessionGitOps';
 import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
@@ -77,8 +95,22 @@ interface RawCommitData {
 }
 
 
-export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
+/**
+ * The request shape of one ops method, taken from the contract itself so the
+ * two can never drift.
+ */
+type OpsInput<K extends keyof SessionGitOpsLike> = Parameters<SessionGitOpsLike[K]>[0];
+
+/**
+ * The resolved envelope of one ops method, taken from the contract. Annotating
+ * each closure with it is what CONTEXTUALLY types the `return { success: … }`
+ * literals inside — without it TypeScript widens `success: true` to `boolean`
+ * and no envelope shape would be checked at all.
+ */
+type OpsResult<K extends keyof SessionGitOpsLike> = Awaited<ReturnType<SessionGitOpsLike[K]>>;
+
+export function createGitOps(services: AppServices): SessionGitOpsLike {
+  const { sessionManager, gitDiffManager, worktreeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
 
   // Quick-session close-out (IDEA-030): after a merge/rebase the session's work
   // is accepted, so a live persistent chat process should exit instead of
@@ -490,7 +522,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     };
   };
 
-  ipcMain.handle('sessions:get-executions', async (_event, sessionId: string) => {
+  const getExecutions = async ({ sessionId }: OpsInput<'getExecutions'>): Promise<OpsResult<'getExecutions'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -546,9 +578,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       const errorMessage = error instanceof Error ? error.message : 'Failed to get executions';
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-execution-diff', async (_event, sessionId: string, executionId: string) => {
+  const getExecutionDiff = async ({ sessionId, executionId }: OpsInput<'getExecutionDiff'>): Promise<OpsResult<'getExecutionDiff'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -571,9 +603,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       const errorMessage = error instanceof Error ? error.message : 'Failed to get execution diff';
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:git-commit', async (_event, sessionId: string, message: string) => {
+  const commit = async ({ sessionId, message }: OpsInput<'commit'>): Promise<OpsResult<'commit'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -613,9 +645,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       const errorMessage = (error instanceof Error ? error.message : '') || (error && typeof error === 'object' && 'stderr' in error ? (error as ProcessError).stderr : '') || 'Failed to commit changes';
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:git-diff', async (_event, sessionId: string) => {
+  const diff = async ({ sessionId }: OpsInput<'diff'>): Promise<OpsResult<'diff'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -637,9 +669,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-combined-diff', async (_event, sessionId: string, executionIds?: number[]) => {
+  const getCombinedDiff = async ({ sessionId, executionIds }: OpsInput<'getCombinedDiff'>): Promise<OpsResult<'getCombinedDiff'>> => {
     try {
       // Get session to find worktree path
       const session = await sessionManager.getSession(sessionId);
@@ -859,46 +891,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       const errorMessage = error instanceof Error ? error.message : 'Failed to get combined diff';
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
   // Git rebase operations
-  ipcMain.handle('sessions:check-rebase-conflicts', async (_event, sessionId: string) => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session) {
-        return { success: false, error: 'Session not found' };
-      }
-
-      if (!session.worktreePath) {
-        return { success: false, error: 'Session has no worktree path' };
-      }
-
-      // Get the project to find the main branch
-      const project = sessionManager.getProjectForSession(sessionId);
-      if (!project) {
-        return { success: false, error: 'Project not found for session' };
-      }
-
-      // Always get the current branch from the project directory
-      const mainBranch = await worktreeManager.getProjectMainBranch(project.path);
-      
-      // Check for conflicts
-      const conflictInfo = await worktreeManager.checkForRebaseConflicts(session.worktreePath, mainBranch);
-      
-      return { 
-        success: true, 
-        data: conflictInfo 
-      };
-    } catch (error: unknown) {
-      console.error(`[IPC:git] Failed to check for rebase conflicts:`, error);
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Failed to check for rebase conflicts'
-      };
-    }
-  });
-
-  ipcMain.handle('sessions:rebase-main-into-worktree', async (_event, sessionId: string) => {
+  const rebaseMainIntoWorktree = async ({ sessionId }: OpsInput<'rebaseMainIntoWorktree'>): Promise<OpsResult<'rebaseMainIntoWorktree'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1040,9 +1036,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
       };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:abort-rebase-and-use-claude', async (_event, sessionId: string) => {
+  const abortRebaseAndUseClaude = async ({ sessionId }: OpsInput<'abortRebaseAndUseClaude'>): Promise<OpsResult<'abortRebaseAndUseClaude'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1148,9 +1144,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         error: error instanceof Error ? error.message : 'Failed to abort rebase and use Claude'
       };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:squash-and-rebase-to-main', async (_event, sessionId: string, commitMessage: string) => {
+  const squashAndRebaseToMain = async ({ sessionId, commitMessage }: OpsInput<'squashAndRebaseToMain'>): Promise<OpsResult<'squashAndRebaseToMain'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1279,9 +1275,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
       };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:rebase-to-main', async (_event, sessionId: string) => {
+  const rebaseToMain = async ({ sessionId }: OpsInput<'rebaseToMain'>): Promise<OpsResult<'rebaseToMain'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1401,10 +1397,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
       };
     }
-  });
+  };
 
   // Git pull/push operations for main repo sessions
-  ipcMain.handle('sessions:git-pull', async (_event, sessionId: string) => {
+  const pull = async ({ sessionId }: OpsInput<'pull'>): Promise<OpsResult<'pull'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1478,9 +1474,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
       };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:git-push', async (_event, sessionId: string) => {
+  const push = async ({ sessionId }: OpsInput<'push'>): Promise<OpsResult<'push'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1581,7 +1577,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         }
       };
     }
-  });
+  };
 
   /**
    * Whether this session's work has been DELIVERED, answered from both sides:
@@ -1598,7 +1594,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
    * Fail-soft on every axis — an unreadable worktree reports landed=false and
    * the operator simply gets the plain confirmation.
    */
-  ipcMain.handle('sessions:get-delivery-state', async (_event, sessionId: string) => {
+  const getDeliveryState = async ({ sessionId }: OpsInput<'getDeliveryState'>): Promise<OpsResult<'getDeliveryState'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1628,7 +1624,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         error: error instanceof Error ? error.message : 'Failed to read session delivery state',
       };
     }
-  });
+  };
 
   /**
    * Record that this session's work LANDED by a path we never observed — the
@@ -1642,7 +1638,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
    * now stamped, that archive keeps the session's findings instead of sweeping
    * them.
    */
-  ipcMain.handle('sessions:mark-complete', async (_event, sessionId: string) => {
+  const markComplete = async ({ sessionId }: OpsInput<'markComplete'>): Promise<OpsResult<'markComplete'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1660,7 +1656,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         error: error instanceof Error ? error.message : 'Failed to mark session complete',
       };
     }
-  });
+  };
 
   /**
    * Subjects of the session branch's OWN commits (mainBranch..HEAD in the
@@ -1668,7 +1664,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
    * commit message — unlike sessions:get-last-commits this never includes
    * main-branch history.
    */
-  ipcMain.handle('sessions:get-branch-commit-subjects', async (_event, sessionId: string) => {
+  const getBranchCommitSubjects = async ({ sessionId }: OpsInput<'getBranchCommitSubjects'>): Promise<OpsResult<'getBranchCommitSubjects'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -1689,9 +1685,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to read branch commits' };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-last-commits', async (_event, sessionId: string, count: number = 50) => {
+  const getLastCommits = async ({ sessionId, count = 50 }: OpsInput<'getLastCommits'>): Promise<OpsResult<'getLastCommits'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session) {
@@ -1729,10 +1725,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         error: error instanceof Error ? error.message : 'Failed to get last commits'
       };
     }
-  });
+  };
 
   // Git operation helpers
-  ipcMain.handle('sessions:has-changes-to-rebase', async (_event, sessionId: string) => {
+  const hasChangesToRebase = async ({ sessionId }: OpsInput<'hasChangesToRebase'>): Promise<OpsResult<'hasChangesToRebase'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -1753,9 +1749,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       console.error('Failed to check for changes to rebase:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Failed to check for changes to rebase' };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-git-commands', async (_event, sessionId: string) => {
+  const getGitCommands = async ({ sessionId }: OpsInput<'getGitCommands'>): Promise<OpsResult<'getGitCommands'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -1805,9 +1801,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }
       return { success: false, error: errorMessage };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-remote-url', async (_event, sessionId: string) => {
+  const getRemoteUrl = async ({ sessionId }: OpsInput<'getRemoteUrl'>): Promise<OpsResult<'getRemoteUrl'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -1822,9 +1818,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to get remote URL' };
     }
-  });
+  };
 
-  ipcMain.handle('sessions:get-git-status', async (_event, sessionId: string, nonBlocking?: boolean, isInitialLoad?: boolean) => {
+  const getGitStatus = async ({ sessionId, nonBlocking, isInitialLoad }: OpsInput<'getGitStatus'>): Promise<OpsResult<'getGitStatus'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
@@ -1871,9 +1867,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       console.error('Error getting git status:', error);
       return { success: false, error: (error as Error).message };
     }
-  });
+  };
 
-  ipcMain.handle('git:cancel-status-for-project', async (_event, projectId: number) => {
+  const cancelStatusForProject = async ({ projectId }: OpsInput<'cancelStatusForProject'>): Promise<OpsResult<'cancelStatusForProject'>> => {
     try {
       // Get all sessions for the project
       const sessions = await sessionManager.getAllSessions();
@@ -1888,5 +1884,28 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       console.error('Error cancelling git status:', error);
       return { success: false, error: (error as Error).message };
     }
-  });
-} 
+  };
+
+  return {
+    getExecutions,
+    getExecutionDiff,
+    commit,
+    diff,
+    getCombinedDiff,
+    rebaseMainIntoWorktree,
+    abortRebaseAndUseClaude,
+    squashAndRebaseToMain,
+    rebaseToMain,
+    pull,
+    push,
+    getDeliveryState,
+    markComplete,
+    getBranchCommitSubjects,
+    getLastCommits,
+    hasChangesToRebase,
+    getGitCommands,
+    getRemoteUrl,
+    getGitStatus,
+    cancelStatusForProject,
+  };
+}

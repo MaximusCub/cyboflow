@@ -1,7 +1,9 @@
 /**
- * Behavioral tests for the `sessions:get-combined-diff` IPC handler in
- * main/src/ipc/git.ts (TASK-680/F10: the handler's execSync calls were
- * migrated to runGitAsync(cwd, args[])).
+ * Behavioral tests for `getCombinedDiff` in main/src/ipc/gitOps.ts — the ops
+ * implementation behind the `cyboflow.sessionGit.getCombinedDiff` tRPC
+ * procedure, formerly the `sessions:get-combined-diff` IPC handler
+ * (TASK-680/F10: the handler's execSync calls were migrated to
+ * runGitAsync(cwd, args[])).
  *
  * These use a REAL temp git repo and a REAL GitDiffManager (no execSync/
  * runGitAsync mocking) so the test exercises the actual async git plumbing
@@ -34,22 +36,8 @@ vi.mock('../claudePanel', () => ({
   claudePanelManager: { registerPanel: vi.fn(), startPanel: vi.fn(async () => {}) },
 }));
 
-import { registerGitHandlers } from '../git';
+import { createGitOps } from '../gitOps';
 import type { AppServices } from '../types';
-
-type Handler = (...args: unknown[]) => Promise<unknown>;
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, Handler>();
-  const ipcMain = { handle: (channel: string, fn: Handler) => handlers.set(channel, fn) };
-  return { ipcMain, handlers };
-}
-
-function invoke(handlers: Map<string, Handler>, channel: string, ...args: unknown[]): Promise<unknown> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler for channel: ${channel}`);
-  return fn({} as unknown, ...args);
-}
 
 function inertDb() {
   const stmt = { run: () => ({ changes: 0 }), get: () => undefined, all: () => [] };
@@ -96,21 +84,15 @@ function makeServices(worktreePath: string): AppServices {
   } as unknown as AppServices;
 }
 
-function register(services: AppServices) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerGitHandlers(ipcMain as unknown as Parameters<typeof registerGitHandlers>[0], services);
-  return handlers;
-}
-
-describe('sessions:get-combined-diff (async git plumbing, real repo)', () => {
+describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () => {
   it('executionIds=[0]: returns the uncommitted working-directory diff', async () => {
     await withTempDir('combined-diff-uncommitted-', async (repo) => {
       initRepoMain(repo);
       commitFile(repo, 'a.txt', 'a1\n', 'base');
       fs.writeFileSync(path.join(repo, 'a.txt'), 'a1\na2-working\n');
 
-      const handlers = register(makeServices(repo));
-      const result = (await invoke(handlers, 'sessions:get-combined-diff', 's1', [0])) as {
+      const ops = createGitOps(makeServices(repo));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1', executionIds: [0] })) as {
         success: boolean;
         data: { diff: string };
       };
@@ -128,8 +110,8 @@ describe('sessions:get-combined-diff (async git plumbing, real repo)', () => {
       commitFile(repo, 'a.txt', 'a1\n', 'feature commit 1');
       commitFile(repo, 'b.txt', 'b1\n', 'feature commit 2');
 
-      const handlers = register(makeServices(repo));
-      const result = (await invoke(handlers, 'sessions:get-combined-diff', 's1', undefined)) as {
+      const ops = createGitOps(makeServices(repo));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
         success: boolean;
         data: { diff: string; changedFiles: string[]; stats: { filesChanged: number } };
       };
@@ -149,9 +131,9 @@ describe('sessions:get-combined-diff (async git plumbing, real repo)', () => {
       commitFile(repo, 'a.txt', 'a1\n', 'feature commit 1');
       commitFile(repo, 'a.txt', 'a1\na2\n', 'feature commit 2');
 
-      const handlers = register(makeServices(repo));
+      const ops = createGitOps(makeServices(repo));
       // Commits are newest-first: id 1 = feature commit 2, id 2 = feature commit 1.
-      const result = (await invoke(handlers, 'sessions:get-combined-diff', 's1', [1, 2])) as {
+      const result = (await ops.getCombinedDiff({ sessionId: 's1', executionIds: [1, 2] })) as {
         success: boolean;
         data: { diff: string; changedFiles: string[] };
       };

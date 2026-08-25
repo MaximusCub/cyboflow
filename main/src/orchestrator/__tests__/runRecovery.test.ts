@@ -1202,7 +1202,7 @@ describe('backfillInterruptedOutcomes', () => {
 
 // ---------------------------------------------------------------------------
 // stampSessionRunsOutcome — the shared pure helper used by the session-level
-// Merge (ipc/git.ts) and Dismiss (ipc/session.ts) close-out paths. Runs link to
+// Merge (ipc/gitOps.ts) and Dismiss (ipc/session.ts) close-out paths. Runs link to
 // the session via workflow_runs.session_id; the guard never clobbers an existing
 // outcome.
 // ---------------------------------------------------------------------------

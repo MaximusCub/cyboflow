@@ -25,6 +25,7 @@ import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../.
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
+import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -465,6 +466,26 @@ export interface ContextDeps {
    * file/git access can omit it.
    */
   workspaceFileOps?: WorkspaceFileOpsLike;
+
+  /**
+   * Live session-git-ops implementation (the `sessionGit` router's business
+   * logic — the session-worktree git surface: commit history and diffs,
+   * rebase-from-main, merge-to-main, pull/push with their session close-outs,
+   * the delivery/mark-complete bookkeeping, and git-status reads).
+   *
+   * Injected from `main/src/index.ts` via `createGitOps(services)`
+   * (main/src/ipc/gitOps.ts) — the SAME AppServices object `registerIpcHandlers`
+   * gets, so the close-out seams (notably `endLiveSession`) are the same live
+   * instances the rest of the IPC layer uses. Using the narrow
+   * {@link SessionGitOpsLike} interface (rather than importing the concrete
+   * factory) preserves the standalone-typecheck invariant: no
+   * 'main/src/services/*' import is needed here.
+   *
+   * Handlers must explicitly check `ctx.sessionGitOps` before use —
+   * `undefined` is the intentional default so unit tests that do not need git
+   * access can omit it.
+   */
+  sessionGitOps?: SessionGitOpsLike;
 }
 
 /**
@@ -521,6 +542,7 @@ export function createContext(deps: ContextDeps = {}): {
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
+  sessionGitOps?: SessionGitOpsLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -543,6 +565,7 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     workspaceFileOps,
+    sessionGitOps,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -572,6 +595,7 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     workspaceFileOps,
+    sessionGitOps,
   };
 }
 

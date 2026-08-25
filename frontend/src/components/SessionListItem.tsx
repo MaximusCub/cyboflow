@@ -7,6 +7,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { RunScriptConfigDialog } from './RunScriptConfigDialog';
 import { NimbalystInstallDialog } from './NimbalystInstallDialog';
 import { API } from '../utils/api';
+import { trpc } from '../trpc/client';
 import { Star, Archive } from 'lucide-react';
 import { NimbalystIcon } from './icons/NimbalystIcon';
 import type { Session, GitStatus } from '../types/session';
@@ -118,7 +119,11 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
         try {
           setGitStatusLoading(true);
           // Use queue-based initial load to prevent overwhelming the system
-          const response = await window.electronAPI.invoke('sessions:get-git-status', session.id, false, true);
+          const response = await trpc.cyboflow.sessionGit.getGitStatus.query({
+            sessionId: session.id,
+            nonBlocking: false,
+            isInitialLoad: true,
+          });
           if (response.success && response.gitStatus) {
             setGitStatus(response.gitStatus);
           }

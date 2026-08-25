@@ -58,14 +58,13 @@ export function SessionCreatePrDialog({ isOpen, onClose, sessionId, sessionName,
         useErrorStore.getState().showError({
           title: 'Push failed',
           error: pushResult.error ?? 'Failed to push branch to remote.',
-          details: pushResult.details,
         });
         setStep('confirm');
         return;
       }
 
       const remoteResult = await API.sessions.getRemoteUrl(sessionId);
-      if (!remoteResult.success || !remoteResult.data) {
+      if (!remoteResult.success) {
         useErrorStore.getState().showError({
           title: 'Could not get remote URL',
           error: remoteResult.error ?? 'Failed to determine remote URL after push.',

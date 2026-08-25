@@ -25,6 +25,7 @@ import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { trackerRouter } from './routers/tracker';
 import { reviewItemsRouter } from './routers/reviewItems';
+import { sessionGitRouter } from './routers/sessionGit';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
 import { monitorRouter } from './routers/monitor';
@@ -60,6 +61,7 @@ export const appRouter = router({
     questions: questionsRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,
+    sessionGit: sessionGitRouter,
     substrates: substratesRouter,
     tasks: tasksRouter,
     tracker: trackerRouter,

@@ -140,7 +140,7 @@ export interface SprintLaneTaskIdsLike {
    * failed/canceled phase, deriveTaskStageForPhase marks the run's batch
    * 'failed' so the lane substrate never strands a non-terminal batch. (The
    * 'completed' close-out lives in the session-merge path in
-   * main/src/ipc/git.ts.) Optional so prompt-only stubs stay minimal.
+   * main/src/ipc/gitOps.ts.) Optional so prompt-only stubs stay minimal.
    */
   markBatchTerminal?(batchId: string, status: 'completed' | 'failed'): void;
 }
@@ -2335,7 +2335,7 @@ export class RunExecutor {
       // a sprint run that dies terminally (failed/canceled) must not strand its
       // batch in a non-terminal status. Fail-soft and BEFORE the task_id
       // early-return — sprint runs carry batch_id but usually no task_id. The
-      // 'completed' close-out is the session-merge path (main/src/ipc/git.ts).
+      // 'completed' close-out is the session-merge path (main/src/ipc/gitOps.ts).
       if ((phase === 'failed' || phase === 'canceled') && run?.batch_id && this.sprintLaneTaskIds?.markBatchTerminal) {
         try {
           this.sprintLaneTaskIds.markBatchTerminal(run.batch_id, 'failed');

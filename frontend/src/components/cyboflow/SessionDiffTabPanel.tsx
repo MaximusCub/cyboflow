@@ -39,7 +39,7 @@ export function SessionDiffTabPanel({
     API.sessions.getCombinedDiff(sessionId).then(
       (res) => {
         if (cancelled) return;
-        if (!res.success || !res.data) {
+        if (!res.success) {
           setState({ diff: '', isLoading: false, error: res.error ?? 'Failed to load diff' });
           return;
         }

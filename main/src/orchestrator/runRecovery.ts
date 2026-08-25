@@ -696,7 +696,7 @@ export function backfillTerminalOutcomes(db: DatabaseLike): OutcomeBackfillResul
 
 /**
  * Stamp `workflow_runs.outcome` on every child run of a session, used by the
- * session-level close-out paths (Merge in ipc/git.ts, Dismiss in ipc/session.ts)
+ * session-level close-out paths (Merge in ipc/gitOps.ts, Dismiss in ipc/session.ts)
  * to keep the run-outcome stats trustworthy when a session is resolved as a
  * whole rather than per-run.
  *
@@ -775,7 +775,7 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
 
 /**
  * Close out a session's runs as a SUCCESSFUL pull request, used by the
- * session-scoped Create-PR flow (ipc/git.ts `sessions:git-push`).
+ * session-scoped Create-PR flow (the `push` op in ipc/gitOps.ts).
  *
  * Unlike {@link stampSessionRunsOutcome} (outcome only), this marks each
  * non-terminal run TERMINAL as `status='completed', outcome='pr_open'` — the
@@ -820,7 +820,7 @@ export interface RunUsageBackfillResult {
  * onLifecycleTransition, for the 'drained' / 'failed' / 'canceled' phases. But a
  * run reaches a terminal STATUS from roughly eight writers: cancelRunHandler,
  * cancelAndRestartHandler, questionRouter, trpc/routers/runs.ts (three close-out
- * sites), the merge path in ipc/git.ts, and recoverActiveStateOrphans itself
+ * sites), the merge path in ipc/gitOps.ts, and recoverActiveStateOrphans itself
  * force-failing an orphan at boot. Every one of those bypasses the executor
  * hook, so the run keeps its raw_events but never gets the durable row. Adding
  * the call to each writer is how the gap opened in the first place — a sweep

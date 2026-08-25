@@ -1137,7 +1137,7 @@ async function recoverStrandedOriginalTask(
  * Point the winner run's sprint lane from a (to-be-swept) clone id to its ORIGINAL
  * task id, so the decide-THEN-merge path closes out like a regular sprint: after
  * decide sweeps the clone, the winner session's still-'integrated' lane points at
- * the ORIGINAL, and finalizeSprintLanesOnSessionMerge (main/src/ipc/git.ts) advances
+ * the ORIGINAL, and finalizeSprintLanesOnSessionMerge (main/src/ipc/gitOps.ts) advances
  * the original to Done on merge (defect a). Without this, decide hard-deletes the
  * clone in step 3 and finalize's `if (!task) continue` skips the dangling lane,
  * stranding the original short of Done. Runs for EVERY winner seed row, clone

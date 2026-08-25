@@ -203,29 +203,30 @@ export class API {
       return window.electronAPI.sessions.stop(sessionId);
     },
 
+    // Session-worktree git — migrated to the cyboflow.sessionGit tRPC router
+    // (slice 3 of the IPC→tRPC migration). Each method keeps its positional
+    // signature and its response envelope, so component call sites are
+    // unchanged; only the transport moved. No isElectron() guard, matching the
+    // other trpc-backed statics below (the ipcLink transport is Electron-only
+    // by construction).
     async getExecutions(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getExecutions(sessionId);
+      return trpc.cyboflow.sessionGit.getExecutions.query({ sessionId });
     },
 
     async getExecutionDiff(sessionId: string, executionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getExecutionDiff(sessionId, executionId);
+      return trpc.cyboflow.sessionGit.getExecutionDiff.query({ sessionId, executionId });
     },
 
     async gitCommit(sessionId: string, message: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.gitCommit(sessionId, message);
+      return trpc.cyboflow.sessionGit.commit.mutate({ sessionId, message });
     },
 
     async gitDiff(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.gitDiff(sessionId);
+      return trpc.cyboflow.sessionGit.diff.query({ sessionId });
     },
 
     async getCombinedDiff(sessionId: string, executionIds?: number[]) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getCombinedDiff(sessionId, executionIds);
+      return trpc.cyboflow.sessionGit.getCombinedDiff.query({ sessionId, executionIds });
     },
 
     // Main repo session
@@ -283,13 +284,11 @@ export class API {
 
     // Git rebase operations
     async rebaseMainIntoWorktree(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.rebaseMainIntoWorktree(sessionId);
+      return trpc.cyboflow.sessionGit.rebaseMainIntoWorktree.mutate({ sessionId });
     },
 
     async abortRebaseAndUseClaude(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.abortRebaseAndUseClaude(sessionId);
+      return trpc.cyboflow.sessionGit.abortRebaseAndUseClaude.mutate({ sessionId });
     },
 
     /**
@@ -299,8 +298,7 @@ export class API {
      * Dismiss into a Mark-complete choice.
      */
     async getDeliveryState(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getDeliveryState(sessionId);
+      return trpc.cyboflow.sessionGit.getDeliveryState.query({ sessionId });
     },
 
     /**
@@ -309,24 +307,20 @@ export class API {
      * the stamp is what makes that archive KEEP the session's findings.
      */
     async markComplete(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.markComplete(sessionId);
+      return trpc.cyboflow.sessionGit.markComplete.mutate({ sessionId });
     },
 
     async squashAndRebaseToMain(sessionId: string, commitMessage: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.squashAndRebaseToMain(sessionId, commitMessage);
+      return trpc.cyboflow.sessionGit.squashAndRebaseToMain.mutate({ sessionId, commitMessage });
     },
 
     async rebaseToMain(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.rebaseToMain(sessionId);
+      return trpc.cyboflow.sessionGit.rebaseToMain.mutate({ sessionId });
     },
 
     // Git operation helpers
     async hasChangesToRebase(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.hasChangesToRebase(sessionId);
+      return trpc.cyboflow.sessionGit.hasChangesToRebase.query({ sessionId });
     },
 
     async rename(sessionId: string, newName: string) {
@@ -360,39 +354,32 @@ export class API {
     },
 
     async getGitCommands(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getGitCommands(sessionId);
+      return trpc.cyboflow.sessionGit.getGitCommands.query({ sessionId });
     },
 
     // Git pull/push operations
     async gitPull(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.gitPull(sessionId);
+      return trpc.cyboflow.sessionGit.pull.mutate({ sessionId });
     },
 
     async gitPush(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.gitPush(sessionId);
+      return trpc.cyboflow.sessionGit.push.mutate({ sessionId });
     },
 
     async getRemoteUrl(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getRemoteUrl(sessionId);
+      return trpc.cyboflow.sessionGit.getRemoteUrl.query({ sessionId });
     },
 
     async getGitStatus(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getGitStatus(sessionId);
+      return trpc.cyboflow.sessionGit.getGitStatus.query({ sessionId });
     },
 
     async getBranchCommitSubjects(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getBranchCommitSubjects(sessionId);
+      return trpc.cyboflow.sessionGit.getBranchCommitSubjects.query({ sessionId });
     },
 
     async getLastCommits(sessionId: string, count: number = 20) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getLastCommits(sessionId, count);
+      return trpc.cyboflow.sessionGit.getLastCommits.query({ sessionId, count });
     },
 
     async openIDE(sessionId: string) {

@@ -107,8 +107,6 @@ export function SessionMergeDialog({ isOpen, onClose, sessionId, onSuccess }: Se
         useErrorStore.getState().showError({
           title: 'Merge failed',
           error: result.error ?? 'An unknown error occurred during merge.',
-          details: result.details,
-          command: result.command,
         });
         setIsMerging(false);
         return;

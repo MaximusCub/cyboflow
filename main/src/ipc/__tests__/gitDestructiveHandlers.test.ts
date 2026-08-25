@@ -1,21 +1,22 @@
 /**
- * Behavioral tests for destructive git IPC handlers in main/src/ipc/git.ts.
+ * Behavioral tests for the destructive git ops in main/src/ipc/gitOps.ts — the
+ * implementations behind the `cyboflow.sessionGit` tRPC router.
  *
  * Covered:
- *  - sessions:rebase-main-into-worktree short-circuits on a detected conflict
- *    WITHOUT mutating the worktree (worktreeManager.rebaseMainIntoWorktree is
- *    never invoked), and performs the rebase on the clean path.
- *  - sessions:git-push surfaces a push failure as success:false + gitError, and
- *    returns the worktreeManager result on success.
- *  - sessions:abort-rebase-and-use-claude is a no-op (does NOT call abortRebase,
- *    does NOT throw) when the worktree is NOT mid-rebase.
+ *  - rebaseMainIntoWorktree short-circuits on a detected conflict WITHOUT
+ *    mutating the worktree (worktreeManager.rebaseMainIntoWorktree is never
+ *    invoked), and performs the rebase on the clean path.
+ *  - push surfaces a push failure as success:false + gitError, and returns the
+ *    worktreeManager result on success.
+ *  - abortRebaseAndUseClaude is a no-op (does NOT call abortRebase, does NOT
+ *    throw) when the worktree is NOT mid-rebase.
  *  - the 30s Promise.race timeout on getProjectMainBranch REJECTS+reports instead
  *    of hanging.
  *
- * Handlers are captured through a stub ipcMain; all service collaborators are
- * object-stubbed. The `../index` (mainWindow) and panelManager singletons are
- * module-mocked; the DB-backed close-out helpers are neutralized with a fake db
- * whose statements are inert.
+ * The ops are built directly from a stubbed AppServices; all service
+ * collaborators are object-stubbed. The `../index` (mainWindow) and panelManager
+ * singletons are module-mocked; the DB-backed close-out helpers are neutralized
+ * with a fake db whose statements are inert.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -24,12 +25,12 @@ vi.mock('electron', () => ({
   app: { isPackaged: false, getPath: vi.fn(() => '/mock'), getName: vi.fn(() => 'Cyboflow'), getVersion: vi.fn(() => '0.1.0') },
 }));
 
-// git.ts imports `mainWindow` from '../index' == src/index.ts (the app entry).
+// gitOps.ts imports `mainWindow` from '../index' == src/index.ts (the app entry).
 // From this test file that resolves to '../../index'; stub it so the real app
 // entry (and its electron-coupled trpc adapter) is never loaded.
 vi.mock('../../index', () => ({ mainWindow: null }));
 
-// git.ts imports '../services/panelManager' == src/services/panelManager; from
+// gitOps.ts imports '../services/panelManager' == src/services/panelManager; from
 // this test file that is '../../services/panelManager'.
 vi.mock('../../services/panelManager', () => ({
   panelManager: {
@@ -38,34 +39,20 @@ vi.mock('../../services/panelManager', () => ({
   },
 }));
 
-// abort-rebase-and-use-claude does `require('./claudePanel')` (src/ipc/claudePanel).
+// abortRebaseAndUseClaude does `require('./claudePanel')` (src/ipc/claudePanel).
 vi.mock('../claudePanel', () => ({
   claudePanelManager: { registerPanel: vi.fn(), startPanel: vi.fn(async () => {}) },
 }));
 
-// The sync runGit (src/utils/runGit) is only reached by abort-rebase's status probe.
+// The sync runGit (src/utils/runGit) is only reached by abortRebaseAndUseClaude's status probe.
 const runGitMock = vi.fn((..._args: unknown[]): string => '');
 vi.mock('../../utils/runGit', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../utils/runGit')>()),
   runGit: (...args: unknown[]) => runGitMock(...args),
 }));
 
-import { registerGitHandlers } from '../git';
+import { createGitOps } from '../gitOps';
 import type { AppServices } from '../types';
-
-type Handler = (...args: unknown[]) => Promise<unknown>;
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, Handler>();
-  const ipcMain = { handle: (channel: string, fn: Handler) => handlers.set(channel, fn) };
-  return { ipcMain, handlers };
-}
-
-function invoke(handlers: Map<string, Handler>, channel: string, ...args: unknown[]): Promise<unknown> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler for channel: ${channel}`);
-  return fn({} as unknown, ...args);
-}
 
 // Inert DB: every statement runs to zero changes / empty rows so the fail-soft
 // close-out helpers (finalizeSprintLanesOnSessionMerge, stampSessionRunsPrOpen)
@@ -121,12 +108,6 @@ function makeServices(session: Record<string, unknown> | undefined, wt: WtOverri
   return { services, worktreeManager };
 }
 
-function register(services: AppServices) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerGitHandlers(ipcMain as unknown as Parameters<typeof registerGitHandlers>[0], services);
-  return handlers;
-}
-
 const SESSION = { id: 's1', worktreePath: '/proj/wt', projectId: 7, name: 'sess' };
 
 beforeEach(() => {
@@ -134,7 +115,7 @@ beforeEach(() => {
   runGitMock.mockReturnValue('');
 });
 
-describe('sessions:rebase-main-into-worktree — conflict short-circuit', () => {
+describe('rebaseMainIntoWorktree — conflict short-circuit', () => {
   it('returns a conflict error WITHOUT mutating the worktree when conflicts are detected', async () => {
     const { services, worktreeManager } = makeServices(SESSION, {
       checkForRebaseConflicts: vi.fn(async () => ({
@@ -143,9 +124,9 @@ describe('sessions:rebase-main-into-worktree — conflict short-circuit', () => 
         conflictingCommits: { ours: ['abc our'], theirs: ['def their'] },
       })),
     });
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:rebase-main-into-worktree', 's1')) as {
+    const result = (await ops.rebaseMainIntoWorktree({ sessionId: 's1' })) as {
       success: boolean;
       error?: string;
       gitError?: { hasConflicts?: boolean; conflictingFiles?: string[] };
@@ -163,9 +144,9 @@ describe('sessions:rebase-main-into-worktree — conflict short-circuit', () => 
     const { services, worktreeManager } = makeServices(SESSION, {
       checkForRebaseConflicts: vi.fn(async () => ({ hasConflicts: false })),
     });
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:rebase-main-into-worktree', 's1')) as {
+    const result = (await ops.rebaseMainIntoWorktree({ sessionId: 's1' })) as {
       success: boolean;
     };
 
@@ -174,7 +155,7 @@ describe('sessions:rebase-main-into-worktree — conflict short-circuit', () => 
   });
 });
 
-describe('sessions:git-push — failure surfacing + success passthrough', () => {
+describe('push — failure surfacing + success passthrough', () => {
   it('surfaces a push failure as success:false with the git output', async () => {
     const pushErr = Object.assign(new Error('push rejected'), {
       gitOutput: '! [rejected] main -> main (non-fast-forward)',
@@ -184,9 +165,9 @@ describe('sessions:git-push — failure surfacing + success passthrough', () => 
         throw pushErr;
       }),
     });
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:git-push', 's1')) as {
+    const result = (await ops.push({ sessionId: 's1' })) as {
       success: boolean;
       error?: string;
       gitError?: { output?: string };
@@ -202,9 +183,9 @@ describe('sessions:git-push — failure surfacing + success passthrough', () => 
     const { services } = makeServices(SESSION, {
       gitPush: vi.fn(async () => ({ output: 'Everything up-to-date' })),
     });
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:git-push', 's1')) as {
+    const result = (await ops.push({ sessionId: 's1' })) as {
       success: boolean;
       data?: { output?: string };
     };
@@ -214,20 +195,20 @@ describe('sessions:git-push — failure surfacing + success passthrough', () => 
   });
 });
 
-describe('sessions:abort-rebase-and-use-claude — no-op when not mid-rebase', () => {
+describe('abortRebaseAndUseClaude — no-op when not mid-rebase', () => {
   it('does NOT call abortRebase and does not throw when git status shows no rebase', async () => {
     // Status probe with no "rebase" token -> the abort branch is skipped.
     runGitMock.mockReturnValue('?? untracked.txt\n');
     const { services, worktreeManager } = makeServices(SESSION);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    // The handler must RESOLVE (the absent rebase is a no-op, not an error).
+    // The op must RESOLVE (the absent rebase is a no-op, not an error).
     // NOTE: the downstream Claude-panel spin-up goes through a dynamic
     // require('./claudePanel') that vitest's vi.mock does NOT intercept (see the
     // sibling fileGitExecuteProject test's note), so the final success value
     // depends on the real panel module and is not asserted here — the no-op-on-abort
     // behavior is the point.
-    const result = (await invoke(handlers, 'sessions:abort-rebase-and-use-claude', 's1')) as {
+    const result = (await ops.abortRebaseAndUseClaude({ sessionId: 's1' })) as {
       success: boolean;
     };
 
@@ -240,7 +221,7 @@ describe('sessions:abort-rebase-and-use-claude — no-op when not mid-rebase', (
   });
 });
 
-describe('sessions:rebase-main-into-worktree — Promise.race timeout', () => {
+describe('rebaseMainIntoWorktree — Promise.race timeout', () => {
   it('rejects and reports instead of hanging when getProjectMainBranch never resolves', async () => {
     vi.useFakeTimers();
     try {
@@ -248,9 +229,9 @@ describe('sessions:rebase-main-into-worktree — Promise.race timeout', () => {
         // Never settles — only the 30s race timer can resolve the outer await.
         getProjectMainBranch: vi.fn(() => new Promise<string>(() => {})),
       });
-      const handlers = register(services);
+      const ops = createGitOps(services);
 
-      const pending = invoke(handlers, 'sessions:rebase-main-into-worktree', 's1') as Promise<{
+      const pending = ops.rebaseMainIntoWorktree({ sessionId: 's1' }) as Promise<{
         success: boolean;
         error?: string;
       }>;
@@ -269,21 +250,21 @@ describe('sessions:rebase-main-into-worktree — Promise.race timeout', () => {
 
 // ---------------------------------------------------------------------------
 // endLiveSessionProcesses close-out (SDK-aware teardown gap fix): both
-// squash-and-rebase-to-main AND rebase-to-main must reach services.endLiveSession
+// squashAndRebaseToMain AND rebaseToMain must reach services.endLiveSession
 // (the SubstrateDispatchFacade.endSession seam) for a session with a chatRunId,
 // on EITHER substrate — not just 'interactive'. Prior behavior gated the call
 // on `session.substrate === 'interactive'`, silently orphaning a warm SDK
 // process across close-out.
 // ---------------------------------------------------------------------------
 
-describe('sessions:squash-and-rebase-to-main — endLiveSessionProcesses close-out', () => {
+describe('squashAndRebaseToMain — endLiveSessionProcesses close-out', () => {
   it('calls endLiveSession with the chatRunId for an interactive-substrate session', async () => {
     const session = { ...SESSION, substrate: 'interactive', chatRunId: 'chat-run-1' };
     const endLiveSession = vi.fn(async () => {});
     const { services } = makeServices(session, {}, endLiveSession);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg')) as {
+    const result = (await ops.squashAndRebaseToMain({ sessionId: 's1', commitMessage: 'commit msg' })) as {
       success: boolean;
     };
 
@@ -296,9 +277,9 @@ describe('sessions:squash-and-rebase-to-main — endLiveSessionProcesses close-o
     const session = { ...SESSION, substrate: 'sdk', chatRunId: 'chat-run-2' };
     const endLiveSession = vi.fn(async () => {});
     const { services } = makeServices(session, {}, endLiveSession);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg')) as {
+    const result = (await ops.squashAndRebaseToMain({ sessionId: 's1', commitMessage: 'commit msg' })) as {
       success: boolean;
     };
 
@@ -311,22 +292,22 @@ describe('sessions:squash-and-rebase-to-main — endLiveSessionProcesses close-o
     const session = { ...SESSION, substrate: 'sdk', chatRunId: null };
     const endLiveSession = vi.fn(async () => {});
     const { services } = makeServices(session, {}, endLiveSession);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg');
+    await ops.squashAndRebaseToMain({ sessionId: 's1', commitMessage: 'commit msg' });
 
     expect(endLiveSession).not.toHaveBeenCalled();
   });
 });
 
-describe('sessions:rebase-to-main — endLiveSessionProcesses close-out', () => {
+describe('rebaseToMain — endLiveSessionProcesses close-out', () => {
   it('calls endLiveSession with the chatRunId for an SDK-substrate session (the fixed gap)', async () => {
     const session = { ...SESSION, substrate: 'sdk', chatRunId: 'chat-run-3' };
     const endLiveSession = vi.fn(async () => {});
     const { services } = makeServices(session, {}, endLiveSession);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:rebase-to-main', 's1')) as { success: boolean };
+    const result = (await ops.rebaseToMain({ sessionId: 's1' })) as { success: boolean };
 
     expect(result.success).toBe(true);
     expect(endLiveSession).toHaveBeenCalledOnce();
@@ -337,9 +318,9 @@ describe('sessions:rebase-to-main — endLiveSessionProcesses close-out', () => 
     const session = { ...SESSION, substrate: 'interactive', chatRunId: 'chat-run-4' };
     const endLiveSession = vi.fn(async () => {});
     const { services } = makeServices(session, {}, endLiveSession);
-    const handlers = register(services);
+    const ops = createGitOps(services);
 
-    const result = (await invoke(handlers, 'sessions:rebase-to-main', 's1')) as { success: boolean };
+    const result = (await ops.rebaseToMain({ sessionId: 's1' })) as { success: boolean };
 
     expect(result.success).toBe(true);
     expect(endLiveSession).toHaveBeenCalledOnce();

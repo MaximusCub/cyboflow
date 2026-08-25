@@ -33,7 +33,7 @@ export function useFileDiffData(sessionId: string, filePath: string): FileDiffDa
     API.sessions.getCombinedDiff(sessionId).then(
       (res) => {
         if (cancelled) return;
-        if (!res.success || !res.data) {
+        if (!res.success) {
           setState({ loading: false, error: res.error ?? 'Failed to load diff', fileDiff: null });
           return;
         }

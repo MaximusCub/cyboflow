@@ -27,8 +27,8 @@ import { API } from '../../../utils/api';
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(API.sessions.squashAndRebaseToMain).mockResolvedValue({ success: true });
-  vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({ success: true });
+  vi.mocked(API.sessions.squashAndRebaseToMain).mockResolvedValue({ success: true, data: { message: 'merged' } });
+  vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({ success: true, data: { message: 'merged' } });
   vi.mocked(API.sessions.delete).mockResolvedValue({ success: true });
   vi.mocked(API.sessions.markComplete).mockResolvedValue({ success: true, data: { stamped: 1 } });
   // Prefill probe fires on open; empty subjects = no prefill (tests own the field).
@@ -116,7 +116,7 @@ describe('SessionMergeDialog', () => {
     vi.mocked(API.sessions.squashAndRebaseToMain).mockResolvedValue({
       success: false,
       error: 'Merge conflict',
-      details: 'Conflicting files: foo.ts',
+      gitError: { output: 'Conflicting files: foo.ts' },
     });
 
     render(<SessionMergeDialog {...defaultProps} />);
@@ -186,6 +186,7 @@ describe('SessionMergeDialog', () => {
     vi.mocked(API.sessions.squashAndRebaseToMain).mockResolvedValue({
       success: false,
       alreadyUpToDate: true,
+      error: 'Branch is already up to date with main',
     });
 
     const callOrder: string[] = [];
@@ -217,7 +218,11 @@ describe('SessionMergeDialog', () => {
   });
 
   it('alreadyUpToDate notice: a failed markComplete does not call delete', async () => {
-    vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({ success: false, alreadyUpToDate: true });
+    vi.mocked(API.sessions.rebaseToMain).mockResolvedValue({
+      success: false,
+      alreadyUpToDate: true,
+      error: 'Branch is already up to date with main',
+    });
     vi.mocked(API.sessions.markComplete).mockResolvedValue({ success: false, error: 'stamp failed' });
 
     render(<SessionMergeDialog {...defaultProps} />);
@@ -240,7 +245,7 @@ describe('SessionMergeDialog', () => {
   });
 
   it('shows loading state on confirm button during merge', async () => {
-    let resolveSquash: (v: { success: boolean }) => void;
+    let resolveSquash: (v: { success: true; data: { message: string } }) => void;
     vi.mocked(API.sessions.squashAndRebaseToMain).mockReturnValue(
       new Promise((res) => { resolveSquash = res; }),
     );
@@ -257,7 +262,7 @@ describe('SessionMergeDialog', () => {
     expect(screen.getByTestId('merge-confirm')).toBeDisabled();
 
     await act(async () => {
-      resolveSquash!({ success: true });
+      resolveSquash!({ success: true, data: { message: 'merged' } });
     });
   });
 

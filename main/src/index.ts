@@ -140,8 +140,10 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
+import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGitOps';
 import { createConfigOps } from './ipc/configOps';
 import { createFileOps } from './ipc/fileOps';
+import { createGitOps } from './ipc/gitOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -884,6 +886,21 @@ let verifyHostProbes: VerifyHostProbesLike | undefined;
 let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
 
 /**
+ * The `cyboflow.sessionGit` router's ops implementation (slice 3 of the
+ * IPC→tRPC migration), built inside initializeServices from the SAME AppServices
+ * object `registerIpcHandlers` receives — that object is assembled there and is
+ * not in scope here, and its close-out seams (`endLiveSession` in particular)
+ * must be the very instances the rest of the IPC layer uses, so a module-scope
+ * holder is how attachOrchestratorTrpcToWindow reaches it.
+ *
+ * Read LAZILY by the per-request context factory below (same shape as the
+ * host-probe holder above), so a window attached before initializeServices
+ * finished still sees the ops once they exist. Undefined before then, which the
+ * router reports as PRECONDITION_FAILED.
+ */
+let sessionGitOps: SessionGitOpsLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -961,6 +978,10 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // once they exist.
         verifyHostProbes,
         verifyRunbookStatus,
+        // Same lazy module-scope read as the probes above — createGitOps needs
+        // the full AppServices object, which only exists inside
+        // initializeServices.
+        sessionGitOps,
       }),
   });
 }
@@ -4188,6 +4209,13 @@ async function initializeServices(): Promise<boolean> {
       },
     },
   };
+
+  // The session-worktree git surface is a tRPC router now (slice 3 of the
+  // IPC→tRPC migration), not an ipcMain.handle module — but its ops still need
+  // the SAME services object registerIpcHandlers gets, close-out seams
+  // included. Publish it on the module-scope holder the per-request tRPC
+  // context reads.
+  sessionGitOps = createGitOps(services);
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);

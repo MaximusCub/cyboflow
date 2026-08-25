@@ -15,7 +15,7 @@
  * against the commit the session branched from (`base_commit`), which counts
  * committed AND uncommitted AND untracked work, and — unlike a comparison
  * against live main — survives the session's commits being merged into main
- * (see getSessionCommitHistory in ipc/git.ts for the same rationale).
+ * (see getSessionCommitHistory in ipc/gitOps.ts for the same rationale).
  *
  * Known and accepted: an IN-PLACE session works in the user's own checkout
  * rather than a private worktree, so pre-existing dirty or untracked files

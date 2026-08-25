@@ -2900,7 +2900,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     });
 
     it("pr_open outcome on a completed DIRECT run -> revert to entry stage (Fix 1 Create-PR close-out)", async () => {
-      // The Create-PR close-out (ipc/git.ts sessions:git-push) flips the run
+      // The Create-PR close-out (the `push` op in ipc/gitOps.ts) flips the run
       // status='completed', outcome='pr_open' then re-derives. pr_open ≠ merged, so
       // arm 1 does NOT fire: the terminal run with no live association reverts the
       // task to its entry stage — the exact revert the git-push wiring now triggers.

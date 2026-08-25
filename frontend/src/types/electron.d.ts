@@ -1,10 +1,9 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
+import type { Session, SessionOutput, GitStatus } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
-import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
@@ -171,13 +170,6 @@ interface ElectronAPI {
     listQuick: (projectId?: number) => Promise<IPCResponse<QuickSessionRow[]>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
-    // Execution and Git operations
-    getExecutions: (sessionId: string) => Promise<IPCResponse<ExecutionDiff[]>>;
-    getExecutionDiff: (sessionId: string, executionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    gitCommit: (sessionId: string, message: string) => Promise<IPCResponse<void>>;
-    gitDiff: (sessionId: string) => Promise<IPCResponse<GitDiffResult>>;
-    getCombinedDiff: (sessionId: string, executionIds?: number[]) => Promise<IPCDataResponse<GitDiffResult>>;
-
     // Script operations
     // IPCDataResponse so callers can use response.data directly after success check
     hasRunScript: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
@@ -195,16 +187,6 @@ interface ElectronAPI {
     // Git merge operations
     mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
     mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
-
-    // Git rebase operations
-    rebaseMainIntoWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
-    abortRebaseAndUseClaude: (sessionId: string) => Promise<IPCResponse<void>>;
-    squashAndRebaseToMain: (sessionId: string, commitMessage: string) => Promise<IPCResponse<void>>;
-    rebaseToMain: (sessionId: string) => Promise<IPCResponse<void>>;
-    // IPCDataResponse so callers can use response.data directly after success check
-    hasChangesToRebase: (sessionId: string) => Promise<IPCDataResponse<boolean>>;
-    getGitCommands: (sessionId: string) => Promise<IPCDataResponse<GitCommands>>;
-    getRemoteUrl: (sessionId: string) => Promise<IPCDataResponse<{ remoteUrl: string; branchName: string }>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
     updateAgentPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<IPCResponse<void>>;
@@ -213,23 +195,6 @@ interface ElectronAPI {
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;
-
-    // Git pull/push operations
-    gitPull: (sessionId: string) => Promise<IPCResponse<void>>;
-    gitPush: (sessionId: string) => Promise<IPCResponse<void>>;
-    getGitStatus: (sessionId: string, nonBlocking?: boolean, isInitialLoad?: boolean) => Promise<IPCResponse<GitStatus>>;
-    getLastCommits: (sessionId: string, count: number) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
-    // Subjects of the session branch's own commits (main..HEAD), newest first
-    getBranchCommitSubjects: (sessionId: string) => Promise<IPCResponse<{ subjects: string[] }>>;
-    // Did this session's work land? `delivered` = a run carries a DELIVERED_RUN_OUTCOMES
-    // stamp (our merge/PR path ran); `landed` = git says the branch has nothing left to
-    // give main (the agent merged it in chat). Either one turns Dismiss into a choice.
-    getDeliveryState: (
-      sessionId: string,
-    ) => Promise<IPCResponse<{ delivered: boolean; landed: boolean; ownCommits: number }>>;
-    // Stamp outcome='completed' on the session's runs — bookkeeping only, archives
-    // nothing. Call BEFORE delete so the archive keeps the session's findings.
-    markComplete: (sessionId: string) => Promise<IPCResponse<{ stamped: number }>>;
 
     // IDE operations
     openIDE: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -331,7 +296,6 @@ interface ElectronAPI {
   // Git operations
   git: {
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
-    cancelStatusForProject: (projectId: number) => Promise<{ success: boolean; error?: string }>;
   };
 
   // Folders

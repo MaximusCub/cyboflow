@@ -25,7 +25,7 @@ import { API } from '../../../utils/api';
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(API.sessions.gitPush).mockResolvedValue({ success: true });
+  vi.mocked(API.sessions.gitPush).mockResolvedValue({ success: true, data: { output: '' } });
   vi.mocked(API.sessions.delete).mockResolvedValue({ success: true });
   vi.mocked(API.sessions.markComplete).mockResolvedValue({ success: true, data: { stamped: 1 } });
   vi.mocked(API.sessions.getRemoteUrl).mockResolvedValue({

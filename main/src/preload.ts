@@ -237,7 +237,6 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
 
   // Sessions
   'sessions:set-active-session',
-  'sessions:get-git-status',
 
   // Projects
   'projects:refresh-git-status',
@@ -368,13 +367,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listQuick: (projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> => ipcRenderer.invoke('sessions:list-quick', projectId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
-    // Execution and Git operations
-    getExecutions: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-executions', sessionId),
-    getExecutionDiff: (sessionId: string, executionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-execution-diff', sessionId, executionId),
-    gitCommit: (sessionId: string, message: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:git-commit', sessionId, message),
-    gitDiff: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:git-diff', sessionId),
-    getCombinedDiff: (sessionId: string, executionIds?: number[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-combined-diff', sessionId, executionIds),
-    
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-or-create-main-repo', projectId),
     
@@ -390,31 +382,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
     // Prompt operations
     getPrompts: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-prompts', sessionId),
-    
-    // Git rebase operations
-    rebaseMainIntoWorktree: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:rebase-main-into-worktree', sessionId),
-    abortRebaseAndUseClaude: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:abort-rebase-and-use-claude', sessionId),
-    squashAndRebaseToMain: (sessionId: string, commitMessage: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:squash-and-rebase-to-main', sessionId, commitMessage),
-    rebaseToMain: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:rebase-to-main', sessionId),
-    
-    // Git pull/push operations
-    gitPull: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:git-pull', sessionId),
-    gitPush: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:git-push', sessionId),
-    getGitStatus: (sessionId: string, nonBlocking?: boolean, isInitialLoad?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-git-status', sessionId, nonBlocking, isInitialLoad),
-    getLastCommits: (sessionId: string, count: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-last-commits', sessionId, count),
-    getBranchCommitSubjects: (sessionId: string): Promise<IPCResponse<{ subjects: string[] }>> =>
-      ipcRenderer.invoke('sessions:get-branch-commit-subjects', sessionId),
-    getDeliveryState: (
-      sessionId: string,
-    ): Promise<IPCResponse<{ delivered: boolean; landed: boolean; ownCommits: number }>> =>
-      ipcRenderer.invoke('sessions:get-delivery-state', sessionId),
-    markComplete: (sessionId: string): Promise<IPCResponse<{ stamped: number }>> =>
-      ipcRenderer.invoke('sessions:mark-complete', sessionId),
-    
-    // Git operation helpers
-    hasChangesToRebase: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:has-changes-to-rebase', sessionId),
-    getGitCommands: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-git-commands', sessionId),
-    getRemoteUrl: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-remote-url', sessionId),
     rename: (sessionId: string, newName: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:rename', sessionId, newName),
     toggleFavorite: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-favorite', sessionId),
     updateAgentPermissionMode: (sessionId: string, mode: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-agent-permission-mode', sessionId, mode),
@@ -528,7 +495,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Git operations
   git: {
     detectBranch: (path: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('projects:detect-branch', path),
-    cancelStatusForProject: (projectId: number): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('git:cancel-status-for-project', projectId),
   },
 
   // Folders
