@@ -1,7 +1,7 @@
 /**
  * quickSessionsStore — the live quick-session status board feed.
  *
- * Backs {@link QuickSessionsTable} (the review-home board) and the landing
+ * Backs {@link SessionTriageGroups} (the review-home triage board) and the landing
  * "waiting on you" attention count. Replaces the old idle-session review_item
  * mint: instead of stale blocking `human_task` rows that never self-cleared on
  * open, this fetches every quick session's LIVE state (running/idle/blocked)
