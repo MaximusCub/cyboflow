@@ -28,11 +28,13 @@
  * elapsed labels (one interval for the whole table, not one per row).
  */
 import React from 'react';
+import { Pencil } from 'lucide-react';
 import { useQuickSessionRows, useQuickSessionsStore } from '../../stores/quickSessionsStore';
 import { useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { API } from '../../utils/api';
 import { formatElapsedMinutes } from '../../utils/homeClassify';
 import type { QuickSessionRow, QuickSessionState } from '../../../../shared/types/quickSessions';
 
@@ -153,11 +155,88 @@ function StateChip({ state }: { state: QuickSessionState }): React.JSX.Element {
 function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: number }): React.JSX.Element {
   const quiet = row.state === 'idle' ? formatElapsedMinutes(row.idleSince, nowMs) : null;
   const needsDot = row.state === 'blocked' || (row.state === 'idle' && row.unviewed);
+
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [editName, setEditName] = React.useState(row.name);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    if (isEditing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [isEditing]);
+
+  const startEdit = (): void => {
+    setEditName(row.name);
+    setIsEditing(true);
+  };
+
+  const saveEdit = (): void => {
+    const trimmed = editName.trim();
+    setIsEditing(false);
+    if (trimmed === '' || trimmed === row.name) {
+      setEditName(row.name);
+      return;
+    }
+    API.sessions
+      .rename(row.sessionId, trimmed)
+      .then((response) => {
+        if (!response.success) {
+          throw new Error(response.error || 'Failed to rename session');
+        }
+      })
+      .catch((error) => {
+        console.error('Error renaming session:', error);
+        alert('Failed to rename session');
+        setEditName(row.name);
+      })
+      .finally(() => {
+        void useQuickSessionsStore.getState().refresh();
+      });
+  };
+
+  const cancelEdit = (): void => {
+    setEditName(row.name);
+    setIsEditing(false);
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    // Never let a rename keystroke reach the row's own Enter/Space-to-open handler.
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    }
+  };
+
+  const handleInputBlur = (): void => {
+    saveEdit();
+  };
+
   return (
-    <button
-      type="button"
-      onClick={() => openQuickSession(row)}
-      className="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        // Only the <input> stops propagation on its own clicks; the rest of the
+        // row (status dot, chip, elapsed label) stays a live click target while
+        // editing, so dismissing the editor by clicking there must not also open
+        // the session and stamp last_viewed_at.
+        if (isEditing) return;
+        openQuickSession(row);
+      }}
+      onKeyDown={(e) => {
+        if (isEditing) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openQuickSession(row);
+        }
+      }}
+      className="group flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
     >
       <span
         aria-hidden="true"
@@ -171,14 +250,43 @@ function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: numb
                 : 'bg-border-emphasized'
         }`}
       />
-      <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
-        {row.name}
-      </span>
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          type="text"
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={handleInputKeyDown}
+          onBlur={handleInputBlur}
+          className="min-w-0 flex-1 border border-border-emphasized bg-bg-primary px-1 font-bold text-text-primary outline-none"
+          style={{ fontSize: '13px' }}
+        />
+      ) : (
+        <>
+          <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
+            {row.name}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              startEdit();
+            }}
+            onKeyDown={(e) => e.stopPropagation()}
+            aria-label="Rename session"
+            title="Rename"
+            className="shrink-0 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+          >
+            <Pencil className="w-3 h-3" />
+          </button>
+        </>
+      )}
       <StateChip state={row.state} />
       <span className="ml-auto shrink-0 text-[11px] text-text-muted">
         {row.state === 'idle' ? `quiet ${quiet}` : row.state === 'blocked' ? 'waiting on you' : ''}
       </span>
-    </button>
+    </div>
   );
 }
 
