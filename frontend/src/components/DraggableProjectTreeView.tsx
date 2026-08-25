@@ -1979,10 +1979,14 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         // parentless run rows after the session list.
                         const isLastSession =
                           index === flatSessions.length - 1 && parentlessRunCount === 0;
-                        // Show LAST-ACTIVITY time (DB updated_at → lastActivity), not
-                        // creation time: an actively-used session should read "a few
-                        // minutes ago", not its hours-old creation timestamp. Fall back
-                        // to createdAt when lastActivity is absent (older/unsynced rows).
+                        // Show LAST-ACTIVITY time, not creation time: an actively-used
+                        // session should read "a few minutes ago", not its hours-old
+                        // creation timestamp. lastActivity is
+                        // COALESCE(sessions.idle_since, sessions.updated_at) — the real
+                        // rest boundary once the session is at rest (migration 119), so
+                        // a rename or a folder move no longer makes a long-quiet session
+                        // read as active moments ago. Fall back to createdAt when
+                        // lastActivity is absent (older/unsynced rows).
                         const lastActivityAt = session.lastActivity ?? session.createdAt;
                         const relativeTime = lastActivityAt ? formatDistanceToNow(lastActivityAt) : '';
                         const isActive = selectedSessionId === session.id;

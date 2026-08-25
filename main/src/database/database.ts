@@ -2624,8 +2624,9 @@ export class DatabaseService {
     // idle_since — the reason simply changed: unviewed is
     // `last_viewed_at < updated_at`, so bumping updated_at here would mark the
     // session unviewed again the instant it was opened, re-arming the blue dot
-    // and the landing "waiting on you" count. (updated_at also still feeds the
-    // sidebar's lastActivity, which idle_since does not yet reach.)
+    // and the landing "waiting on you" count. (The sidebar's lastActivity no
+    // longer depends on it for a resting session — sessionManager COALESCEs
+    // idle_since first — but a busy session still falls through to updated_at.)
     // Viewed-ness stays correct as written: stamping last_viewed_at alone
     // flips the predicate to viewed.
     this.db.prepare(`
@@ -3220,8 +3221,9 @@ export class DatabaseService {
     // identical timestamp, collapsing the board's "quiet for N" labels — is now
     // fixed at the source (migration 119 put those labels on idle_since, which
     // a display_order write never touches), but the guard stays: a bump here
-    // would still mark every session in the project unviewed at once, and
-    // would still stamp the sidebar's lastActivity.
+    // would still mark every session in the project unviewed at once, and would
+    // still move the sidebar's lastActivity for any BUSY session in the project
+    // (those have idle_since NULL and fall through to updated_at).
     const stmt = this.db.prepare(`
       UPDATE sessions
       SET display_order = ?
