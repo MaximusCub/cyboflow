@@ -67,7 +67,7 @@ import {
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../services/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
-import { isPtyLane, resolvePanelLane, type PanelLane } from '../services/panelLane';
+import { isPtyLane, nonClaudeLaneOwner, resolvePanelLane, type PanelLane } from '../services/panelLane';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { ToolPanel } from '../../../shared/types/panels';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
@@ -743,25 +743,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   /**
    * The manager that owns a lane's live process for Stop / Dismiss close-out, or
-   * undefined for the two CLAUDE lanes — those keep their own fallbacks (the
-   * interactive one degrades to `killLiveSession` when its manager is absent,
-   * and `claudeCodeManager.stopPanel` is the session-level Stop that predates
-   * the interactive split).
+   * undefined for the two CLAUDE lanes — see {@link nonClaudeLaneOwner}.
    */
-  const laneStopOwner = (lane: PanelLane): AbstractCliManager | undefined => {
-    switch (lane) {
-      case 'codex-sdk':
-        return codexSdkManager;
-      case 'codex-pty':
-        return codexPtyManager;
-      case 'omp-sdk':
-        return ompSdkManager;
-      case 'omp-pty':
-        return ompPtyManager;
-      default:
-        return undefined;
-    }
-  };
+  const laneStopOwner = (lane: PanelLane): AbstractCliManager | undefined =>
+    nonClaudeLaneOwner<AbstractCliManager | undefined>(lane, {
+      'codex-sdk': codexSdkManager,
+      'codex-pty': codexPtyManager,
+      'omp-sdk': ompSdkManager,
+      'omp-pty': ompPtyManager,
+    });
 
   /**
    * Rest the session when a PTY lane's process exits. Lane, not session runtime:
