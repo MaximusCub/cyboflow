@@ -207,9 +207,10 @@ interface IPCResponse<T = unknown> {
 // escape hatch (`window.electronAPI.invoke` and `window.electron.invoke`).
 // Unconstrained, that hatch hands ANY renderer-side script — including one
 // injected via XSS in rendered markdown, a diff, or a session name — the whole
-// ~194-channel `ipcMain.handle` surface, which includes arbitrary git execution
-// and project-scoped file writes. The typed wrapper methods elsewhere in this
-// file are unaffected; only the generic hatch is gated.
+// remaining `ipcMain.handle` surface. (Session/project-scoped file I/O and git
+// execution moved off `ipcMain.handle` entirely, to the `cyboflow.workspaceFiles`
+// tRPC router — see main/src/ipc/fileOps.ts.) The typed wrapper methods
+// elsewhere in this file are unaffected; only the generic hatch is gated.
 //
 // The list is derived from the ACTUAL renderer call sites — every literal
 // channel matched by `grep -rn "\.invoke(" frontend/src` (excluding tRPC), plus
@@ -243,19 +244,6 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
 
   // Archive progress polling
   'archive:get-progress',
-
-  // Session-scoped file I/O (diff + editor panels)
-  'file:read',
-  'file:readAtRevision',
-  'file:write',
-  'file:list',
-  'file:delete',
-  'file:search',
-
-  // Session-scoped git actions (diff panel commit/revert/restore)
-  'git:commit',
-  'git:revert',
-  'git:restore',
 
   // Tool panels
   'panels:update',
@@ -541,7 +529,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   git: {
     detectBranch: (path: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('projects:detect-branch', path),
     cancelStatusForProject: (projectId: number): Promise<{ success: boolean; error?: string }> => ipcRenderer.invoke('git:cancel-status-for-project', projectId),
-    executeProject: (projectId: number, args: string[]): Promise<IPCResponse> => ipcRenderer.invoke('git:execute-project', { projectId, args }),
   },
 
   // Folders
@@ -591,12 +578,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Prompts
   prompts: {
     getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('prompts:get-all'),
-  },
-
-  // File operations
-  file: {
-    readProject: (projectId: number, filePath: string): Promise<IPCResponse> => ipcRenderer.invoke('file:read-project', { projectId, filePath }),
-    writeProject: (projectId: number, filePath: string, content: string): Promise<IPCResponse> => ipcRenderer.invoke('file:write-project', { projectId, filePath, content }),
   },
 
   // Dialog

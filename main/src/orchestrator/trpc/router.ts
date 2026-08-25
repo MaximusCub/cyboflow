@@ -35,6 +35,7 @@ import { experimentsRouter } from './routers/experiments';
 import { verificationRequestsRouter } from './routers/verificationRequests';
 import { ompRouter } from './routers/omp';
 import { ompCommandRouter } from './routers/ompCommand';
+import { workspaceFilesRouter } from './routers/workspaceFiles';
 
 export const appRouter = router({
   cyboflow: router({
@@ -67,6 +68,7 @@ export const appRouter = router({
     workflows: workflowsRouter,
     omp: ompRouter,
     ompCommand: ompCommandRouter,
+    workspaceFiles: workspaceFilesRouter,
   }),
 });
 

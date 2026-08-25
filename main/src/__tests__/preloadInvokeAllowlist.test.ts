@@ -77,10 +77,10 @@ describe('exposed bridge shape is unchanged', () => {
 describe.each(['electronAPI', 'electron'] as const)('%s.invoke allowlist', (bridge) => {
   it('forwards an allowlisted channel to ipcRenderer.invoke with its args intact', async () => {
     invokeCalls.length = 0;
-    const result = await bridgeInvoke(bridge)('file:read', { sessionId: 's1', filePath: 'a.ts' });
+    const result = await bridgeInvoke(bridge)('sessions:set-active-session', { sessionId: 's1' });
     expect(result).toEqual({ success: true });
     expect(invokeCalls).toEqual([
-      { channel: 'file:read', args: [{ sessionId: 's1', filePath: 'a.ts' }] },
+      { channel: 'sessions:set-active-session', args: [{ sessionId: 's1' }] },
     ]);
   });
 

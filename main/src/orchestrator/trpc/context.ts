@@ -24,6 +24,7 @@ import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shar
 import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
+import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -445,6 +446,25 @@ export interface ContextDeps {
    * can omit it.
    */
   configOps?: ConfigOpsLike;
+
+  /**
+   * Live workspace-file-ops implementation (the `workspaceFiles` router's
+   * business logic — session-worktree and project-directory file I/O, plus
+   * the worktree/project-scoped git mutations that have always lived
+   * alongside it: commit/revert/restore/execute).
+   *
+   * Injected from `main/src/index.ts` via `createFileOps({ sessionManager,
+   * databaseService, gitStatusManager, configManager })`
+   * (main/src/ipc/fileOps.ts). Using the narrow {@link WorkspaceFileOpsLike}
+   * interface (rather than importing the concrete factory) preserves the
+   * standalone-typecheck invariant: no 'main/src/services/*' import is needed
+   * here.
+   *
+   * Handlers must explicitly check `ctx.workspaceFileOps` before use —
+   * `undefined` is the intentional default so unit tests that do not need
+   * file/git access can omit it.
+   */
+  workspaceFileOps?: WorkspaceFileOpsLike;
 }
 
 /**
@@ -500,6 +520,7 @@ export function createContext(deps: ContextDeps = {}): {
   ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
+  workspaceFileOps?: WorkspaceFileOpsLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -521,6 +542,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    workspaceFileOps,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -549,6 +571,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    workspaceFileOps,
   };
 }
 

@@ -20,8 +20,8 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-08-25 (200 handlers — down from 205: the 5 `ipc/config.ts`
- * handlers migrated to the cyboflow.config tRPC router, the pilot slice of
+/** Frozen 2026-08-25 (187 handlers — down from 200: the 13 `ipc/file.ts`
+ * handlers migrated to the cyboflow.workspaceFiles tRPC router, slice 2 of
  * the IPC→tRPC migration). Entries may decrease or disappear, never grow —
  * and a decrease MUST be recorded here, so the map tracks reality. */
 const FROZEN_HANDLER_COUNTS: Record<string, number> = {
@@ -37,7 +37,6 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/designPrototypeServer.ts': 3,
   'ipc/dialog.ts': 2,
   'ipc/editorPanel.ts': 4,
-  'ipc/file.ts': 13,
   'ipc/folders.ts': 7,
   'ipc/git.ts': 21,
   'ipc/ideaAttachments.ts': 2,

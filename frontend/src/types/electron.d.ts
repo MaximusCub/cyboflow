@@ -332,7 +332,6 @@ interface ElectronAPI {
   git: {
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
     cancelStatusForProject: (projectId: number) => Promise<{ success: boolean; error?: string }>;
-    executeProject: (projectId: number, args: string[]) => Promise<IPCResponse<string>>;
   };
 
   // Folders
@@ -371,12 +370,6 @@ interface ElectronAPI {
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
   prompts: {
     getAll: () => Promise<IPCDataResponse<unknown[]>>;
-  };
-
-  // File operations
-  file: {
-    readProject: (projectId: number, filePath: string) => Promise<IPCResponse<string | null>>;
-    writeProject: (projectId: number, filePath: string, content: string) => Promise<IPCResponse<void>>;
   };
 
   // Dialog

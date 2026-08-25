@@ -3,6 +3,7 @@ import { CheckCircle2, Circle, ChevronRight, GitBranch, FileCode } from 'lucide-
 import { useSession } from '../../contexts/SessionContext';
 import { panelApi } from '../../services/panelApi';
 import { API } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 import type { SetupTasksPanelState } from '../../../../shared/types/panels';
 
 // Active consumer: usePanelSurface (autoCreatePermanentPanels=true, ProjectView path) via PanelContainer case 'setup-tasks'.
@@ -38,7 +39,10 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
     
     try {
       // Use the file API to read .gitignore from the project
-      const response = await window.electronAPI.file.readProject(parseInt(projectId), '.gitignore');
+      const response = await trpc.cyboflow.workspaceFiles.readProject.query({
+        projectId: parseInt(projectId),
+        filePath: '.gitignore',
+      });
       if (!response.success || !response.data) return false;
       
       const content = response.data as string;
@@ -118,7 +122,10 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
     try {
       // Read current .gitignore or create empty if doesn't exist
       console.log('[SetupTasksPanel] Reading .gitignore...');
-      const readResponse = await window.electronAPI.file.readProject(parseInt(projectId), '.gitignore');
+      const readResponse = await trpc.cyboflow.workspaceFiles.readProject.query({
+        projectId: parseInt(projectId),
+        filePath: '.gitignore',
+      });
       console.log('[SetupTasksPanel] Read response:', readResponse);
       
       let content = '';
@@ -128,7 +135,7 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
         console.log('[SetupTasksPanel] Current .gitignore length:', content.length);
       } else if (readResponse.success && readResponse.data === null) {
         console.log('[SetupTasksPanel] .gitignore does not exist, will create it');
-      } else {
+      } else if (!readResponse.success) {
         console.error('[SetupTasksPanel] Failed to read .gitignore:', readResponse.error);
         alert(`Failed to read .gitignore: ${readResponse.error}`);
         return;
@@ -165,7 +172,11 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
         
         console.log('[SetupTasksPanel] Writing updated content to .gitignore...');
         // Write back to file
-        const writeResponse = await window.electronAPI.file.writeProject(parseInt(projectId), '.gitignore', content);
+        const writeResponse = await trpc.cyboflow.workspaceFiles.writeProject.mutate({
+          projectId: parseInt(projectId),
+          filePath: '.gitignore',
+          content,
+        });
         console.log('[SetupTasksPanel] Write response:', writeResponse);
         
         if (!writeResponse.success) {
@@ -180,10 +191,10 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
         console.log('[SetupTasksPanel] Creating git commit...');
         
         // Stage the .gitignore file
-        const gitAddResponse = await window.electronAPI.git.executeProject(
-          parseInt(projectId),
-          ['add', '.gitignore']
-        );
+        const gitAddResponse = await trpc.cyboflow.workspaceFiles.gitExecuteProject.mutate({
+          projectId: parseInt(projectId),
+          args: ['add', '.gitignore'],
+        });
         
         if (!gitAddResponse.success) {
           console.error('[SetupTasksPanel] Failed to stage .gitignore:', gitAddResponse.error);
@@ -200,10 +211,10 @@ const SetupTasksPanel: React.FC<SetupTasksPanelProps> = ({ panelId, isActive }) 
           '- /worktree-*/\n\n' +
           'This prevents git from tracking temporary Cyboflow session directories.';
         
-        const gitCommitResponse = await window.electronAPI.git.executeProject(
-          parseInt(projectId),
-          ['commit', '-m', commitMessage]
-        );
+        const gitCommitResponse = await trpc.cyboflow.workspaceFiles.gitExecuteProject.mutate({
+          projectId: parseInt(projectId),
+          args: ['commit', '-m', commitMessage],
+        });
         
         if (!gitCommitResponse.success) {
           // Check if it's because there's nothing to commit (file unchanged)

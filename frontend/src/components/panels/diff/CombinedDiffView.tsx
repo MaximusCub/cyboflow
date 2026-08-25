@@ -4,6 +4,7 @@ import ExecutionList from '../../ExecutionList';
 import { CommitDialog } from '../../CommitDialog';
 import { FileList } from '../../FileList';
 import { API } from '../../../utils/api';
+import { trpc } from '../../../trpc/client';
 import type { CombinedDiffViewProps } from '../../../types/diff';
 import type { ExecutionDiff, GitDiffResult } from '../../../types/diff';
 import { Maximize2, Minimize2, RefreshCw } from 'lucide-react';
@@ -340,7 +341,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
   const handleCommit = useCallback(async (message: string) => {
     console.log('Committing with message:', message);
     
-    const result = await window.electronAPI.invoke('git:commit', {
+    const result = await trpc.cyboflow.workspaceFiles.gitCommit.mutate({
       sessionId,
       message
     });
@@ -365,7 +366,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
     }
 
     try {
-      const result = await window.electronAPI.invoke('git:revert', {
+      const result = await trpc.cyboflow.workspaceFiles.gitRevert.mutate({
         sessionId,
         commitHash
       });
@@ -455,7 +456,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
 
   const handleFileDelete = useCallback(async (filePath: string) => {
     try {
-      const result = await window.electronAPI.invoke('file:delete', {
+      const result = await trpc.cyboflow.workspaceFiles.delete.mutate({
         sessionId,
         filePath
       });
@@ -507,7 +508,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
     }
 
     try {
-      const result = await window.electronAPI.invoke('git:restore', {
+      const result = await trpc.cyboflow.workspaceFiles.gitRestore.mutate({
         sessionId
       });
       

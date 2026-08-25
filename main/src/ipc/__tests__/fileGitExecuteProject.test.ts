@@ -1,8 +1,8 @@
 /**
  * `git:execute-project` — the subcommand allowlist and argv construction
- * (main/src/ipc/file.ts → PROJECT_GIT_SUBCOMMANDS).
+ * (main/src/ipc/fileOps.ts → PROJECT_GIT_SUBCOMMANDS).
  *
- * This channel is the only renderer-facing handler that takes a git argv. It
+ * This channel is the only renderer-facing surface that takes a git argv. It
  * used to run `execSync(\`git ${escapeShellArgs(args)}\`)` — shell-escaped, so
  * not injectable as a shell command, but still "whatever git subcommand the
  * renderer asks for" inside the user's real project directory: `push`,
@@ -10,12 +10,10 @@
  * git (execFile, no shell) behind an allowlist of the two argv SHAPES the
  * renderer actually sends, both from SetupTasksPanel.tsx.
  *
- * The tests drive the REAL handler with `runGitCapture` stubbed, so they assert
+ * The tests drive the REAL ops with `runGitCapture` stubbed, so they assert
  * the argv that would actually be spawned rather than a reconstructed string.
- * The previous version of this file tested a copy of the handler's template
- * literal, which could not observe what the handler really did.
  *
- * The other handlers migrated off shell strings in the same change are covered
+ * The other ops migrated off shell strings in the same change are covered
  * here too, since each carries renderer-supplied data into a git invocation:
  * `git:revert` (commit hash), `file:readAtRevision` (revision), `git:restore`.
  */
@@ -43,50 +41,29 @@ vi.mock('../../utils/runGit', async (importOriginal) => {
   };
 });
 
-import { registerFileHandlers } from '../file';
+import { createFileOps } from '../fileOps';
 import type { AppServices } from '../types';
 import type { Session } from '../../types/session';
-
-type Handler = (...args: unknown[]) => Promise<unknown>;
-interface Result {
-  success: boolean;
-  error?: string;
-  output?: string;
-  content?: string;
-}
 
 const PROJECT_PATH = '/tmp/cyboflow-test-project';
 const WORKTREE_PATH = '/tmp/cyboflow-test-worktree';
 
-let handlers: Map<string, Handler>;
+let ops: ReturnType<typeof createFileOps>;
 
 beforeEach(() => {
   gitCalls.length = 0;
   gitResult.value = { stdout: '', stderr: '' };
 
-  handlers = new Map<string, Handler>();
   const session = { id: 's1', worktreePath: WORKTREE_PATH, archived: false } as unknown as Session;
-  registerFileHandlers(
-    { handle: (channel: string, fn: Handler) => handlers.set(channel, fn) } as unknown as Parameters<
-      typeof registerFileHandlers
-    >[0],
-    {
-      sessionManager: { getSession: vi.fn(() => session) },
-      databaseService: { getProject: vi.fn(() => ({ id: 1, path: PROJECT_PATH })) },
-      gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
-      configManager: { isDemoMode: () => false },
-    } as unknown as AppServices,
-  );
+  ops = createFileOps({
+    sessionManager: { getSession: vi.fn(() => session) },
+    databaseService: { getProject: vi.fn(() => ({ id: 1, path: PROJECT_PATH })) },
+    gitStatusManager: { refreshSessionGitStatus: vi.fn(async () => {}) },
+    configManager: { isDemoMode: () => false },
+  } as unknown as AppServices);
 });
 
-function invoke(channel: string, ...args: unknown[]): Promise<Result> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler for channel: ${channel}`);
-  return fn({} as unknown, ...args) as Promise<Result>;
-}
-
-const executeProject = (args: string[]): Promise<Result> =>
-  invoke('git:execute-project', { projectId: 1, args });
+const executeProject = (args: string[]) => ops.gitExecuteProject({ projectId: 1, args });
 
 describe('git:execute-project — allowed shapes pass through as argv', () => {
   it('runs `add` with END_OF_OPTIONS before the pathspec, in the project cwd', async () => {
@@ -107,7 +84,7 @@ describe('git:execute-project — allowed shapes pass through as argv', () => {
   it('returns git stdout as `output`', async () => {
     gitResult.value = { stdout: '[main abc1234] done\n', stderr: '' };
     const res = await executeProject(['add', '.gitignore']);
-    expect(res.output).toBe('[main abc1234] done\n');
+    expect(res.success && res.output).toBe('[main abc1234] done\n');
   });
 
   it('accepts multiple pathspecs for add', async () => {
@@ -141,9 +118,9 @@ describe('git:execute-project — the allowlist rejects everything else', () => 
 
   it('names the offending subcommand and points at the allowlist', async () => {
     const res = await executeProject(['push']);
-    expect(res.error).toContain('push');
-    expect(res.error).toContain('PROJECT_GIT_SUBCOMMANDS');
-    expect(res.error).toContain('add, commit');
+    expect(!res.success && res.error).toContain('push');
+    expect(!res.success && res.error).toContain('PROJECT_GIT_SUBCOMMANDS');
+    expect(!res.success && res.error).toContain('add, commit');
   });
 
   it('rejects a leading global option used to smuggle config', async () => {
@@ -174,7 +151,7 @@ describe('git:execute-project — per-subcommand argument validation', () => {
   it('rejects an option-shaped pathspec for add', async () => {
     const res = await executeProject(['add', '--all']);
     expect(res.success).toBe(false);
-    expect(res.error).toMatch(/parsed as options/);
+    expect(!res.success && res.error).toMatch(/parsed as options/);
     expect(gitCalls).toEqual([]);
   });
 
@@ -187,7 +164,7 @@ describe('git:execute-project — per-subcommand argument validation', () => {
   it('rejects add with no pathspec (which would stage everything)', async () => {
     const res = await executeProject(['add']);
     expect(res.success).toBe(false);
-    expect(res.error).toMatch(/at least one pathspec/);
+    expect(!res.success && res.error).toMatch(/at least one pathspec/);
   });
 
   it.each([
@@ -199,7 +176,7 @@ describe('git:execute-project — per-subcommand argument validation', () => {
   ])('rejects commit form: %s', async (_name, args) => {
     const res = await executeProject(args);
     expect(res.success).toBe(false);
-    expect(res.error).toMatch(/commit -m <message>/);
+    expect(!res.success && res.error).toMatch(/commit -m <message>/);
     expect(gitCalls).toEqual([]);
   });
 });
@@ -222,17 +199,17 @@ describe('git:execute-project — error reporting', () => {
     gitResult.value = err;
     const res = await executeProject(['commit', '-m', 'msg']);
     expect(res.success).toBe(false);
-    expect(res.error).toContain('nothing to commit');
+    expect(!res.success && res.error).toContain('nothing to commit');
   });
 });
 
 // ---------------------------------------------------------------------------
-// The sibling handlers migrated off shell strings in the same change.
+// The sibling ops migrated off shell strings in the same change.
 // ---------------------------------------------------------------------------
 
 describe('git:revert — argv form, option-shaped hash rejected', () => {
   it('places our flag first, then END_OF_OPTIONS, then the hash', async () => {
-    const res = await invoke('git:revert', { sessionId: 's1', commitHash: 'abc1234' });
+    const res = await ops.gitRevert({ sessionId: 's1', commitHash: 'abc1234' });
     expect(res.success).toBe(true);
     expect(gitCalls).toEqual([
       { cwd: WORKTREE_PATH, args: ['revert', '--no-edit', '--end-of-options', 'abc1234'] },
@@ -240,7 +217,7 @@ describe('git:revert — argv form, option-shaped hash rejected', () => {
   });
 
   it('rejects an option-shaped commit hash', async () => {
-    const res = await invoke('git:revert', {
+    const res = await ops.gitRevert({
       sessionId: 's1',
       commitHash: '--upload-pack=touch /tmp/pwned',
     });
@@ -251,7 +228,7 @@ describe('git:revert — argv form, option-shaped hash rejected', () => {
   it('keeps a shell-metacharacter hash as one inert argv element', async () => {
     // Previously interpolated into `git revert ${hash} --no-edit` as a shell
     // string, so this was command substitution.
-    await invoke('git:revert', { sessionId: 's1', commitHash: '$(touch /tmp/pwned)' });
+    await ops.gitRevert({ sessionId: 's1', commitHash: '$(touch /tmp/pwned)' });
     expect(gitCalls[0].args).toEqual([
       'revert',
       '--no-edit',
@@ -263,7 +240,7 @@ describe('git:revert — argv form, option-shaped hash rejected', () => {
 
 describe('git:restore — argv form', () => {
   it('runs reset --hard HEAD then clean -fd', async () => {
-    const res = await invoke('git:restore', { sessionId: 's1' });
+    const res = await ops.gitRestore({ sessionId: 's1' });
     expect(res.success).toBe(true);
     expect(gitCalls).toEqual([
       { cwd: WORKTREE_PATH, args: ['reset', '--hard', 'HEAD'] },
@@ -275,11 +252,7 @@ describe('git:restore — argv form', () => {
 describe('file:readAtRevision — argv form, revision validated', () => {
   it('builds a single <rev>:<path> spec behind END_OF_OPTIONS', async () => {
     gitResult.value = { stdout: 'file contents\n', stderr: '' };
-    const res = await invoke('file:readAtRevision', {
-      sessionId: 's1',
-      filePath: 'src/a.ts',
-      revision: 'HEAD~2',
-    });
+    const res = await ops.readAtRevision({ sessionId: 's1', filePath: 'src/a.ts', revision: 'HEAD~2' });
     expect(res).toMatchObject({ success: true, content: 'file contents\n' });
     expect(gitCalls).toEqual([
       { cwd: WORKTREE_PATH, args: ['show', '--end-of-options', 'HEAD~2:src/a.ts'] },
@@ -287,29 +260,25 @@ describe('file:readAtRevision — argv form, revision validated', () => {
   });
 
   it('defaults the revision to HEAD', async () => {
-    await invoke('file:readAtRevision', { sessionId: 's1', filePath: 'a.ts' });
+    await ops.readAtRevision({ sessionId: 's1', filePath: 'a.ts' });
     expect(gitCalls[0].args).toEqual(['show', '--end-of-options', 'HEAD:a.ts']);
   });
 
   it('rejects an option-shaped revision', async () => {
-    const res = await invoke('file:readAtRevision', {
-      sessionId: 's1',
-      filePath: 'a.ts',
-      revision: '--output=/tmp/pwned',
-    });
+    const res = await ops.readAtRevision({ sessionId: 's1', filePath: 'a.ts', revision: '--output=/tmp/pwned' });
     expect(res.success).toBe(false);
     expect(gitCalls).toEqual([]);
   });
 
   it('rejects a revision containing ":" — git splits on the FIRST colon', async () => {
     // `HEAD:../../etc/passwd` + ':a.ts' would re-aim the path half of the spec.
-    const res = await invoke('file:readAtRevision', {
+    const res = await ops.readAtRevision({
       sessionId: 's1',
       filePath: 'a.ts',
       revision: 'HEAD:../../etc/passwd',
     });
     expect(res.success).toBe(false);
-    expect(res.error).toMatch(/must not contain/);
+    expect(!res.success && res.error).toMatch(/must not contain/);
     expect(gitCalls).toEqual([]);
   });
 });

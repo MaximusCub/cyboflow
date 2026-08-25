@@ -11,6 +11,7 @@ import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
 import { MarkdownPreview } from '../../MarkdownPreview';
 import { useResizablePanel } from '../../../hooks/useResizablePanel';
 import { EditorPanelState } from '../../../../../shared/types/panels';
+import { trpc } from '../../../trpc/client';
 
 interface FileItem {
   name: string;
@@ -162,7 +163,7 @@ function FileTree({
     setLoading(true);
     setError(null);
     try {
-      const result = await window.electronAPI.invoke('file:list', {
+      const result = await trpc.cyboflow.workspaceFiles.list.query({
         sessionId,
         path
       });
@@ -229,7 +230,7 @@ function FileTree({
     }
 
     try {
-      const result = await window.electronAPI.invoke('file:delete', {
+      const result = await trpc.cyboflow.workspaceFiles.delete.mutate({
         sessionId,
         filePath: file.path
       });
@@ -269,7 +270,7 @@ function FileTree({
       const isFolder = showNewItemDialog === 'folder';
       const filePath = isFolder ? `${newItemName}/.gitkeep` : newItemName;
       
-      const result = await window.electronAPI.invoke('file:write', {
+      const result = await trpc.cyboflow.workspaceFiles.write.mutate({
         sessionId,
         filePath,
         content: ''
@@ -629,7 +630,7 @@ export function FileEditor({
     setLoading(true);
     setError(null);
     try {
-      const result = await window.electronAPI.invoke('file:read', {
+      const result = await trpc.cyboflow.workspaceFiles.read.query({
         sessionId,
         filePath: file.path
       });
@@ -775,7 +776,7 @@ export function FileEditor({
       if (!selectedFile || selectedFile.isDirectory || fileContent === originalContent) return;
       
       try {
-        const result = await window.electronAPI.invoke('file:write', {
+        const result = await trpc.cyboflow.workspaceFiles.write.mutate({
           sessionId,
           filePath: selectedFile.path,
           content: fileContent

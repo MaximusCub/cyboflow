@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, Folder, Zap } from 'lucide-react';
+import { trpc } from '../trpc/client';
 
 interface FileItem {
   path: string;
@@ -219,7 +220,7 @@ const FilePathAutocomplete: React.FC<FilePathAutocompleteProps> = ({
     if (!sessionId && !projectId) return;
 
     try {
-      const result = await window.electronAPI?.invoke('file:search', {
+      const result = await trpc.cyboflow.workspaceFiles.search.query({
         sessionId,
         projectId: typeof projectId === 'string' ? parseInt(projectId, 10) : projectId,
         pattern,

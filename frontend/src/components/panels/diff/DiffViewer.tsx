@@ -4,6 +4,7 @@ import { FileText, ChevronRight, ChevronDown } from 'lucide-react';
 import type { DiffViewerProps } from '../../../types/diff';
 import type { FileDiff } from '../../../types/diff';
 import { useTheme } from '../../../contexts/ThemeContext';
+import { trpc } from '../../../trpc/client';
 
 // Parse unified diff format to extract individual file diffs
 const parseUnifiedDiff = (diff: string): FileDiff[] => {
@@ -189,7 +190,7 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
 
             try {
               // Load the full current file content
-              const result = await window.electronAPI.invoke('file:read', {
+              const result = await trpc.cyboflow.workspaceFiles.read.query({
                 sessionId,
                 filePath: file.path
               });
@@ -212,7 +213,7 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
                 const baseRevision = isAllCommitsSelected ? mainBranch : 'HEAD';
                 
                 try {
-                  const headResult = await window.electronAPI.invoke('file:readAtRevision', {
+                  const headResult = await trpc.cyboflow.workspaceFiles.readAtRevision.query({
                     sessionId,
                     filePath: file.path,
                     revision: baseRevision
@@ -246,9 +247,13 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
                   return file;
                 }
               } else {
-                console.warn(`Failed to load full content for ${file.path}:`, result.error);
+                // result.success is false here (the `content !== undefined` half of
+                // the guard above is always true on success, since `content` is a
+                // required field of the success envelope).
+                const readError = result.success ? undefined : result.error;
+                console.warn(`Failed to load full content for ${file.path}:`, readError);
                 // Check if file was deleted (ENOENT error)
-                if (result.error && result.error.includes('ENOENT')) {
+                if (readError && readError.includes('ENOENT')) {
                   // File was deleted, mark it as deleted type
                   return {
                     ...file,
@@ -257,7 +262,7 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
                     newValue: ''
                   };
                 }
-                errors[file.path] = result.error || 'Failed to load file content';
+                errors[file.path] = readError || 'Failed to load file content';
                 return file;
               }
             } catch (error) {

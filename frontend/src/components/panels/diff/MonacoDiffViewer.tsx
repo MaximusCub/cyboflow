@@ -6,6 +6,7 @@ import type { FileDiff } from '../../../types/diff';
 import { debounce, type DebouncedFunction } from '../../../utils/debounce';
 import { MonacoErrorBoundary } from '../../MonacoErrorBoundary';
 import { MarkdownPreview } from '../../MarkdownPreview';
+import { trpc } from '../../../trpc/client';
 import type * as monaco from 'monaco-editor';
 
 interface IDisposable {
@@ -196,7 +197,7 @@ export const MonacoDiffViewer: React.FC<MonacoDiffViewerProps> = ({
         contentPreview: content.substring(0, 100)
       });
       
-      const result = await window.electronAPI.invoke('file:write', {
+      const result = await trpc.cyboflow.workspaceFiles.write.mutate({
         sessionId,
         filePath: currentFilePath,
         content
