@@ -341,3 +341,54 @@ describe('TaskCard ledger expand', () => {
     );
   });
 });
+
+// Search / membership filtering (IDEA-053, TASK-203). The evidence line is the
+// only user-visible signal that a card is on the board because a CHILD matched;
+// its exact "Matches <REF> — <Title>" format is asserted here directly (the
+// BacklogPane suite only checks the two substrings end-to-end).
+describe('TaskCard matched-child evidence', () => {
+  it('renders "Matches REF — Title" for a single matched child', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'epic', ref: 'EPIC-001', title: 'Parent epic' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+        matchedChildRefs={[{ ref: 'TASK-014', title: 'Add retry guard' }]}
+      />,
+    );
+    expect(screen.getByTestId('matched-child-evidence')).toHaveTextContent(
+      'Matches TASK-014 — Add retry guard',
+    );
+  });
+
+  it('comma-joins several matched children', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'epic', ref: 'EPIC-001', title: 'Parent epic' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+        matchedChildRefs={[
+          { ref: 'TASK-014', title: 'Add retry guard' },
+          { ref: 'TASK-015', title: 'Update session token' },
+        ]}
+      />,
+    );
+    expect(screen.getByTestId('matched-child-evidence')).toHaveTextContent(
+      'Matches TASK-014 — Add retry guard, TASK-015 — Update session token',
+    );
+  });
+
+  it('renders nothing when there is no matched-child evidence (the unfiltered board)', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'epic', ref: 'EPIC-001' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.queryByTestId('matched-child-evidence')).not.toBeInTheDocument();
+  });
+});

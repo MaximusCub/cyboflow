@@ -2915,11 +2915,17 @@ export class McpQueryHandler {
   }
 
   /**
-   * Project a full BacklogTaskItem for cyboflow_get_task, EXCLUDING `inFlow`
-   * (an internal live-run overlay with no stable external contract). Every
-   * other field — including `body`, `blockedBy`/`relatedTo`/`readyToWork`, and
-   * (for an epic) `children`/`childCount`/`pendingTasks` — passes through
-   * unchanged.
+   * Project a full BacklogTaskItem for cyboflow_get_task. A CURATED ALLOW-LIST,
+   * not a pass-through: the fields below are the tool's external contract, and a
+   * field newly added to `BacklogTaskItem` is absent here until it is added
+   * DELIBERATELY. It does include `body`, `blockedBy`/`relatedTo`/`readyToWork`
+   * and (for an epic) `children`/`childCount`/`pendingTasks`.
+   *
+   * Deliberately omitted:
+   *  - `inFlow` — an internal live-run overlay with no stable external contract;
+   *  - `memberships` (sprint/experiment labels, TASK-190) — a backlog-UI filter
+   *    overlay; no flow agent consumes it, and widening an agent-facing payload
+   *    is a product decision, not a projection detail.
    */
   private static toFullTask(item: BacklogTaskItem): Record<string, unknown> {
     return {

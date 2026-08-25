@@ -105,9 +105,11 @@ interface CardActionsMenuProps {
   /** False on the column's last card — disables Move down. */
   canMoveDown?: boolean;
   /**
-   * Whether the active backlog sort mode is `'manual'` (default `true`).
-   * Reorder (drag-and-drop AND these Move items) is enabled ONLY in manual
-   * sort — `false` force-disables all three Move items regardless of
+   * Whether same-column reorder is offered at all (default `true`). The caller
+   * (BacklogPane) sets it from `sortMode === 'manual'` AND the absence of an
+   * active search / membership filter — under either, the rendered column is
+   * not the real column, so a re-rank would renumber rows the user cannot see.
+   * `false` force-disables all three Move items regardless of
    * `canMoveUp`/`canMoveDown` and guards their `onClick`.
    */
   isManualSort?: boolean;
@@ -276,7 +278,9 @@ export function CardActionsMenu({
     // onClick is guarded too so a stray activation (native `disabled` should
     // already block it, but this is belt-and-braces) can never call
     // `onReorder` outside manual sort.
-    const reorderHint = !isManualSort ? 'Reordering is available only in Manual sort' : undefined;
+    const reorderHint = !isManualSort
+      ? 'Reordering is available only in Manual sort with no search or membership filter'
+      : undefined;
     items.push(
       {
         id: 'move-up',

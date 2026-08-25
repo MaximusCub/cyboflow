@@ -474,6 +474,15 @@ function hasPendingApprovals(db: DatabaseLike, runIds: string[]): boolean {
 // ---------------------------------------------------------------------------
 
 /** Generic `id -> value` bulk lookup — used for the small denormalization joins below. */
+/**
+ * Generic `id -> value` bulk lookup.
+ *
+ * TRUST BOUNDARY: `table` / `idColumn` / `valueColumn` are INTERPOLATED into the
+ * SQL (SQLite cannot bind identifiers), so every call site MUST pass a hardcoded
+ * schema literal — they all do today. `ids` is the only caller-derived input and
+ * it is bound through `?` placeholders. Never route a user/agent-supplied string
+ * into the first three parameters.
+ */
 function fetchColumnMap(
   db: DatabaseLike,
   table: string,

@@ -569,6 +569,74 @@ describe('WorkflowEditorModal — edit mode', () => {
     });
   });
 
+  it('"Run with modifications" honours the GLOBAL defaultLaunchModel rung when nothing is stored per-workflow', async () => {
+    // The middle rung of resolveRunTypeLaunchDefaults: no stored
+    // `workflow:<id>` model, but the user set a global launch model — every
+    // other launch seam honours it, and so must this one (it used to skip
+    // straight to DEFAULT_WORKFLOW_MODEL).
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: {},
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-run-button'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      projectId: 1,
+      sessionId: 'session-quick-001',
+      model: 'sonnet',
+    });
+  });
+
+  it('"Run with modifications": a stored per-workflow model OUTRANKS the global launch model', async () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: 'sonnet',
+      runTypeDefaults: { [`workflow:${EDIT_WORKFLOW_ID}`]: { model: 'haiku' } },
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-run-button'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'haiku' }));
+  });
+
+  it('"Run with modifications": a BLANK global defaultLaunchModel is unset, not a model', async () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: '   ',
+      runTypeDefaults: {},
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-run-button'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ model: DEFAULT_WORKFLOW_MODEL }),
+    );
+  });
+
   it('blocks Save with a friendly inline error when a workflow-copy prompt is empty', async () => {
     // Seed a definition whose agentConfigs carries a workflow-copy with a blank
     // (whitespace-only) system prompt — the zod write path would reject it.
@@ -1027,6 +1095,72 @@ describe('WorkflowEditorModal — create mode', () => {
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     expect(mockCreateCustom.mock.calls[0][0].name).toBe('new-flow');
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
+  });
+
+  it('"Run with modifications" in CREATE mode resolves the model against the FRESHLY-MINTED id', async () => {
+    // The real mint path (createCustom → a brand-new workflow id), not an
+    // edit-mode stand-in: the run must both target the minted id and resolve
+    // its launch model under `workflow:<minted id>`.
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: 'haiku',
+      runTypeDefaults: { [`workflow:${NEW_CUSTOM_ROW.id}`]: { model: 'sonnet' } },
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    render(
+      <WorkflowEditorModal isOpen onClose={vi.fn()} workflowId="" projectId={1} mode="create" onSaved={vi.fn()} />,
+    );
+    await screen.findByTestId('workflow-editor-canvas');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-run-button'));
+    });
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'minted-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    await waitFor(() =>
+      expect(mockRunStart).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowId: NEW_CUSTOM_ROW.id, model: 'sonnet' }),
+      ),
+    );
+  });
+
+  it('"Run with modifications" in CREATE mode falls back to the global launch model for an unknown minted id', async () => {
+    const config: AppConfig = {
+      gitRepoPath: '/repo',
+      defaultLaunchModel: 'haiku',
+      runTypeDefaults: { 'workflow:some-other-id': { model: 'sonnet' } },
+    };
+    act(() => {
+      useConfigStore.setState({ config });
+    });
+
+    render(
+      <WorkflowEditorModal isOpen onClose={vi.fn()} workflowId="" projectId={1} mode="create" onSaved={vi.fn()} />,
+    );
+    await screen.findByTestId('workflow-editor-canvas');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-run-button'));
+    });
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'minted-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    await waitFor(() =>
+      expect(mockRunStart).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowId: NEW_CUSTOM_ROW.id, model: 'haiku' }),
+      ),
+    );
   });
 
   it('the "Save as new flow" dialog defaults to the typed name WITHOUT a -copy suffix', async () => {

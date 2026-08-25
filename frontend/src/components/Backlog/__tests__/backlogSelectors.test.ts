@@ -861,6 +861,50 @@ describe('applySearchAndMembership', () => {
     expect(result.children?.map((c) => c.id)).toEqual(['TASK-c1']);
   });
 
+  it('a SELF-matched parent keeps its full children and rollups even when NO child matches', () => {
+    // Regression: narrowing a self-matched node zeroed childCount/pendingTasks,
+    // which hides TaskCard's expand affordance (gated on childCount > 0) and
+    // makes the epic's real children unreachable while the search is active.
+    const childA = item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', ref: 'TASK-014', title: 'Fix login bug' });
+    const childB = item({
+      id: 'TASK-c2',
+      parent_epic_id: 'EPIC-1',
+      ref: 'TASK-015',
+      title: 'Update session token',
+      isDone: true,
+    });
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      title: 'Auth revamp', // only the EPIC matches "auth"; neither child does
+      children: [childA, childB],
+      childCount: 2,
+      pendingTasks: 1,
+    });
+    const [result] = applySearchAndMembership([epic], 'auth', [], []) as FilteredBacklogTaskItem[];
+    expect(result.children?.map((c) => c.id)).toEqual(['TASK-c1', 'TASK-c2']);
+    expect(result.childCount).toBe(2);
+    expect(result.pendingTasks).toBe(1);
+    expect(result.matchedChildRefs).toBeUndefined();
+  });
+
+  it('a SELF-matched parent under an active MEMBERSHIP filter also keeps its full children', () => {
+    const child = item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', ref: 'TASK-014', title: 'child', memberships: [] });
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      title: 'epic',
+      memberships: [sprintMembership('s1', 'Sprint 1')],
+      children: [child],
+      childCount: 1,
+      pendingTasks: 1,
+    });
+    const [result] = applySearchAndMembership([epic], '', ['s1'], []) as FilteredBacklogTaskItem[];
+    expect(result.children?.map((c) => c.id)).toEqual(['TASK-c1']);
+    expect(result.childCount).toBe(1);
+    expect(result.pendingTasks).toBe(1);
+  });
+
   it('search AND membership apply to the SAME node — a search-only self-match fails when membership is also active', () => {
     const tasks = [
       // Matches search, but not a member of the selected sprint.

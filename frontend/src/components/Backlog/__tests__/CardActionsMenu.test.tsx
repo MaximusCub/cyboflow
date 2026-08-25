@@ -588,7 +588,7 @@ describe('CardActionsMenu', () => {
       expect(screen.getByText('Move down').closest('button')).toBeDisabled();
       expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
       // The equivalent-of-required accessible explanation, once per item.
-      expect(screen.getAllByText('Reordering is available only in Manual sort')).toHaveLength(3);
+      expect(screen.getAllByText('Reordering is available only in Manual sort with no search or membership filter')).toHaveLength(3);
     });
 
     it('isManualSort=false guards onClick too — a stray activation can never invoke onReorder', () => {
@@ -613,7 +613,7 @@ describe('CardActionsMenu', () => {
       const onReorder = vi.fn();
       render(<CardActionsMenu task={makeTask()} onReorder={onReorder} canMoveUp canMoveDown />);
       fireEvent.click(screen.getByTestId('task-actions-trigger'));
-      expect(screen.queryByText('Reordering is available only in Manual sort')).not.toBeInTheDocument();
+      expect(screen.queryByText('Reordering is available only in Manual sort with no search or membership filter')).not.toBeInTheDocument();
       expect(screen.getByText('Move up').closest('button')).toBeEnabled();
     });
   });

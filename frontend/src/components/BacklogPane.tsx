@@ -485,6 +485,7 @@ function BacklogBoard({
   tasks,
   layoutMode,
   sortMode,
+  reorderEnabled,
   onRun,
   onReorder,
   launchingTaskId,
@@ -495,8 +496,14 @@ function BacklogBoard({
   /** The FINAL filtered+searched+membership-narrowed task list (applySearchAndMembership output). */
   tasks: BacklogTaskItem[];
   layoutMode: LayoutMode;
-  /** Active per-stage sort mode — drives both bucketByStage's comparator and Kanban's reorder gate. */
+  /** Active per-stage sort mode — drives bucketByStage's comparator. */
   sortMode: BacklogSortMode;
+  /**
+   * Whether same-column reorder is offered at all — manual sort AND no active
+   * search/membership narrowing (see BacklogPane's `reorderEnabled`). Feeds
+   * KanbanView/CardActionsMenu's `isManualSort` gate.
+   */
+  reorderEnabled: boolean;
   onRun: (task: BacklogTaskItem) => void;
   /** Same-column re-rank (Kanban only, DnD + card-menu Move items — the List stays read-only). */
   onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
@@ -512,7 +519,7 @@ function BacklogBoard({
         onReorder={onReorder}
         launchingTaskId={launchingTaskId}
         now={now}
-        isManualSort={sortMode === 'manual'}
+        isManualSort={reorderEnabled}
       />
     );
   }
@@ -603,6 +610,21 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   const stages = unifiedStages(boards, filterProjectId, showArchived);
   const archivedCount = countArchived(tasks, filterProjectId);
 
+  /**
+   * Same-column reorder is offered ONLY when the rendered column IS the real
+   * column: manual sort AND no active search/membership narrowing. Search and
+   * membership are orthogonal to `sortMode`, and `reorderTask` plans against
+   * the RENDERED (narrowed) list — under a filter, planReorder's re-seed
+   * fallback would renumber only the visible subset and silently reshuffle the
+   * hidden siblings' ranks. Gating here covers all three surfaces at once
+   * (Kanban DnD, the card menu's Move items, and reorderTask's own guard).
+   */
+  const reorderEnabled =
+    sortMode === 'manual' &&
+    searchQuery.trim().length === 0 &&
+    selectedSprintIds.length === 0 &&
+    selectedExperimentIds.length === 0;
+
   // Launch in the task's OWN project — in All-projects mode the pane prop may
   // point at a different (or no) project.
   const handleRun = (task: BacklogTaskItem): void => {
@@ -646,13 +668,15 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
    * refetch re-syncs the board — a mid-plan conflict can leave a seed plan
    * partially applied.
    *
-   * MANUAL-SORT-ONLY (IDEA-053, TASK-203): a no-op whenever `sortMode` isn't
-   * `'manual'` — the final belt-and-braces gate alongside KanbanView's DnD
-   * guard and CardActionsMenu's disabled Move items, so `planReorder` /
-   * `tasks.update` can never fire from a non-manual-sort interaction attempt.
+   * MANUAL-SORT-ONLY AND UNFILTERED (IDEA-053, TASK-203): a no-op whenever
+   * `reorderEnabled` is false (non-manual sort, or an active search/membership
+   * filter — see its definition) — the final belt-and-braces gate alongside
+   * KanbanView's DnD guard and CardActionsMenu's disabled Move items, so
+   * `planReorder` / `tasks.update` can never fire from an interaction attempt
+   * whose rendered column is not the real column.
    */
   const reorderTask = async (task: BacklogTaskItem, targetIndex: number): Promise<void> => {
-    if (sortMode !== 'manual') return;
+    if (!reorderEnabled) return;
     const bucket = bucketByStage(visibleTasks, stages, sortMode).find(
       (b) => b.stage.position === task.stage_position,
     );
@@ -725,6 +749,7 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
             tasks={visibleTasks}
             layoutMode={layoutMode}
             sortMode={sortMode}
+            reorderEnabled={reorderEnabled}
             onRun={handleRun}
             onReorder={(task, targetIndex) => void reorderTask(task, targetIndex)}
             launchingTaskId={busyTaskId}

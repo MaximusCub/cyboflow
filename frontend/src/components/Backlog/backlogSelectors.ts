@@ -688,6 +688,10 @@ interface VisitResult {
  * arbitrary depth (in practice idea/epic -> task -> nothing further). Returns
  * `null` when neither the node nor any descendant matches (drop it).
  *
+ * A node that matches on its OWN fields is returned AS-IS (the exact source
+ * object): the user matched THAT node, so its full subtree and rollups stay
+ * intact and it stays normally expandable/countable.
+ *
  * A node kept ONLY via a descendant gets a shallow copy: `children` narrowed
  * to the retained subtree, `childCount`/`pendingTasks` recomputed off THOSE
  * (mirrors {@link filterTasks}'s copy-on-write — the source object is never
@@ -716,15 +720,21 @@ function visitTask(
 
   if (!selfMatched && visitedChildren.length === 0) return null;
 
+  // A node that matched on its OWN fields is returned WHOLE — original
+  // `children`, `childCount` and `pendingTasks`, unmodified. Narrowing here
+  // would zero the rollups of an epic whose title matched but whose children
+  // did not (childCount: 0 hides TaskCard's expand affordance entirely, making
+  // its real children unreachable while the search is active, and skews
+  // deriveCounts). Narrowing is EXCLUSIVELY the child-only-match case below.
+  if (selfMatched) return { item: task, selfMatched: true };
+
   const visibleChildren = visitedChildren.map((v) => v.item);
   const evidence: MatchedChildEvidence[] = [];
-  if (!selfMatched) {
-    for (const v of visitedChildren) {
-      if (v.selfMatched) {
-        evidence.push({ ref: v.item.ref, title: v.item.title });
-      } else if (v.item.matchedChildRefs !== undefined) {
-        evidence.push(...v.item.matchedChildRefs);
-      }
+  for (const v of visitedChildren) {
+    if (v.selfMatched) {
+      evidence.push({ ref: v.item.ref, title: v.item.title });
+    } else if (v.item.matchedChildRefs !== undefined) {
+      evidence.push(...v.item.matchedChildRefs);
     }
   }
 
@@ -735,7 +745,7 @@ function visitTask(
     pendingTasks: visibleChildren.filter((c) => !c.isDone).length,
     ...(evidence.length > 0 ? { matchedChildRefs: evidence } : {}),
   };
-  return { item, selfMatched };
+  return { item, selfMatched: false };
 }
 
 /**

@@ -32,7 +32,10 @@ import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
-import { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults';
+import {
+  resolveRunTypeLaunchDefaults,
+  workflowRunTypeKey,
+} from '../../../../shared/types/sessionDefaults';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
@@ -456,13 +459,22 @@ export function WorkflowEditorModal({
       // so it REUSES the active session (no forceNew) — it is the "iterate on the
       // run I'm viewing" path, not an explicit new-session launch.
       const sessionId = await ensureSessionForLaunch(projectId);
-      // Best-effort (tier 2): resolved AFTER persist(), since a brand-new custom
-      // flow's id isn't known until persist() mints it. A miss (fresh id absent
-      // from runTypeDefaults) simply falls back to DEFAULT_WORKFLOW_MODEL — no
-      // attempt to chase down a "parent" workflow's stored default.
-      const model =
-        useConfigStore.getState().config?.runTypeDefaults?.[`workflow:${targetWorkflowId}`]
-          ?.model ?? DEFAULT_WORKFLOW_MODEL;
+      // Resolved AFTER persist(), since a brand-new custom flow's id isn't known
+      // until persist() mints it. Routed through THE canonical launch-defaults
+      // chokepoint (stored `workflow:<id>` → the user's GLOBAL launch model →
+      // DEFAULT_WORKFLOW_MODEL) exactly like every other launch seam — reading
+      // runTypeDefaults by hand skipped the global rung, so a user with
+      // `defaultLaunchModel` set silently got Opus from this button alone. A
+      // miss (fresh id absent from runTypeDefaults) still falls through the same
+      // ladder — no attempt to chase down a "parent" workflow's stored default.
+      // `defaultLaunchModel` is trimmed/blank ⇒ unset, matching main's
+      // configManager.getDefaultLaunchModel and useLaunchWorkflow.
+      const config = useConfigStore.getState().config;
+      const { model } = resolveRunTypeLaunchDefaults(
+        workflowRunTypeKey(targetWorkflowId),
+        config?.runTypeDefaults,
+        { model: config?.defaultLaunchModel?.trim() || undefined },
+      );
       const result = await trpc.cyboflow.runs.start.mutate({
         workflowId: targetWorkflowId,
         projectId,

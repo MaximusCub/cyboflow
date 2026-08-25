@@ -855,8 +855,56 @@ describe('BacklogPane', () => {
       expect(screen.getByText('Move up').closest('button')).toBeDisabled();
       expect(screen.getByText('Move down').closest('button')).toBeDisabled();
       expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
-      expect(screen.getAllByText('Reordering is available only in Manual sort').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Reordering is available only in Manual sort with no search or membership filter').length).toBeGreaterThan(0);
       fireEvent.click(screen.getByText('Move up'));
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
+    // Search / membership are ORTHOGONAL to sortMode: under either, the
+    // rendered column is a SUBSET of the real column, so planReorder's re-seed
+    // fallback would renumber only the visible rows and silently reshuffle the
+    // hidden siblings' ranks.
+    it('an active SEARCH disables reorder even in manual sort (drag cannot write ranks)', () => {
+      mockSortMode = 'manual';
+      mockSearchQuery = 'keep';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', title: 'keep one', sort_order: 0 }),
+        task({ id: 't2', stage_id: 's-ready', title: 'hidden sibling', sort_order: 1024 }),
+        task({ id: 't3', stage_id: 's-ready', title: 'keep two', sort_order: 2048 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const slots = screen.getAllByTestId('kanban-card-slot');
+      expect(slots).toHaveLength(2); // the hidden sibling is not rendered
+      for (const slot of slots) expect(slot).toHaveAttribute('draggable', 'false');
+      fireEvent.dragStart(slots[0], { dataTransfer: dataTransfer() });
+      fireEvent.dragOver(slots[1], { dataTransfer: dataTransfer() });
+      fireEvent.drop(slots[1], { dataTransfer: dataTransfer() });
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
+    it('an active MEMBERSHIP filter disables the card menu Move items in manual sort', () => {
+      mockSortMode = 'manual';
+      mockSelectedSprintIds = ['sprint-1'];
+      mockTasks = [
+        task({
+          id: 't1',
+          stage_id: 's-ready',
+          sort_order: 0,
+          memberships: [{ kind: 'sprint', id: 'sprint-1', label: 'Sprint 1', status: 'running' }],
+        }),
+        task({
+          id: 't2',
+          stage_id: 's-ready',
+          sort_order: 1024,
+          memberships: [{ kind: 'sprint', id: 'sprint-1', label: 'Sprint 1', status: 'running' }],
+        }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      fireEvent.click(screen.getAllByTestId('task-actions-trigger')[0]);
+      expect(screen.getByText('Move up').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move down').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
+      fireEvent.click(screen.getByText('Move down'));
       expect(mockTaskUpdate).not.toHaveBeenCalled();
     });
 

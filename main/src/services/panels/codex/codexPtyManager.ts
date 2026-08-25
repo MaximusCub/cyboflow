@@ -374,6 +374,12 @@ export class CodexPtyManager extends AbstractCliManager {
     // panelId inside the delay window, so a presence-only `processes.has()` check
     // is not enough: it would let the deferred Enter land in an UNRELATED fresh
     // REPL that never received the body. Identity match or nothing.
+    //
+    // The `!target` guard cannot fire in practice (the sendInput above throws on
+    // a missing process, and nothing awaits in between) — it is what NARROWS
+    // `target` to a concrete IPty. Do not "simplify" it away: the comparison
+    // below would then degrade to `undefined !== undefined` on a torn-down
+    // panel, i.e. stop being an identity check at all.
     const target = this.getProcess(panelId)?.process;
     if (!target) return;
     const timer = setTimeout(() => {

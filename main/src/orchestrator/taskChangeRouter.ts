@@ -419,7 +419,12 @@ interface ExperimentMembershipRow {
   session_b_id: string | null;
 }
 
-/** Generic `id -> value` bulk lookup — mirrors taskListing.ts's fetchColumnMap. */
+/**
+ * Generic `id -> value` bulk lookup — mirrors taskListing.ts's fetchColumnMap,
+ * including its TRUST BOUNDARY: `table` / `idColumn` / `valueColumn` are
+ * INTERPOLATED (SQLite cannot bind identifiers) and MUST be hardcoded schema
+ * literals at every call site; only `ids` is bound through `?` placeholders.
+ */
 function fetchColumnMap(
   db: DatabaseLike,
   table: string,
