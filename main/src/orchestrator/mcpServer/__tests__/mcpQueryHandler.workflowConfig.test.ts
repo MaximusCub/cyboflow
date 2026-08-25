@@ -117,6 +117,7 @@ interface Calls {
   listByProject: number[];
   createCustom: Array<{ projectId: number | null; name: string; specJson?: string }>;
   updateSpec: Array<{ id: string; definition: WorkflowDefinition }>;
+  createVariant: Array<{ workflowId: string; label: string; definition?: WorkflowDefinition }>;
   updateVariant: Array<{ id: string; patch: Record<string, unknown> }>;
   setVariantStatus: Array<{ id: string; status: WorkflowVariantStatus }>;
   setBaselineRotation: Array<{ id: string; patch: { inRotation?: boolean; weight?: number } }>;
@@ -132,6 +133,7 @@ function makeFakeConfig(over: Partial<WorkflowConfigLike> = {}): {
     listByProject: [],
     createCustom: [],
     updateSpec: [],
+    createVariant: [],
     updateVariant: [],
     setVariantStatus: [],
     setBaselineRotation: [],
@@ -160,7 +162,10 @@ function makeFakeConfig(over: Partial<WorkflowConfigLike> = {}): {
     },
     deleteWorkflow: () => undefined,
     listVariants: () => [variantRow()],
-    createVariantFromCurrent: (_workflowId, label) => variantRow({ label }),
+    createVariantFromCurrent: (workflowId, label, definition) => {
+      calls.createVariant.push({ workflowId, label, ...(definition !== undefined ? { definition } : {}) });
+      return variantRow({ label, ...(definition !== undefined ? { spec_json: JSON.stringify(definition) } : {}) });
+    },
     updateVariant: (id, patch) => {
       calls.updateVariant.push({ id, patch });
     },
@@ -289,6 +294,87 @@ describe('McpQueryHandler workflow/variant config', () => {
       applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'efficient'),
     );
     expect(data.definition).not.toEqual(WORKFLOW_DEFINITIONS.sprint);
+  });
+
+  it('create_variant WITHOUT definition_json snapshots the current definition', async () => {
+    const { cfg, calls } = makeFakeConfig();
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'mcp-create-variant',
+        requestId: 'r1',
+        runId: 'run-quick',
+        workflowId: 'wf-global-sprint',
+        label: 'faster',
+      },
+      socket,
+    );
+
+    expect(parseLastWrite(writes).ok).toBe(true);
+    expect(calls.createVariant).toEqual([{ workflowId: 'wf-global-sprint', label: 'faster' }]);
+  });
+
+  it('create_variant THREADS definition_json to the registry, validated like update_workflow', async () => {
+    const { cfg, calls } = makeFakeConfig();
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'mcp-create-variant',
+        requestId: 'r1',
+        runId: 'run-quick',
+        workflowId: 'wf-global-sprint',
+        label: 'edited',
+        definitionJson: JSON.stringify(VALID_DEFINITION),
+      },
+      socket,
+    );
+
+    const res = parseLastWrite(writes);
+    expect(res.ok).toBe(true);
+    expect(calls.createVariant).toHaveLength(1);
+    expect(calls.createVariant[0].definition).toEqual(VALID_DEFINITION);
+    // The frozen graph is what came in, and the status is still draft.
+    const data = res.data as { variant: Record<string, unknown> };
+    expect(data.variant).toMatchObject({ status: 'draft' });
+  });
+
+  it('create_variant rejects malformed JSON and an invalid definition without creating anything', async () => {
+    const { cfg, calls } = makeFakeConfig();
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
+
+    const bad = makeSocketDouble();
+    await handler.handleMessage(
+      {
+        type: 'mcp-create-variant',
+        requestId: 'r1',
+        runId: 'run-quick',
+        workflowId: 'wf-global-sprint',
+        label: 'x',
+        definitionJson: '{not json',
+      },
+      bad.socket,
+    );
+    expect(parseLastWrite(bad.writes).error).toBe('invalid_json');
+
+    const invalid = makeSocketDouble();
+    await handler.handleMessage(
+      {
+        type: 'mcp-create-variant',
+        requestId: 'r2',
+        runId: 'run-quick',
+        workflowId: 'wf-global-sprint',
+        label: 'x',
+        definitionJson: '{"phases":"nope"}',
+      },
+      invalid.socket,
+    );
+    expect(parseLastWrite(invalid.writes).error).toBe('invalid_definition');
+
+    expect(calls.createVariant).toHaveLength(0);
   });
 
   it('update_workflow rejects malformed JSON and an invalid definition without calling updateSpec', async () => {

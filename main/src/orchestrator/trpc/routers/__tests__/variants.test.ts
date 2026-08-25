@@ -147,6 +147,51 @@ describe('cyboflow.variants', () => {
     } satisfies Partial<TRPCError>);
   });
 
+  it('create freezes an explicit definition (the editor\'s "save as new variant") and leaves the flow alone', async () => {
+    const caller = makeCaller(db);
+    const edited = {
+      id: 'edited',
+      phases: [
+        {
+          id: 'plan',
+          label: 'Plan',
+          color: '#3b6dd6',
+          steps: [{ id: 'context', name: 'Context', agent: 'context', mcps: [], retries: 0 }],
+        },
+      ],
+    };
+
+    const created = await caller.cyboflow.variants.create({
+      workflowId: WF,
+      label: 'from-editor',
+      definition: edited,
+    });
+
+    expect(created.status).toBe('draft');
+    expect(JSON.parse(created.spec_json)).toEqual(edited);
+    // The base flow's custom slot and level stamp are untouched.
+    const row = db.prepare('SELECT spec_json, tuning_level FROM workflows WHERE id = ?').get(WF) as {
+      spec_json: string;
+      tuning_level: string;
+    };
+    expect(row.spec_json).toBe('{}');
+    expect(row.tuning_level).toBe('standard');
+  });
+
+  it('create rejects a malformed definition before the registry sees it', async () => {
+    const caller = makeCaller(db);
+    await expect(
+      caller.cyboflow.variants.create({
+        workflowId: WF,
+        label: 'bad',
+        // A phase with no steps — rejected by the strict write-path schema.
+        definition: { id: 'x', phases: [{ id: 'p1', label: 'P1', color: '#3b6dd6', steps: [] }] },
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    const count = db.prepare('SELECT COUNT(*) AS n FROM workflow_variants').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
   it('create maps an unresolvable workflow to BAD_REQUEST', async () => {
     db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-broken', 1, 'not-a-builtin', '{}')").run();
     const caller = makeCaller(db);

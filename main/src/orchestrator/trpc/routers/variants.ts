@@ -71,9 +71,21 @@ export const variantsRouter = router({
    * ("Create variant from current"). Seeds status='draft'. CONFLICT on a label
    * collision; BAD_REQUEST on an unresolvable/reserved workflow; NOT_FOUND when
    * the workflow is missing.
+   *
+   * An optional `definition` (validated by the strict write-path schema, so a
+   * malformed graph is BAD_REQUEST before the body runs) freezes THAT graph
+   * instead of the resolved one — the Advanced editor's "save as new variant of
+   * this flow", which must capture the edited graph without touching the base
+   * flow's `spec_json` or level stamp.
    */
   create: protectedProcedure
-    .input(z.object({ workflowId: z.string().min(1), label: z.string().min(1) }))
+    .input(
+      z.object({
+        workflowId: z.string().min(1),
+        label: z.string().min(1),
+        definition: workflowDefinitionSchema.optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }): Promise<WorkflowVariantRow> => {
       if (!ctx.workflowRegistry) {
         throw new TRPCError({
@@ -82,7 +94,11 @@ export const variantsRouter = router({
         });
       }
       try {
-        return ctx.workflowRegistry.createVariantFromCurrent(input.workflowId, input.label);
+        return ctx.workflowRegistry.createVariantFromCurrent(
+          input.workflowId,
+          input.label,
+          input.definition,
+        );
       } catch (err) {
         throw mapRegistryError(err);
       }

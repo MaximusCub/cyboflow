@@ -102,6 +102,43 @@ describe('WorkflowRegistry variants', () => {
     expect(parsed.phases.length).toBeGreaterThan(0);
   });
 
+  it('createVariantFromCurrent freezes an EXPLICIT definition instead of the resolved one', () => {
+    // The Advanced editor's "save as new variant of this flow" carries the EDITED
+    // graph, which by construction is not the workflow's resolved definition.
+    const edited = makeCustomDefinition('edited-graph');
+    const variant = registry.createVariantFromCurrent(WF_PLANNER, 'from-editor', edited);
+
+    const parsed = JSON.parse(variant.spec_json) as WorkflowDefinition;
+    expect(parsed).toEqual(edited);
+    // Draft, exactly like a snapshot create — rotation stays an explicit opt-in.
+    expect(variant.status).toBe('draft');
+    // The base flow's own slot and level stamp are untouched.
+    const row = registry.getById(WF_PLANNER);
+    expect(row?.spec_json).toBe('{}');
+    expect(row?.tuning_level).toBe('standard');
+  });
+
+  it('createVariantFromCurrent freezes through the CANONICAL serializer (stable key order)', () => {
+    // Two structurally identical definitions whose keys were inserted in
+    // different orders must freeze to the same string — a bare JSON.stringify
+    // would fork their revision history.
+    const a: WorkflowDefinition = {
+      id: 'x',
+      phases: [
+        { id: 'p1', label: 'P1', color: '#000', steps: [{ id: 's1', name: 'S1', agent: 'a', mcps: [], retries: 0 }] },
+      ],
+    };
+    const b: WorkflowDefinition = {
+      phases: [
+        { steps: [{ retries: 0, mcps: [], agent: 'a', name: 'S1', id: 's1' }], color: '#000', label: 'P1', id: 'p1' }],
+      id: 'x',
+    } as WorkflowDefinition;
+
+    const va = registry.createVariantFromCurrent(WF_PLANNER, 'order-a', a);
+    const vb = registry.createVariantFromCurrent(WF_PLANNER, 'order-b', b);
+    expect(va.spec_json).toBe(vb.spec_json);
+  });
+
   it('rejects a label collision with a CONFLICT-style "already exists" error', () => {
     registry.createVariantFromCurrent(WF_PLANNER, 'dup');
     expect(() => registry.createVariantFromCurrent(WF_PLANNER, 'dup')).toThrow(/already exists/);

@@ -131,10 +131,17 @@ export interface WorkflowRegistryLike {
   unarchiveVariant(variantId: string): void;
   /**
    * Create a variant snapshotting the workflow's current resolved definition
-   * (seeds status='draft'). Throws distinguishable Errors: 'not found' / reserved
-   * sentinel / unresolvable definition / label 'already exists'.
+   * (seeds status='draft'). An explicit `definition` freezes THAT graph instead
+   * (the Advanced editor's "save as new variant of this flow"); callers validate
+   * it with the write-path schema first. Throws distinguishable Errors:
+   * 'not found' / reserved sentinel / unresolvable definition / label
+   * 'already exists'.
    */
-  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow;
+  createVariantFromCurrent(
+    workflowId: string,
+    label: string,
+    definition?: WorkflowDefinition,
+  ): WorkflowVariantRow;
   /** Patch a variant in place (re-snapshot). Throws 'not found' when missing. */
   updateVariant(
     variantId: string,

@@ -753,12 +753,16 @@ export type McpQueryMessage =
       workflowId: string;
     }
   | {
-      /** Create a variant snapshotting the workflow's current resolved definition. */
+      /** Create a variant snapshotting the workflow's current resolved
+       *  definition — or, when `definitionJson` is supplied (a JSON-encoded
+       *  WorkflowDefinition, validated in the handler like update_workflow),
+       *  that edited graph instead. Status stays 'draft' either way. */
       type: 'mcp-create-variant';
       requestId: string;
       runId: string;
       workflowId: string;
       label: string;
+      definitionJson?: string;
     }
   | {
       /** Patch a variant in place. `definitionJson` (JSON-encoded
@@ -1714,7 +1718,11 @@ export interface WorkflowConfigLike {
   }): WorkflowRow;
   deleteWorkflow(workflowId: string): void;
   listVariants(workflowId: string, opts?: { includeArchived?: boolean }): WorkflowVariantRow[];
-  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow;
+  createVariantFromCurrent(
+    workflowId: string,
+    label: string,
+    definition?: WorkflowDefinition,
+  ): WorkflowVariantRow;
   updateVariant(
     variantId: string,
     patch: {
@@ -6856,8 +6864,18 @@ export class McpQueryHandler {
   ): void {
     const resolved = this.resolveWorkflowConfig(msg, client);
     if (!resolved) return;
+    // An explicit definition seeds the variant's frozen graph instead of the
+    // workflow's resolved one; validated the same way update_workflow validates
+    // its payload (invalid_json / invalid_definition), so a malformed graph
+    // never reaches the registry.
+    let definition: WorkflowDefinition | undefined;
+    if (msg.definitionJson !== undefined) {
+      const parsed = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
+      if (!parsed) return;
+      definition = parsed;
+    }
     try {
-      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label);
+      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label, definition);
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,

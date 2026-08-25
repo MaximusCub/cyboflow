@@ -735,13 +735,18 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_create_variant',
     description:
-      'Create a new variant of a workflow, snapshotting its CURRENT resolved definition, seeded status=\'draft\' (opt into rotation later via cyboflow_set_variant_status / cyboflow_update_variant weight). `label` must be unique within the workflow (collision → error \'already_exists\'). Unknown workflow → \'not_found\'.',
+      'Create a new variant of a workflow, snapshotting its CURRENT resolved definition, seeded status=\'draft\' (opt into rotation later via cyboflow_set_variant_status / cyboflow_update_variant weight). Pass `definition_json` to seed the variant\'s frozen graph with an edited definition instead of snapshotting the current one (validated like cyboflow_update_workflow: bad JSON → \'invalid_json\', a graph the schema rejects → \'invalid_definition\'); the parent workflow\'s own spec and tuning level are untouched and the status stays draft either way. `label` must be unique within the workflow (collision → error \'already_exists\'). Unknown workflow → \'not_found\'.',
     input: z.object({
       workflow_id: z.string().min(1).describe('The parent workflow id (required)'),
       label: z.string().min(1).describe('Unique variant label within the workflow (required)'),
+      definition_json: z.string().describe("Optional JSON-encoded WorkflowDefinition to freeze as the variant's graph, instead of snapshotting the workflow's current resolved definition. Get a starting definition from cyboflow_get_workflow, edit it, pass it back.").optional(),
     }),
     envelope: 'mcp-create-variant',
-    toEnvelope: (args) => ({ workflowId: args.workflow_id, label: args.label }),
+    toEnvelope: (args) => ({
+      workflowId: args.workflow_id,
+      label: args.label,
+      ...(args.definition_json !== undefined ? { definitionJson: args.definition_json } : {}),
+    }),
   }),
 
   defineTool({

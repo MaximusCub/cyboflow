@@ -28,6 +28,7 @@ import {
   isTuningLevel,
   materializeForLevel,
   resolveEffectiveDefinition,
+  serializeDefinition,
   type TuningLevel,
 } from '../../../shared/tuning/workflowTuning';
 import { tuningOverrideRejection } from '../../../shared/tuning/workflowTuningErrors';
@@ -637,13 +638,26 @@ export class WorkflowRegistry {
    * is explicit opt-in — a fresh variant is pinnable + experiment-usable but never
    * auto-rotated), `weight=1`, NULL model/execution_model/agent_overrides_json.
    *
+   * `definition` overrides what gets frozen: the Advanced editor's "save as new
+   * variant of this flow" (plan D3) carries the EDITED graph, which is not the
+   * workflow's resolved definition and must not be re-derived from it — without
+   * this the create would snapshot the unedited flow and the edit would need a
+   * follow-up `updateVariant` to land. The workflow row (and its level stamp) is
+   * untouched either way. Callers pass a definition they have already validated
+   * with the strict write-path schema; the registry only serializes it.
+   *
    * Guards (distinguishable Error messages the router maps to TRPCError):
    *   - missing workflow → 'not found' (NOT_FOUND)
    *   - reserved sentinel (__quick__) → 'reserved' (BAD_REQUEST)
-   *   - unresolvable definition (broken custom flow) → 'unresolvable' (BAD_REQUEST)
+   *   - unresolvable definition (broken custom flow, no explicit `definition`)
+   *     → 'unresolvable' (BAD_REQUEST)
    *   - label collision (UNIQUE) → 'already exists' (CONFLICT)
    */
-  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow {
+  createVariantFromCurrent(
+    workflowId: string,
+    label: string,
+    definitionOverride?: WorkflowDefinition,
+  ): WorkflowVariantRow {
     const workflow = this.getById(workflowId);
     if (!workflow) {
       throw new Error(`WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} not found`);
@@ -653,11 +667,9 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createVariantFromCurrent: '${workflow.name}' is a reserved sentinel and cannot have variants`,
       );
     }
-    const definition = resolveEffectiveDefinition(
-      workflow.name,
-      workflow.spec_json,
-      workflow.tuning_level,
-    );
+    const definition =
+      definitionOverride ??
+      resolveEffectiveDefinition(workflow.name, workflow.spec_json, workflow.tuning_level);
     if (definition === null) {
       throw new Error(
         `WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} has an unresolvable definition`,
@@ -679,7 +691,11 @@ export class WorkflowRegistry {
     }
 
     const id = `wfv_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-    const specJson = JSON.stringify(definition);
+    // The canonical serializer, not a bare JSON.stringify: a variant's frozen
+    // graph is hashed and compared alongside materialized preset specs, and two
+    // structurally identical definitions must produce the same string whatever
+    // key order their producer happened to use.
+    const specJson = serializeDefinition(definition);
     const insert = this.db.prepare(`
       INSERT INTO workflow_variants (id, workflow_id, label, spec_json, status, weight)
       VALUES (?, ?, ?, ?, 'draft', 1)
