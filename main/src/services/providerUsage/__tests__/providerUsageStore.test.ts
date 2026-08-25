@@ -110,6 +110,53 @@ describe('ProviderUsageStore — Claude ingest', () => {
     expect(store.getState(NOW).claude?.windows[0]?.usedPercent).toBeNull();
   });
 
+  it('RETAINS the polled percentage when the stream reports the same reset at second precision', () => {
+    // Both readings below are verbatim production captures of ONE five-hour
+    // window: the `/usage` poll's ISO carries sub-second digits
+    // (…19:09:59.822085Z = 1787684999822 ms), the `rate_limit_event` reports
+    // whole epoch SECONDS (1787685000 = 1787685000000 ms). Compared exactly,
+    // the 178 ms gap read as a NEW window, so the poll's 25% was dropped and
+    // the session meter blanked seconds after every poll.
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          five_hour: { utilization: 25, resets_at: '2026-08-25T19:09:59.822085+00:00' },
+        },
+      },
+      NOW,
+    );
+    store.recordClaudeRateLimit(
+      { status: 'allowed', resetsAt: 1787685000, rateLimitType: 'five_hour' },
+      NOW + 1000,
+    );
+    const window = store.getState(NOW).claude?.windows[0];
+    expect(window?.usedPercent).toBe(25);
+    // The number is still the polled one; only the record is fresher.
+    expect(window?.percentSource).toBe('poll');
+    expect(window?.percentObservedAtMs).toBe(NOW);
+  });
+
+  it('still CLEARS when the reset moves by a whole window, not by rounding', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          five_hour: { utilization: 25, resets_at: '2026-08-25T19:09:59.822085+00:00' },
+        },
+      },
+      NOW,
+    );
+    // Five hours later: a genuinely new window, whose usage we do not know.
+    store.recordClaudeRateLimit(
+      { status: 'allowed', resetsAt: 1787685000 + 5 * 60 * 60, rateLimitType: 'five_hour' },
+      NOW + 1000,
+    );
+    expect(store.getState(NOW).claude?.windows[0]?.usedPercent).toBeNull();
+  });
+
   it('accepts a utilization reported under a plain `allowed` status', () => {
     // The schema makes utilization optional INDEPENDENTLY of status; the
     // "only on allowed_warning" pattern is an observation, not an invariant.

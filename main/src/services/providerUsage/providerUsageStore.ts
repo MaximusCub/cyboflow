@@ -58,6 +58,30 @@ const PERSIST_DEBOUNCE_MS = 2_000;
  */
 const NO_RESET_MAX_AGE_MS = 12 * 60 * 60 * 1_000;
 
+/**
+ * How far apart two reset timestamps may be and still name the SAME window.
+ *
+ * The two Claude sources report the same reset at different precision: the
+ * `/usage` poll returns ISO 8601 with sub-second digits
+ * (`…T19:09:59.822085+00:00`), while `rate_limit_event` reports whole epoch
+ * SECONDS (`1787685000`) — 178 ms apart for one observed five-hour window.
+ * Compared exactly, the stream reading looked like a different window, so the
+ * polled percentage was not retained and the meter blanked seconds after every
+ * poll. Consecutive real windows are five hours or seven days apart, so a
+ * minute of slack cannot merge two of them.
+ */
+const RESET_MATCH_TOLERANCE_MS = 60_000;
+
+/**
+ * Whether an incoming reading describes the window a stored record already
+ * holds. Two unknown resets match (neither reading names a boundary); a known
+ * reset never matches an unknown one.
+ */
+function isSameResetWindow(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.abs(a - b) <= RESET_MATCH_TOLERANCE_MS;
+}
+
 /** The narrow log surface this store needs — `console` satisfies it. */
 export interface ProviderUsageLogger {
   warn(message: string): void;
@@ -197,7 +221,8 @@ export class ProviderUsageStore {
    * nothing it could correctly update.
    *
    * `utilization` is absent from most readings. When it is, and the same window
-   * (same kind AND same reset) already has a known percentage, that percentage is
+   * (same kind AND the same reset, within {@link RESET_MATCH_TOLERANCE_MS})
+   * already has a known percentage, that percentage is
    * RETAINED — otherwise a plain `allowed` event arriving after a 95% warning
    * would blank the meter and read as a recovery that never happened.
    */
@@ -218,7 +243,7 @@ export class ProviderUsageStore {
       );
 
       const previous = this.windows.get('claude')?.get(kind);
-      const sameWindow = previous !== undefined && previous.resetsAtMs === resetsAtMs;
+      const sameWindow = previous !== undefined && isSameResetWindow(previous.resetsAtMs, resetsAtMs);
       const retained = sameWindow ? previous : undefined;
       const usedPercent = reported ?? retained?.usedPercent ?? null;
       // A RETAINED percentage keeps its original provenance and measurement time
