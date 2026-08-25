@@ -13,12 +13,18 @@
  *      "inner" content div, not the bounded "viewport" scrollport around it,
  *      and workflow-canvas-meta is NOT a descendant of that scrollable
  *      content (so it stays stationary while the graph scrolls).
+ *   8. TASK-204: edge/token measurement stays relative to the card-containing
+ *      "inner" element (not the outer scroll "viewport") — proven by mocking
+ *      getBoundingClientRect with DIFFERENT rects for viewport vs. inner and
+ *      confirming the rendered token coordinate is computed against inner's
+ *      rect only.
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import { WorkflowCanvas } from '../WorkflowCanvas';
+import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -362,6 +368,47 @@ describe('WorkflowCanvas', () => {
     expect(allColumns).toHaveLength(TALL_DEFINITION.phases.length);
     for (const col of allColumns) {
       expect(col).toHaveStyle({ width: '138px' });
+    }
+  });
+
+  it('measures edge/token overlay coordinates relative to the inner content, not the outer scroll viewport', () => {
+    // Deliberately give workflow-canvas-viewport a DIFFERENT rect than
+    // workflow-canvas-inner — if the measurement effect ever regressed to use
+    // the scroll viewport as its reference frame instead of the inner content
+    // (innerRef), the computed coordinates below would be wrong.
+    const rects: Record<string, DOMRect> = {
+      'workflow-canvas-viewport': new DOMRect(0, 0, 300, 200),
+      'workflow-canvas-inner': new DOMRect(100, 50, 800, 1500),
+      'step-wrapper-step-b': new DOMRect(150, 200, 138, 106),
+      'step-wrapper-step-c': new DOMRect(400, 220, 138, 106),
+    };
+    const spy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const id = this.getAttribute('data-testid');
+        return (id && rects[id]) ?? new DOMRect(0, 0, 0, 0);
+      });
+
+    try {
+      render(
+        <WorkflowCanvas definition={MOCK_DEFINITION} currentStepId="step-b" isRunning={true} />,
+      );
+
+      // Token overlay renders only when both endpoints resolve — proves the
+      // measurement pipeline (innerRef-relative stepRects) wired through.
+      const overlay = screen.getByTestId('workflow-canvas-token-overlay');
+      const circle = overlay.querySelector('circle');
+      expect(circle).not.toBeNull();
+
+      // step-b rect made relative to the INNER element's rect (100,50) — NOT
+      // the viewport's rect (0,0). At the token's initial t=0 the rendered
+      // circle sits exactly at the "from" (step-b) endpoint:
+      //   x = (150-100) + 138/2 = 119
+      //   y = (200-50) + HEAD_BAR_CENTER_Y
+      expect(circle).toHaveAttribute('cx', '119');
+      expect(circle).toHaveAttribute('cy', String(150 + HEAD_BAR_CENTER_Y));
+    } finally {
+      spy.mockRestore();
     }
   });
 });
