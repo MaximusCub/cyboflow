@@ -6,7 +6,7 @@ import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
-import { parseDbTimestamp } from '../utils/timestampUtils';
+import { parseTimestamp } from '../utils/timestampUtils';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
@@ -182,7 +182,7 @@ export class SessionManager extends EventEmitter {
       status: this.mapDbStatusToSessionStatus(dbSession.status, dbSession.last_viewed_at, dbSession.updated_at),
       statusMessage: dbSession.status_message,
       pid: dbSession.pid,
-      createdAt: parseDbTimestamp(dbSession.created_at),
+      createdAt: parseTimestamp(dbSession.created_at),
       // The session's real last-ACTIVITY clock: idle_since (stamped at the
       // busy→resting transition, migration 119) when the session is at rest,
       // updated_at while it is still busy — a running session has no rest
@@ -192,11 +192,11 @@ export class SessionManager extends EventEmitter {
       // folder move or the boot sweep would make a long-quiet session read as
       // active moments ago in the sidebar.
       //
-      // parseDbTimestamp, not `new Date`: both columns are space-separated UTC
+      // parseTimestamp, not `new Date`: both columns are space-separated UTC
       // (SQLite CURRENT_TIMESTAMP / datetime('now')), which JS reads as LOCAL —
       // a shift that pushed every recent row into the future and made the
       // sidebar's "time ago" formatter collapse them all to "just now".
-      lastActivity: parseDbTimestamp(dbSession.idle_since ?? dbSession.updated_at),
+      lastActivity: parseTimestamp(dbSession.idle_since ?? dbSession.updated_at),
       output: [], // Will be loaded separately by frontend when needed
       jsonMessages: [], // Will be loaded separately by frontend when needed
       error: dbSession.exit_code && dbSession.exit_code !== 0 ? `Exit code: ${dbSession.exit_code}` : undefined,
