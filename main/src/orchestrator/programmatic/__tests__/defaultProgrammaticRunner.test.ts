@@ -28,6 +28,7 @@ function ctxFor(def: WorkflowDefinition, opts?: { batchId?: string | null }): Pr
     workflow_path: null,
     permission_mode: 'default',
     spec_json: JSON.stringify(def),
+    tuning_level: 'standard',
     created_at: 'now',
     archived_at: null,
   };

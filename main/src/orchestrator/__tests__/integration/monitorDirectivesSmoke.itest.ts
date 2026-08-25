@@ -140,6 +140,7 @@ function registryFor(runId: string, workflowId: string, specJson: string): Workf
     workflow_path: null,
     permission_mode: 'default',
     spec_json: specJson,
+    tuning_level: 'standard',
     created_at: 'now',
     archived_at: null,
   };

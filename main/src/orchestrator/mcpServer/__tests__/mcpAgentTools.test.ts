@@ -107,6 +107,9 @@ function buildDb(): Database.Database {
   apply('074_agent_threads.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
+  // ...and workflows.tuning_level, which also decides WHICH definition
+  // cyboflow_workflow returns and which spec the edit-workflow CAS hashes.
+  apply('122_workflow_tuning_level.sql');
 
   // sessions predates the numbered migrations (database.ts inline bootstrap) —
   // hand-rolled with only the columns cyboflow_overview's SELECT touches.

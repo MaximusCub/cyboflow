@@ -23,7 +23,9 @@
  * since a global flow's runs are scattered across the projects it ran in.
  *
  * Each workflow row's effective definition is resolved via
- * {@link resolveWorkflowDefinition}; rows whose definition cannot resolve (a
+ * {@link resolveEffectiveDefinition} — the row's `tuning_level` decides whether
+ * that is the as-authored built-in, a preset transform over it, or the row's
+ * own custom slot; rows whose definition cannot resolve (a
  * stale custom flow with broken spec, or a hidden scheduler-internal row) are
  * dropped so the gallery never renders a card without a ribbon.
  *
@@ -47,7 +49,7 @@ import type {
   WorkflowRunListRow,
   WorkflowDefinition,
 } from '../../../shared/types/workflows';
-import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveEffectiveDefinition } from '../../../shared/tuning/workflowTuning';
 import { wfMeta, type WfMeta } from '../components/workflows/wfMeta';
 
 // ---------------------------------------------------------------------------
@@ -337,7 +339,10 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
       const lastUsed = deriveLastUsedByWorkflow(runs ?? []);
       const projectName = names.get(projectId) ?? '';
       for (const row of rows ?? []) {
-        const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+        // EFFECTIVE definition (migration 122): the graph this flow's tuning
+        // level actually selects, so the card's phase/step counts describe what
+        // a run would do rather than the untransformed built-in.
+        const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
         // Drop rows whose definition cannot resolve (broken spec / hidden
         // scheduler-internal row) so the gallery never renders a ribbon-less card.
         if (definition === null) continue;

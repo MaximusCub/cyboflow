@@ -31,6 +31,11 @@ import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb } from '../../__test_fixtures__/orchestratorTestDb';
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
+import { WORKFLOW_DEFINITIONS } from '../../../../../shared/types/workflows';
+import {
+  applyTuningPreset,
+  resolveEffectiveDefinition,
+} from '../../../../../shared/tuning/workflowTuning';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../../shared/types/experiments';
 
 // ---------------------------------------------------------------------------
@@ -67,6 +72,7 @@ function workflowRow(over: Partial<WorkflowRow> = {}): WorkflowRow {
     workflow_path: null,
     permission_mode: 'default',
     spec_json: '{}',
+    tuning_level: 'standard',
     created_at: '2026-07-14T00:00:00.000Z',
     archived_at: null,
     ...over,
@@ -140,6 +146,10 @@ function makeFakeConfig(over: Partial<WorkflowConfigLike> = {}): {
       calls.ensureGlobalBuiltIns += 1;
     },
     getBaselineRotation: () => ({ inRotation: false, weight: 1 }),
+    // The registry's own resolution, stubbed: getById returns a level-'standard'
+    // sprint row, whose effective definition is the as-authored built-in.
+    getEffectiveDefinition: () =>
+      resolveEffectiveDefinition(workflowRow().name, workflowRow().spec_json, workflowRow().tuning_level),
     updateSpec: (id, definition) => {
       calls.updateSpec.push({ id, definition });
     },
@@ -218,6 +228,10 @@ describe('McpQueryHandler workflow/variant config', () => {
       scope: 'global',
       is_built_in: true,
       has_custom_spec: false,
+      // Migration 122: the level is reported alongside has_custom_spec because
+      // the two answer different questions — a flow can hold a saved custom
+      // definition while running a preset level.
+      tuning_level: 'standard',
     });
     // The compact projection must NOT leak the spec_json blob.
     expect(data.workflows[0]).not.toHaveProperty('spec_json');
@@ -248,9 +262,33 @@ describe('McpQueryHandler workflow/variant config', () => {
     const res = parseLastWrite(writes);
     expect(res.ok).toBe(true);
     const data = res.data as { workflow: Record<string, unknown>; definition: unknown; baseline_rotation: unknown };
-    expect(data.workflow).toMatchObject({ id: 'wf-global-sprint' });
+    expect(data.workflow).toMatchObject({ id: 'wf-global-sprint', tuning_level: 'standard' });
     // spec_json '{}' → the built-in fallback definition (non-null for a real built-in name).
     expect(data.baseline_rotation).toEqual({ inRotation: false, weight: 1 });
+  });
+
+  it("get_workflow returns the LEVEL's definition, not the raw slot resolution", async () => {
+    // An 'efficient'-stamped sprint: the effective definition is the preset
+    // transform, so an agent editing what it fetched is editing what runs.
+    const row = workflowRow({ tuning_level: 'efficient' });
+    const { cfg } = makeFakeConfig({
+      getById: () => row,
+      getEffectiveDefinition: () => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level),
+    });
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
+    const { socket, writes } = makeSocketDouble();
+    await handler.handleMessage(
+      { type: 'mcp-get-workflow', requestId: 'r1', runId: 'run-quick', workflowId: 'wf-global-sprint' },
+      socket,
+    );
+    const res = parseLastWrite(writes);
+    expect(res.ok).toBe(true);
+    const data = res.data as { workflow: Record<string, unknown>; definition: unknown };
+    expect(data.workflow).toMatchObject({ tuning_level: 'efficient' });
+    expect(data.definition).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'efficient'),
+    );
+    expect(data.definition).not.toEqual(WORKFLOW_DEFINITIONS.sprint);
   });
 
   it('update_workflow rejects malformed JSON and an invalid definition without calling updateSpec', async () => {

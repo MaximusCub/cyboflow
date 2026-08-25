@@ -101,11 +101,13 @@ import BetterSqlite3Database from 'better-sqlite3';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import {
+  hasCustomSpecSlot,
   resolveWorkflowDefinition,
   isPermissionMode,
   isCyboflowWorkflowName,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../../shared/types/workflows';
+import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
 import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../../shared/types/workflows';
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
@@ -1695,7 +1697,14 @@ export interface WorkflowConfigLike {
   /** Reconcile the in-repo built-ins as global rows (mirrors the tRPC list). */
   ensureGlobalBuiltIns(): void;
   getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null;
+  /**
+   * The workflow's EFFECTIVE definition (migration 122): the tuning level's
+   * materialized graph, or the custom slot at level `'custom'`.
+   */
+  getEffectiveDefinition(workflowId: string): WorkflowDefinition | null;
+  /** Writes the custom slot AND stamps `tuning_level = 'custom'` atomically. */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void;
+  /** Clears the custom slot AND flips a `'custom'` level back to `'standard'`. */
   resetSpec(workflowId: string): void;
   createCustom(params: {
     projectId: number | null;
@@ -6584,7 +6593,6 @@ export class McpQueryHandler {
 
   /** Compact workflow projection (no spec_json blob — see get_workflow for the definition). */
   private static toCompactWorkflow(row: WorkflowRow): Record<string, unknown> {
-    const specJson = typeof row.spec_json === 'string' ? row.spec_json.trim() : '';
     return {
       id: row.id,
       name: row.name,
@@ -6592,10 +6600,14 @@ export class McpQueryHandler {
       scope: row.project_id === null ? 'global' : 'project',
       is_built_in: row.project_id === null && isCyboflowWorkflowName(row.name),
       permission_mode: row.permission_mode,
-      // A non-empty, non-'{}' spec_json means the row carries an edited/custom
-      // definition (vs falling back to the built-in). The full graph is on
-      // get_workflow, not here.
-      has_custom_spec: specJson.length > 0 && specJson !== '{}',
+      // A non-empty, non-'{}' spec_json means the row's CUSTOM SLOT is filled
+      // (migration 122) — i.e. `tuning_level: 'custom'` has something to
+      // resolve. The full graph is on get_workflow, not here.
+      has_custom_spec: hasCustomSpecSlot(row.spec_json),
+      // Which definition this flow resolves (migration 122). Reported alongside
+      // has_custom_spec because the two answer different questions: a flow can
+      // hold a custom definition while running 'efficient'.
+      tuning_level: row.tuning_level,
       created_at: row.created_at,
     };
   }
@@ -6710,9 +6722,12 @@ export class McpQueryHandler {
       });
       return;
     }
-    // The EFFECTIVE definition the editor seeds from (spec_json wins, else the
-    // built-in fallback, else null for a broken custom flow).
-    const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+    // The EFFECTIVE definition the editor seeds from — the one this flow's
+    // TUNING LEVEL selects (migration 122): a preset level's transform over the
+    // built-in, the custom slot at 'custom', null for a broken custom flow.
+    // The level itself rides along on the compact workflow projection, so a
+    // caller can tell what it is looking at before editing it back.
+    const definition = cfg.getEffectiveDefinition(msg.workflowId);
     const baselineRotation = cfg.getBaselineRotation(msg.workflowId);
     this.writeResponse(client, {
       type: 'mcp-query-response',
@@ -6957,7 +6972,7 @@ export class McpQueryHandler {
   private readWorkflowRow(workflowId: string): WorkflowRow | null {
     const row = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
            FROM workflows WHERE id = ?`,
       )
       .get(workflowId) as WorkflowRow | undefined;
@@ -7241,13 +7256,15 @@ export class McpQueryHandler {
     }
     const rows = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
            FROM workflows
           WHERE ${clauses.join(' AND ')}
           ORDER BY name`,
       )
       .all(...params) as WorkflowRow[];
-    const usable = rows.filter((row) => resolveWorkflowDefinition(row.name, row.spec_json) !== null);
+    const usable = rows.filter(
+      (row) => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level) !== null,
+    );
 
     this.writeResponse(client, {
       type: 'mcp-query-response',
@@ -7272,7 +7289,7 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
       return;
     }
-    const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+    const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
     const baselineRow = this.db
       .prepare(
         'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
@@ -7338,7 +7355,10 @@ export class McpQueryHandler {
         this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'workflow_not_found' });
         return;
       }
-      const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+      // The EFFECTIVE definition (migration 122) — must match what the proposal
+      // executor's `readEffectiveWorkflowSpec` re-reads at apply time, or the
+      // CAS hash never matches and every edit-workflow proposal is refused.
+      const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
       if (definition === null) {
         this.writeResponse(client, {
           type: 'mcp-query-response',

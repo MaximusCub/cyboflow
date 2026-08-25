@@ -154,6 +154,7 @@ function ctxFor(
     workflow_path: null,
     permission_mode: 'default',
     spec_json: specJson,
+    tuning_level: 'standard',
     created_at: 'now',
     archived_at: null,
   };

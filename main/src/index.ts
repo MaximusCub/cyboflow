@@ -3109,6 +3109,7 @@ async function initializeServices(): Promise<boolean> {
         listByProject: (projectId) => workflowRegistry.listByProject(projectId),
         ensureGlobalBuiltIns: () => workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows()),
         getBaselineRotation: (id) => workflowRegistry.getBaselineRotation(id),
+        getEffectiveDefinition: (id) => workflowRegistry.getEffectiveDefinition(id),
         updateSpec: (id, def) => workflowRegistry.updateSpec(id, def),
         resetSpec: (id) => workflowRegistry.resetSpec(id),
         createCustom: (params) => workflowRegistry.createCustom(params),
@@ -6030,10 +6031,10 @@ app.whenReady().then(async () => {
         return row ?? null;
       },
       runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
-      readEffectiveWorkflowSpec: (workflowId) => {
-        const w = workflowRegistry.getById(workflowId);
-        return w ? resolveWorkflowDefinition(w.name, w.spec_json) : null;
-      },
+      // The EFFECTIVE definition (migration 122) — the tuning level's graph, not
+      // the raw slot. Must stay the SAME resolution the proposal's CAS hash was
+      // captured from (mcpQueryHandler's edit-workflow precondition).
+      readEffectiveWorkflowSpec: (workflowId) => workflowRegistry.getEffectiveDefinition(workflowId),
       applyWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
       logger: loggerLike,
     };

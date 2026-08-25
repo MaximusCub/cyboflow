@@ -75,6 +75,7 @@ function globalRow(id: string, name: string): WorkflowRow {
     workflow_path: `workflows/${name}.md`,
     permission_mode: 'default',
     spec_json: '{}',
+    tuning_level: 'standard',
     created_at: '2026-06-01T00:00:00.000Z',
     archived_at: null,
   };
@@ -88,6 +89,7 @@ function projectRow(id: string, name: string, projectId: number): WorkflowRow {
     name,
     workflow_path: null,
     permission_mode: 'default',
+    tuning_level: 'standard',
     // A custom flow needs a resolvable spec_json or it is dropped on read.
     spec_json: JSON.stringify({
       id: name,

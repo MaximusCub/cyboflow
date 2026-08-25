@@ -79,6 +79,7 @@ function ctxFor(runId: string): ProgrammaticRunContext {
     workflow_path: null,
     permission_mode: 'default',
     spec_json: '{}',
+    tuning_level: 'standard',
     created_at: 'now',
     archived_at: null,
   };
@@ -190,6 +191,7 @@ function fanOutCtx(runId: string, specJson: string, batchId: string | null): Pro
     workflow_path: null,
     permission_mode: 'default',
     spec_json: specJson,
+    tuning_level: 'standard',
     created_at: 'now',
     archived_at: null,
   };

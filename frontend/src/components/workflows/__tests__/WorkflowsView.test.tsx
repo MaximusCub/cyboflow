@@ -182,6 +182,7 @@ function buildWorkflowEntry(over: Partial<WorkflowGalleryEntry> = {}): WorkflowG
       workflow_path: null,
       permission_mode: 'default',
       spec_json: '{}',
+      tuning_level: 'standard',
       created_at: '2026-06-10T00:00:00.000Z',
       archived_at: null,
     },

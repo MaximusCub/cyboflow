@@ -31,6 +31,7 @@ function makeWorkflowRow(overrides?: Partial<WorkflowRow>): WorkflowRow {
     workflow_path: '/fake/sprint.md',
     permission_mode: 'default',
     spec_json: '{}',
+    tuning_level: 'standard',
     created_at: new Date().toISOString(),
     archived_at: null,
     ...overrides,

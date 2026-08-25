@@ -21,6 +21,10 @@ import type { AgentModelAlias } from './agents';
 import type { ReasoningEffort } from './reasoningEffort';
 import type { CliTool } from './cliTools';
 import { SPRINT_BATCH_CAP } from './sprintBatch';
+// Type-only, so the shared/tuning -> shared/types edge stays one-directional at
+// runtime (workflowTuning imports the definitions from here; this import is
+// erased at compile time and creates no cycle).
+import type { TuningLevel } from '../tuning/workflowTuning';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -71,8 +75,24 @@ export interface WorkflowRow {
    * JSON-encoded `WorkflowDefinition` for an edited or custom flow.
    * `'{}'` (or empty/invalid JSON) means "use the built-in definition".
    * See `resolveWorkflowDefinition`.
+   *
+   * Since migration 122 this doubles as the dedicated CUSTOM SLOT: it is
+   * written only by the Advanced editor / MCP writer, never by the tuning dial,
+   * and it is what `tuning_level === 'custom'` resolves. See
+   * {@link hasCustomSpecSlot}.
    */
   spec_json: string;
+  /**
+   * Tuning level (migration 122): which definition this workflow resolves.
+   * `'standard'` = the as-authored built-in (the identity — today's behaviour
+   * byte for byte), `'efficient'`/`'thorough'` = the calibrated presets applied
+   * to the built-in at READ time, `'custom'` = {@link spec_json}.
+   *
+   * Required (not optional), for the same reason `archived_at` is: every
+   * `WorkflowRow`-producing SELECT must project it explicitly or an omitted
+   * column would silently resolve to `undefined` and read as "not custom".
+   */
+  tuning_level: TuningLevel;
   created_at: string;
   /**
    * Soft-archive stamp (migration 078, mirrors the entity `archived_at`
@@ -1577,6 +1597,28 @@ function isValidPhase(value: unknown): value is WorkflowPhase {
   if (typeof phase.color !== 'string' || phase.color.length === 0) return false;
   if (!Array.isArray(phase.steps) || phase.steps.length === 0) return false;
   return phase.steps.every(isValidStep);
+}
+
+/**
+ * Is a workflow's CUSTOM SLOT filled — i.e. does `spec_json` carry something
+ * other than the two "no slot" sentinels?
+ *
+ * THE emptiness predicate, shared by every surface that needs to know: the
+ * migration-122 backfill (in SQL), the tuning selector's "Custom is disabled
+ * until you save one" hint, `setTuningLevel`'s empty-slot rejection, and the
+ * MCP `has_custom_spec` projection. Deliberately a function of `spec_json`
+ * rather than a derived field on {@link WorkflowRow}: the registry casts raw
+ * SQL rows, so a computed row field would silently be `undefined` at any
+ * producer that forgot to compute it — the exact drift the IPC type-parity
+ * rules exist to prevent.
+ *
+ * Structural validity is NOT checked here (a corrupt-but-non-empty slot still
+ * counts as filled — that is a broken definition to repair, not an absent one).
+ */
+export function hasCustomSpecSlot(specJson: string | null | undefined): boolean {
+  if (specJson === null || specJson === undefined) return false;
+  const trimmed = specJson.trim();
+  return trimmed !== '' && trimmed !== '{}';
 }
 
 /**

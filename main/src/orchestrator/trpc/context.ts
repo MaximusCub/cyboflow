@@ -13,6 +13,7 @@ import type { DatabaseLike } from '../types';
 import type { NativeGrantProbe, VerificationModality } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { OmpControlPlaneAdapter } from '../../../../shared/types/omp';
 import type { OmpCommandAdapter, OmpPrincipal } from '../../../../shared/types/ompCommand';
@@ -69,10 +70,30 @@ export interface WorkflowRegistryLike {
    * project. Re-points pre-refactor rows at the in-repo prompts; no projectId.
    */
   ensureGlobalBuiltIns(descriptors: WorkflowDescriptor[]): void;
-  /** Persist an edited definition onto a workflow's `spec_json` (editor Save). */
+  /**
+   * The workflow's EFFECTIVE definition (migration 122): the tuning level's
+   * materialized graph, or the custom slot at level `'custom'`. The read-path
+   * chokepoint — a raw `row.spec_json` resolve here would run Standard for an
+   * Efficient-stamped flow.
+   */
+  getEffectiveDefinition(workflowId: string): WorkflowDefinition | null;
+  /**
+   * Persist an edited definition onto a workflow's `spec_json` (editor Save).
+   * Also stamps `tuning_level = 'custom'` — writing the slot IS selecting it.
+   */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void;
-  /** Reset a built-in workflow's spec back to its static default. */
+  /**
+   * Reset a built-in workflow's spec back to its static default. Also flips a
+   * `'custom'` tuning level back to `'standard'` (an emptied slot has nothing
+   * for Custom to select).
+   */
   resetSpec(workflowId: string): void;
+  /**
+   * Stamp the workflow's tuning level (migration 122). Throws distinguishable
+   * Errors: 'not found' / 'invalid tuning level' / 'not a built-in' /
+   * 'empty custom slot'.
+   */
+  setTuningLevel(workflowId: string, level: TuningLevel): void;
   /**
    * Create a brand-new custom workflow row (migration 030). `projectId === null`
    * mints a GLOBAL custom flow; a number mints a project-scoped copy. `specJson`

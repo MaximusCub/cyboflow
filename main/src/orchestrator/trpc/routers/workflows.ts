@@ -1,8 +1,9 @@
 /**
  * cyboflow.workflows sub-router.
  *
- * Implements list/get (read) and getDefinition/updateSpec/resetSpec/createCustom
- * (blueprint-editor) procedures backed by WorkflowRegistry.
+ * Implements list/get (read) and getDefinition/updateSpec/resetSpec/
+ * setTuningLevel/createCustom (blueprint-editor) procedures backed by
+ * WorkflowRegistry.
  * Reconciles the two in-repo built-in workflows (Planner + Sprint) on every
  * list — inserting them for a fresh project and re-pointing a pre-refactor
  * project's rows at the current in-repo prompts.
@@ -15,8 +16,8 @@ import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
 import { buildBuiltInWorkflows } from '../../workflows/builtInWorkflows';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
-import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
+import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
 
 export const workflowsRouter = router({
   /**
@@ -79,10 +80,11 @@ export const workflowsRouter = router({
    * Resolve the effective `WorkflowDefinition` for a workflow (the graph the
    * editor seeds from and the canvas renders).
    *
-   * Resolution order is `resolveWorkflowDefinition`: a valid non-empty
-   * `spec_json` wins, else the built-in fallback for a `CyboflowWorkflowName`,
-   * else null. NOT_FOUND when the row is missing OR resolution is null (a
-   * custom flow whose spec is missing/broken).
+   * Routes through the registry's `getEffectiveDefinition` (migration 122), so
+   * the graph returned is the one the flow's TUNING LEVEL selects: a preset
+   * level's transform over the built-in, or the custom slot at `'custom'`.
+   * NOT_FOUND when the row is missing OR resolution is null (a custom flow
+   * whose spec is missing/broken).
    */
   getDefinition: protectedProcedure
     .input(z.object({ workflowId: z.string().min(1) }))
@@ -100,7 +102,7 @@ export const workflowsRouter = router({
           message: `Workflow ${input.workflowId} not found`,
         });
       }
-      const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+      const definition = ctx.workflowRegistry.getEffectiveDefinition(input.workflowId);
       if (definition === null) {
         throw new TRPCError({
           code: 'NOT_FOUND',
@@ -108,6 +110,34 @@ export const workflowsRouter = router({
         });
       }
       return definition;
+    }),
+
+  /**
+   * Stamp the workflow's tuning level (migration 122) — the dial.
+   *
+   * One cheap write that never touches `spec_json`, so switching levels is
+   * lossless. Maps the registry's distinguishable guard errors:
+   *   - 'not found' → NOT_FOUND
+   *   - otherwise   → BAD_REQUEST (not a built-in flow / empty custom slot /
+   *     an invalid level that slipped past the enum)
+   */
+  setTuningLevel: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1), level: z.enum(TUNING_LEVELS) }))
+    .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      try {
+        ctx.workflowRegistry.setTuningLevel(input.workflowId, input.level);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = message.includes('not found') ? 'NOT_FOUND' : 'BAD_REQUEST';
+        throw new TRPCError({ code, message });
+      }
+      return { ok: true };
     }),
 
   /**

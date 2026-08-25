@@ -9,14 +9,14 @@
  * calls, no Node built-ins: a single pure function over the two row arrays so it
  * is trivially unit-testable.
  *
- * Step / phase counts come from `resolveWorkflowDefinition` (the same READ-path
+ * Step / phase counts come from `resolveEffectiveDefinition` (the same READ-path
  * resolver the canvas and the active-runs rail use): a row's `spec_json` wins,
  * else the built-in fallback for a `CyboflowWorkflowName`, else null → zero
  * counts (a custom flow with a missing/broken spec).
  */
 import type { inferRouterOutputs } from '@trpc/server';
 import type { AppRouter } from '../../../../../shared/types/trpc';
-import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
+import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
 
 // ---------------------------------------------------------------------------
 // Types inferred from the router output — never a local mirror.
@@ -185,7 +185,9 @@ export function buildWorkflowMeta(
   runs: RunListRow[],
 ): WorkflowCardMeta[] {
   return rows.map((row) => {
-    const def = resolveWorkflowDefinition(row.name, row.spec_json);
+    // EFFECTIVE definition (migration 122): the card's phase/step counts must
+    // describe the graph the flow's tuning level actually selects.
+    const def = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
     const phaseCount = def ? def.phases.length : 0;
     const stepCount = def
       ? def.phases.reduce((sum, phase) => sum + phase.steps.length, 0)

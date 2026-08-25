@@ -39,7 +39,7 @@ import {
   agentOverrideProjectChannel,
 } from '../../agentOverrideRouter';
 import { CLI_TOOLS } from '../../../../../shared/types/cliTools';
-import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
+import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
 import type { AgentOverrideRow } from '../../../database/models';
 import type { AgentEntry, AgentChangedEvent, AgentUsage } from '../../../../../shared/types/agents';
 import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
@@ -126,7 +126,10 @@ function computeProjectUsage(ctx: AgentsCtx, projectId: number): Map<string, Age
   const rows = ctx.workflowRegistry.listByProject(projectId);
   const workflows: WorkflowForUsage[] = [];
   for (const row of rows) {
-    const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+    // EFFECTIVE definition (migration 122): usage must count the agents the
+    // flow's tuning level actually binds — a preset that drops steps or repins
+    // models changes both which agents run and on what.
+    const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
     if (definition !== null) workflows.push({ name: row.name, definition });
   }
   return computeAgentUsage(workflows);

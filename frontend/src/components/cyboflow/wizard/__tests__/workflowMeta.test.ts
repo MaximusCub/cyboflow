@@ -32,6 +32,10 @@ function makeWorkflow(overrides: Partial<WorkflowListRow>): WorkflowListRow {
     workflow_path: null,
     permission_mode: 'default',
     spec_json: '{}',
+    // Migration 122: the LEVEL decides which graph resolves, so a fixture that
+    // wants its spec_json to win must stamp 'custom' — the state the app
+    // produces (updateSpec stamps it; the 122 backfill stamped existing rows).
+    tuning_level: 'standard',
     created_at: '2026-01-01',
     ...overrides,
   } as WorkflowListRow;
@@ -192,7 +196,7 @@ describe('buildWorkflowMeta', () => {
     expect(meta.find((m) => m.name === 'planner')!.lastUsedAt).toBeNull();
   });
 
-  it('(e) a valid spec_json overrides the built-in fallback counts', () => {
+  it("(e) a 'custom'-stamped spec_json overrides the built-in fallback counts", () => {
     // A one-phase / one-step custom graph that resolveWorkflowDefinition accepts.
     const customDef = {
       id: 'custom',
@@ -206,13 +210,50 @@ describe('buildWorkflowMeta', () => {
       ],
     };
     const meta = buildWorkflowMeta(
-      [makeWorkflow({ id: 'wf-x', name: 'sprint', spec_json: JSON.stringify(customDef) })],
+      [
+        makeWorkflow({
+          id: 'wf-x',
+          name: 'sprint',
+          spec_json: JSON.stringify(customDef),
+          tuning_level: 'custom',
+        }),
+      ],
       [],
     );
 
-    // spec_json wins over the built-in sprint definition.
+    // The custom slot wins over the built-in sprint definition.
     expect(meta[0].phaseCount).toBe(1);
     expect(meta[0].stepCount).toBe(1);
+  });
+
+  it("(e2) the SAME spec_json is dormant while a preset level is selected", () => {
+    const customDef = {
+      id: 'custom',
+      phases: [
+        {
+          id: 'only',
+          label: 'Only',
+          color: '#c96442',
+          steps: [{ id: 'do-it', name: 'Do it', agent: 'executor', mcps: [], retries: 0 }],
+        },
+      ],
+    };
+    const meta = buildWorkflowMeta(
+      [
+        makeWorkflow({
+          id: 'wf-x',
+          name: 'sprint',
+          spec_json: JSON.stringify(customDef),
+          tuning_level: 'thorough',
+        }),
+      ],
+      [],
+    );
+
+    // Thorough is agent-pins + optional-flips only on sprint — no structural
+    // edit — so the counts are the built-in's, not the slot's one-step graph.
+    expect(meta[0].phaseCount).toBe(SPRINT_PHASES);
+    expect(meta[0].stepCount).toBe(SPRINT_STEPS);
   });
 });
 

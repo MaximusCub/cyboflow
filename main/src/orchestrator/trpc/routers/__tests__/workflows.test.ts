@@ -23,6 +23,7 @@ import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { REGISTRY_SCHEMA } from '../../../../database/__test_fixtures__/registrySchema';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../../../shared/types/workflows';
+import { applyTuningPreset } from '../../../../../../shared/tuning/workflowTuning';
 
 /**
  * Minimal definition that passes the STRICT `workflowDefinitionSchema`
@@ -328,12 +329,18 @@ function insertWorkflow(
   specJson = '{}',
   permissionMode = 'default',
 ): void {
+  // `tuning_level` mirrors migration 122's backfill: a row carrying a real
+  // definition in its custom slot resolves that definition, which is exactly
+  // what 'custom' means. Seeding a spec WITHOUT the stamp would describe a
+  // state the app never produces — and would resolve the built-in instead,
+  // since the level (not the slot's emptiness) decides the read.
+  const tuningLevel = specJson.trim() !== '' && specJson.trim() !== '{}' ? 'custom' : 'standard';
   rawDb
     .prepare(
-      `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
-       VALUES (?, ?, ?, ?, NULL, ?)`,
+      `INSERT INTO workflows (id, project_id, name, spec_json, tuning_level, workflow_path, permission_mode)
+       VALUES (?, ?, ?, ?, ?, NULL, ?)`,
     )
-    .run(id, projectId, name, specJson, permissionMode);
+    .run(id, projectId, name, specJson, tuningLevel, permissionMode);
 }
 
 describe('cyboflow.workflows.getDefinition', () => {
@@ -402,6 +409,85 @@ describe('cyboflow.workflows.getDefinition', () => {
     const caller = appRouter.createCaller(createContext());
     await expect(
       caller.cyboflow.workflows.getDefinition({ workflowId: 'any' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+
+  // -------------------------------------------------------------------------
+  // Tuning-level routing (migration 122): the LEVEL decides which graph the
+  // editor seeds from, not whether the custom slot happens to be filled.
+  // -------------------------------------------------------------------------
+
+  it("returns the preset transform for an 'efficient'-stamped built-in", async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+    registry.setTuningLevel('wf-1-sprint', 'efficient');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-sprint' });
+
+    expect(result).toEqual(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'efficient'));
+    expect(result).not.toEqual(WORKFLOW_DEFINITIONS.sprint);
+  });
+
+  it('leaves a filled custom slot dormant while a preset level is selected', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+    const saved = makeDefinition('sprint');
+    registry.updateSpec('wf-1-sprint', saved);
+    registry.setTuningLevel('wf-1-sprint', 'thorough');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-sprint' });
+
+    expect(result).not.toEqual(saved);
+    expect(result).toEqual(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'thorough'));
+  });
+});
+
+describe('cyboflow.workflows.setTuningLevel', () => {
+  it('stamps the level and returns { ok: true }', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.setTuningLevel({ workflowId: 'wf-1-sprint', level: 'efficient' }),
+    ).resolves.toEqual({ ok: true });
+    expect(registry.getById('wf-1-sprint')?.tuning_level).toBe('efficient');
+  });
+
+  it('maps a missing row to NOT_FOUND', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    await expect(
+      caller.cyboflow.workflows.setTuningLevel({ workflowId: 'nope', level: 'efficient' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it("maps an empty custom slot and a non-built-in flow to BAD_REQUEST", async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+    insertWorkflow(rawDb, 'wf-1-custom-abc12345', 1, 'My Custom Flow', JSON.stringify(makeDefinition('mine')));
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.setTuningLevel({ workflowId: 'wf-1-sprint', level: 'custom' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+    await expect(
+      caller.cyboflow.workflows.setTuningLevel({ workflowId: 'wf-1-custom-abc12345', level: 'efficient' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('throws PRECONDITION_FAILED when workflowRegistry is not wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.workflows.setTuningLevel({ workflowId: 'any', level: 'standard' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
   });
 });

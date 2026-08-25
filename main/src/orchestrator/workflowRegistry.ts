@@ -17,11 +17,17 @@ import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import {
+  hasCustomSpecSlot,
   isCyboflowWorkflowName,
   resolveWorkflowDefinition,
   parseWorkflowDefinition,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../shared/types/workflows';
+import {
+  isTuningLevel,
+  resolveEffectiveDefinition,
+  type TuningLevel,
+} from '../../../shared/tuning/workflowTuning';
 import {
   MixedProviderOrchestratedError,
   ProviderOrchestratedUnsupportedError,
@@ -356,10 +362,83 @@ export class WorkflowRegistry {
    */
   getById(workflowId: string): WorkflowRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at FROM workflows WHERE id = ?',
+      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at FROM workflows WHERE id = ?',
     );
     const row = stmt.get(workflowId) as WorkflowRow | undefined;
     return row ?? null;
+  }
+
+  /**
+   * The EFFECTIVE definition for a workflow — the read-path entry point every
+   * definition consumer on the WORKFLOW (as opposed to per-run) side must go
+   * through (plan D1 / risk #1).
+   *
+   * Resolution is `resolveEffectiveDefinition(name, spec_json, tuning_level)`:
+   * a preset level applies its transform to the built-in, `'custom'` resolves
+   * the spec slot, `'standard'` is the identity. Reading `row.spec_json`
+   * directly instead silently runs Standard for an Efficient-stamped flow —
+   * which is exactly the failure this accessor exists to make hard.
+   *
+   * Returns null on the same condition `resolveWorkflowDefinition` does: a
+   * missing row, or a custom flow whose spec is missing/unparseable.
+   *
+   * NOT for per-run reads: a run walks its FROZEN spec (`resolveRunFrozenSpec`),
+   * never the live workflow row — see docs/CODE-PATTERNS.md.
+   */
+  getEffectiveDefinition(workflowId: string): WorkflowDefinition | null {
+    const row = this.getById(workflowId);
+    if (!row) return null;
+    return resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
+  }
+
+  /**
+   * Stamp a workflow's tuning level (the dial). ONE cheap write — `spec_json`
+   * is never touched, which is what makes level switching lossless: a custom
+   * definition survives untouched while a preset level is selected, and
+   * selecting Custom again resolves the same slot.
+   *
+   * Guards (each throws a distinguishable Error the routers map to a TRPCError,
+   * mirroring resetSpec's guard style — these are user-reachable input errors,
+   * not crashes):
+   *   - Missing row → 'not found' (→ NOT_FOUND).
+   *   - Not a TuningLevel → 'invalid tuning level' (→ BAD_REQUEST). Callers
+   *     validate too; this is the chokepoint's own guard.
+   *   - A non-built-in ("save as new") flow → 'not a built-in' (→ BAD_REQUEST).
+   *     Those rows have no built-in baseline, so `efficient`/`thorough`/
+   *     `standard` have nothing to transform and would silently keep resolving
+   *     the flow's own spec. The selector is hidden for them; this is the
+   *     server-side half of that rule.
+   *   - `'custom'` with an EMPTY slot → 'empty custom slot' (→ BAD_REQUEST).
+   *     There is nothing for Custom to select, and stamping it would leave the
+   *     row resolving `null` — an unrenderable flow.
+   *
+   * Idempotent: re-stamping the level a row already carries is a no-op UPDATE.
+   */
+  setTuningLevel(workflowId: string, level: TuningLevel): void {
+    if (!isTuningLevel(level)) {
+      throw new Error(
+        `WorkflowRegistry.setTuningLevel: invalid tuning level '${String(level)}' for workflow ${workflowId}`,
+      );
+    }
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.setTuningLevel: workflow ${workflowId} not found`);
+    }
+    if (!isCyboflowWorkflowName(row.name)) {
+      throw new Error(
+        `WorkflowRegistry.setTuningLevel: workflow ${workflowId} is not a built-in flow, so it has no tuning baseline`,
+      );
+    }
+    if (level === 'custom' && !hasCustomSpecSlot(row.spec_json)) {
+      throw new Error(
+        `WorkflowRegistry.setTuningLevel: workflow ${workflowId} has an empty custom slot; save a definition from the advanced editor first`,
+      );
+    }
+    const stmt = this.db.prepare('UPDATE workflows SET tuning_level = ? WHERE id = ?');
+    const tx = this.db.transaction(() => {
+      stmt.run(level, workflowId);
+    });
+    tx();
   }
 
   /**
@@ -379,11 +458,21 @@ export class WorkflowRegistry {
    * to its spec. UNIQUE(workflow_id, spec_hash) makes re-saving the SAME spec
    * idempotent — only a distinct edit adds a revision row.
    *
+   * Also stamps `tuning_level = 'custom'` in the SAME transaction (migration
+   * 122): writing the custom slot IS the "overwrite this flow" save, and a slot
+   * written while the row still reads `'efficient'` would resolve the preset
+   * and silently ignore the definition just saved. This is the single
+   * chokepoint behind both writers — the tRPC editor save and MCP
+   * `cyboflow_update_workflow` (which reaches it through `WorkflowConfigLike`),
+   * so neither can write a slot without the stamp.
+   *
    * Throws if no row matches `workflowId` (0 rows updated).
    */
   updateSpec(workflowId: string, definition: WorkflowDefinition): void {
     const specJson = JSON.stringify(definition);
-    const stmt = this.db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?');
+    const stmt = this.db.prepare(
+      "UPDATE workflows SET spec_json = ?, tuning_level = 'custom' WHERE id = ?",
+    );
     const tx = this.db.transaction(() => {
       const result = stmt.run(specJson, workflowId);
       if (result.changes === 0) {
@@ -406,6 +495,13 @@ export class WorkflowRegistry {
    * returning null (an error state). The editor only offers "Reset to default"
    * for built-in flows for this reason.
    *
+   * Also flips `tuning_level` from `'custom'` back to `'standard'` in the SAME
+   * transaction (migration 122) — an emptied slot has nothing for Custom to
+   * select, so leaving the stamp would strand the row resolving `null`. The
+   * flip is CONDITIONAL: resetting the slot of a flow parked on `'efficient'`
+   * (its slot held a definition it was not currently running) must not knock it
+   * off that level.
+   *
    * Throws if the row is missing or its name is not a built-in.
    */
   resetSpec(workflowId: string): void {
@@ -418,7 +514,12 @@ export class WorkflowRegistry {
         `WorkflowRegistry.resetSpec: cannot reset a custom workflow to default (${workflowId})`,
       );
     }
-    const stmt = this.db.prepare("UPDATE workflows SET spec_json = '{}' WHERE id = ?");
+    const stmt = this.db.prepare(
+      `UPDATE workflows
+          SET spec_json = '{}',
+              tuning_level = CASE WHEN tuning_level = 'custom' THEN 'standard' ELSE tuning_level END
+        WHERE id = ?`,
+    );
     const tx = this.db.transaction(() => {
       stmt.run(workflowId);
       // Snapshot the reset-to-'{}' spec as a revision (same idempotent path as
@@ -524,9 +625,12 @@ export class WorkflowRegistry {
    * Create a variant snapshotting the workflow's RESOLVED effective definition
    * ("Create variant from current").
    *
-   * Snapshots `resolveWorkflowDefinition(name, spec_json)` — so a built-in with a
-   * live `spec_json='{}'` freezes the CONCRETE static graph rather than '{}'
-   * (independent of later built-in code changes). Seeds `status='draft'` (rotation
+   * Snapshots the workflow's EFFECTIVE definition (migration 122: the level's
+   * materialized graph, `spec_json` when the level is `'custom'`) — so a
+   * built-in with a live `spec_json='{}'` freezes the CONCRETE static graph
+   * rather than '{}' (independent of later built-in code changes), and "create
+   * variant from current" on an Efficient-stamped flow snapshots what that flow
+   * actually runs rather than the untransformed built-in. Seeds `status='draft'` (rotation
    * is explicit opt-in — a fresh variant is pinnable + experiment-usable but never
    * auto-rotated), `weight=1`, NULL model/execution_model/agent_overrides_json.
    *
@@ -546,7 +650,11 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createVariantFromCurrent: '${workflow.name}' is a reserved sentinel and cannot have variants`,
       );
     }
-    const definition = resolveWorkflowDefinition(workflow.name, workflow.spec_json);
+    const definition = resolveEffectiveDefinition(
+      workflow.name,
+      workflow.spec_json,
+      workflow.tuning_level,
+    );
     if (definition === null) {
       throw new Error(
         `WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} has an unresolvable definition`,
@@ -998,7 +1106,7 @@ export class WorkflowRegistry {
     const placeholders = excluded.map(() => '?').join(', ');
     const archivedClause = includeArchived ? '' : ' AND archived_at IS NULL';
     const stmt = this.db.prepare(
-      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
+      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
        FROM workflows
        WHERE (project_id = ? OR project_id IS NULL) AND name NOT IN (${placeholders})${archivedClause}
        ORDER BY name`,
@@ -1011,7 +1119,9 @@ export class WorkflowRegistry {
     // CyboflowWorkflowNames, so they would otherwise render as dead
     // "0 steps / 0 phases" picker cards. Filtered, not deleted — they reappear
     // automatically once they carry a real definition.
-    return rows.filter((row) => resolveWorkflowDefinition(row.name, row.spec_json) !== null);
+    return rows.filter(
+      (row) => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level) !== null,
+    );
   }
 
   /**
@@ -1565,6 +1675,12 @@ export class WorkflowRegistry {
     // definition" readers resolve the run's spec from (workflow_id, spec_hash) via
     // resolveRunFrozenSpec, so a variant run walks its OWN graph and a mid-run
     // workflow edit no longer changes a running definition.
+    //
+    // NOT YET LEVEL-AWARE (migration 122 / plan phase 3): a run of an
+    // efficient/thorough-stamped flow still freezes the live `spec_json` — i.e.
+    // '{}' for an untouched built-in — so the preset transform does not reach
+    // the run. Phase 3 replaces this with materializeForLevel + the per-run
+    // `tuning_level` stamp. Until then the level is a read-path concept only.
     const effectiveSpecJson = opts?.variantSpecJson ?? workflow.spec_json ?? '{}';
     const specHash = computeSpecHash(effectiveSpecJson);
 

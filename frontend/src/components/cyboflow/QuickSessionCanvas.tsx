@@ -22,10 +22,8 @@
  */
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { trpc } from '../../trpc/client';
-import {
-  resolveWorkflowDefinition,
-  type WorkflowRow,
-} from '../../../../shared/types/workflows';
+import type { WorkflowRow } from '../../../../shared/types/workflows';
+import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
 import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
 import { useSessionSummary } from '../../hooks/useSessionSummary';
@@ -363,7 +361,7 @@ export function QuickSessionCanvas({
   );
 
   const phaseDotColor = useCallback((row: WorkflowRow): string => {
-    const def = resolveWorkflowDefinition(row.name, row.spec_json);
+    const def = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
     return def?.phases[0]?.color ?? 'var(--color-text-tertiary)';
   }, []);
 
