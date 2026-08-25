@@ -21,6 +21,7 @@
  * `useActiveDynamicWorkflows()`. Renders null when there are zero quick sessions.
  */
 import React from 'react';
+import { Pencil } from 'lucide-react';
 import { useQuickSessionRows, useQuickSessionsStore } from '../../stores/quickSessionsStore';
 import { useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -137,6 +138,147 @@ function DetailsToggle({ expanded, onClick }: { expanded: boolean; onClick: (e: 
 }
 
 /**
+ * Shared inline-rename state for one row. Ported from the old QuickSessionsTable
+ * row (commit 26d811841) with the click-away fix (083695a6c): a native
+ * click-away dismiss dispatches blur BEFORE click, so by the time the row's
+ * onClick runs, saveEdit() has already flipped isEditing to false and a plain
+ * `if (isEditing) return` guard would be bypassed — the dismissing click would
+ * still open the session and stamp last_viewed_at. `handleRowMouseDown` arms
+ * `suppressClickRef` instead (mousedown fires before blur, while isEditing is
+ * still true); a later genuine click re-runs mousedown with isEditing false and
+ * disarms it. Callers wire `handleRowMouseDown` onto the row and check
+ * `suppressClickRef.current` first in the row's onClick.
+ */
+function useInlineRename(row: QuickSessionRow): {
+  isEditing: boolean;
+  editName: string;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  suppressClickRef: React.MutableRefObject<boolean>;
+  startEdit: () => void;
+  handleInputChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  handleInputKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  handleInputBlur: () => void;
+  handleRowMouseDown: () => void;
+} {
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [editName, setEditName] = React.useState(row.name);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const suppressClickRef = React.useRef(false);
+
+  React.useEffect(() => {
+    if (isEditing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [isEditing]);
+
+  const startEdit = (): void => {
+    setEditName(row.name);
+    setIsEditing(true);
+  };
+
+  const saveEdit = (): void => {
+    const trimmed = editName.trim();
+    setIsEditing(false);
+    if (trimmed === '' || trimmed === row.name) {
+      setEditName(row.name);
+      return;
+    }
+    API.sessions
+      .rename(row.sessionId, trimmed)
+      .then((response) => {
+        if (!response.success) {
+          throw new Error(response.error || 'Failed to rename session');
+        }
+      })
+      .catch((error) => {
+        console.error('Error renaming session:', error);
+        alert('Failed to rename session');
+        setEditName(row.name);
+      })
+      .finally(() => {
+        void useQuickSessionsStore.getState().refresh();
+      });
+  };
+
+  const cancelEdit = (): void => {
+    setEditName(row.name);
+    setIsEditing(false);
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    // Never let a rename keystroke reach the row's own Enter/Space-to-open handler.
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    }
+  };
+
+  return {
+    isEditing,
+    editName,
+    inputRef,
+    suppressClickRef,
+    startEdit,
+    handleInputChange: (e) => setEditName(e.target.value),
+    handleInputKeyDown,
+    handleInputBlur: saveEdit,
+    handleRowMouseDown: () => {
+      suppressClickRef.current = isEditing;
+    },
+  };
+}
+
+/**
+ * The name slot shared by every row: a truncated name + hover pencil, or (while
+ * editing) an inline input seeded with the current name. Callers put the row's
+ * outer element in a `group` class so the pencil's `group-hover:opacity-100`
+ * has something to key off of.
+ */
+function InlineNameEditor({ row, rename }: { row: QuickSessionRow; rename: ReturnType<typeof useInlineRename> }): React.JSX.Element {
+  if (rename.isEditing) {
+    return (
+      <input
+        ref={rename.inputRef}
+        type="text"
+        value={rename.editName}
+        onChange={rename.handleInputChange}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={rename.handleInputKeyDown}
+        onBlur={rename.handleInputBlur}
+        className="min-w-0 flex-1 border border-border-emphasized bg-bg-primary px-1 font-bold text-text-primary outline-none"
+        style={{ fontSize: '13px' }}
+      />
+    );
+  }
+  return (
+    <>
+      <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
+        {row.name}
+      </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          rename.startEdit();
+        }}
+        onKeyDown={(e) => e.stopPropagation()}
+        aria-label="Rename session"
+        title="Rename"
+        className="shrink-0 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+      >
+        <Pencil className="h-3 w-3" />
+      </button>
+    </>
+  );
+}
+
+/**
  * "Needs your input" — full-width card. Only the name row and the "Answer in
  * session →" button open the session; the details toggle stops propagation and
  * the summary/waiting-on content in between is not itself clickable.
@@ -156,21 +298,43 @@ function NeedsInputCard({
 }): React.JSX.Element {
   const isBlocked = row.state === 'blocked';
   const quiet = row.state === 'idle' ? formatElapsedMinutes(row.idleSince, nowMs) : null;
+  const rename = useInlineRename(row);
+  const open = () => openQuickSession(row);
   return (
     <div className="border border-status-error/40 bg-surface-primary p-3 transition-colors hover:border-status-error">
-      <button type="button" onClick={() => openQuickSession(row)} className="flex w-full items-center gap-2 text-left">
+      <div
+        role="button"
+        tabIndex={0}
+        onMouseDown={rename.handleRowMouseDown}
+        onClick={() => {
+          if (rename.suppressClickRef.current) {
+            rename.suppressClickRef.current = false;
+            return;
+          }
+          if (rename.isEditing) return;
+          open();
+        }}
+        onKeyDown={(e) => {
+          if (rename.isEditing) return;
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            open();
+          }
+        }}
+        className="group flex w-full cursor-pointer items-center gap-2 text-left"
+      >
         <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-error" />
-        <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
-          {row.name}
-        </span>
-        <span
-          className={`eyebrow ml-auto shrink-0 border px-1.5 py-0.5 ${
-            isBlocked ? 'border-status-error text-status-error' : 'border-status-warning text-status-warning'
-          }`}
-        >
-          {isBlocked ? 'question' : 'asked you'}
-        </span>
-      </button>
+        <InlineNameEditor row={row} rename={rename} />
+        {!rename.isEditing && (
+          <span
+            className={`eyebrow ml-auto shrink-0 border px-1.5 py-0.5 ${
+              isBlocked ? 'border-status-error text-status-error' : 'border-status-warning text-status-warning'
+            }`}
+          >
+            {isBlocked ? 'question' : 'asked you'}
+          </span>
+        )}
+      </div>
       <div className="mt-2">
         <SummaryLine row={row} />
       </div>
@@ -225,20 +389,30 @@ function ReadyRow({
       : readyState.tone === 'success'
         ? 'text-status-success'
         : 'text-text-muted';
+  const rename = useInlineRename(row);
   const open = () => openQuickSession(row);
   return (
     <div>
       <div
         role="button"
         tabIndex={0}
-        onClick={open}
+        onMouseDown={rename.handleRowMouseDown}
+        onClick={() => {
+          if (rename.suppressClickRef.current) {
+            rename.suppressClickRef.current = false;
+            return;
+          }
+          if (rename.isEditing) return;
+          open();
+        }}
         onKeyDown={(e) => {
+          if (rename.isEditing) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             open();
           }
         }}
-        className="flex w-full cursor-pointer items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
+        className="group flex w-full cursor-pointer items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
       >
         <span
           aria-hidden="true"
@@ -246,10 +420,8 @@ function ReadyRow({
         />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
-            <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
-              {row.name}
-            </span>
-            {readyState.label !== '' && (
+            <InlineNameEditor row={row} rename={rename} />
+            {!rename.isEditing && readyState.label !== '' && (
               <span className={`ml-auto shrink-0 text-[11px] ${toneClass}`}>{readyState.label}</span>
             )}
           </span>
@@ -267,27 +439,49 @@ function ReadyRow({
   );
 }
 
-/** "Working" — compact row, whole-row button (no details toggle — nothing needed from you). */
+/**
+ * "Working" — compact row, whole-row click target (no details toggle — nothing
+ * needed from you). A `div[role=button]` rather than a `<button>` so the inline
+ * rename input can nest inside it (an input inside a button is invalid HTML).
+ */
 function WorkingRow({ row }: { row: QuickSessionRow }): React.JSX.Element {
+  const rename = useInlineRename(row);
+  const open = () => openQuickSession(row);
   return (
-    <button
-      type="button"
-      onClick={() => openQuickSession(row)}
-      className="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
+    <div
+      role="button"
+      tabIndex={0}
+      onMouseDown={rename.handleRowMouseDown}
+      onClick={() => {
+        if (rename.suppressClickRef.current) {
+          rename.suppressClickRef.current = false;
+          return;
+        }
+        if (rename.isEditing) return;
+        open();
+      }}
+      onKeyDown={(e) => {
+        if (rename.isEditing) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
+      }}
+      className="group flex w-full cursor-pointer items-center gap-2.5 px-4 py-2 text-left transition-colors hover:bg-surface-hover"
     >
       <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-success" />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
-          <span className="truncate font-bold text-text-primary" style={{ fontSize: '13px' }} title={row.name}>
-            {row.name}
-          </span>
-          <span className="eyebrow ml-auto shrink-0 border border-border-emphasized px-1.5 py-0.5 text-status-success">
-            running
-          </span>
+          <InlineNameEditor row={row} rename={rename} />
+          {!rename.isEditing && (
+            <span className="eyebrow ml-auto shrink-0 border border-border-emphasized px-1.5 py-0.5 text-status-success">
+              running
+            </span>
+          )}
         </span>
         <SummaryLine row={row} />
       </span>
-    </button>
+    </div>
   );
 }
 
