@@ -32,6 +32,42 @@ describe('parseTimestamp', () => {
   });
 });
 
+/**
+ * Every timestamp shape this repo actually produces, and the ONE correct
+ * instant for each. This matrix is the guard's specification.
+ *
+ * The three zone-marked-but-space-separated rows are the ones a "does it
+ * contain a 'T'?" test gets WRONG — it treats them as unzoned, appends a second
+ * 'Z', and yields Invalid Date, which is strictly worse than not normalizing at
+ * all. They are not hypothetical: database.ts's prompt-marker queries select
+ * `datetime(timestamp) || 'Z'` and ipc/session.ts appends 'Z' to a raw column,
+ * both producing exactly this shape.
+ */
+const SHAPES: Array<[label: string, input: string, expectedIso: string]> = [
+  ['bare SQLite (CURRENT_TIMESTAMP)', '2026-08-24 19:12:52', '2026-08-24T19:12:52.000Z'],
+  ['SQLite with 6-digit fraction', '2026-08-24 19:12:52.123456', '2026-08-24T19:12:52.123Z'],
+  ['unzoned ISO (T, no zone)', '2026-08-24T19:12:52', '2026-08-24T19:12:52.000Z'],
+  ['ISO with Z', '2026-08-24T19:12:52Z', '2026-08-24T19:12:52.000Z'],
+  ['ISO with millis and Z', '2026-08-24T19:12:52.000Z', '2026-08-24T19:12:52.000Z'],
+  ['space-separated WITH Z', '2026-08-24 19:12:52Z', '2026-08-24T19:12:52.000Z'],
+  ['space-separated, millis + Z', '2026-08-24 19:12:52.123Z', '2026-08-24T19:12:52.123Z'],
+  ['space-separated, numeric offset', '2026-08-24 19:12:52+00:00', '2026-08-24T19:12:52.000Z'],
+];
+
+describe('parseTimestamp shape matrix', () => {
+  it.each(SHAPES)('%s → the correct instant', (_label, input, expectedIso) => {
+    const parsed = parseTimestamp(input);
+    expect(Number.isNaN(parsed.getTime())).toBe(false);
+    expect(parsed.toISOString()).toBe(expectedIso);
+  });
+
+  it('never produces Invalid Date for any shape the repo emits', () => {
+    for (const [, input] of SHAPES) {
+      expect(Number.isNaN(parseTimestamp(input).getTime())).toBe(false);
+    }
+  });
+});
+
 describe('formatDistanceToNow normalizes a raw SQLite string', () => {
   it('reports real elapsed time, not "just now"', () => {
     // The exact WorkflowCard case: three hours ago, stored SQLite-shaped.

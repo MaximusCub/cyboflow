@@ -32,6 +32,24 @@ export function formatFullDateTime(timestamp: string | Date): string {
 }
 
 /**
+ * Matches a timestamp that carries NO zone information — the shape SQLite's
+ * CURRENT_TIMESTAMP / datetime() produce ("2026-08-24 19:12:52"), and its
+ * T-separated and fractional variants. Deliberately an ALLOW-LIST: anything
+ * that already carries a zone (a trailing 'Z', a "+00:00" offset) fails to
+ * match and is handed to the platform parser untouched.
+ *
+ * The naive test — "does it contain a 'T'?" — is NOT a proxy for this. The repo
+ * emits zone-marked values that have no 'T' at all: database.ts's prompt-marker
+ * queries select `datetime(timestamp) || 'Z'` and ipc/session.ts appends 'Z' to
+ * a raw column, both yielding "2026-08-24 19:12:52Z". A 'T'-based guard treats
+ * those as unzoned and appends a SECOND 'Z', producing Invalid Date — strictly
+ * worse than doing nothing, since `new Date()` parses that shape correctly.
+ * The fractional part is unbounded (\.\d+) because SQLite can emit more than
+ * three digits.
+ */
+const UNZONED_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+
+/**
  * Parses a timestamp string to a Date object, treating an unzoned value as UTC.
  *
  * SQLite's CURRENT_TIMESTAMP and datetime('now') produce "YYYY-MM-DD HH:MM:SS" —
@@ -43,10 +61,11 @@ export function formatFullDateTime(timestamp: string | Date): string {
  * how the sidebar's relative time went unnoticed while being wrong for every
  * session touched in the last 7 hours.
  *
- * Values that already carry a zone (an ISO string with 'T' — what
- * `strftime('%Y-%m-%dT%H:%M:%SZ', …)` and `Date.toISOString()` emit, including
- * anything serialized across the IPC boundary) pass through untouched, so this
- * is safe on the repo's mixed-format columns.
+ * Values that already carry a zone — a trailing 'Z' or a numeric offset, with
+ * or without a 'T' separator — pass through to the platform parser untouched.
+ * The zone test is an allow-list on the UNZONED shape (see
+ * {@link UNZONED_TIMESTAMP}), not a 'T' check: the repo emits zone-marked
+ * values with no 'T' in them, and a 'T' check mangles those into Invalid Date.
  *
  * This deliberately MATCHES frontend/src/utils/timestampUtils.ts's
  * `parseTimestamp`, which has always normalized. The two copies previously
@@ -57,7 +76,9 @@ export function formatFullDateTime(timestamp: string | Date): string {
  * @returns Date object at the correct instant
  */
 export function parseTimestamp(timestamp: string): Date {
-  return new Date(timestamp.includes('T') ? timestamp : `${timestamp.replace(' ', 'T')}Z`);
+  return UNZONED_TIMESTAMP.test(timestamp)
+    ? new Date(`${timestamp.replace(' ', 'T')}Z`)
+    : new Date(timestamp);
 }
 
 /**

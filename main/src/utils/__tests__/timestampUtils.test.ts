@@ -53,13 +53,52 @@ describe('parseTimestamp', () => {
   });
 });
 
+/**
+ * Every timestamp shape this repo actually produces, and the ONE correct
+ * instant for each. This matrix is the guard's specification.
+ *
+ * The three zone-marked-but-space-separated rows are the ones a "does it
+ * contain a 'T'?" test gets WRONG — it treats them as unzoned, appends a second
+ * 'Z', and yields Invalid Date, which is strictly worse than not normalizing at
+ * all. They are not hypothetical: database.ts's prompt-marker queries select
+ * `datetime(timestamp) || 'Z'` and ipc/session.ts appends 'Z' to a raw column,
+ * both producing exactly this shape.
+ */
+const SHAPES: Array<[label: string, input: string, expectedIso: string]> = [
+  ['bare SQLite (CURRENT_TIMESTAMP)', '2026-08-24 19:12:52', '2026-08-24T19:12:52.000Z'],
+  ['SQLite with 6-digit fraction', '2026-08-24 19:12:52.123456', '2026-08-24T19:12:52.123Z'],
+  ['unzoned ISO (T, no zone)', '2026-08-24T19:12:52', '2026-08-24T19:12:52.000Z'],
+  ['ISO with Z', '2026-08-24T19:12:52Z', '2026-08-24T19:12:52.000Z'],
+  ['ISO with millis and Z', '2026-08-24T19:12:52.000Z', '2026-08-24T19:12:52.000Z'],
+  ['space-separated WITH Z', '2026-08-24 19:12:52Z', '2026-08-24T19:12:52.000Z'],
+  ['space-separated, millis + Z', '2026-08-24 19:12:52.123Z', '2026-08-24T19:12:52.123Z'],
+  ['space-separated, numeric offset', '2026-08-24 19:12:52+00:00', '2026-08-24T19:12:52.000Z'],
+];
+
+describe('parseTimestamp shape matrix', () => {
+  it.each(SHAPES)('%s → the correct instant', (_label, input, expectedIso) => {
+    const parsed = parseTimestamp(input);
+    expect(Number.isNaN(parsed.getTime())).toBe(false);
+    expect(parsed.toISOString()).toBe(expectedIso);
+  });
+
+  it('never produces Invalid Date for any shape the repo emits', () => {
+    for (const [, input] of SHAPES) {
+      expect(Number.isNaN(parseTimestamp(input).getTime())).toBe(false);
+    }
+  });
+});
+
 describe('getTimeDifference is unaffected when BOTH sides share a format', () => {
   it('two unzoned SQLite values yield the correct interval even unnormalized', () => {
-    // Why contextCompactor's getTimeDifference(prompt.timestamp,
-    // prompt.completion_timestamp) was never broken: prompt_markers writes both
-    // columns through datetime(), so both misparse by the SAME offset and it
-    // cancels in the subtraction. Only a MIXED pair — one raw column against a
-    // `new Date()` — goes wrong.
+    // A same-format pair cancels: both sides misparse by the identical offset,
+    // so the subtraction is right even unnormalized. Only a MIXED pair — one
+    // raw column against a `new Date()` — goes wrong.
+    //
+    // NOTE this is NOT why contextCompactor is safe. Its operands come back
+    // from database.ts as `datetime(x) || 'Z'`, i.e. already zone-marked, so
+    // each one parses correctly on its own. Both facts are true; do not
+    // conflate them when auditing a new call site.
     const start = '2026-08-24 19:00:00';
     const end = '2026-08-24 19:12:52';
     expect(getTimeDifference(start, end)).toBe(12 * 60_000 + 52_000);

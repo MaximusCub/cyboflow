@@ -75,9 +75,16 @@ export function parseTimestamp(timestamp: string | Date): Date {
     return timestamp;
   }
   
-  // SQLite DATETIME format: "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.SSS"
-  // These are stored in UTC but without timezone indicator
-  const sqliteDateTimeRegex = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/;
+  // Allow-list on the UNZONED shape — SQLite's CURRENT_TIMESTAMP / datetime()
+  // ("YYYY-MM-DD HH:MM:SS"), plus its T-separated and fractional variants.
+  // Anything already carrying a zone (a trailing 'Z', a numeric offset) fails
+  // to match and goes to the platform parser untouched, which is correct for it.
+  // The fraction is unbounded (\.\d+): a 3-digit cap sent "…19:12:52.123456"
+  // down the bare-parse path, where it was read as LOCAL and landed the host's
+  // UTC offset away. Kept byte-identical to main/src/utils/timestampUtils.ts —
+  // the two copies previously disagreed, which is what made this bug class easy
+  // to reintroduce on whichever side you were not looking at.
+  const sqliteDateTimeRegex = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
   
   if (sqliteDateTimeRegex.test(timestamp)) {
     // This is a SQLite timestamp in UTC, convert to ISO format with Z suffix
