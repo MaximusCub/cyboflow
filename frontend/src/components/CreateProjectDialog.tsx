@@ -184,6 +184,7 @@ export function CreateProjectDialog({ isOpen, onClose, onCreated }: CreateProjec
                       const result = await API.dialog.openDirectory({
                         title: 'Select Repository Directory',
                         buttonLabel: 'Select',
+                        properties: ['openDirectory', 'createDirectory'],
                       });
                       if (result.success && result.data) {
                         setNewProject({ ...newProject, path: result.data });

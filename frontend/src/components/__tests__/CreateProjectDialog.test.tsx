@@ -105,6 +105,55 @@ describe('CreateProjectDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('Browse requests both openDirectory and createDirectory picker properties', async () => {
+    render(<CreateProjectDialog isOpen onClose={vi.fn()} onCreated={vi.fn()} />);
+    await flushDemoEffect();
+    fireEvent.click(screen.getByRole('button', { name: /browse/i }));
+    await waitFor(() => expect(mockOpenDirectory).toHaveBeenCalledTimes(1));
+    expect(mockOpenDirectory.mock.calls[0][0]).toMatchObject({
+      properties: expect.arrayContaining(['openDirectory', 'createDirectory']),
+    });
+  });
+
+  it('Browse populates the Repository Path from a successful pick and detects its branch', async () => {
+    mockOpenDirectory.mockResolvedValue({ success: true, data: '/chosen/path' });
+    render(<CreateProjectDialog isOpen onClose={vi.fn()} onCreated={vi.fn()} />);
+    await flushDemoEffect();
+    fireEvent.click(screen.getByRole('button', { name: /browse/i }));
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText('/path/to/your/repository') as HTMLInputElement).value).toBe(
+        '/chosen/path',
+      ),
+    );
+    expect(mockDetectBranch).toHaveBeenCalledWith('/chosen/path');
+  });
+
+  it('leaves the Repository Path unchanged and skips branch detection on cancel or an unsuccessful pick', async () => {
+    mockOpenDirectory.mockResolvedValue({ success: false });
+    render(<CreateProjectDialog isOpen onClose={vi.fn()} onCreated={vi.fn()} />);
+    await flushDemoEffect();
+    const pathInput = screen.getByPlaceholderText('/path/to/your/repository') as HTMLInputElement;
+    fireEvent.change(pathInput, { target: { value: '/existing/repo' } });
+    mockDetectBranch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /browse/i }));
+    await waitFor(() => expect(mockOpenDirectory).toHaveBeenCalledTimes(1));
+    expect(pathInput.value).toBe('/existing/repo');
+    expect(mockDetectBranch).not.toHaveBeenCalled();
+  });
+
+  it('leaves the Repository Path unchanged when the pick resolves with a null selection', async () => {
+    mockOpenDirectory.mockResolvedValue({ success: true, data: null });
+    render(<CreateProjectDialog isOpen onClose={vi.fn()} onCreated={vi.fn()} />);
+    await flushDemoEffect();
+    const pathInput = screen.getByPlaceholderText('/path/to/your/repository') as HTMLInputElement;
+    fireEvent.change(pathInput, { target: { value: '/existing/repo' } });
+    mockDetectBranch.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /browse/i }));
+    await waitFor(() => expect(mockOpenDirectory).toHaveBeenCalledTimes(1));
+    expect(pathInput.value).toBe('/existing/repo');
+    expect(mockDetectBranch).not.toHaveBeenCalled();
+  });
+
   it('prefills the sandbox project name + path when demo mode is on', async () => {
     mockDemoGetInfo.mockResolvedValue({
       success: true,
