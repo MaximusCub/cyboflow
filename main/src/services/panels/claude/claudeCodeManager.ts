@@ -1303,13 +1303,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return {};
   }
 
-  protected async cleanupCliResources(sessionId: string): Promise<void> {
+  protected async cleanupCliResources(_panelId: string, sessionId: string): Promise<void> {
     // Approval cleanup is done in runSdkQuery's finally block via
     // ApprovalRouter.getInstance().clearPendingForRun(panelId) — using panelId
     // (the id under which requestApproval() was called) rather than sessionId.
     // cleanupCliResources fires on the ABORT path (killProcess); normal completion
     // tears down via runSdkQuery's finally. Bundle removal is routed through the
     // shared helper from BOTH so it never depends on which path ended the run.
+    //
+    // Session-scoped (not panel-scoped) DELIBERATELY: the bundle lives in the
+    // shared worktree and a fan-out can run several lanes under one sessionId,
+    // all sharing it — removeBundleForSession's own refcount (see below) is
+    // what keeps a finishing lane from deleting it out from under a still-live
+    // sibling, so panelId is unused here.
     this.removeBundleForSession(sessionId);
   }
 

@@ -3476,11 +3476,26 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // Stop all Claude panels for this session
         console.log(`[IPC] Stopping ${stopClaudePanels.length} agent panel(s) for session ${sessionId}`);
         for (const claudePanel of stopClaudePanels) {
-          // Per-PANEL lane — see the dismiss teardown above. claudeCodeManager
-          // covers both Claude lanes here (its stopPanel is the session-level
-          // Stop that predates the interactive split).
-          const stopOwner = laneStopOwner(resolvePanelLane(dbSession, claudePanel));
-          await (stopOwner ?? claudeCodeManager).stopPanel(claudePanel.id);
+          // Per-PANEL lane — mirrors the dismiss teardown above. The
+          // claude-interactive lane runs on its OWN manager (interactiveCliManager
+          // has a completely separate process map from claudeCodeManager's SDK
+          // substrate), so it needs its own branch here too: falling through to
+          // claudeCodeManager.stopPanel for it used to silently no-op (that
+          // manager never had the PTY's panelId registered) and leave the REPL
+          // running after "Stop".
+          const stopLane = resolvePanelLane(dbSession, claudePanel);
+          const stopOwner = laneStopOwner(stopLane);
+          if (stopOwner) {
+            await stopOwner.stopPanel(claudePanel.id);
+          } else if (stopLane === 'claude-interactive') {
+            if (interactiveCliManager) {
+              await interactiveCliManager.stopPanel(claudePanel.id);
+            } else if (gateRunId) {
+              await killLiveSession(gateRunId);
+            }
+          } else {
+            await claudeCodeManager.stopPanel(claudePanel.id);
+          }
         }
       } else {
         // Fallback to session-based stop

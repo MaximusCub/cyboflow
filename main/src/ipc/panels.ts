@@ -5,6 +5,8 @@ import { databaseService } from '../services/database';
 import { CreatePanelRequest, PanelEventType, ToolPanel, BaseAIPanelState, hasCwdString } from '../../../shared/types/panels';
 import type { AppServices } from './types';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
+import { resolvePanelLane, type PanelLane } from '../services/panelLane';
+import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 
 /**
  * Resolve the working directory for a terminal panel in priority order:
@@ -23,6 +25,35 @@ function resolveTerminalCwd(panel: ToolPanel, optionsCwd?: string): string {
 }
 
 export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
+  /**
+   * The manager that actually owns a live Codex/OMP panel — undefined for the
+   * two Claude lanes (those stay owned by claudePanelManager below).
+   *
+   * Every agent panel, whatever its provider, keeps the legacy `type: 'claude'`
+   * panel row and registers into `claudePanelManager` at create time (see
+   * panels:create below). But `ClaudePanelManager.getCliManager` only ever
+   * resolves the two CLAUDE substrates — it has no notion of Codex/OMP — so a
+   * panel whose actual (provider × substrate) lane is Codex or OMP was never
+   * reachable through claudePanelManager.stopPanel/isPanelRunning at all: those
+   * calls silently missed it (wrong manager, panel id not found there), and
+   * panels:delete leaked the live process. Dispatch by the panel's real lane
+   * instead.
+   */
+  const nonClaudeLaneOwner = (lane: PanelLane): AbstractCliManager | undefined => {
+    switch (lane) {
+      case 'codex-sdk':
+        return services.codexSdkManager;
+      case 'codex-pty':
+        return services.codexPtyManager;
+      case 'omp-sdk':
+        return services.ompSdkManager;
+      case 'omp-pty':
+        return services.ompPtyManager;
+      default:
+        return undefined;
+    }
+  };
+
   // Panel CRUD operations
   ipcMain.handle('panels:create', async (_, request: CreatePanelRequest) => {
     try {
@@ -67,17 +98,35 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
     try {
       // Clean up terminal process if it's a terminal panel
       const panel = panelManager.getPanel(panelId);
-      // Unregister Claude panels from ClaudePanelManager
+      // Stop + unregister an agent panel, routed by its ACTUAL lane — see
+      // nonClaudeLaneOwner above for why a substrate-only lookup used to leak
+      // a live Codex/OMP panel's process. The claudePanelManager require stays
+      // SCOPED to the branches that actually need it (mirrors the original
+      // fail-soft shape: a require failure here must never block the
+      // nonClaudeOwner stop, or the panelManager.deletePanel below).
       if (panel?.type === 'claude') {
+        const lane = resolvePanelLane(databaseService.getSession(panel.sessionId), panel);
+        const nonClaudeOwner = nonClaudeLaneOwner(lane);
         try {
-          const { claudePanelManager } = require('./claudePanel');
-          if (claudePanelManager) {
-            // Stop if running, then unregister
-            if (claudePanelManager.isPanelRunning(panelId)) {
+          if (nonClaudeOwner) {
+            if (nonClaudeOwner.isPanelRunning(panelId)) {
+              await nonClaudeOwner.stopPanel(panelId);
+            }
+          } else {
+            const { claudePanelManager } = require('./claudePanel');
+            if (claudePanelManager?.isPanelRunning(panelId)) {
               await claudePanelManager.stopPanel(panelId);
             }
-            claudePanelManager.unregisterPanel(panelId);
           }
+        } catch (err) {
+          console.warn('[Panels IPC] Failed to stop panel during delete:', err);
+        }
+        // claudePanelManager registers EVERY agent panel at create time
+        // regardless of lane (panels:create above), so its own bookkeeping
+        // must be cleared even when a different manager owned the live process.
+        try {
+          const { claudePanelManager } = require('./claudePanel');
+          claudePanelManager?.unregisterPanel(panelId);
         } catch (err) {
           console.warn('[Panels IPC] Failed to unregister Claude panel during delete:', err);
         }

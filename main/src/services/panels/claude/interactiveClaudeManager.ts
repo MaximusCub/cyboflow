@@ -983,12 +983,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * Clean up the run's interactive resources. Runs on BOTH clean drain (from the
    * inherited onExit path) and abort (killProcess). Idempotent.
    *
-   * cleanupCliResources is keyed by sessionId by the base contract, so we map
-   * sessionId -> panelId via the active interactiveRuns/processes records.
+   * Keyed by panelId (the base contract now passes it) rather than derived from
+   * sessionId — a session can host several interactive panels (Add-chat), and
+   * mapping sessionId back to "a" panel via findPanelIdForSession used to grab
+   * whichever panel happened to iterate first, tearing down a still-live
+   * sibling's run/router/MCP-config instead of the one that actually exited.
    */
-  protected async cleanupCliResources(sessionId: string): Promise<void> {
-    const panelId = this.findPanelIdForSession(sessionId);
-    if (panelId === undefined) return;
+  protected async cleanupCliResources(panelId: string, _sessionId: string): Promise<void> {
     this.teardownRun(panelId);
   }
 
@@ -1998,17 +1999,6 @@ export class InteractiveClaudeManager extends AbstractCliManager {
         `[InteractiveClaudeManager] remove generated settings failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-  }
-
-  /** Map a sessionId back to its active panelId via the run/process records. */
-  private findPanelIdForSession(sessionId: string): string | undefined {
-    for (const [panelId, run] of this.interactiveRuns) {
-      if (run.sessionId === sessionId) return panelId;
-    }
-    for (const [panelId, proc] of this.processes) {
-      if (proc.sessionId === sessionId) return panelId;
-    }
-    return undefined;
   }
 
   // ---------------------------------------------------------------------------

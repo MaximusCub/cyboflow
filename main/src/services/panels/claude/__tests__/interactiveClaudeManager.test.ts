@@ -1713,6 +1713,54 @@ describe('InteractiveClaudeManager', () => {
       // flag an unhandled pending promise.
       void spawnA;
     });
+
+    it('two panels sharing ONE session (Add-chat): killing the second-spawned panel tears down ONLY that panel, not the first', async () => {
+      // Regression for the sessionId->panelId lookup bug: cleanupCliResources
+      // used to derive "the" panel for a sessionId via findPanelIdForSession,
+      // which returned whichever panel happened to iterate first out of
+      // interactiveRuns/processes (insertion order == panel-A, spawned first)
+      // — REGARDLESS of which panel's process actually exited. Killing
+      // panel-B (spawned second, sharing panel-A's session) used to tear down
+      // panel-A's live run instead, because it was "the" panel for that
+      // session. The fix threads panelId straight through from the base
+      // contract, so this must tear down exactly the panel that was killed.
+      const sharedSessionId = 'sess-shared';
+      const spawnA = mgr.spawnCliProcess({ panelId: 'panel-A', sessionId: sharedSessionId, worktreePath: '/tmp/A', prompt: 'a' });
+      await waitFor(() => mgr.fakeSources.length >= 1 && mgr.fakeSources[0].started);
+      const spawnB = mgr.spawnCliProcess({ panelId: 'panel-B', sessionId: sharedSessionId, worktreePath: '/tmp/B', prompt: 'b' });
+      await waitFor(() => mgr.fakeSources.length >= 2 && mgr.fakeSources[1].started);
+
+      const srcA = mgr.fakeSources[0];
+      const srcB = mgr.fakeSources[1];
+      expect(mgr.publicInteractiveRuns().has('panel-A')).toBe(true);
+      expect(mgr.publicInteractiveRuns().has('panel-B')).toBe(true);
+
+      // Kill panel-B — the SECOND panel spawned into the shared session.
+      await mgr.killProcess('panel-B');
+
+      // Only B's TranscriptSource stopped; A (still live) must be untouched.
+      expect(srcB.stopped).toBe(true);
+      expect(srcA.stopped).toBe(false);
+
+      // Router pending cleared under B's id, never A's.
+      expect(clearApprovalSpy).toHaveBeenCalledWith('panel-B');
+      expect(clearApprovalSpy).not.toHaveBeenCalledWith('panel-A');
+
+      // B's maps cleared; A's sibling entries survive — no cross-panel leak.
+      expect(mgr.publicInteractiveRuns().has('panel-B')).toBe(false);
+      expect(mgr.publicTailSources().has('panel-B')).toBe(false);
+      expect(mgr.publicPipelines().has('panel-B')).toBe(false);
+      expect(mgr.publicInteractiveRuns().has('panel-A')).toBe(true);
+      expect(mgr.publicTailSources().has('panel-A')).toBe(true);
+      expect(mgr.publicPipelines().has('panel-A')).toBe(true);
+
+      // Drain A cleanly to release its pending spawn promise.
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawnA;
+
+      void spawnB;
+    });
   });
 
   // -------------------------------------------------------------------------
