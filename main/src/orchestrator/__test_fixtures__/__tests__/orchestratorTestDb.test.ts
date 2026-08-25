@@ -7,7 +7,8 @@
  * 3. seedRun with overrides.status='awaiting_review' honors the override.
  * 4. Column-level parity: GATE_SCHEMA columns match the raw orchestrator schema
  *    after 006_cyboflow_schema.sql + 071_raw_events_dedup.sql +
- *    111_approval_awaited.sql for workflows, workflow_runs, approvals,
+ *    111_approval_awaited.sql + 124_workflow_tuning_level.sql for workflows,
+ *    workflow_runs, approvals,
  *    raw_events.
  * 5. messages table is intentionally absent from GATE_SCHEMA.
  *
@@ -38,6 +39,8 @@ function createCanonicalDb(): Database.Database {
   const laterMigrations = [
     'src/database/migrations/071_raw_events_dedup.sql',
     'src/database/migrations/111_approval_awaited.sql',
+    // 124 adds tuning_level to BOTH workflows and workflow_runs.
+    'src/database/migrations/124_workflow_tuning_level.sql',
   ];
   const sql = readFileSync(schemaPath, 'utf8');
   const db = new Database(':memory:');
@@ -286,7 +289,7 @@ describe('GATE_SCHEMA parity vs canonical raw orchestrator schema', () => {
   const TABLES_TO_CHECK = ['workflows', 'workflow_runs', 'approvals', 'raw_events'] as const;
 
   it.each(TABLES_TO_CHECK)(
-    'column set for table "%s" matches the canonical schema through migration 111',
+    'column set for table "%s" matches the canonical schema through migration 124',
     (tableName) => {
       const gateDb = createTestDb();
       const canonicalDb = createCanonicalDb();

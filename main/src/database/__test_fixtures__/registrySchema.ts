@@ -7,8 +7,12 @@
  *   - GATE_SCHEMA additions (approvals, raw_events):
  *       main/src/database/migrations/006_cyboflow_schema.sql and
  *       main/src/database/migrations/071_raw_events_dedup.sql.
+ *   - workflows.tuning_level / workflow_runs.tuning_level:
+ *       main/src/database/migrations/124_workflow_tuning_level.sql.
  * Any column added to those tables at the canonical site MUST be
- * mirrored here too.
+ * mirrored here too — AND the migration that adds it listed in
+ * __tests__/orchestratorTestDb.test.ts's `laterMigrations`, or the
+ * column-parity guard drifts silently.
  *
  * NOTE: workflows.project_id is NULLABLE (migration 030, NULL ⇒ global). The
  * canonical schema.sql also carries a `FOREIGN KEY (project_id) REFERENCES
@@ -33,6 +37,14 @@ CREATE TABLE IF NOT EXISTS workflows (
   spec_json TEXT NOT NULL DEFAULT '{}',
   workflow_path TEXT,
   permission_mode TEXT NOT NULL DEFAULT 'default',
+  -- migration 124: the tuning-level stamp every WorkflowRow SELECT projects.
+  -- Inlined here rather than hidden behind a createTestDb flag because the
+  -- registry's own reads (getById / listByProject / createRun) project it
+  -- unconditionally — a flag would make every registry test opt in to a column
+  -- the code under test always needs. Kept in parity by listing 124 in
+  -- orchestratorTestDb.test.ts's laterMigrations list.
+  tuning_level TEXT NOT NULL DEFAULT 'standard'
+    CHECK (tuning_level IN ('efficient','standard','thorough','custom')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id);
@@ -53,6 +65,12 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   started_at DATETIME,
   ended_at DATETIME,
+  -- migration 124: the run's frozen tuning level. NULL = pre-feature or a
+  -- variant run (a variant is its own frozen spec, so no level is attributable).
+  -- Nothing writes it until phase 3 stamps it at createRun; the column is here
+  -- so the fixture's column set stays in parity with the real schema.
+  tuning_level TEXT
+    CHECK (tuning_level IS NULL OR tuning_level IN ('efficient','standard','thorough','custom')),
   FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);

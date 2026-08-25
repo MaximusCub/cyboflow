@@ -61,7 +61,8 @@ not architecture — this plan is about the machinery.
   Insights queries AVG today; median-in-JS has precedent (`verificationRequests.ts:812`).
 - **Eval jury**: fixed 3-slot array wired at boot (`index.ts:2572`); only lever today is the
   binary `eval_enabled` — and it stays the only lever (D6: jury composition untouched by levels).
-- **Migrations**: highest is 118 → this feature takes **119**.
+- **Migrations**: highest on this branch is 118, but 119–121 are claimed by unmerged sibling
+  branches → this feature takes **122** (implemented as such; D2's SQL below is illustrative).
 
 ## 3. Core design decisions
 
