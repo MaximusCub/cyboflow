@@ -123,7 +123,9 @@ interface TuningPreset {
   // retries is OUTER-step only — FanOutInnerStep has no retries field and lanes
   // run under the global FAN_OUT_LANE_ATTEMPT_CAP; inner patches may set only
   // optional/name. (Per-inner-step retry budgets = possible future work, out of scope.)
-  outerStepPatches?: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name'>>>;
+  outerStepPatches?: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name' | 'outputArtifact'>>>;
+  // outputArtifact is patchable so a preset that removes a step can re-home the
+  // artifact it minted (planner-efficient: decomposed-stories → epics step).
   innerStepPatches?: Record<string, Partial<Pick<FanOutInnerStep, 'optional' | 'name'>>>;
   promptAddenda?: Record<string, string>;       // per agent key — see D5
   evalDefault?: boolean;                        // efficient: false

@@ -315,6 +315,16 @@ describe('planner × efficient', () => {
   it('carries no pin for the removed tasks step', () => {
     expect(out.agentConfigs?.tasks).toBeUndefined();
   });
+
+  it('re-homes the decomposed-stories artifact onto the merged epics step', () => {
+    const epics = out.phases
+      .find((phase) => phase.id === 'refine')
+      ?.steps.find((step) => step.id === 'epics');
+    expect(epics?.outputArtifact).toEqual({
+      atype: 'decomposed-stories',
+      label: 'Decomposed stories',
+    });
+  });
 });
 
 describe('planner × thorough', () => {

@@ -92,8 +92,15 @@ export interface TuningPreset {
   agentConfigs: Record<string, TuningAgentPin>;
   /** Step keys to drop from the graph entirely. */
   removeSteps?: string[];
-  /** Field patches for outer steps, keyed `"<phaseId>/<stepId>"`. */
-  outerStepPatches?: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name'>>>;
+  /**
+   * Field patches for outer steps, keyed `"<phaseId>/<stepId>"`. `outputArtifact`
+   * is patchable so a preset that removes a step can re-home the artifact that
+   * step minted (planner-efficient moves `decomposed-stories` onto `epics`).
+   */
+  outerStepPatches?: Record<
+    string,
+    Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name' | 'outputArtifact'>>
+  >;
   /** Field patches for fan-out inner steps, keyed `"<phaseId>/<stepId>/inner/<innerId>"`. */
   innerStepPatches?: Record<string, Partial<Pick<FanOutInnerStep, 'optional' | 'name'>>>;
   /**
@@ -197,6 +204,13 @@ const PLANNER_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
     promptAddenda: {
       epics:
         'This tuning level runs a MERGED decomposition step — the separate "fill out task details" step is disabled. Alongside the epic breakdown, return the COMPLETE task list for every epic (title, body, and acceptance criteria per task) so the orchestrator can persist execution-ready tasks straight from your output.',
+    },
+    // The removed `refine/tasks` step minted the decomposed-stories artifact the
+    // approve-plan gate reviews — re-home the mint onto the merged epics step.
+    outerStepPatches: {
+      'refine/epics': {
+        outputArtifact: { atype: 'decomposed-stories', label: 'Decomposed stories' },
+      },
     },
     evalDefault: false,
   },
@@ -416,7 +430,10 @@ function findOuterStep(def: WorkflowDefinition, parsed: ParsedStepKey): Workflow
 
 function applyOuterPatches(
   def: WorkflowDefinition,
-  patches: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name'>>>,
+  patches: Record<
+    string,
+    Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name' | 'outputArtifact'>>
+  >,
 ): void {
   for (const [key, patch] of Object.entries(patches)) {
     const parsed = parseStepKey(key);
@@ -426,6 +443,7 @@ function applyOuterPatches(
     if (patch.retries !== undefined) step.retries = patch.retries;
     if (patch.optional !== undefined) step.optional = patch.optional;
     if (patch.name !== undefined) step.name = patch.name;
+    if (patch.outputArtifact !== undefined) step.outputArtifact = patch.outputArtifact;
   }
 }
 
