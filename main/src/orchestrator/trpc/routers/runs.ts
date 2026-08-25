@@ -39,6 +39,7 @@ import {
 } from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
+import { TUNING_LEVELS, isTuningLevel, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
@@ -365,8 +366,13 @@ export interface RunLauncherLike {
    * pre-launch "what are you trying to build?" free text — written DIRECTLY to
    * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
    * When omitted the run is not prompt-seeded.
+   * `launchOptions.tuningLevel` (migration 122) is the per-run tuning-level
+   * override: it forces the baseline arm and is materialized + stamped by
+   * createRun. `launchOptions.frozenSpec` is the restart-provenance replay pair
+   * (the failed run's exact frozen spec + the level it was stamped with) — set
+   * only by runs.restart, never reachable from a tRPC input.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string; originIdeaId?: string; tuningLevel?: TuningLevel; frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null } }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -1161,6 +1167,15 @@ export const runsRouter = router({
       // (an explicit variant pin always wins). Mirrors the launchOptions.baseline
       // pin runs.restart already uses to reproduce a baseline run on retry.
       baseline: z.boolean().optional(),
+      // Optional PER-RUN tuning-level override (migration 122 / plan D4) — the
+      // launch wizard's "run this once at this level". When supplied it rides the
+      // trailing launchOptions bag to RunLauncher.launch, which forces the
+      // baseline arm (an override IS an explicit spec choice, so rotation must
+      // not swap the graph out from under it) and hands it to createRun, which
+      // materializes the run's spec from it and stamps workflow_runs.tuning_level.
+      // Omitted = no override → the workflow's own stamped level decides. The
+      // workflows row is never written by this path.
+      tuningLevel: z.enum(TUNING_LEVELS).optional(),
     }).refine((v) => !(v.taskId !== undefined && v.taskIds !== undefined), {
       // Fix 6a — a single run must not carry BOTH a direct task link (taskId) and a
       // sprint batch (taskIds): the run would appear in gatherTaskRuns twice (once
@@ -1185,6 +1200,19 @@ export const runsRouter = router({
         throw new TRPCError({
           code: 'BAD_REQUEST',
           message: 'ideaId and ideaIds are mutually exclusive — supply one or the other, not both',
+        });
+      }
+      // Tuning override × explicit variant pin are mutually exclusive (plan D4):
+      // a variant runs its own frozen definition, so the two are competing spec
+      // choices. createRun is the authoritative chokepoint (it rejects the pair
+      // for every caller, MCP and scripted launches included); restating it here
+      // is only so the wire surface answers a contradictory payload with a 400
+      // instead of the INTERNAL_SERVER_ERROR tRPC wraps a registry throw in.
+      if (input.tuningLevel !== undefined && input.variantId !== undefined) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message:
+            'tuningLevel and variantId are mutually exclusive — a variant runs its own frozen definition, so pick one or the other',
         });
       }
       const project = startRunDeps.sessionManager.getProjectById(input.projectId);
@@ -1390,7 +1418,8 @@ export const runsRouter = router({
         input.baseline ||
         input.ideaIds !== undefined ||
         input.seedPrompt !== undefined ||
-        input.originIdeaId !== undefined
+        input.originIdeaId !== undefined ||
+        input.tuningLevel !== undefined
           ? {
               ...(input.variantId !== undefined
                 ? { requestedVariantId: input.variantId }
@@ -1400,6 +1429,7 @@ export const runsRouter = router({
               ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
               ...(input.seedPrompt !== undefined ? { seedPrompt: input.seedPrompt } : {}),
               ...(input.originIdeaId !== undefined ? { originIdeaId: input.originIdeaId } : {}),
+              ...(input.tuningLevel !== undefined ? { tuningLevel: input.tuningLevel } : {}),
             }
           : undefined;
       const { runId, worktreePath, branchName } = launchWithAgentSelection
@@ -1567,6 +1597,72 @@ export const runsRouter = router({
           ideaIds = undefined;
         }
       }
+      // Restart provenance for a BASELINE run (plan D4). The failed run executed
+      // a spec that may exist NOWHERE ELSE: the tuning dial never writes
+      // `workflows.spec_json`, so an efficient/thorough run's graph lives only in
+      // the `workflow_revisions` row createRun snapshotted for its `spec_hash`.
+      // Relaunching on the workflow's CURRENT spec would therefore silently
+      // restart a different flow — a recalibrated preset in a newer app version,
+      // or an Advanced edit landed since — which is exactly what the frozen
+      // address exists to prevent. So recover the exact spec and replay it,
+      // together with the level it was filed under.
+      //
+      // Read the revision DIRECTLY rather than through `resolveRunFrozenSpec`:
+      // that helper is fail-soft by design and falls back to the LIVE
+      // `workflows.spec_json` when no revision row exists, which here would look
+      // like a successful recovery while quietly reintroducing the very drift
+      // this block prevents. We need to know the difference, so an unrecoverable
+      // spec is logged and left to today's behaviour (relaunch on the live spec).
+      //
+      // The stamp pair is read in its OWN guarded statement rather than folded
+      // into the provenance SELECT above: `spec_hash` (026) and `tuning_level`
+      // (122) are the newest columns on the row, and a pre-026 install or a
+      // schema-narrow DB lacks them — which must degrade to today's restart, not
+      // fail it. Same fail-soft schema contract resolveRunFrozenSpec carries.
+      //
+      // Skipped for a variant restart: that path already inherits the variant
+      // (requestedVariantId below), whose own frozen `definition_json` is the
+      // authoritative spec — and createRun treats a variant spec as the winner
+      // over a replay anyway.
+      let frozenSpec: { specJson: string; tuningLevel: TuningLevel | null } | undefined;
+      if (row.variant_id === null) {
+        let specHash: string | null = null;
+        let stampedLevel: TuningLevel | null = null;
+        try {
+          const stamp = ctx.db
+            .prepare(
+              'SELECT spec_hash AS specHash, tuning_level AS tuningLevel FROM workflow_runs WHERE id = ?',
+            )
+            .get(input.runId) as { specHash?: unknown; tuningLevel?: unknown } | undefined;
+          specHash = typeof stamp?.specHash === 'string' ? stamp.specHash : null;
+          stampedLevel = isTuningLevel(stamp?.tuningLevel) ? stamp.tuningLevel : null;
+        } catch {
+          // Pre-026 / pre-122 schema — no frozen address to replay.
+          specHash = null;
+        }
+        if (specHash !== null) {
+          try {
+            const revision = ctx.db
+              .prepare(
+                'SELECT spec_json AS specJson FROM workflow_revisions WHERE workflow_id = ? AND spec_hash = ?',
+              )
+              .get(row.workflow_id, specHash) as { specJson?: unknown } | undefined;
+            if (typeof revision?.specJson === 'string') {
+              frozenSpec = { specJson: revision.specJson, tuningLevel: stampedLevel };
+            }
+          } catch {
+            // No workflow_revisions table (pre-026) — degrade, don't fail.
+            frozenSpec = undefined;
+          }
+          if (frozenSpec === undefined) {
+            console.warn(
+              `[runs.restart] no workflow_revisions row for (${row.workflow_id}, ${specHash}) — ` +
+                `restarting run ${input.runId} on the workflow's current spec instead of its frozen one`,
+            );
+          }
+        }
+      }
+
       let taskIds: string[] | undefined;
       if (row.batch_id) {
         const laneRows = ctx.db
@@ -1617,10 +1713,15 @@ export const runsRouter = router({
         // (migration 100) is merged in whenever the failed run carried a Launch
         // flow seed prompt, so the restart re-injects the same `# What you are
         // building` grounding block.
+        // frozenSpec (migration 122 / plan D4) rides along on a baseline restart
+        // whenever the failed run's spec was recoverable: the restart replays the
+        // EXACT graph that ran, stamped with the level it ran under, instead of
+        // re-deriving one from a possibly-recalibrated preset or an edited slot.
         {
           ...(row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true }),
           ...(ideaIds !== undefined ? { ideaIds } : {}),
           ...(row.seed_prompt ? { seedPrompt: row.seed_prompt } : {}),
+          ...(frozenSpec !== undefined ? { frozenSpec } : {}),
         },
         row.agent_provider ?? undefined,
         // The column carries what a run row may STORE; a restart is a real

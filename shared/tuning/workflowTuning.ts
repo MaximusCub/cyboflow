@@ -543,3 +543,39 @@ export function resolveEffectiveDefinition(
   }
   return resolveWorkflowDefinition(name, specJson);
 }
+
+/**
+ * The RUN-side sibling of {@link resolveEffectiveDefinition}: the exact
+ * `spec_json` TEXT a run should freeze for a flow at a level (plan D1's
+ * "materialization happens once per run, at createRun").
+ *
+ * Two functions rather than one because the run side freezes a STRING, and which
+ * string it freezes is load-bearing beyond the definition it parses to:
+ *
+ *   `standard` -> `'{}'` LITERALLY, never the workflow's slot. `'{}'` is the
+ *     built-in-fallback sentinel every per-run reader already resolves through
+ *     `resolveWorkflowDefinition`, so a standard run's `spec_hash` is
+ *     byte-identical to what an untouched flow has always stamped — no revision
+ *     fork, no stats re-bucketing, zero change for anyone who never touches the
+ *     dial. (A flow whose slot holds a definition while the dial sits on
+ *     `standard` deliberately freezes `'{}'` too: `standard` IS the as-authored
+ *     built-in, which is exactly what the read path returns for it.)
+ *   `custom`   -> the workflow's own slot — today's exact path.
+ *   otherwise  -> the preset applied to the built-in, through the canonical
+ *     {@link serializeDefinition}, so the same level on the same flow always
+ *     hashes to the same revision whether it was persistent or a per-run override.
+ *
+ * A non-built-in flow has no baseline to transform; it always freezes its own
+ * spec regardless of level (its runs stamp a NULL level — it is outside the
+ * level system).
+ */
+export function materializeForLevel(
+  name: string,
+  specJson: string | null | undefined,
+  level: TuningLevel,
+): string {
+  if (!isCyboflowWorkflowName(name)) return specJson ?? '{}';
+  if (level === 'custom') return specJson ?? '{}';
+  if (level === 'standard') return '{}';
+  return serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS[name], name, level));
+}

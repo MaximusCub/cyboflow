@@ -139,6 +139,10 @@ describe('cancelAndRestartHandler', () => {
       includeSubstrate: true,
       includeWorkflowRunTaskColumns: true,
     });
+    // Migration 026's frozen-definition address, copied verbatim by the handler
+    // so the replacement run executes the same definition (it is not part of
+    // GATE_SCHEMA; tuning_level, migration 122, is).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
     spy = makeOrderSpy();
     runQueues = new RunQueueRegistry();
     vi.clearAllMocks();
@@ -304,6 +308,26 @@ describe('cancelAndRestartHandler', () => {
       model: 'opus',
       eval_enabled: 0,
     });
+  });
+
+  it('copies the frozen definition address + tuning level onto the restarted run', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-frozen');
+    db.prepare(
+      "UPDATE workflow_runs SET spec_hash = 'deadbeef', tuning_level = 'efficient' WHERE id = ?",
+    ).run(runId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    // Without this, the replacement run resolves its definition from the LIVE
+    // workflow spec — which for a preset-tuned flow is the '{}' built-in
+    // fallback, silently dropping an Efficient run to Standard on restart. The
+    // preset graph lives only in the workflow_revisions row this hash addresses.
+    const newRun = db
+      .prepare('SELECT spec_hash, tuning_level FROM workflow_runs WHERE id = ?')
+      .get(result.newRunId) as { spec_hash: string | null; tuning_level: string | null };
+    expect(newRun).toEqual({ spec_hash: 'deadbeef', tuning_level: 'efficient' });
   });
 
   it('copies the original run session_id onto the restarted run (run stays nested under its session)', async () => {
@@ -657,6 +681,10 @@ describe('cancelAndRestartHandler — task-stage revert (migration 066)', () => 
       includeSubstrate: true,
       includeWorkflowRunTaskColumns: true,
     });
+    // Migration 026's frozen-definition address, copied verbatim by the handler
+    // so the replacement run executes the same definition (it is not part of
+    // GATE_SCHEMA; tuning_level, migration 122, is).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
     spy = makeOrderSpy();
     runQueues = new RunQueueRegistry();
     vi.clearAllMocks();

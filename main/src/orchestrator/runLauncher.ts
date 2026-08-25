@@ -33,6 +33,7 @@ import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { TaskChange } from './taskChangeRouter';
 import type { VariantResolver } from './variantResolver';
 import type { ExperimentArm } from '../../../shared/types/experiments';
+import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { emitSeamError } from './telemetrySink';
 import { classifyErrorPattern } from './programmatic/systemicError';
@@ -373,6 +374,19 @@ export class RunLauncher {
       // ideaId seed is also present it wins (they should never disagree; the
       // seed path already stamps).
       originIdeaId?: string;
+      // Per-run TUNING LEVEL override (migration 122 / plan D4). The launch
+      // wizard's "run this once at Efficient/Thorough/…" choice, threaded into
+      // WorkflowRegistry.createRun, which validates it, materializes the run's
+      // spec from it, and stamps workflow_runs.tuning_level. Never writes the
+      // workflows row. Mutually exclusive with requestedVariantId (createRun
+      // rejects the pair); see the baseline forcing below for the rotation half.
+      tuningLevel?: TuningLevel;
+      // INTERNAL restart provenance (plan D4) — set only by runs.restart, never
+      // by a tRPC input. Carries the failed run's EXACT frozen spec (recovered
+      // from workflow_revisions by its spec_hash) plus the level it was stamped
+      // with, so the restart replays what actually ran instead of re-deriving it
+      // from a since-recalibrated preset or a since-edited slot.
+      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null };
     },
     // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
     // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime
@@ -536,9 +550,17 @@ export class RunLauncher {
     // pure stamper. An explicit pin (requestedVariantId) loads regardless of status;
     // otherwise the resolver does weighted random over active variants (or null →
     // baseline live-spec run). A foreign-workflow pin throws inside the resolver.
+    //
+    // Tuning override × rotation (plan D4): an explicit level override IS an
+    // explicit spec choice, so it FORCES the baseline arm — a rotation pick would
+    // hand the run a variant's frozen graph and discard the level the user just
+    // asked for. An explicit variant PIN is not resolved away here: it survives
+    // into createRun, which rejects the pair outright rather than silently
+    // dropping one half of a contradictory request.
+    const tuningLevel = launchOptions?.tuningLevel;
     const assignment =
       this.variantResolver?.resolveForLaunch(workflowId, launchOptions?.requestedVariantId, {
-        baseline: launchOptions?.baseline,
+        baseline: launchOptions?.baseline ?? (tuningLevel !== undefined ? true : undefined),
       }) ?? null;
     // Provenance split (phase 2): the resolved variant is folded as before, and a
     // GENUINE weighted rotation pick (source==='rotation') additionally stamps the
@@ -578,7 +600,9 @@ export class RunLauncher {
       experiment !== undefined ||
       projectVerifyConfig !== null ||
       requestedAgentProvider !== undefined ||
-      requestedAgentRuntime !== undefined
+      requestedAgentRuntime !== undefined ||
+      tuningLevel !== undefined ||
+      launchOptions?.frozenSpec !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
@@ -603,6 +627,10 @@ export class RunLauncher {
             ...(projectVerifyConfig !== null ? { projectVerifyConfig } : {}),
             ...(requestedAgentProvider !== undefined ? { requestedAgentProvider } : {}),
             ...(requestedAgentRuntime !== undefined ? { requestedAgentRuntime } : {}),
+            ...(tuningLevel !== undefined ? { tuningLevel } : {}),
+            ...(launchOptions?.frozenSpec !== undefined
+              ? { frozenSpec: launchOptions.frozenSpec }
+              : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(

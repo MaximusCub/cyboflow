@@ -21,6 +21,7 @@ import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { McpConfigWriter } from '../mcpConfigWriter';
 import type { RunExecutor } from '../runExecutor';
+import type { VariantResolver } from '../variantResolver';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -2501,6 +2502,130 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         .prepare("SELECT COUNT(*) AS n FROM workflow_runs WHERE session_id = 'sess-realbusy'")
         .get() as { n: number };
       expect(count.n).toBe(1); // only the pre-existing real run
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-run tuning-level override (migration 122 / plan D4).
+//
+// The launcher owns ONE half of the override contract: an override is an
+// explicit spec choice, so it must force the BASELINE arm — otherwise rotation
+// could hand the run a variant's frozen graph and quietly discard the level the
+// user just picked. The other half (validating the override, materializing the
+// spec, stamping the level) belongs to createRun and is covered by
+// workflowRegistry.createRun.tuning.test.ts.
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch tuningLevel override', () => {
+  function makeTuningDb(): Database.Database {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    db.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, worktree_path TEXT, base_branch TEXT, run_id TEXT,
+        substrate TEXT, agent_provider TEXT DEFAULT 'claude',
+        agent_runtime TEXT DEFAULT 'claude-sdk', agent_model TEXT,
+        in_place BOOLEAN DEFAULT 0, is_main_repo BOOLEAN DEFAULT 0
+      )
+    `);
+    return db;
+  }
+
+  /** A registry stub whose createRun records the opts bag the launcher assembled. */
+  function makeRegistry(
+    db: Database.Database,
+    workflowId: string,
+    cannedRunId: string,
+  ): { registry: WorkflowRegistry; createRunSpy: ReturnType<typeof vi.fn> } {
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+    ).run(workflowId);
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, 1, 'queued', 'default', ?)",
+      ).run(cannedRunId, workflowId, sessionId ?? null);
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+    });
+    const registry = {
+      getById: (id: string) =>
+        db
+          .prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?')
+          .get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+    return { registry, createRunSpy };
+  }
+
+  /** A VariantResolver stub that records how it was consulted and never assigns. */
+  function makeResolver(): { resolver: VariantResolver; resolveSpy: ReturnType<typeof vi.fn> } {
+    const resolveSpy = vi.fn(() => ({ variant: null, source: 'none' as const, rotationExperimentId: null }));
+    return { resolver: { resolveForLaunch: resolveSpy } as unknown as VariantResolver, resolveSpy };
+  }
+
+  async function launchWith(
+    tmpDir: string,
+    launchOptions: Parameters<RunLauncher['launch']>[15],
+  ): Promise<{ createRunSpy: ReturnType<typeof vi.fn>; resolveSpy: ReturnType<typeof vi.fn> }> {
+    const db = makeTuningDb();
+    const workflowId = randomUUID();
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    db.prepare(
+      "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-t', ?, 'main', NULL)",
+    ).run(join(tmpDir, 'session-tree'));
+    const { registry, createRunSpy } = makeRegistry(db, workflowId, cannedRunId);
+    const { resolver, resolveSpy } = makeResolver();
+    const { worktree } = sessionWorktreeStub('main');
+
+    const launcher = new RunLauncher(
+      dbAdapter(db), registry, worktree, makeSpyLogger(),
+      fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      undefined, undefined, undefined, undefined, undefined, undefined, resolver,
+    );
+    await launcher.launch(
+      workflowId, tmpDir, undefined, undefined, undefined, 'sess-t',
+      undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined,
+      launchOptions,
+    );
+    return { createRunSpy, resolveSpy };
+  }
+
+  it('forces the baseline arm and threads the level into createRun', async () => {
+    await withTempDir('runlauncher-tuning-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, { tuningLevel: 'efficient' });
+      // Rotation is skipped: the override IS the spec choice for this run.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), undefined, { baseline: true });
+      expect(createRunSpy.mock.calls[0][4]).toMatchObject({ tuningLevel: 'efficient' });
+    });
+  });
+
+  it('leaves rotation alone when no override is supplied', async () => {
+    await withTempDir('runlauncher-tuning-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, undefined);
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), undefined, { baseline: undefined });
+      expect(createRunSpy.mock.calls[0][4]).not.toHaveProperty('tuningLevel');
+    });
+  });
+
+  it('still forwards an explicit variant pin so createRun can reject the pair', async () => {
+    await withTempDir('runlauncher-tuning-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, {
+        tuningLevel: 'efficient',
+        requestedVariantId: 'wfv_1',
+      });
+      // The pin reaches the resolver (which ignores `baseline` when one is set),
+      // and the contradictory pair is refused at the createRun chokepoint rather
+      // than half-honoured here.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'wfv_1', { baseline: true });
+      expect(createRunSpy.mock.calls[0][4]).toMatchObject({ tuningLevel: 'efficient' });
+    });
+  });
+
+  it('threads a restart frozenSpec replay pair through to createRun', async () => {
+    await withTempDir('runlauncher-tuning-', async (tmpDir) => {
+      const frozenSpec = { specJson: '{"id":"frozen","phases":[]}', tuningLevel: 'thorough' as const };
+      const { createRunSpy } = await launchWith(tmpDir, { baseline: true, frozenSpec });
+      expect(createRunSpy.mock.calls[0][4]).toMatchObject({ frozenSpec });
     });
   });
 });

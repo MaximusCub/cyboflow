@@ -24,10 +24,13 @@ import {
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../shared/types/workflows';
 import {
+  getTuningPreset,
   isTuningLevel,
+  materializeForLevel,
   resolveEffectiveDefinition,
   type TuningLevel,
 } from '../../../shared/tuning/workflowTuning';
+import { tuningOverrideRejection } from '../../../shared/tuning/workflowTuningErrors';
 import {
   MixedProviderOrchestratedError,
   ProviderOrchestratedUnsupportedError,
@@ -1176,11 +1179,18 @@ export class WorkflowRegistry {
    * The substrate is resolved ONCE here and is immutable for the run lifetime —
    * there is intentionally no UPDATE path. IDEA-013 / TASK-806.
    *
-   * Freezes the workflow's CURRENT spec onto the run as `spec_hash` (sha256 of
-   * spec_json; migration 026) following the SAME no-UPDATE discipline as
+   * Freezes the run's EFFECTIVE spec onto the run as `spec_hash` (sha256 of the
+   * spec text; migration 026) following the SAME no-UPDATE discipline as
    * substrate, and INSERT-OR-IGNOREs a `workflow_revisions` snapshot for that
    * hash so the frozen address always resolves to its spec text — even for a
    * spec that only ever ran and was never explicitly saved via the editor.
+   *
+   * The effective spec is MATERIALIZED FROM THE TUNING LEVEL (migration 122 /
+   * plan D1): `custom` freezes the workflow's slot, `standard` freezes `'{}'`
+   * (the built-in fallback — byte-identical to what every run stamped before the
+   * dial existed), and a preset level freezes its serialized transform. The level
+   * that produced it is stamped alongside on `workflow_runs.tuning_level`, NULL
+   * for a variant run or a non-built-in flow.
    *
    * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL:
    * when supplied it links the run to the owning chat session at INSERT time so a
@@ -1289,6 +1299,30 @@ export class WorkflowRegistry {
        * codexSdkRequested guard immediately below.
        */
       requireSdkSubstrate?: boolean;
+      /**
+       * PER-RUN tuning-level override (migration 122 / plan D4) — the launch
+       * wizard's "run this once at THIS level", threaded runs.start ->
+       * RunLauncher.launch -> here. Undefined = no override, the workflow's own
+       * `tuning_level` stamp decides. It never writes the workflows row.
+       *
+       * Validated here (the chokepoint): rejected for a non-built-in flow, for
+       * `'custom'` with an empty slot, and in combination with an explicit
+       * variant pin — see `shared/tuning/workflowTuningErrors.ts`.
+       */
+      tuningLevel?: TuningLevel;
+      /**
+       * INTERNAL restart provenance (plan D4) — NOT reachable from the tRPC
+       * input. `runs.restart` recovers the failed run's EXACT frozen spec from
+       * `workflow_revisions` (keyed by its `spec_hash`) and replays it verbatim
+       * together with the level it was stamped with, so a preset recalibration
+       * — or an edit to the workflow's slot — between run and restart cannot
+       * change what restarts. The pair travels together on purpose: replaying
+       * the spec without its stamp would file the run under the wrong level.
+       *
+       * `tuningLevel: null` is meaningful (a pre-feature or non-built-in run
+       * restarts unattributed, exactly as it ran).
+       */
+      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null };
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1562,6 +1596,68 @@ export class WorkflowRegistry {
       throw new ProviderOrchestratedUnsupportedError(providerLabel(agentProvider));
     }
 
+    // ── Tuning level: resolve, validate, materialize (migration 122 / plan D1+D4)
+    //
+    // Resolved HERE — above the mixed-provider guard and the spec freeze — because
+    // both consume the run's EFFECTIVE definition, and reading the raw
+    // `workflow.spec_json` for either would silently run Standard for a flow the
+    // user parked on Efficient (plan risk #1).
+    //
+    // A non-built-in ("save as new") flow is outside the level system entirely: it
+    // has no built-in baseline for a preset to transform, so it keeps today's
+    // behaviour (freeze its own spec) and stamps a NULL level. The `__quick__`
+    // sentinel lands here too, which is correct — a quick chat has no DAG to tune.
+    const isBuiltInFlow = isCyboflowWorkflowName(workflow.name);
+    const overrideLevel = opts?.tuningLevel;
+    if (overrideLevel !== undefined) {
+      if (!isTuningLevel(overrideLevel)) {
+        throw tuningOverrideRejection('invalid_level', overrideLevel, workflow.name);
+      }
+      if (!isBuiltInFlow) {
+        throw tuningOverrideRejection('not_built_in', overrideLevel, workflow.name);
+      }
+      // Mutual exclusion (plan D4): a variant carries its own frozen graph, so an
+      // explicit variant pin and a level override are two competing spec choices.
+      // The wizard disables one when the other is picked; this is the server half.
+      // Only an EXPLICIT pin can reach here — RunLauncher forces the baseline arm
+      // whenever an override is present, so rotation never assigns a variant
+      // underneath one.
+      if (opts?.variantId !== undefined || opts?.variantSpecJson !== undefined) {
+        throw tuningOverrideRejection('variant_conflict', overrideLevel, workflow.name);
+      }
+      if (overrideLevel === 'custom' && !hasCustomSpecSlot(workflow.spec_json)) {
+        throw tuningOverrideRejection('empty_custom_slot', overrideLevel, workflow.name);
+      }
+    }
+    const effectiveLevel: TuningLevel | null = isBuiltInFlow
+      ? overrideLevel ?? workflow.tuning_level
+      : null;
+
+    // The EFFECTIVE spec TEXT this run freezes, in precedence order:
+    //   1. an explicit variant's frozen spec (a variant is its own definition);
+    //   2. a restart's recovered frozen spec (replay, never re-derive — D4);
+    //   3. the level materialization (custom -> slot, standard -> '{}', preset ->
+    //      the serialized transform).
+    // Unreachable in combination: restart pins `baseline: true` exactly when the
+    // failed run had no variant, so (1) and (2) never both apply.
+    const effectiveSpecJson =
+      opts?.variantSpecJson ??
+      opts?.frozenSpec?.specJson ??
+      (effectiveLevel === null
+        ? workflow.spec_json ?? '{}'
+        : materializeForLevel(workflow.name, workflow.spec_json, effectiveLevel));
+
+    // The level this run is FILED under (migration 122). NULL is "unattributed":
+    // a variant run (its spec is the variant's, not a level's — crediting a level
+    // would poison the per-level estimate buckets), a non-built-in flow, or a
+    // restart replaying a run that was itself unattributed.
+    const tuningLevelStamp: TuningLevel | null =
+      opts?.variantId !== undefined || opts?.variantSpecJson !== undefined
+        ? null
+        : opts?.frozenSpec !== undefined
+          ? opts.frozenSpec.tuningLevel
+          : effectiveLevel;
+
     // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent
     // NON-CLAUDE runtime pin — set EITHER in a workflow agent config
     // (`WorkflowAgentConfig.runtime`) OR in the project's `agent_overrides`
@@ -1583,20 +1679,20 @@ export class WorkflowRegistry {
     // caller catches MixedProviderOrchestratedError, so tripping it would brick
     // quick sessions project-wide the moment any agent is pinned off Claude.
     if (executionModel === 'orchestrated' && agentProvider === 'claude' && !isQuickSentinel) {
-      // Resolve the same effective definition the frozen spec below is
-      // derived from: a variant run's frozen opts.variantSpecJson when
-      // present, else the workflow's own resolved definition. For the variant
-      // case, parseWorkflowDefinition (not resolveWorkflowDefinition) is used
-      // deliberately — a frozen variant spec must stand on its own and should
-      // never fall back to a built-in default the variant didn't ask for.
+      // Resolve the definition from the SAME `effectiveSpecJson` the freeze
+      // below stamps — including a tuning preset's `agentConfigs`, which can
+      // themselves pin a runtime and so must be visible to this guard. For the
+      // variant case, parseWorkflowDefinition (not resolveWorkflowDefinition) is
+      // used deliberately — a frozen variant spec must stand on its own and
+      // should never fall back to a built-in default the variant didn't ask for.
       // Fails soft to null on a missing/malformed definition (no throw): an
       // unreadable spec has no reachable agents to detect, so it can't be
       // "mixed" either — spec validation is a separate concern owned by the
       // workflow/variant editors, not this guard.
       const effectiveDefinitionForMixCheck: WorkflowDefinition | null =
         opts?.variantSpecJson !== undefined
-          ? parseWorkflowDefinition(opts.variantSpecJson)
-          : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
+          ? parseWorkflowDefinition(effectiveSpecJson)
+          : resolveWorkflowDefinition(workflow.name, effectiveSpecJson);
       if (this.effectiveSetPinsNonClaudeRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
         throw new MixedProviderOrchestratedError();
       }
@@ -1617,8 +1713,20 @@ export class WorkflowRegistry {
     // inherit the GLOBAL codeReviewEvalEnabled toggle at the trigger seam
     // (snapshotRunForEval). Stamped ONCE here and immutable for the run; NULL — the
     // legacy/zero-behavior-change floor — means "no per-run pin". Stored as 0/1/NULL.
-    const evalEnabled =
-      opts?.requestedEvalEnabled === undefined ? null : opts.requestedEvalEnabled ? 1 : 0;
+    //
+    // The tuning level supplies the DEFAULT when the wizard didn't pin one (plan
+    // D6): `evalDefault` is the ONLY eval lever levels have — jury composition is
+    // untouched at every level. Only the `efficient` presets carry it (false), so
+    // standard / thorough / custom / variant / non-built-in runs all still stamp
+    // NULL and behave byte-for-byte as before. Keyed off the STAMPED level, so a
+    // variant run (NULL) consults no preset — its graph is the variant's, not a
+    // level's.
+    const levelEvalDefault =
+      tuningLevelStamp === null
+        ? undefined
+        : getTuningPreset(workflow.name, tuningLevelStamp)?.evalDefault;
+    const resolvedEvalEnabled = opts?.requestedEvalEnabled ?? levelEvalDefault;
+    const evalEnabled = resolvedEvalEnabled === undefined ? null : resolvedEvalEnabled ? 1 : 0;
 
     // Resolve the layered visual-verification posture (migration 055 — the
     // third immutable run-stamp sibling to substrate / execution_model). Decides
@@ -1676,17 +1784,15 @@ export class WorkflowRegistry {
     // resolveRunFrozenSpec, so a variant run walks its OWN graph and a mid-run
     // workflow edit no longer changes a running definition.
     //
-    // NOT YET LEVEL-AWARE (migration 122 / plan phase 3): a run of an
-    // efficient/thorough-stamped flow still freezes the live `spec_json` — i.e.
-    // '{}' for an untouched built-in — so the preset transform does not reach
-    // the run. Phase 3 replaces this with materializeForLevel + the per-run
-    // `tuning_level` stamp. Until then the level is a read-path concept only.
-    const effectiveSpecJson = opts?.variantSpecJson ?? workflow.spec_json ?? '{}';
+    // LEVEL-AWARE since migration 122 / plan phase 3: `effectiveSpecJson` is
+    // resolved above (variant spec > restart replay > level materialization) and
+    // the level it was materialized at is stamped alongside the hash, so the two
+    // can never disagree about what this run executed.
     const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
@@ -1726,6 +1832,7 @@ export class WorkflowRegistry {
         opts?.variantId ?? null,
         opts?.variantLabel ?? null,
         rotationExperimentId,
+        tuningLevelStamp,
       );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
@@ -1734,6 +1841,11 @@ export class WorkflowRegistry {
       // ever ran (never saved via the editor) still gets a revision row here, so
       // historic spec text is never lost. Same transaction as the INSERT, so the
       // frozen hash is always resolvable.
+      //
+      // This is what makes a materialized PRESET spec durably recoverable, which
+      // plan D4's restart depends on: an efficient/thorough run's graph exists
+      // nowhere else (the dial never writes `spec_json`), so without this row a
+      // restart would have only a hash pointing at nothing.
       this.recordRevision(workflowId, effectiveSpecJson);
     });
 
@@ -1825,7 +1937,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

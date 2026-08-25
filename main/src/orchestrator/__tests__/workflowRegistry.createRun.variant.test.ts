@@ -127,9 +127,15 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
     expect(row?.variant_label ?? null).toBeNull();
     expect(row?.experiment_id ?? null).toBeNull();
     expect(row?.experiment_arm ?? null).toBeNull();
-    // Baseline run freezes the LIVE spec.
+    // A baseline run freezes the spec its TUNING LEVEL materializes (migration
+    // 122 / plan D1), not the raw slot: this fixture's row is a built-in flow
+    // sitting at the default 'standard', and standard IS the as-authored
+    // built-in, so it freezes the '{}' fallback sentinel — the same hash every
+    // untouched flow has always stamped. (A row carrying an edited slot lands on
+    // 'custom' via the 122 backfill, which is what resolves that slot; see
+    // workflowRegistry.createRun.tuning.test.ts for the full matrix.)
     const specRow = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as { spec_hash: string };
-    expect(specRow.spec_hash).toBe(computeSpecHash('{"live":1}'));
+    expect(specRow.spec_hash).toBe(computeSpecHash('{}'));
   });
 
   it('model ladder: requestedModel wins over variantModel', () => {

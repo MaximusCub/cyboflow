@@ -631,6 +631,82 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
+  // (a8b) tuningLevel supplied (launch wizard's per-run level override, migration
+  // 122 / plan D4) → rides the trailing launchOptions bag, which is where the
+  // launcher reads it to force the baseline arm before handing it to createRun.
+  // -------------------------------------------------------------------------
+  it('(a8b) tuningLevel=efficient → forwards it in the trailing launchOptions bag', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-tuning',
+      worktreePath: '/tmp/wt/tuning',
+      branchName: 'cyboflow/sprint/tuning12',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        tuningLevel: 'efficient',
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      // The 16th slot is the launchOptions bag.
+      expect(launchMock.mock.calls[0][15]).toEqual({ tuningLevel: 'efficient' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8c) tuningLevel + variantId → BAD_REQUEST, and nothing is launched', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          tuningLevel: 'efficient',
+          variantId: 'wfv_1',
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8d) an unknown tuningLevel is refused at the zod boundary', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        // @ts-expect-error — deliberately outside the TuningLevel union.
+        tuningLevel: 'turbo',
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
+  // -------------------------------------------------------------------------
   // (a11) verifyEnabled supplied (Configure Advanced) → full-form launch carrying
   // the per-run visual-verification override into the 15th launch slot.
   // -------------------------------------------------------------------------

@@ -236,6 +236,17 @@ export interface WorkflowRunRow {
   /** Denormalized variant label (migration 048) that survives variant rename/delete. NULL for baseline runs. */
   variant_label?: string | null;
   /**
+   * The tuning level this run FROZE at (migration 122) — the immutable-snapshot
+   * sibling of `spec_hash` / `variant_id`, stamped once at createRun from the
+   * per-run wizard override if given, else the workflow's own stamp.
+   *
+   * NULL means UNATTRIBUTED, never `'standard'`: a pre-feature run, a
+   * non-built-in flow (outside the level system), or a VARIANT run — a variant
+   * carries its own frozen graph, so crediting a level to it would poison the
+   * per-level estimate buckets. Every reader must treat NULL that way.
+   */
+  tuning_level?: TuningLevel | null;
+  /**
    * The merge commit SHA where this run's code landed (migration 049), stamped at
    * merge close-out (stampSessionRunsOutcome 'merged'). NULL until merged (or when
    * the SHA read fails, fail-soft). Read by slice C's post-merge bug attribution.

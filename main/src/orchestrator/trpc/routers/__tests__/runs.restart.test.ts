@@ -23,6 +23,7 @@ import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun } from '../../../__test_fixtures__/orchestratorTestDb';
 import { setStartRunDeps } from '../runs';
+import { computeSpecHash } from '../../../specHash';
 
 /** Reset the module-level start deps so no state leaks across tests. */
 function resetStartRunDeps(): void {
@@ -52,7 +53,43 @@ describe('cyboflow.runs.restart', () => {
          status TEXT NOT NULL DEFAULT 'queued'
        )`,
     );
+    // The frozen-spec address (migration 026) + its revision store: restart
+    // recovers the failed run's EXACT spec through this pair (plan D4). Runs that
+    // never stamp a spec_hash leave it NULL, which is the "nothing to replay"
+    // path every pre-existing test above exercises.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS workflow_revisions (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         workflow_id TEXT NOT NULL,
+         spec_hash TEXT NOT NULL,
+         spec_json TEXT NOT NULL,
+         UNIQUE (workflow_id, spec_hash)
+       )`,
+    );
   });
+
+  /**
+   * Freeze `specJson` onto a run the way createRun does — stamp the hash, record
+   * the revision — and file it under `level`.
+   */
+  function freezeRun(
+    runId: string,
+    workflowId: string,
+    specJson: string,
+    level: string | null,
+  ): string {
+    const specHash = computeSpecHash(specJson);
+    db.prepare('UPDATE workflow_runs SET spec_hash = ?, tuning_level = ? WHERE id = ?').run(
+      specHash,
+      level,
+      runId,
+    );
+    db.prepare(
+      'INSERT OR IGNORE INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)',
+    ).run(workflowId, specHash, specJson);
+    return specHash;
+  }
 
   afterEach(() => {
     resetStartRunDeps();
@@ -319,6 +356,109 @@ describe('cyboflow.runs.restart', () => {
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     await expect(caller.cyboflow.runs.restart({ runId })).rejects.toMatchObject({ code: 'CONFLICT' });
     expect(launchMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // (t) Tuning-level restart provenance (migration 122 / plan D4).
+  //
+  // A restart must relaunch what the failed run ACTUALLY ran, not what the flow
+  // would produce today. That matters because a preset graph is written down
+  // nowhere but the run's own `workflow_revisions` row — the dial never touches
+  // `workflows.spec_json` — so a preset recalibration in a newer app version, or
+  // an Advanced edit landed since, would otherwise silently change what restarts.
+  // -------------------------------------------------------------------------
+  const EFFICIENT_SPEC = '{"id":"sprint-efficient","phases":[]}';
+
+  /** Seed a FAILED baseline run frozen at `level` on `specJson`. */
+  function seedFrozenFailedRun(
+    id: string,
+    specJson: string,
+    level: string | null,
+  ): { runId: string; workflowId: string } {
+    const seeded = seedRun(db, { id, status: 'failed', projectId: 1 });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-host' WHERE id = ?`).run(seeded.runId);
+    freezeRun(seeded.runId, seeded.workflowId, specJson, level);
+    return seeded;
+  }
+
+  /** Restart `runId` against a launch spy and return the launchOptions it got. */
+  async function restartAndCaptureOptions(runId: string): Promise<Record<string, unknown>> {
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+    expect(launchMock).toHaveBeenCalledOnce();
+    return launchMock.mock.calls[0][15] as Record<string, unknown>;
+  }
+
+  it('(t1) replays a preset run on its frozen spec, stamped with the level it ran', async () => {
+    const { runId } = seedFrozenFailedRun('run-efficient', EFFICIENT_SPEC, 'efficient');
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient' },
+    });
+  });
+
+  it('(t2) replays the frozen spec even after the workflow moved to another level', async () => {
+    // The post-preset-upgrade case: the flow is now parked on thorough, so a
+    // re-derivation would hand the restart a different graph entirely. What goes
+    // out is still the efficient spec the failed run froze. (The hash half of this
+    // contract — that replaying it reproduces the ORIGINAL spec_hash — is pinned
+    // in workflowRegistry.createRun.tuning.test.ts, which drives the real freeze.)
+    const { runId, workflowId } = seedFrozenFailedRun('run-upgraded', EFFICIENT_SPEC, 'efficient');
+    db.prepare("UPDATE workflows SET tuning_level = 'thorough', spec_json = ? WHERE id = ?").run(
+      '{"id":"edited-since","phases":[]}',
+      workflowId,
+    );
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient' },
+    });
+  });
+
+  it("(t3) a standard run replays '{}' — the built-in fallback, same hash as today", async () => {
+    const { runId } = seedFrozenFailedRun('run-standard', '{}', 'standard');
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: { specJson: '{}', tuningLevel: 'standard' },
+    });
+  });
+
+  it('(t4) a custom run replays the slot definition it froze', async () => {
+    const slot = '{"id":"my-custom-graph","phases":[]}';
+    const { runId } = seedFrozenFailedRun('run-custom', slot, 'custom');
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: { specJson: slot, tuningLevel: 'custom' },
+    });
+  });
+
+  it('(t5) a pre-feature run replays its spec with a NULL stamp', async () => {
+    const { runId } = seedFrozenFailedRun('run-legacy', '{}', null);
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: { specJson: '{}', tuningLevel: null },
+    });
+  });
+
+  it('(t6) a VARIANT run is unchanged — it inherits the variant, never a replay', async () => {
+    const { runId } = seedFrozenFailedRun('run-variant-frozen', EFFICIENT_SPEC, null);
+    db.prepare(`UPDATE workflow_runs SET variant_id = 'wfv_7' WHERE id = ?`).run(runId);
+    // The variant's own frozen definition_json is the authoritative spec; the
+    // replay pair would be a second, competing answer.
+    expect(await restartAndCaptureOptions(runId)).toEqual({ requestedVariantId: 'wfv_7' });
+  });
+
+  it('(t7) an unrecoverable frozen spec degrades to today’s behaviour', async () => {
+    const { runId } = seedFrozenFailedRun('run-orphan-hash', EFFICIENT_SPEC, 'efficient');
+    // The revision row is gone (pruned / never written by an older build): there
+    // is nothing to replay, so the restart falls back to the live spec rather
+    // than failing.
+    db.prepare('DELETE FROM workflow_revisions').run();
+    expect(await restartAndCaptureOptions(runId)).toEqual({ baseline: true });
   });
 
   // -------------------------------------------------------------------------

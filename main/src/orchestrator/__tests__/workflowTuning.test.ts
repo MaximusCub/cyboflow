@@ -25,6 +25,7 @@ import {
   definitionHasStepKey,
   getTuningPreset,
   isTuningLevel,
+  materializeForLevel,
   resolveEffectiveDefinition,
   serializeDefinition,
   type TuningPresetLevel,
@@ -32,6 +33,7 @@ import {
 import {
   CYBOFLOW_WORKFLOW_NAMES,
   WORKFLOW_DEFINITIONS,
+  resolveWorkflowDefinition,
   type CyboflowWorkflowName,
   type WorkflowDefinition,
 } from '../../../../shared/types/workflows';
@@ -422,5 +424,72 @@ describe('resolveEffectiveDefinition', () => {
       expect(out?.phases.map((phase) => phase.id)).toEqual(['only']);
     }
     expect(resolveEffectiveDefinition('my-custom-flow', '{}', 'standard')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// materializeForLevel — the RUN-side sibling. What createRun freezes.
+// ---------------------------------------------------------------------------
+
+describe('materializeForLevel', () => {
+  const slotSpec = JSON.stringify({
+    id: 'sprint',
+    phases: [
+      {
+        id: 'only',
+        label: 'Only',
+        color: '#3b6dd6',
+        steps: [{ id: 'do-it', name: 'Do it', agent: 'implement', mcps: [], retries: 0 }],
+      },
+    ],
+  });
+
+  it("standard is LITERALLY '{}' — the invariant the whole zero-change promise rests on", () => {
+    // Not "a spec that parses to the built-in": the exact string, because it is
+    // hashed into spec_hash and any other text would fork the revision history
+    // of every flow nobody ever tuned.
+    expect(materializeForLevel('sprint', '{}', 'standard')).toBe('{}');
+    expect(materializeForLevel('sprint', slotSpec, 'standard')).toBe('{}');
+    expect(materializeForLevel('planner', null, 'standard')).toBe('{}');
+  });
+
+  it('custom is the slot verbatim', () => {
+    expect(materializeForLevel('sprint', slotSpec, 'custom')).toBe(slotSpec);
+    expect(materializeForLevel('sprint', '{}', 'custom')).toBe('{}');
+  });
+
+  it('a preset level is the canonically serialized transform', () => {
+    for (const level of PRESET_LEVELS) {
+      expect(materializeForLevel('sprint', '{}', level)).toBe(
+        serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', level)),
+      );
+    }
+  });
+
+  it('a preset level ignores whatever sits in the custom slot', () => {
+    expect(materializeForLevel('sprint', slotSpec, 'efficient')).toBe(
+      materializeForLevel('sprint', '{}', 'efficient'),
+    );
+  });
+
+  it('every materialization round-trips to the same definition the read path resolves', () => {
+    // The two halves of D1 must not drift: what a run FREEZES has to parse back
+    // to what the editor/prompt side RESOLVES for the same flow at the same level.
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
+      for (const level of TUNING_LEVELS) {
+        const frozen = materializeForLevel(name, '{}', level);
+        const fromRun = resolveWorkflowDefinition(name, frozen);
+        const fromRead = resolveEffectiveDefinition(name, '{}', level);
+        expect(serializeDefinition(fromRun as WorkflowDefinition)).toBe(
+          serializeDefinition(fromRead as WorkflowDefinition),
+        );
+      }
+    }
+  });
+
+  it('a non-built-in flow always materializes its own spec', () => {
+    for (const level of TUNING_LEVELS) {
+      expect(materializeForLevel('my-custom-flow', slotSpec, level)).toBe(slotSpec);
+    }
   });
 });

@@ -108,6 +108,25 @@ interface WorkflowRunRow {
   model: string | null;
   eval_enabled: number | null;
   /**
+   * The frozen definition address (spec_hash mig 026) + the tuning level it was
+   * materialized at (mig 122). Copied verbatim for the same reason as the
+   * columns above: the replacement run must execute the SAME definition the
+   * canceled one was executing.
+   *
+   * Load-bearing since the tuning dial landed. A preset level's graph is written
+   * down NOWHERE but the run's own `workflow_revisions` row — the dial never
+   * touches `workflows.spec_json` — so a replacement run left with a NULL
+   * spec_hash falls back to the live spec, i.e. silently drops an Efficient run
+   * to Standard mid-restart. The revision row keyed by (workflow_id, spec_hash)
+   * already exists, so copying the address is all the resolution needs.
+   *
+   * NOT fixed here (pre-existing, and orthogonal): this handler still does not
+   * copy `variant_id`, so a variant run's replacement keeps running the variant
+   * graph while being attributed to no variant.
+   */
+  spec_hash: string | null;
+  tuning_level: string | null;
+  /**
    * Task/batch links (migration 066). Read so the OLD run's tasks can revert off
    * 'In development' after it flips 'canceled'. Deliberately NOT copied to the
    * replacement run's INSERT — a restart re-plans from scratch, so the tasks
@@ -165,7 +184,8 @@ export async function cancelAndRestartHandler(
     // Step 1: Fetch the run row.
     const row = db.prepare(
       `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
-              substrate, permission_mode_snapshot, model, eval_enabled, task_id, batch_id
+              substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
+              task_id, batch_id
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
 
@@ -235,8 +255,9 @@ export async function cancelAndRestartHandler(
       db.prepare(
         `INSERT INTO workflow_runs
            (id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
-            substrate, permission_mode_snapshot, model, eval_enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+            substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newRunId,
         row.workflow_id,
@@ -248,6 +269,8 @@ export async function cancelAndRestartHandler(
         row.permission_mode_snapshot,
         row.model,
         row.eval_enabled,
+        row.spec_hash,
+        row.tuning_level,
         now,
         now,
       );
