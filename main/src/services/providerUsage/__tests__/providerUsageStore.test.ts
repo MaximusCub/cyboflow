@@ -176,6 +176,159 @@ describe('ProviderUsageStore — Claude ingest', () => {
     expect(store.getState(NOW).claude?.windows[0]?.status).toBe('exhausted');
   });
 
+  it('records a per-model weekly bucket from `model_scoped`', () => {
+    // Verbatim from a live `/usage` poll: the server names the bucket, so no
+    // enum here could have anticipated "Fable".
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00.822106+00:00' },
+          model_scoped: [
+            { display_name: 'Fable', utilization: 24, resets_at: '2026-08-29T15:59:59.822311+00:00' },
+          ],
+        },
+      },
+      NOW,
+    );
+    const scoped = store.getState(NOW).claude?.windows.find((w) => w.kind === 'claude_model_scoped');
+    expect(scoped).toMatchObject({
+      scopeLabel: 'Fable',
+      label: 'Weekly (Fable)',
+      usedPercent: 24,
+      percentSource: 'poll',
+      resetsAtMs: 1788019199822,
+    });
+  });
+
+  it('keeps two model buckets side by side instead of colliding on their shared kind', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          model_scoped: [
+            { display_name: 'Fable', utilization: 24, resets_at: '2026-08-29T16:00:00Z' },
+            { display_name: 'Opus', utilization: 61, resets_at: '2026-08-29T16:00:00Z' },
+          ],
+        },
+      },
+      NOW,
+    );
+    const labels = store.getState(NOW).claude?.windows.map((w) => w.label);
+    // Most-constrained first, and BOTH present: keying by kind alone would have
+    // let the second bucket overwrite the first.
+    expect(labels).toEqual(['Weekly (Opus)', 'Weekly (Fable)']);
+  });
+
+  it('DROPS a model_scoped entry that names no bucket or reports no number', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00Z' },
+          model_scoped: [
+            { display_name: '', utilization: 10, resets_at: null },
+            { display_name: 'Sonnet', utilization: null, resets_at: null },
+            'not an object',
+          ],
+        },
+      },
+      NOW,
+    );
+    // The array is explicitly additive; an unrecognised entry is dropped, never
+    // rendered as a nameless row or a zero.
+    expect(store.getState(NOW).claude?.windows.map((w) => w.kind)).toEqual(['claude_seven_day']);
+  });
+
+  it('reads extra-usage credits from `spend`, verbatim', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00Z' },
+          spend: {
+            used: { amount_minor: 1393, currency: 'USD', exponent: 2 },
+            limit: { amount_minor: 1000, currency: 'USD', exponent: 2 },
+            percent: 100,
+            enabled: false,
+            disabled_reason: 'org_level_disabled_until',
+          },
+        },
+      },
+      NOW,
+    );
+    expect(store.getState(NOW).claude?.spend).toEqual({
+      usedMinor: 1393,
+      limitMinor: 1000,
+      currency: 'USD',
+      exponent: 2,
+      // 1393 against a 1000 cap is 139%, and the provider still says 100.
+      // Recomputing it here would be inventing a number nobody reported.
+      percent: 100,
+      enabled: false,
+      disabledReason: 'org_level_disabled_until',
+    });
+  });
+
+  it('falls back to the older `extra_usage` credits view when `spend` is absent', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00Z' },
+          extra_usage: {
+            is_enabled: false,
+            monthly_limit: 1000,
+            used_credits: 1393,
+            utilization: 100,
+            currency: 'USD',
+            decimal_places: 2,
+            disabled_reason: 'org_level_disabled_until',
+          },
+        },
+      },
+      NOW,
+    );
+    expect(store.getState(NOW).claude?.spend).toMatchObject({
+      usedMinor: 1393,
+      limitMinor: 1000,
+      exponent: 2,
+      enabled: false,
+    });
+  });
+
+  it('CLEARS credits when a later poll no longer reports them', () => {
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: {
+          seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00Z' },
+          spend: { used: { amount_minor: 1393, currency: 'USD', exponent: 2 }, percent: 100, enabled: true },
+        },
+      },
+      NOW,
+    );
+    expect(store.getState(NOW).claude?.spend).not.toBeNull();
+
+    store.recordClaudeUsagePoll(
+      {
+        subscriptionType: 'max',
+        rateLimitsAvailable: true,
+        rateLimits: { seven_day: { utilization: 27, resets_at: '2026-08-29T16:00:00Z' } },
+      },
+      NOW + 1000,
+    );
+    // The poll is authoritative: a balance nobody reports any more is not a
+    // balance to keep showing.
+    expect(store.getState(NOW).claude?.spend).toBeNull();
+  });
+
   it('REFUSES a reading that names no window', () => {
     // 4 production rows look like this: no rateLimitType, no utilization. There
     // is no window it could correctly update.
