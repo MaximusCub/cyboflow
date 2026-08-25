@@ -197,11 +197,6 @@ export class API {
       return window.electronAPI.sessions.listQuick(projectId);
     },
 
-    async warmQuickGit(sessionIds: string[]): Promise<IPCResponse> {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.warmQuickGit(sessionIds);
-    },
-
     async stop(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.stop(sessionId);

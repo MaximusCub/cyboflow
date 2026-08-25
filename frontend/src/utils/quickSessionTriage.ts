@@ -104,7 +104,7 @@ export interface QuickSessionTriage {
  *   - `working`     — `running` (post-overlay).
  *   - `readyForReview` — everything else (idle, not needs-input).
  *
- * `needsInput` sorts oldest `updatedAtIso` first (nulls last, then name);
+ * `needsInput` sorts oldest `restedAtIso` first (nulls last, then name);
  * `readyForReview` reuses {@link sortQuickSessionRows}'s weights (unviewed idle
  * first, longest-quiet first — every row in this bucket is idle, so the
  * blocked/running weight tiers never apply); `working` sorts by name.
@@ -134,10 +134,10 @@ export function deriveQuickSessionTriage(
   }
 
   needsInput.sort((a, b) => {
-    if (a.updatedAtIso === null && b.updatedAtIso === null) return a.name.localeCompare(b.name);
-    if (a.updatedAtIso === null) return 1;
-    if (b.updatedAtIso === null) return -1;
-    return a.updatedAtIso.localeCompare(b.updatedAtIso);
+    if (a.restedAtIso === null && b.restedAtIso === null) return a.name.localeCompare(b.name);
+    if (a.restedAtIso === null) return 1;
+    if (b.restedAtIso === null) return -1;
+    return a.restedAtIso.localeCompare(b.restedAtIso);
   });
 
   return {

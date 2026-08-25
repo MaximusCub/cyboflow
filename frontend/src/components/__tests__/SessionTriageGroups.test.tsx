@@ -17,8 +17,7 @@ import { QUIET_GRACE_MS } from '../../utils/quickSessionTriage';
 
 let mockQuickRows: QuickSessionRow[] = [];
 
-const { warmQuickGitSpy, getSummarySpy } = vi.hoisted(() => ({
-  warmQuickGitSpy: vi.fn(),
+const { getSummarySpy } = vi.hoisted(() => ({
   getSummarySpy: vi.fn(),
 }));
 
@@ -41,7 +40,6 @@ vi.mock('../../stores/sessionStore', () => ({
 vi.mock('../../utils/api', () => ({
   API: {
     sessions: {
-      warmQuickGit: warmQuickGitSpy,
       getSummary: getSummarySpy,
     },
   },
@@ -58,7 +56,7 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
     state: overrides.state ?? 'idle',
     idleSince: overrides.idleSince ?? '2026-07-06T00:00:00.000Z',
     unviewed: overrides.unviewed ?? false,
-    updatedAtIso: overrides.updatedAtIso ?? '2026-07-06T00:00:00.000Z',
+    restedAtIso: overrides.restedAtIso ?? '2026-07-06T00:00:00.000Z',
     rawStatus: overrides.rawStatus ?? 'completed',
     exitCode: overrides.exitCode ?? null,
     summary: overrides.summary ?? null,
@@ -72,7 +70,6 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
 
 beforeEach(() => {
   mockQuickRows = [];
-  warmQuickGitSpy.mockReset().mockResolvedValue({ success: true });
   getSummarySpy.mockReset().mockResolvedValue({
     success: true,
     data: { enabled: true, summary: null, updatedAt: null, entries: [] } satisfies SessionSummaryPayload,
@@ -153,16 +150,6 @@ describe('SessionTriageGroups', () => {
     ];
     render(<SessionTriageGroups />);
     expect(screen.getByText('no summary yet')).toBeInTheDocument();
-  });
-
-  it('fires warmQuickGit on mount with the non-running rows\' ids', () => {
-    mockQuickRows = [
-      quickRow({ sessionId: 's1', name: 'a', state: 'idle', unviewed: false }),
-      quickRow({ sessionId: 's2', name: 'b', state: 'blocked' }),
-      quickRow({ sessionId: 's3', name: 'c', state: 'running' }),
-    ];
-    render(<SessionTriageGroups />);
-    expect(warmQuickGitSpy).toHaveBeenCalledWith(['s1', 's2']);
   });
 
   it('moves a recently-idle row from Working to Ready once the quiet grace window elapses', () => {

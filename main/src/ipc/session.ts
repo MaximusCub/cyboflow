@@ -3426,18 +3426,32 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
+  // Throttle state for the sessions:list-quick git-cache warm (seam item (3)
+  // below). Handler-scoped: one warm window per registration, i.e. per app run.
+  const QUICK_GIT_WARM_INTERVAL_MS = 60_000;
+  const QUICK_GIT_WARM_MAX_SESSIONS = 20;
+  let lastQuickGitWarmMs = 0;
+
   // Live quick-session status board (replaces the old idle-session review_item
   // mint). Derives each quick session's state on read: `blocked` when its chat
   // run has a pending AskUserQuestion / permission gate (SDK gates via the
   // Question/Approval routers; PTY gates via the interactive manager's
   // awaiting-input flag), else `running`/`idle` from the DB status. `projectId`
-  // scopes to one project; omit for the cross-project review home. Two things
+  // scopes to one project; omit for the cross-project review home. Three things
   // happen ONLY at this seam (never in the pure listing module): (1) a
   // cache-only git snapshot is attached from GitStatusManager.peekCachedStatus
   // — never a fresh fetch, so the 3s poll can't spawn git subprocesses; (2)
   // when the session-summary feature toggle is off, summary/summaryState/
   // waitingOn are nulled so a toggle-off can't leak a persisted summary onto
-  // the board (mirrors sessions:get-summary's `enabled` contract).
+  // the board (mirrors sessions:get-summary's `enabled` contract); (3) at most
+  // once per QUICK_GIT_WARM_INTERVAL_MS, a fire-and-forget cache WARM kicks
+  // getGitStatus (TTL-aware, coalesced, concurrency-bounded) for the resting
+  // rows — the git watcher pipeline (badge auto-refresh) is disabled in
+  // production (GIT_STATUS_BADGE_ENABLED=false), so the cache this seam reads
+  // would otherwise stay cold. Folding the warm into the poll (instead of a
+  // dedicated handler) keeps the legacy ipcMain.handle surface frozen
+  // (noNewIpcHandlers.test.ts) and scopes warming to exactly "while a board
+  // is polling".
   ipcMain.handle('sessions:list-quick', async (_event, projectId?: number) => {
     try {
       const blockedRunIds = new Set<string>();
@@ -3470,31 +3484,24 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           waitingOn: summaryEnabled ? row.waitingOn : null,
         };
       });
+
+      // (3) Throttled cache warm — see the seam comment above. Never awaited:
+      // the poll's response must not wait on git subprocesses.
+      const nowMs = Date.now();
+      if (nowMs - lastQuickGitWarmMs >= QUICK_GIT_WARM_INTERVAL_MS) {
+        lastQuickGitWarmMs = nowMs;
+        for (const row of rows.filter((r) => r.state !== 'running').slice(0, QUICK_GIT_WARM_MAX_SESSIONS)) {
+          void gitStatusManager.getGitStatus(row.sessionId).catch((error) => {
+            console.error(`Failed to warm git status for session ${row.sessionId}:`, error);
+          });
+        }
+      }
+
       return { success: true, data: rows };
     } catch (error) {
       console.error('Failed to list quick sessions:', error);
       return { success: false, error: 'Failed to list quick sessions' };
     }
-  });
-
-  // Warm the git-status cache for a batch of quick-session board rows. The
-  // git watcher pipeline (badge auto-refresh) is disabled in production
-  // (GIT_STATUS_BADGE_ENABLED=false), so the cache `sessions:list-quick`
-  // reads is otherwise cold for quick sessions. The frontend calls this on
-  // triage-board mount plus a slow interval; the 3s list poll itself stays
-  // cache-only (never fetches). Fire-and-forget: getGitStatus is already
-  // TTL-aware, coalesced, and concurrency-bounded internally, so this just
-  // kicks it and returns immediately without waiting on the fetches.
-  ipcMain.handle('sessions:warm-quick-git', async (_event, sessionIds: unknown) => {
-    if (!Array.isArray(sessionIds) || !sessionIds.every((id) => typeof id === 'string')) {
-      return { success: false, error: 'sessionIds must be an array of strings' };
-    }
-    for (const sessionId of sessionIds.slice(0, 20)) {
-      void gitStatusManager.getGitStatus(sessionId).catch((error) => {
-        console.error(`Failed to warm git status for session ${sessionId}:`, error);
-      });
-    }
-    return { success: true };
   });
 
   ipcMain.handle('sessions:stop', async (_event, sessionId: string) => {

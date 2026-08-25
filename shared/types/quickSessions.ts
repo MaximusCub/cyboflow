@@ -79,8 +79,13 @@ export interface QuickSessionRow {
    * for a `blocked` row (a pending gate needs you regardless of viewed-ness).
    */
   unviewed: boolean;
-  /** sessions.updated_at as UTC ISO — the needs-input sort key (present regardless of `state`, unlike `idleSince`). */
-  updatedAtIso: string | null;
+  /**
+   * The session's last rest boundary as UTC ISO — `COALESCE(sessions.idle_since,
+   * sessions.updated_at)` (migration 119; a rename or folder move no longer
+   * resets it). The needs-input sort key: present regardless of `state`, unlike
+   * `idleSince` (which is set only for `idle` rows).
+   */
+  restedAtIso: string | null;
   /** sessions.status verbatim ('completed'/'stopped'/'failed'/…) — the UI's "stopped early vs clean" split that the derived `state` (which collapses these into `idle`) can't express. */
   rawStatus: string;
   /** sessions.exit_code. Written by the PTY substrate; usually null for SDK-substrate rows. */

@@ -65,7 +65,7 @@ function rowsEqual(a: QuickSessionRow, b: QuickSessionRow): boolean {
     a.state === b.state &&
     a.idleSince === b.idleSince &&
     a.unviewed === b.unviewed &&
-    a.updatedAtIso === b.updatedAtIso &&
+    a.restedAtIso === b.restedAtIso &&
     a.rawStatus === b.rawStatus &&
     a.exitCode === b.exitCode &&
     a.summary === b.summary &&

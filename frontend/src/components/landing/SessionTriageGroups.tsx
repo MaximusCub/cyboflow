@@ -38,12 +38,6 @@ import type { SessionSummaryPayload } from '../../../../shared/types/sessionSumm
  *  it at most half a minute stale without a per-second interval. */
 const ELAPSED_TICK_MS = 30_000;
 
-/** Cadence for the best-effort git-cache warm on the non-running rows. */
-const GIT_WARM_TICK_MS = 60_000;
-
-/** Cap on how many session ids one warm call carries (avoid an unbounded batch). */
-const GIT_WARM_MAX_IDS = 20;
-
 /** Open a quick session AND mark it viewed, then refresh so its row updates promptly. */
 function openQuickSession(row: QuickSessionRow): void {
   useCyboflowStore.getState().setActiveQuickSession(row.sessionId, row.runId ?? undefined);
@@ -337,44 +331,9 @@ export function SessionTriageGroups(): React.JSX.Element | null {
     };
   }, []);
 
-  // Best-effort git-cache warm for the non-running rows, on the same
-  // visibility-aware cadence as the clock. Reads the latest rows via a ref so
-  // the interval (set up once) never closes over a stale snapshot.
-  const rowsRef = React.useRef(rows);
-  rowsRef.current = rows;
-  React.useEffect(() => {
-    const warm = () => {
-      const ids = rowsRef.current
-        .filter((row) => row.state !== 'running')
-        .slice(0, GIT_WARM_MAX_IDS)
-        .map((row) => row.sessionId);
-      if (ids.length === 0) return;
-      void API.sessions.warmQuickGit(ids).catch(() => {
-        // Best-effort cache warm — a transient IPC failure is a no-op.
-      });
-    };
-    let id: number | null = null;
-    const start = () => {
-      if (id !== null) return;
-      warm();
-      id = window.setInterval(warm, GIT_WARM_TICK_MS);
-    };
-    const stop = () => {
-      if (id === null) return;
-      window.clearInterval(id);
-      id = null;
-    };
-    const handleVisibilityChange = () => {
-      if (document.hidden) stop();
-      else start();
-    };
-    if (!document.hidden) start();
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      stop();
-    };
-  }, []);
+  // NOTE: the git-cache warm is server-side now — sessions:list-quick itself
+  // throttle-warms the resting rows' git status (at most once a minute while a
+  // board is polling), so this component only ever renders the cache snapshot.
 
   const activeWorkflowSessionIds = React.useMemo(
     () => new Set(activeDynamicWorkflows.map((w) => w.sessionId)),

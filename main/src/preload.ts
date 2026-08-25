@@ -380,7 +380,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     markViewed: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:mark-viewed', sessionId),
     getSummary: (sessionId: string, opts?: { catchUp?: boolean }): Promise<IPCResponse<SessionSummaryPayload>> => ipcRenderer.invoke('sessions:get-summary', sessionId, opts),
     listQuick: (projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> => ipcRenderer.invoke('sessions:list-quick', projectId),
-    warmQuickGit: (sessionIds: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:warm-quick-git', sessionIds),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
     // Execution and Git operations

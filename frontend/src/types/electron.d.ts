@@ -172,7 +172,6 @@ interface ElectronAPI {
     markViewed: (sessionId: string) => Promise<IPCResponse<void>>;
     getSummary: (sessionId: string, opts?: { catchUp?: boolean }) => Promise<IPCResponse<SessionSummaryPayload>>;
     listQuick: (projectId?: number) => Promise<IPCResponse<QuickSessionRow[]>>;
-    warmQuickGit: (sessionIds: string[]) => Promise<IPCResponse>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Execution and Git operations

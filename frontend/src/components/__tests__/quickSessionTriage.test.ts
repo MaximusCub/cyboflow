@@ -18,7 +18,7 @@ function row(o: Partial<QuickSessionRow>): QuickSessionRow {
     state: o.state ?? 'idle',
     idleSince: o.idleSince ?? null,
     unviewed: o.unviewed ?? false,
-    updatedAtIso: o.updatedAtIso ?? null,
+    restedAtIso: o.restedAtIso ?? null,
     rawStatus: o.rawStatus ?? 'completed',
     exitCode: o.exitCode ?? null,
     summary: o.summary ?? null,
@@ -204,11 +204,11 @@ describe('deriveQuickSessionTriage', () => {
     expect(triage.working.map((r) => r.sessionId)).toEqual(['s1']);
   });
 
-  it('sorts needsInput by updatedAtIso, oldest first', () => {
+  it('sorts needsInput by restedAtIso, oldest first', () => {
     const rows = [
-      row({ sessionId: 'newer', state: 'blocked', updatedAtIso: '2026-07-06T11:30:00Z' }),
-      row({ sessionId: 'older', state: 'blocked', updatedAtIso: '2026-07-06T10:00:00Z' }),
-      row({ sessionId: 'no-updated', state: 'blocked', updatedAtIso: null, name: 'zzz' }),
+      row({ sessionId: 'newer', state: 'blocked', restedAtIso: '2026-07-06T11:30:00Z' }),
+      row({ sessionId: 'older', state: 'blocked', restedAtIso: '2026-07-06T10:00:00Z' }),
+      row({ sessionId: 'no-updated', state: 'blocked', restedAtIso: null, name: 'zzz' }),
     ];
     const triage = deriveQuickSessionTriage(rows, new Set(), nowMs);
     expect(triage.needsInput.map((r) => r.sessionId)).toEqual(['older', 'newer', 'no-updated']);

@@ -148,7 +148,7 @@ export function toQuickSessionRow(
     idleSince: state === 'idle' ? row.idle_since_iso : null,
     // A blocked row always needs you (a pending gate), independent of viewed-ness.
     unviewed: state === 'blocked' ? false : row.unviewed === 1,
-    updatedAtIso: row.updated_at_iso,
+    restedAtIso: row.idle_since_iso,
     rawStatus: row.status,
     exitCode: row.exit_code,
     summary: row.summary,

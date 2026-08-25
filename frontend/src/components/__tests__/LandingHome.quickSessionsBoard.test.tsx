@@ -69,7 +69,7 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
     state: overrides.state ?? 'idle',
     idleSince: overrides.idleSince ?? '2026-07-06T00:00:00.000Z',
     unviewed: overrides.unviewed ?? false,
-    updatedAtIso: overrides.updatedAtIso ?? '2026-07-06T00:00:00.000Z',
+    restedAtIso: overrides.restedAtIso ?? '2026-07-06T00:00:00.000Z',
     rawStatus: overrides.rawStatus ?? 'completed',
     exitCode: overrides.exitCode ?? null,
     summary: overrides.summary ?? null,
