@@ -100,6 +100,18 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       if (panel?.type === 'claude') {
         const lane = resolvePanelLane(databaseService.getSession(panel.sessionId), panel);
         const nonClaudeOwner = laneOwner(lane);
+        // An omp-fleet panel is a 'claude' panel whose work lives on a REMOTE
+        // worker, so claudePanelManager.isPanelRunning is false for it and the
+        // stop below never fires. Closing the tab would leave the worker alive
+        // AND leave its poll timer emitting into a deleted panel, where
+        // addPanelOutput throws 'Panel not found' on every tick. stopPanel is a
+        // no-op for a panel the fleet manager doesn't track, so this is safe to
+        // call unconditionally — no runtime lookup needed.
+        try {
+          await services.ompSessionManager?.stopPanel(panelId);
+        } catch (err) {
+          console.warn('[Panels IPC] Failed to stop OMP fleet worker during delete:', err);
+        }
         try {
           if (nonClaudeOwner) {
             if (nonClaudeOwner.isPanelRunning(panelId)) {
