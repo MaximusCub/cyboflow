@@ -232,13 +232,16 @@ export function GalleryStacked({
                   record per worktree.
                 </p>
               ) : null}
-              <div className="flex items-center gap-2 border-t border-dashed border-border-primary pt-2.5 text-[9.5px] tracking-[0.04em] text-text-tertiary">
-                <span>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-dashed border-border-primary pt-2.5 text-[9.5px] tracking-[0.04em] text-text-tertiary">
+                <span className="whitespace-nowrap">
                   <b className="font-bold tabular-nums text-text-primary">{entry.version}</b>
                   {entry.versionCount > 1 ? ` +${entry.versionCount - 1}` : ''}
                 </span>
                 {entry.installCount > 1 ? (
-                  <span data-testid={`plugin-card-${entry.name}-installs`}>
+                  <span
+                    className="whitespace-nowrap"
+                    data-testid={`plugin-card-${entry.name}-installs`}
+                  >
                     <b className="font-bold tabular-nums text-text-primary">{entry.installCount}</b>{' '}
                     installs
                   </span>
