@@ -34,6 +34,7 @@ import { isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import {
   USAGE_PROVIDER_LABELS,
   formatSpendAmount,
+  hasSpendToShow,
   isPercentPossiblyStale,
   usageTier,
   usageWindowFillClass,
@@ -262,7 +263,9 @@ function ProviderCard({
         {snapshot.windows.map((w) => (
           <UsageMeterRow key={usageWindowKey(w)} window={w} nowMs={nowMs} />
         ))}
-        {snapshot.spend !== null && <SpendRow spend={snapshot.spend} />}
+        {snapshot.spend !== null && hasSpendToShow(snapshot.spend) && (
+          <SpendRow spend={snapshot.spend} />
+        )}
       </div>
 
       <div className={`mt-2 text-[11px] ${isStale ? 'text-status-warning' : 'text-text-muted'}`}>

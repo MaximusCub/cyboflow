@@ -147,6 +147,18 @@ export interface ProviderSpendSummary {
   disabledReason: string | null;
 }
 
+/**
+ * Whether a credits line says anything worth a row.
+ *
+ * An account that has never switched extra usage on reports it in full anyway —
+ * `used 0`, `limit null`, `enabled false` — and a permanent "0% $0.00 off" row
+ * on every card is noise that pushes the quota windows down. The store still
+ * records the observation; this is only about whether to draw it.
+ */
+export function hasSpendToShow(spend: ProviderSpendSummary): boolean {
+  return spend.enabled || spend.usedMinor > 0 || spend.limitMinor !== null;
+}
+
 /** "$13.93" — minor units rendered with the provider's own currency + exponent. */
 export function formatSpendAmount(minor: number, currency: string, exponent: number): string {
   const value = minor / 10 ** exponent;

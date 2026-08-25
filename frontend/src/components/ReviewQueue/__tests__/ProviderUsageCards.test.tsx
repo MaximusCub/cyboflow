@@ -376,4 +376,39 @@ describe('ProviderUsageCards', () => {
     expect(spendRow).toHaveTextContent('$13.93 of $10.00');
     expect(screen.getByTestId('usage-spend-off')).toHaveTextContent('off');
   });
+
+  it('draws NO credits row for an account that has never switched extra usage on', () => {
+    mockUsage.current = {
+      claude: {
+        provider: 'claude',
+        planType: 'max',
+        observedAtMs: NOW,
+        // Verbatim from a live poll on an account with no credits: the provider
+        // reports the line in full, and it says nothing.
+        spend: {
+          usedMinor: 0,
+          limitMinor: null,
+          currency: 'USD',
+          exponent: 2,
+          percent: 0,
+          enabled: false,
+          disabledReason: null,
+        },
+        windows: [{
+          kind: 'claude_five_hour',
+          scopeLabel: null,
+          label: '5-hour session',
+          status: 'ok',
+          usedPercent: 24,
+          percentSource: 'poll',
+          percentObservedAtMs: NOW,
+          resetsAtMs: IN_AN_HOUR,
+          windowMinutes: null,
+          observedAtMs: NOW,
+        }],
+      },
+    };
+    render(<ProviderUsageCards />);
+    expect(screen.queryByTestId('usage-spend')).not.toBeInTheDocument();
+  });
 });
