@@ -58,9 +58,16 @@ import {
  * Synchronous — matches the existing readWorkflowPrompt API.
  * Throws WorkflowPromptReadError when a built-in `.md` is missing/empty or when a
  * custom flow has no resolvable definition.
+ *
+ * `runId` is passed for a LIVE run so the implementation can derive the appended
+ * step-reporting / fan-out instructions from the run's FROZEN spec and its
+ * `tuning_level` stamp rather than the live `workflows.spec_json` — the two
+ * genuinely differ under a tuning preset (plan D9). It is optional so a stub that
+ * ignores it, and the workflow-preview read that has no run at all, both still
+ * satisfy this interface.
  */
 export interface WorkflowPromptReaderLike {
-  read(workflow: WorkflowRow): { prompt: string; systemPromptAppend: string };
+  read(workflow: WorkflowRow, runId?: string): { prompt: string; systemPromptAppend: string };
 }
 
 /**
@@ -1609,7 +1616,7 @@ export class RunExecutor {
     if (!this.promptReader) {
       throw new Error('RunExecutor.getPrompt: no WorkflowPromptReaderLike injected — pass a promptReader to the constructor or override getPrompt in a subclass');
     }
-    const { prompt, systemPromptAppend } = this.promptReader.read(workflow);
+    const { prompt, systemPromptAppend } = this.promptReader.read(workflow, runId);
     this.pendingSystemPromptAppend.set(runId, systemPromptAppend);
 
     // Piece C — idle-chat nudge. When a pending nudge exists, return JUST the

@@ -239,9 +239,10 @@ work never done. The per-step stamps are called out below.
 
 Each materialized task has a **lane** — a per-task progress row the UI renders
 alongside this run. You move lanes with `cyboflow_update_sprint_task` (status:
-`running` / `integrated` / `failed` / `blocked`; current step: `implement`,
-`write-tests`, `code-review`, `task-verify`, `visual-verify`). `integrated` means
-the task is complete AND committed in this session's worktree.
+`running` / `integrated` / `failed` / `blocked`; current step: one of the lane step
+ids listed in the **Fan-out execution** block appended to this prompt at runtime —
+that list is authoritative for THIS run and any id outside it is rejected).
+`integrated` means the task is complete AND committed in this session's worktree.
 
 12. **analyze-dependencies** → report the step, then delegate to
     `cyboflow-dependency-analyzer`, passing it the materialized tasks — for each
@@ -319,7 +320,7 @@ below with the partial-sprint summary.
 **The partial-sprint summary must enumerate each failed lane**, not just say "some
 lanes failed": for every `failed` lane give its task ref + title, the lane step it
 died on (`current_step`), and the attempt it reached (e.g. "`TASK-107` — Add chat
-panel — failed at `code-review` after 3 attempts"). That is the picture the human
+panel — failed at `implement` after 3 attempts"). That is the picture the human
 needs to decide approve vs reject, so surface it in the gate question rather than
 making them open the swimlane.
 
@@ -337,8 +338,8 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
 16. **address-review** → **close the loop on this run's own review findings** so a
     review changes code instead of only filling the backlog.
     1. Call `cyboflow_list_run_findings` (read-only, no arguments). It returns
-       every still-open finding THIS run filed — each task lane's `code-review`
-       `## Findings` **and** sprint-review's — with the `id` each one needs to be
+       every still-open finding THIS run filed — whatever the task lanes' review
+       stages produced **and** sprint-review's — with the `id` each one needs to be
        resolved. Read them from this tool, not from your own memory of what you
        recorded: `cyboflow_report_finding` never returns the minted id, and lanes
        you delegated hours ago filed findings you never saw. If it returns an
@@ -463,17 +464,16 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
 - **Failed lanes never block the gate** — they are reported at it. The user
   decides what to do with a partially-failed sprint.
 - Report every step transition via `cyboflow_report_step` from this main session —
-  including the steps whose work you delegated to a subagent. When a design step id
-  (`ui-prototype`, `architecture`, `adversarial-review`, `approve-design`) is missing from the appended
-  step-reporting list (an older user-edited definition), still run the phases the
-  flags call for — just skip those steps' reports (unknown ids are rejected).
+  including the steps whose work you delegated to a subagent. **The appended
+  step-reporting list is this run's authoritative step set** — a step described
+  above but absent from that list is not part of this run's definition (the flow
+  was tuned or edited to drop it): skip its work AND its report, and carry on with
+  the steps that remain — unless that step's own entry above says what to do when it
+  is absent, in which case follow it. Unknown ids are rejected.
 
 ## Step reporting
 
-Report each of these 17 step ids via `cyboflow_report_step` as that step begins,
-in order (the runtime also appends an authoritative copy of this list below):
-
-`context`, `approve-idea`, `expand-spec`, `ui-prototype`,
-`architecture`, `adversarial-review`, `approve-design`, `epics`, `tasks`,
-`approve-plan`, `materialize-batch`, `analyze-dependencies`, `execute-tasks`,
-`sprint-verify`, `sprint-review`, `address-review`, `human-review`.
+Report each step id via `cyboflow_report_step` as that step begins, in order. The
+authoritative list for THIS run is appended to this prompt at runtime under a
+**Step reporting (cyboflow)** heading — take the ids from there, and report only
+the ones it lists.

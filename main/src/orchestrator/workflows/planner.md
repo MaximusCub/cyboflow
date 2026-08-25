@@ -466,6 +466,11 @@ a summary held only in your context.
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
    `cyboflow_create_task` **as its proposal arrives** (title, body, acceptance
    criteria, file/dependency hints, parent epic/idea linkage).
+   - **When `tasks` is absent from the appended step list**, this run's definition
+     merged decomposition into `epics`: do not delegate `cyboflow-tasks`. The epics
+     step's own result already carries the complete task list, so create those tasks
+     here with everything below applied unchanged (fallback epic first, stamps, batch
+     rules) and report nothing for `tasks`.
    - **Fallback epic first.** For an idea with no epic yet, count the returned tasks
      before you create any: **>1** → create the step-8 fallback epic
      (`cyboflow_create_task(task_type='epic', title=<the idea's title>,
@@ -601,10 +606,12 @@ readable, cold, by the next run.
   wait, or plan it, even if the run later resumes with the guard still pending. The
   human resolves it outside this run.
 - Report every step transition via `cyboflow_report_step` from this main session —
-  including the steps whose work you delegated to a subagent. When a design step id
-  (`ui-prototype`, `architecture`, `adversarial-review`, `approve-design`) is missing from the appended
-  step-reporting list (an older user-edited definition), still run the phases the
-  flags call for — just skip those steps' reports (unknown ids are rejected).
+  including the steps whose work you delegated to a subagent. **The appended
+  step-reporting list is this run's authoritative step set** — a step described
+  above but absent from that list is not part of this run's definition (the flow
+  was tuned or edited to drop it): skip its work AND its report, and carry on with
+  the steps that remain — unless that step's own entry above says what to do when it
+  is absent, in which case follow it. Unknown ids are rejected.
 - **The board has no intermediate planning stages.** The idea stays at **Idea** for
   the whole plan — there are no Research / Idea-spec stages to step it through (those
   positions were removed). The tasks you create land as **hidden drafts**
@@ -619,9 +626,7 @@ readable, cold, by the next run.
 
 ## Step reporting
 
-Report each of these 11 step ids via `cyboflow_report_step` as that step begins,
-in order (the runtime also appends an authoritative copy of this list below):
-
-`context`, `approve-idea`, `expand-spec`, `ui-prototype`,
-`architecture`, `adversarial-review`, `approve-design`, `epics`, `tasks`,
-`approve-plan`, `decompose`.
+Report each step id via `cyboflow_report_step` as that step begins, in order. The
+authoritative list for THIS run is appended to this prompt at runtime under a
+**Step reporting (cyboflow)** heading — take the ids from there, and report only
+the ones it lists.

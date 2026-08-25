@@ -309,7 +309,7 @@ import {
   transitionToFailed,
   transitionToCanceled,
 } from './services/cyboflow/transitions';
-import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAdapter';
+import { readWorkflowPromptForRow, resolveRunPromptContext } from './orchestrator/workflowPromptReaderAdapter';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import {
   recoverActiveStateOrphans,
@@ -3167,8 +3167,17 @@ async function initializeServices(): Promise<boolean> {
   // The branch logic (built-in / edited built-in `.md` + step-reporting append vs
   // custom-flow rendered-graph prompt) lives in readWorkflowPromptForRow so it is
   // unit-testable without bootstrapping Electron — see workflowPromptReaderAdapter.ts.
+  // A live run also passes its runId, so the appended step-reporting / fan-out
+  // instructions derive from the run's FROZEN spec and its tuning_level stamp
+  // instead of the live `workflows.spec_json` — under a tuning preset those are
+  // different graphs, and prompting the orchestrator off the wrong one hands it a
+  // lane vocabulary the MCP write path rejects (plan D9).
   const promptReader: WorkflowPromptReaderLike = {
-    read: readWorkflowPromptForRow,
+    read: (workflow, runId) =>
+      readWorkflowPromptForRow(
+        workflow,
+        runId === undefined ? null : resolveRunPromptContext(cyboflowDb, runId),
+      ),
   };
 
   // SubstrateDispatchFacade — the substrate-aware ClaudeSpawnerLike that replaces

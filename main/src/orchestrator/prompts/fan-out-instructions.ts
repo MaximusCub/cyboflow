@@ -40,14 +40,15 @@ import {
   type WorkflowDefinition,
   type WorkflowStep,
 } from '../../../../shared/types/workflows';
-import { AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
+import { AWAITING_VERIFY_STEP, SPRINT_VISUAL_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import {
   DEFAULT_FAN_OUT_DISPATCH,
   type FanOutDispatch,
 } from '../../../../shared/types/fanOutDispatch';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { fanOutBatchWorkflowName, segmentFanOutInner } from './fanOutStageScript';
 
-/** Options for {@link buildFanOutAppend}. Both default to today's prose behavior. */
+/** Options for {@link buildFanOutAppend}. All default to today's prose behavior. */
 export interface FanOutAppendOptions {
   /** How the inner chain is executed. Defaults to `prose`. */
   dispatch?: FanOutDispatch;
@@ -57,6 +58,14 @@ export interface FanOutAppendOptions {
    * scripts that are not on disk. Defaults to the definition's `id`.
    */
   workflowName?: string;
+  /**
+   * The run's stamped tuning level (plan D7). Only `'thorough'` changes the
+   * output, adding one viewport-depth line to the visual-verification task
+   * composition; `'standard'` / `'custom'` / `'efficient'` / `null` / omitted all
+   * render TODAY'S TEXT byte for byte. Depth is prompt-level guidance in v1 —
+   * there is no mechanical viewport clamp.
+   */
+  tuningLevel?: TuningLevel | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +93,29 @@ function loopbackAgent(targetId: string, innerById: Map<string, FanOutInnerStep>
 interface ChainContext {
   firstId: string;
   innerById: Map<string, FanOutInnerStep>;
+  /**
+   * The extra viewport-depth sentence appended to the visual-verification task
+   * composition, or `''` at every level that keeps today's text (plan D7).
+   */
+  viewportDepthClause: string;
+}
+
+/**
+ * The level-conditioned viewport-depth guidance for the composed verification
+ * task (plan D7). Emitted ONLY at `thorough`, and only when the chain actually
+ * carries a visual merge-gate — asking for three viewports on a chain with no
+ * gate to consume them would be instruction with no addressee.
+ *
+ * Every other level (including `null`, i.e. an unattributed / pre-feature /
+ * variant run) returns `''`, so the rendered block stays byte-identical to what
+ * it emitted before levels existed.
+ */
+function viewportDepthClause(level: TuningLevel | null | undefined, hasVisualVerify: boolean): string {
+  if (level !== 'thorough' || !hasVisualVerify) return '';
+  return (
+    ' This run is tuned **thorough**: tell it the composed task must capture the ' +
+    'deliverable at **desktop, tablet, and mobile** viewports, not a single desktop one.'
+  );
 }
 
 /**
@@ -153,7 +185,7 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
         `**output-contract failure** — NEVER treat it as "nothing to verify": re-delegate ` +
         `\`${agent}\` ONCE with the contract error; a second contract failure marks the lane ` +
         `\`failed\`. Retain the fence's JSON object (or the not-applicable reason) — the next ` +
-        `step consumes it.`
+        `step consumes it.${ctx.viewportDepthClause}`
       );
     case 'visual-verify':
       return (
@@ -342,13 +374,21 @@ function renderFanOutSection(
   fanOut: FanOutSpec,
   dispatch: FanOutDispatch,
   workflowName: string,
+  tuningLevel: TuningLevel | null | undefined,
 ): string {
   const cap = effectiveMaxConcurrency(fanOut);
   const firstId = fanOut.inner.length > 0 ? fanOut.inner[0].id : '';
   const innerById = new Map<string, FanOutInnerStep>(
     fanOut.inner.map((s): [string, FanOutInnerStep] => [s.id, s]),
   );
-  const ctx: ChainContext = { firstId, innerById };
+  const ctx: ChainContext = {
+    firstId,
+    innerById,
+    viewportDepthClause: viewportDepthClause(
+      tuningLevel,
+      innerById.has(SPRINT_VISUAL_VERIFY_STEP),
+    ),
+  };
   const laneIds = fanOut.inner.map((s) => `\`${s.id}\``).join(', ');
 
   const chain =
@@ -439,7 +479,9 @@ export function buildFanOutAppend(
   for (const phase of def.phases) {
     for (const step of phase.steps) {
       if (step.fanOut !== undefined) {
-        sections.push(renderFanOutSection(step, step.fanOut, dispatch, workflowName));
+        sections.push(
+          renderFanOutSection(step, step.fanOut, dispatch, workflowName, opts?.tuningLevel),
+        );
       }
     }
   }

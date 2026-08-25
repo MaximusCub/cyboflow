@@ -34,6 +34,7 @@ import {
   DEFAULT_FAN_OUT_DISPATCH,
   type FanOutDispatch,
 } from '../../../../../shared/types/fanOutDispatch';
+import { isTuningLevel, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
@@ -1418,7 +1419,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const workflowName = this.resolveRunWorkflowName(runId) ?? def?.id ?? '';
     const append = [
       buildStepReportingAppend(def),
-      buildFanOutAppend(def, { dispatch, workflowName }),
+      buildFanOutAppend(def, {
+        dispatch,
+        workflowName,
+        tuningLevel: this.resolveRunTuningLevel(runId),
+      }),
     ]
       .filter((part) => part.length > 0)
       .join('\n\n');
@@ -1433,6 +1438,24 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private resolveRunWorkflowName(runId: string): string | null {
     try {
       return resolveRunFrozenSpec(this.db, runId)?.workflowName ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The run's stamped `workflow_runs.tuning_level` (migration 122), for the
+   * level-conditioned depth guidance in the fan-out block (plan D7). `null`
+   * fail-soft on a missing row, a pre-122 DB, or any read error — and `null`
+   * renders TODAY'S text, so a failure here can only degrade to the pre-levels
+   * prompt, never to garbage.
+   */
+  private resolveRunTuningLevel(runId: string): TuningLevel | null {
+    try {
+      const row = this.db
+        .prepare('SELECT tuning_level AS tuningLevel FROM workflow_runs WHERE id = ?')
+        .get(runId) as { tuningLevel?: unknown } | undefined;
+      return isTuningLevel(row?.tuningLevel) ? row.tuningLevel : null;
     } catch {
       return null;
     }
