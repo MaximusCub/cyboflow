@@ -142,9 +142,9 @@ describe('toQuickSessionRow', () => {
     expect(toQuickSessionRow(row({ exit_code: null }), new Set()).exitCode).toBeNull();
   });
 
-  it('restedAtIso is present regardless of state (unlike idleSince)', () => {
-    expect(toQuickSessionRow(row({ status: 'running' }), new Set()).restedAtIso).toBe('2026-07-16T10:00:00Z');
-    expect(toQuickSessionRow(row({ status: 'completed' }), new Set()).restedAtIso).toBe('2026-07-16T10:00:00Z');
+  it('restedAtIso carries idle_since_iso regardless of state (unlike idleSince)', () => {
+    expect(toQuickSessionRow(row({ status: 'running' }), new Set()).restedAtIso).toBe('2026-07-16T09:00:00Z');
+    expect(toQuickSessionRow(row({ status: 'completed' }), new Set()).restedAtIso).toBe('2026-07-16T09:00:00Z');
   });
 
   it('rawStatus carries the DB status verbatim, distinct from the derived state', () => {
