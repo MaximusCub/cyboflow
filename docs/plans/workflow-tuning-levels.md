@@ -60,7 +60,7 @@ not architecture — this plan is about the machinery.
   `variant_id`, `eval_enabled`, …) — the established home for a per-run `tuning_level` stamp.
   Insights queries AVG today; median-in-JS has precedent (`verificationRequests.ts:812`).
 - **Eval jury**: fixed 3-slot array wired at boot (`index.ts:2572`); only lever today is the
-  binary `eval_enabled`. Juror-count-by-level is new machinery.
+  binary `eval_enabled` — and it stays the only lever (D6: jury composition untouched by levels).
 - **Migrations**: highest is 118 → this feature takes **119**.
 
 ## 3. Core design decisions
@@ -256,11 +256,10 @@ addendum then applies on top of the variant's prompt, which is the consistent re
 
 - **efficient** → eval off: preset `evalDefault: false`, consumed at launch as the default for
   `eval_enabled` when the wizard didn't explicitly override (existing per-run column, migration 044).
-- **standard** → single juror; **thorough** → full 3-slot jury: new, contained change —
-  `EvalWorker` reads the graded run's `workflow_runs.tuning_level` and filters its configured slot
-  array (`standard` ⇒ `['claude-1']`, else all). NULL/unknown level ⇒ all slots (today's
-  behavior). No config/boot wiring changes; jury composition stays hardcoded at boot.
-  Ship this as its own phase — it is independently revertible.
+- **standard / thorough / custom** → unchanged: whenever `eval_enabled` is on, the existing
+  boot-wired 3-slot jury runs exactly as today (user decision, 2026-08-25). No `EvalWorker`
+  slot-filter machinery, no juror-count-by-level — the r2 design for that is deleted along with
+  its phase. `evalDefault: false` on the efficient preset is the feature's ONLY eval lever.
 
 ### D7. Visual-verify depth (1 vs 3 viewports) — prompt-level only in v1
 
@@ -287,8 +286,8 @@ custom graph).
 
 **Scope caveat (review finding):** `run_usage` rolls up the run's own `raw_events`; eval jurors
 run through separate judge queries whose SDK usage is not persisted (`run_evals` records
-verdicts, not tokens). So the median systematically excludes a level-DEPENDENT cost (1 vs 3
-jurors). v1 handles this honestly rather than invisibly: the cards label the number
+verdicts, not tokens). So the median systematically excludes a level-DEPENDENT cost (eval off on
+efficient vs the 3-slot jury elsewhere). v1 handles this honestly rather than invisibly: the cards label the number
 "execution tokens (excl. eval)", and the static multipliers are calibrated on execution tokens
 only. Metering + persisting jury usage (then folding it in) is listed as future work, not
 silently promised.
@@ -336,11 +335,10 @@ appear nowhere operative.
 | 5 | Editor UI | two-page modal, four-slot selector, generated phase strip, three-way save prompt, variant-create-with-definition seam (D3) | L |
 | 6 | Wizard UI | level segment, override plumbing, variant mutual exclusion | S–M |
 | 7 | Estimates | `selectTuningLevelUsage` + median helper + tRPC read + both UI surfaces, "excl. eval" labeling | S–M |
-| 8 | Eval juror filter | `EvalWorker` slot filter by run level (D6) | S |
-| 9 | Viewport prompt guidance | fan-out instruction line by level (D7) | S |
+| 8 | Viewport prompt guidance | fan-out instruction line by level (D7) | S |
 
 Suggested checkpoints: after phase 4 the feature is fully functional headless (MCP/tRPC) and
-safe on both planes; after phase 6 it is user-visible end-to-end; 7–9 are polish/depth.
+safe on both planes; after phase 6 it is user-visible end-to-end; 7–8 are polish/depth.
 
 ## 6. Testing
 
@@ -414,6 +412,9 @@ Verdict: needs-attention; 4 high + 2 medium, all confirmed against the repo and 
    page; saving prompts overwrite-this-flow (writes the custom slot + stamps `'custom'`) /
    save-as-new-flow (existing path) / save-as-new-variant (variant create gains an optional
    definition payload).
+4. **Eval jury untouched at standard AND thorough** (r3.1 follow-up decision): the 3-slot jury
+   stays exactly as shipped wherever `eval_enabled` is on; efficient's `evalDefault: false` is
+   the only eval lever. The former "eval juror filter" phase is deleted.
 
-The canvas artifact predates r3 (shows a derived-CUSTOM card, 3-segment selector, no save
-prompt) — refresh it before implementation kickoff.
+The canvas artifact was refreshed to r3 on 2026-08-25 (4-slot selector, three-way save prompt,
+as-authored STANDARD columns).
