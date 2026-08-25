@@ -244,6 +244,12 @@ Each domain has its own IPC file in `main/src/ipc/` that registers `ipcMain.hand
 All handlers are registered in `main/src/ipc/index.ts`. Keep business logic in `services/`,
 not in IPC handlers — handlers should be thin: validate input, delegate to service, return result.
 
+**This surface is frozen.** New renderer→main calls are tRPC procedures under
+`main/src/orchestrator/trpc/routers/` (zod-validated input, end-to-end types), not new
+`ipcMain.handle` registrations — `main/src/ipc/__tests__/noNewIpcHandlers.test.ts` pins the
+per-file handler counts and fails on any growth; migrating a handler to tRPC means lowering
+its frozen entry there.
+
 - **Canonical example:** `main/src/ipc/session.ts`
 
 **Runtime input validation:** Every handler that reads from `args` MUST validate args via
