@@ -22,8 +22,11 @@
  *
  * Step ③ (Configure) is the launch surface and adapts to the selection:
  *   - workflow: agent-permission override + agent runtime (+ caveats) + model
- *     pin (default Opus, threaded into runs.start → workflow_runs.model) + workflow
- *     blueprint editor access + a launch summary.
+ *     pin (default Opus, threaded into runs.start → workflow_runs.model) + a
+ *     per-run tuning-level override (BUILT-IN flows only, TuningLevelSelector —
+ *     workflow-tuning-levels.md D4; mutually exclusive with pinning a specific
+ *     A/B variant, see the effects near `selectedWorkflowId`) + the A/B variant
+ *     picker + workflow blueprint editor access + a launch summary.
  *   - quick: agent-permission override + agent runtime (+ caveats) + model pin
  *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
  *     edit, so the blueprint editor is omitted).
@@ -101,6 +104,9 @@ import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFA
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
+import { useWorkflowVariants } from '../../../stores/variantsStore';
+import { TuningLevelSelector } from './TuningLevelSelector';
+import type { TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import {
   effortLevelsForProvider,
@@ -616,6 +622,21 @@ export default function SessionStartWizard(): React.JSX.Element {
   // so a stale variant id from a PREVIOUS workflow is never sent to a different
   // workflow's launch.
   const [variantSelection, setVariantSelection] = useState<VariantSelection>({ mode: 'rotation' });
+  // Advanced (Configure ③, WORKFLOW only): per-run tuning-level override
+  // (workflow-tuning-levels.md D4). `null` = no override — the run uses the
+  // workflow's stamped `tuning_level`; a non-null value is a per-run pick that
+  // DIFFERS from the stamp (picking the stamp back through
+  // TuningLevelSelector's onChange clears it to null again — see the handler
+  // below). Reset alongside `variantSelection` whenever the selected workflow
+  // changes so a prior flow's override never bleeds onto a different launch.
+  const [tuningLevelOverride, setTuningLevelOverride] = useState<TuningLevel | null>(null);
+  // Live variant count for the CURRENT workflow selection — read here (not just
+  // inside VariantSelector) so the mutual-exclusion placeholder below can tell
+  // "this workflow has variants but they're disabled by a level override" apart
+  // from "this workflow has none, so VariantSelector renders nothing anyway".
+  const selectedWorkflowVariants = useWorkflowVariants(
+    selection?.kind === 'workflow' ? selection.workflowId : null,
+  ).variants;
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -658,7 +679,32 @@ export default function SessionStartWizard(): React.JSX.Element {
   const selectedWorkflowId = selection?.kind === 'workflow' ? selection.workflowId : null;
   useEffect(() => {
     setVariantSelection({ mode: 'rotation' });
+    setTuningLevelOverride(null);
   }, [selectedWorkflowId]);
+
+  // D4 mutual exclusion, half 1: pinning a SPECIFIC variant runs its own frozen
+  // definition, so any pending level override is meaningless — and sending
+  // both `variantId` and `tuningLevel` to `runs.start` is a BAD_REQUEST server
+  // side. Clear the override the moment the user pins one. `variantSelection`
+  // modes 'rotation' and 'baseline' are NOT an explicit pin (D4: "picking a
+  // non-baseline variant"), so they leave an active override alone.
+  useEffect(() => {
+    if (variantSelection.mode === 'variant' && tuningLevelOverride !== null) {
+      setTuningLevelOverride(null);
+    }
+  }, [variantSelection, tuningLevelOverride]);
+
+  // D4 mutual exclusion, half 2 (the mirror rule): an active level override IS
+  // an explicit spec choice, so it forces the variant picker to baseline —
+  // "Rotation … with a level override forces baseline for that run" (D4).
+  // Runs after half 1 settles (variantSelection can only be 'variant' here if
+  // tuningLevelOverride is already null, per the effect above), so this never
+  // fights it.
+  useEffect(() => {
+    if (tuningLevelOverride !== null && variantSelection.mode !== 'baseline') {
+      setVariantSelection({ mode: 'baseline' });
+    }
+  }, [tuningLevelOverride, variantSelection.mode]);
 
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
@@ -1020,6 +1066,12 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
+          // Per-run tuning-level override (D4) — omitted when the user never
+          // diverged from the workflow's stamped level (see tuningLevelOverride's
+          // doc comment). Mutually exclusive with an explicit variant pin
+          // server-side; the effects above keep the two controls from both
+          // being live at once.
+          ...(tuningLevelOverride !== null ? { tuningLevel: tuningLevelOverride } : {}),
           ...variantSelectionToStartInput(variantSelection),
         });
         // Nest the run under its session so the close-out + panels resolve
@@ -1062,7 +1114,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, cleanupUnusedHostedSession],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1123,6 +1175,8 @@ export default function SessionStartWizard(): React.JSX.Element {
               ? { executionModel: executionModelOverride }
               : {}),
           taskIds,
+          // Per-run tuning-level override (D4) — see launchRun's identical spread.
+          ...(tuningLevelOverride !== null ? { tuningLevel: tuningLevelOverride } : {}),
           ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -1154,7 +1208,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, cleanupUnusedHostedSession],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1837,17 +1891,52 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
+            {/* Per-run tuning-level override (workflow-tuning-levels.md D4),
+                BUILT-IN workflows only — a "save as new" custom flow has no
+                calibrated baseline to select a level of, so the control is
+                hidden entirely for it (selectedMeta.isBuiltIn). Disabled
+                (with a note) while a SPECIFIC variant is pinned — see the D4
+                mutual-exclusion effects above `selectedWorkflowId`. */}
+            {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
+              <TuningLevelSelector
+                value={tuningLevelOverride ?? selectedMeta.tuningLevel}
+                savedLevel={selectedMeta.tuningLevel}
+                flowTitle={selectedMeta.title}
+                customSlotAvailable={selectedMeta.hasCustomSlot}
+                disabled={variantSelection.mode === 'variant'}
+                onChange={(level) => {
+                  // Picking the saved level back CLEARS the override (D3/D4:
+                  // only a genuine divergence from the stamp is an override);
+                  // any other pick sets a per-run override.
+                  setTuningLevelOverride(level === selectedMeta.tuningLevel ? null : level);
+                }}
+                id="wizard-tuning-level"
+              />
+            )}
+
             {/* Per-run A/B variant selector (migration 048), WORKFLOW only — hidden
                 entirely for a workflow with zero variants. Threaded into
                 runs.start as variantId / baseline (never both); rotation sends
-                neither field. */}
+                neither field. Replaced with a disabled/forced-baseline
+                placeholder (D4's mirror rule) while a tuning-level override is
+                active — a level override IS an explicit spec choice, so variant
+                pinning is disabled rather than silently ignored. */}
             {selection.kind === 'workflow' && (
-              <VariantSelector
-                workflowId={selection.workflowId}
-                value={variantSelection}
-                onChange={setVariantSelection}
-                id="wizard-variant"
-              />
+              tuningLevelOverride !== null && selectedWorkflowVariants.length > 0 ? (
+                <div className="flex flex-col gap-1" data-testid="wizard-variant-disabled-by-tuning">
+                  <span className="text-xs font-medium text-text-secondary">Variant</span>
+                  <div className="w-full rounded-input border border-border-secondary bg-bg-primary px-2 py-1.5 text-xs text-text-tertiary opacity-60">
+                    Baseline (no variant) — disabled: tuning level override active
+                  </div>
+                </div>
+              ) : (
+                <VariantSelector
+                  workflowId={selection.workflowId}
+                  value={variantSelection}
+                  onChange={setVariantSelection}
+                  id="wizard-variant"
+                />
+              )
             )}
             {/* Advanced (QUICK + ULTRACODE): workspace plus Claude-only MCP/plugin
                 selection. These are a session-START decision — the deny-list is

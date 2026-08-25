@@ -57,6 +57,12 @@ vi.mock('../../../../trpc/client', () => ({
       // adds variantId/baseline to the runs.start payload.
       variants: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        // variantsStore.fetch awaits BOTH calls in Promise.all — without this
+        // the fetch throws (rejects on the undefined call), the store's
+        // `loaded` flag never flips true, and VariantSelector silently renders
+        // null forever (indistinguishable, in a zero-variant test, from the
+        // legitimate "no variants" empty render — see the tuning-level D4 tests).
+        getBaselineRotation: { query: vi.fn().mockResolvedValue({ inRotation: false, weight: 0 }) },
       },
       workflows: {
         list: {
@@ -209,6 +215,7 @@ import { useCyboflowStore } from '../../../../stores/cyboflowStore';
 import { useConfigStore } from '../../../../stores/configStore';
 import { useNavigationStore } from '../../../../stores/navigationStore';
 import { useDesignModeStore } from '../../../../stores/designModeStore';
+import { useVariantsStore } from '../../../../stores/variantsStore';
 import { DESIGN_KICKOFF_PROMPT } from '../../design/designKickoff';
 import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
@@ -304,6 +311,31 @@ const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
   name: 'compound',
   workflow_path: null,
   spec_json: '{}',
+  tuning_level: 'standard',
+  permission_mode: 'default',
+  created_at: '',
+  archived_at: null,
+};
+
+/** Compound row stamped THOROUGH with no custom slot — tuning-level defaulting/override tests. */
+const COMPOUND_THOROUGH_ROW: WorkflowRow = {
+  id: 'wf-compound',
+  project_id: 1,
+  name: 'compound',
+  workflow_path: null,
+  spec_json: '{}',
+  tuning_level: 'thorough',
+  permission_mode: 'default',
+  created_at: '',
+  archived_at: null,
+};
+/** Compound row stamped STANDARD with a real custom slot — Custom segment enabled. */
+const COMPOUND_WITH_CUSTOM_SLOT_ROW: WorkflowRow = {
+  id: 'wf-compound',
+  project_id: 1,
+  name: 'compound',
+  workflow_path: null,
+  spec_json: '{"custom":true}',
   tuning_level: 'standard',
   permission_mode: 'default',
   created_at: '',
@@ -3486,5 +3518,173 @@ describe('SessionStartWizard — global launch defaults (defaultLaunchModel / de
         model: 'opus',
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tuning-level override (workflow-tuning-levels.md D4 + §4 "SessionStartWizard")
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — tuning-level override (D4)', () => {
+  const mockVariantsList = vi.mocked(trpc.cyboflow.variants.list.query);
+
+  // Isolate the real variantsStore between tests — several tests below feed it
+  // real variant rows via the trpc mock, and the store is a module-level
+  // singleton keyed by workflowId that would otherwise leak across tests.
+  beforeEach(() => {
+    mockVariantsList.mockResolvedValue([]);
+    act(() => {
+      useVariantsStore.setState({
+        byWorkflowId: {},
+        baselineByWorkflowId: {},
+        loadedWorkflowIds: {},
+        loading: {},
+        error: {},
+      });
+    });
+  });
+
+  it('defaults to the stamped level and omits tuningLevel from the launch payload', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    expect(screen.getByTestId('wizard-tuning-level-thorough-saved-tag')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-tuning-level-thorough')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ tuningLevel: expect.anything() }),
+    );
+  });
+
+  it('threads an explicit override into the launch payload', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    expect(screen.getByTestId('wizard-tuning-level-override-note')).toHaveTextContent(
+      'Override for this run only — the Compound workflow keeps Thorough.',
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'efficient' }));
+  });
+
+  it('clears the override (omits tuningLevel) once picked back to the saved level', async () => {
+    // A launch navigates away and never resets the wizard's in-flight latch on
+    // success (see launchRun), so this exercises the pick-back-to-saved CLEAR
+    // behavior WITHOUT a launch in between — a single CTA click at the end,
+    // asserting the field is absent, is enough to prove the clear worked.
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    expect(screen.getByTestId('wizard-tuning-level-override-note')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-thorough'));
+    });
+    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ tuningLevel: expect.anything() }),
+    );
+  });
+
+  it('disables Custom while the spec_json slot is empty, and enables + threads it once filled', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    const unmountEmpty = await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    expect(screen.getByTestId('wizard-tuning-level-custom')).toBeDisabled();
+    unmountEmpty();
+
+    mockWorkflowsList.mockResolvedValue([COMPOUND_WITH_CUSTOM_SLOT_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    const customBtn = screen.getByTestId('wizard-tuning-level-custom');
+    expect(customBtn).not.toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(customBtn);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'custom' }));
+  });
+
+  it('D4 mutual exclusion: a pinned variant disables the level segments; an active override forces/disables the variant picker', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    mockVariantsList.mockResolvedValue([
+      {
+        id: 'wfv_1',
+        workflow_id: 'wf-compound',
+        label: 'Variant A',
+        spec_json: '{}',
+        agent_overrides_json: null,
+        model: null,
+        execution_model: null,
+        agent_provider: null,
+        agent_runtime: null,
+        weight: 1,
+        status: 'active',
+        archived_at: null,
+        created_at: '',
+        updated_at: '',
+      },
+    ]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await screen.findByLabelText('Select workflow variant');
+
+    // Pin the specific variant → the tuning-level segments disable.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select workflow variant'), { target: { value: 'wfv_1' } });
+    });
+    expect(screen.getByTestId('wizard-tuning-level-efficient')).toBeDisabled();
+    expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
+
+    // Back to rotation (no explicit pin) — the level segments re-enable.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select workflow variant'), { target: { value: '__rotation__' } });
+    });
+    expect(screen.getByTestId('wizard-tuning-level-efficient')).not.toBeDisabled();
+
+    // Set a level override → the variant picker is replaced by the forced-baseline placeholder.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    expect(screen.getByTestId('wizard-variant-disabled-by-tuning')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select workflow variant')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ tuningLevel: 'efficient', baseline: true }),
+    );
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ variantId: expect.anything() }),
+    );
+  });
+
+  it('hides the control entirely for a non-built-in flow', async () => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    expect(screen.queryByTestId('wizard-tuning-level')).not.toBeInTheDocument();
   });
 });

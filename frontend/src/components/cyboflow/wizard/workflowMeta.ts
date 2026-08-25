@@ -16,7 +16,13 @@
  */
 import type { inferRouterOutputs } from '@trpc/server';
 import type { AppRouter } from '../../../../../shared/types/trpc';
-import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
+import {
+  DEFAULT_TUNING_LEVEL,
+  isTuningLevel,
+  resolveEffectiveDefinition,
+  type TuningLevel,
+} from '../../../../../shared/tuning/workflowTuning';
+import { hasCustomSpecSlot, isCyboflowWorkflowName } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Types inferred from the router output — never a local mirror.
@@ -80,6 +86,24 @@ export interface WorkflowCardMeta {
    * `deriveLastUsedByWorkflow`'s fold relies on.)
    */
   lastUsedAt: string | null;
+  /**
+   * The workflow's STAMPED tuning level (migration 122) — `workflows.tuning_level`,
+   * defensively coalesced to {@link DEFAULT_TUNING_LEVEL} for a malformed row.
+   * The launch wizard's tuning-level selector (workflow-tuning-levels.md §4
+   * "SessionStartWizard") reads this as the segment tagged "saved default".
+   */
+  tuningLevel: TuningLevel;
+  /**
+   * Whether `spec_json` holds a real Advanced-edited definition
+   * ({@link hasCustomSpecSlot}) — gates the tuning selector's Custom segment.
+   */
+  hasCustomSlot: boolean;
+  /**
+   * True for a built-in flow name ({@link isCyboflowWorkflowName}). The tuning
+   * selector only makes sense against a calibrated built-in baseline; a "save
+   * as new" custom flow has none, and the launch wizard hides the control for it.
+   */
+  isBuiltIn: boolean;
 }
 
 /** The workflow pre-selected by the wizard on open. */
@@ -212,6 +236,9 @@ export function buildWorkflowMeta(
       stepCount,
       phaseCount,
       lastUsedAt,
+      tuningLevel: isTuningLevel(row.tuning_level) ? row.tuning_level : DEFAULT_TUNING_LEVEL,
+      hasCustomSlot: hasCustomSpecSlot(row.spec_json),
+      isBuiltIn: isCyboflowWorkflowName(row.name),
     };
   });
 }
