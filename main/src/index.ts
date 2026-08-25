@@ -1008,9 +1008,13 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      // Required: preload uses require('trpc-electron/main') which the sandboxed
-      // preload loader rejects (only 'electron' and relative paths resolve there).
-      sandbox: false,
+      // The sandboxed preload loader resolves only 'electron' and a few node
+      // builtins, so preload.js is esbuild-bundled (scripts/bundle-preload.mjs,
+      // wired into build:main) with '@sentry/electron/preload', 'trpc-electron/main'
+      // and the shared/* siblings INLINED and 'electron' left external. That script
+      // also fails the build if a future import would reintroduce an unresolvable
+      // runtime require — which would silently take the whole bridge down here.
+      sandbox: true,
     },
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hiddenInset',
