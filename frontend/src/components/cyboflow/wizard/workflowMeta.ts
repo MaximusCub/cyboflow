@@ -69,7 +69,16 @@ export interface WorkflowCardMeta {
   stepCount: number;
   /** Phase count of the effective definition (0 if none). */
   phaseCount: number;
-  /** ISO timestamp of the most recent run of this workflow, or null if never run. */
+  /**
+   * Timestamp of the most recent run of this workflow, or null if never run.
+   *
+   * NOT necessarily ISO — it is `workflow_runs.created_at` passed through
+   * untouched, and SQLite stores that space-separated and unzoned
+   * ("2026-08-24 19:12:52"). Parse it with `utils/timestampUtils.parseTimestamp`,
+   * never a bare `new Date()`, which would read it as LOCAL. (Lexical ordering
+   * across values of the SAME format is still fine, which is what
+   * `deriveLastUsedByWorkflow`'s fold relies on.)
+   */
   lastUsedAt: string | null;
 }
 
