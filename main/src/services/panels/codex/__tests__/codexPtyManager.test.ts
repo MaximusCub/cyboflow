@@ -273,6 +273,46 @@ describe('CodexPtyManager.relayUserTurn (composer submit)', () => {
     );
     expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
   });
+
+  it('keeps two panels fully isolated — each deferred Enter lands only on the process its own body was written to', () => {
+    // The identity guard is captured per-call from getProcess(panelId), so a
+    // second panel's relayUserTurn (and its OWN pending timer) must never let
+    // panel-1's Enter drift onto panel-2's process, or vice versa.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const procA = makeFakePty();
+    const procB = makeFakePty();
+    manager.seedProcess('panel-1', procA, 'session-1');
+    manager.seedProcess('panel-2', procB, 'session-2');
+
+    manager.relayUserTurn('panel-1', 'turn for panel one');
+    manager.relayUserTurn('panel-2', 'turn for panel two');
+
+    expect(procA.writes).toEqual(['turn for panel one']);
+    expect(procB.writes).toEqual(['turn for panel two']);
+
+    vi.advanceTimersByTime(1000);
+
+    expect(procA.writes).toEqual(['turn for panel one', '\r']);
+    expect(procB.writes).toEqual(['turn for panel two', '\r']);
+  });
+
+  it('handles two relayUserTurn calls on the same panel in quick succession as two independent, correctly-ordered submissions', () => {
+    // Each call captures its own process-identity target and schedules its own
+    // timer; back-to-back calls against the SAME still-live process must not
+    // clobber or cancel each other's pending Enter.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'first turn');
+    manager.relayUserTurn('panel-1', 'second turn');
+
+    expect(proc.writes).toEqual(['first turn', 'second turn']);
+
+    vi.advanceTimersByTime(1000);
+
+    expect(proc.writes).toEqual(['first turn', 'second turn', '\r', '\r']);
+  });
 });
 
 describe('CodexPtyManager.relayRawInput (raw keystroke passthrough)', () => {
