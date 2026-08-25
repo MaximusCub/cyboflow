@@ -85,6 +85,20 @@ interface TaskBodyProps {
   canMoveUp?: boolean;
   /** False on the column's last card — disables Move down. */
   canMoveDown?: boolean;
+  /**
+   * Whether the active backlog sort mode is `'manual'` (default `true`).
+   * Forwarded to {@link CardActionsMenu} — reorder (drag + Move items) is
+   * enabled ONLY in manual sort (IDEA-053, TASK-203).
+   */
+  isManualSort?: boolean;
+  /**
+   * Accessible evidence for a card retained ONLY because a nested child
+   * matched the active search/membership filter (IDEA-053, TASK-203) — never
+   * set when the card itself matched, or with no active filter. Rendered as
+   * "Matches REF — Title" text; only ever populated on an epic (the only
+   * `type` with `children`).
+   */
+  matchedChildRefs?: ReadonlyArray<{ ref: string; title: string }>;
 }
 
 /**
@@ -136,6 +150,7 @@ function CardFooter({
   onReorder,
   canMoveUp,
   canMoveDown,
+  isManualSort,
   onShowComponents,
 }: TaskBodyProps & {
   onEdit: (e: React.MouseEvent) => void;
@@ -237,6 +252,7 @@ function CardFooter({
           onReorder={onReorder}
           canMoveUp={canMoveUp}
           canMoveDown={canMoveDown}
+          isManualSort={isManualSort}
           onShowComponents={onShowComponents}
         />
       </div>
@@ -276,6 +292,8 @@ export function TaskBody({
   onReorder,
   canMoveUp,
   canMoveDown,
+  isManualSort,
+  matchedChildRefs,
 }: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   // Sibling to the epic `expanded` state above — ideas have no expanded state
@@ -371,6 +389,20 @@ export function TaskBody({
         <p className="line-clamp-3 text-[11.5px] leading-snug text-text-secondary">{task.summary}</p>
       )}
 
+      {/* Child-match evidence (IDEA-053, TASK-203): this card is retained ONLY
+          because a nested descendant matched the active search/membership
+          filter — surfaced identically in Kanban and List since both render
+          through this shared body. Accessible text names the matching
+          child(ren) by ref + title, e.g. "Matches TASK-014 — Add retry guard". */}
+      {matchedChildRefs && matchedChildRefs.length > 0 && (
+        <p
+          className="text-[10.5px] italic text-text-tertiary"
+          data-testid="matched-child-evidence"
+        >
+          Matches {matchedChildRefs.map((c) => `${c.ref} — ${c.title}`).join(', ')}
+        </p>
+      )}
+
       <CardFooter
         task={task}
         onRun={onRun}
@@ -382,6 +414,7 @@ export function TaskBody({
         onReorder={onReorder}
         canMoveUp={canMoveUp}
         canMoveDown={canMoveDown}
+        isManualSort={isManualSort}
         onShowComponents={
           task.type === 'idea' && task.components ? () => setLedgerExpanded(true) : undefined
         }
@@ -476,6 +509,8 @@ export function BoardCard({
   onReorder,
   canMoveUp,
   canMoveDown,
+  isManualSort,
+  matchedChildRefs,
 }: TaskBodyProps): React.JSX.Element {
   // Breathing is an ACTIVE-RUN visual — a live-but-idle association (queued,
   // awaiting_review, a batch-pulled task not yet picked up) must not pulse.
@@ -498,6 +533,8 @@ export function BoardCard({
         onReorder={onReorder}
         canMoveUp={canMoveUp}
         canMoveDown={canMoveDown}
+        isManualSort={isManualSort}
+        matchedChildRefs={matchedChildRefs}
       />
     </div>
   );

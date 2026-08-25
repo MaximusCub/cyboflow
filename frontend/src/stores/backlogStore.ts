@@ -31,6 +31,17 @@
  * `layoutMode` ('kanban' | 'list') is persisted under `cyboflow-backlog-layout`
  * via {@link migrateLocalStorageKey} (mount-only migration from the legacy
  * `crystal-backlog-layout` key) — NEVER via ad-hoc getItem/setItem rename logic.
+ *
+ * ## Search / membership filter / sort view state (IDEA-053, TASK-203)
+ *
+ * `searchQuery`, `selectedSprintIds`, `selectedExperimentIds`, and `sortMode`
+ * follow the SAME in-memory-only convention as `filterProjectId`/
+ * `showArchived` above: plain reducers, no persistence, no task write. Because
+ * they live on this GLOBAL store (not component state) they survive switching
+ * between Kanban and List automatically. The actual filtering/sorting logic is
+ * pure and lives in `components/Backlog/backlogSelectors.ts`
+ * (`applySearchAndMembership`, `deriveMembershipOptions`, `bucketByStage`'s
+ * `sortMode` param) — this store only holds the selection.
  */
 import { create } from 'zustand';
 import { trpc } from '../trpc/client';
@@ -38,6 +49,7 @@ import { API, type IPCResponse } from '../utils/api';
 import { migrateLocalStorageKey } from '../utils/migrateLocalStorageKey';
 import type { Project } from '../types/project';
 import type { BacklogTaskItem, Board, TaskChangedEvent } from '../../../shared/types/tasks';
+import type { BacklogSortMode } from '../components/Backlog/backlogSelectors';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,6 +103,18 @@ export interface BacklogState {
   layoutMode: LayoutMode;
   /** Whether archived items + hidden_by_default stages are shown. */
   showArchived: boolean;
+  /**
+   * Free-text search over `ref`/`title`/`summary` (IDEA-053, TASK-203).
+   * In-memory only, like `filterProjectId`/`showArchived` — never persisted,
+   * never written to a task. Default `''` (no filter).
+   */
+  searchQuery: string;
+  /** Selected "In sprint" membership filter ids (`sprint_batches.id`). OR'd together; [] = no constraint. In-memory only. */
+  selectedSprintIds: string[];
+  /** Selected "In experiment" membership filter ids (`experiments.id`). OR'd together; [] = no constraint. In-memory only. */
+  selectedExperimentIds: string[];
+  /** Active per-stage sort mode. In-memory only, default `'manual'` (existing drag/rank order). */
+  sortMode: BacklogSortMode;
 
   // -- Reducers (pure / synchronous) ---------------------------------------
 
@@ -115,6 +139,14 @@ export interface BacklogState {
   setLayoutMode: (mode: LayoutMode) => void;
   /** Toggle the show-archived filter. */
   toggleShowArchived: () => void;
+  /** Set the free-text search query. In-memory only, not persisted. */
+  setSearchQuery: (query: string) => void;
+  /** Toggle one sprint id in/out of the "In sprint" selection. In-memory only. */
+  toggleSprintFilter: (id: string) => void;
+  /** Toggle one experiment id in/out of the "In experiment" selection. In-memory only. */
+  toggleExperimentFilter: (id: string) => void;
+  /** Set the active per-stage sort mode. In-memory only, not persisted. */
+  setSortMode: (mode: BacklogSortMode) => void;
 
   // -- Actions (async / side-effectful) ------------------------------------
 
@@ -261,6 +293,10 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
     connectionStatus: 'idle',
     layoutMode: readPersistedLayout(),
     showArchived: false,
+    searchQuery: '',
+    selectedSprintIds: [],
+    selectedExperimentIds: [],
+    sortMode: 'manual',
 
     // -- Reducers -------------------------------------------------------------
 
@@ -284,6 +320,24 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
     },
 
     toggleShowArchived: () => set((s) => ({ showArchived: !s.showArchived })),
+
+    setSearchQuery: (query) => set({ searchQuery: query }),
+
+    toggleSprintFilter: (id) =>
+      set((s) => ({
+        selectedSprintIds: s.selectedSprintIds.includes(id)
+          ? s.selectedSprintIds.filter((x) => x !== id)
+          : [...s.selectedSprintIds, id],
+      })),
+
+    toggleExperimentFilter: (id) =>
+      set((s) => ({
+        selectedExperimentIds: s.selectedExperimentIds.includes(id)
+          ? s.selectedExperimentIds.filter((x) => x !== id)
+          : [...s.selectedExperimentIds, id],
+      })),
+
+    setSortMode: (mode) => set({ sortMode: mode }),
 
     // -- Actions --------------------------------------------------------------
 

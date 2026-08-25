@@ -10,7 +10,7 @@
  * an item to a terminal stage), unify per-project boards into one shared column
  * set by stage POSITION, and bucket items by `stage_position`.
  */
-import type { BacklogTaskItem, Board, BoardStage } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, Board, BoardStage, Priority } from '../../../../shared/types/tasks';
 
 /** A board stage paired with the (top-level) tasks currently sitting in it. */
 export interface StageBucket {
@@ -389,13 +389,19 @@ export function countActiveBacklogItems(tasks: BacklogTaskItem[]): number {
  * since that stage carries `hidden_by_default`) is dropped — never an orphaned
  * entry.
  *
- * Each bucket is sorted with {@link compareBacklogOrder} (the server ORDER BY
- * mirrored client-side) so a drag's freshly written `sort_order` renders
- * immediately off the live-event upsert, which does NOT re-sort the store list.
+ * Each bucket is sorted with the comparator for `sortMode` (default
+ * `'manual'`, {@link compareBacklogOrder} — the server ORDER BY mirrored
+ * client-side) so a drag's freshly written `sort_order` renders immediately
+ * off the live-event upsert, which does NOT re-sort the store list. Every
+ * other sort mode (`priority` / `updated` / `title`, IDEA-053/TASK-203) sorts
+ * WITHIN each stage bucket only — it never moves an item between stages, and
+ * Kanban + List both call this SAME function so they render literally the
+ * same buckets.
  */
 export function bucketByStage(
   tasks: BacklogTaskItem[],
   stages: BoardStage[],
+  sortMode: BacklogSortMode = 'manual',
 ): StageBucket[] {
   const byPosition = new Map<number, BacklogTaskItem[]>();
   for (const stage of stages) byPosition.set(stage.position, []);
@@ -406,10 +412,11 @@ export function bucketByStage(
     const bucket = byPosition.get(effectiveBoardPosition(item));
     if (bucket) bucket.push(item);
   }
+  const cmp = compareForSortMode(sortMode);
   return stages.map((stage) => ({
     stage,
     // Freshly built arrays — safe to sort in place.
-    tasks: (byPosition.get(stage.position) ?? []).sort(compareBacklogOrder),
+    tasks: (byPosition.get(stage.position) ?? []).sort(cmp),
   }));
 }
 
@@ -500,11 +507,18 @@ export function planReorder(
 /**
  * Client-side comparator mirroring the server's `selectProjectBacklog`
  * ORDER BY EXACTLY: `(sort_order IS NULL) ASC, sort_order ASC, created_at ASC,
- * ref ASC`. REQUIRED because the store's live-event path
- * ({@link applyTaskChangeToList}) upserts rows IN PLACE without re-sorting —
- * without a client-side sort a drag's new order would not render until the
- * next full sync. Strings compare raw (`<`/`>`, not localeCompare) to mirror
- * SQLite's binary text collation; ISO-8601 timestamps order correctly that way.
+ * ref ASC`, PLUS two client-only tiebreakers appended after `ref`
+ * (`project_id` ASC, then `id` ASC — IDEA-053/TASK-203) that only ever resolve
+ * a comparison the server-mirrored chain left at 0 (same `created_at` AND same
+ * `ref`, which cannot happen within one project's own refs but can across
+ * projects in the cross-project board). REQUIRED because the store's
+ * live-event path ({@link applyTaskChangeToList}) upserts rows IN PLACE
+ * without re-sorting — without a client-side sort a drag's new order would not
+ * render until the next full sync. Strings compare raw (`<`/`>`, not
+ * localeCompare) to mirror SQLite's binary text collation; ISO-8601
+ * timestamps order correctly that way. This is also the tail every other sort
+ * mode (priority / updated / title) falls back to once its own primary key
+ * ties — see {@link comparePriority} / {@link compareUpdated} / {@link compareTitle}.
  */
 export function compareBacklogOrder(a: BacklogTaskItem, b: BacklogTaskItem): number {
   if (a.sort_order !== null && b.sort_order !== null) {
@@ -516,7 +530,246 @@ export function compareBacklogOrder(a: BacklogTaskItem, b: BacklogTaskItem): num
   }
   if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
   if (a.ref !== b.ref) return a.ref < b.ref ? -1 : 1;
+  if (a.project_id !== b.project_id) return a.project_id - b.project_id;
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Per-stage sort modes (IDEA-053, TASK-203)
+// ---------------------------------------------------------------------------
+
+/** The user-selectable per-stage sort — applies WITHIN each stage bucket only. */
+export type BacklogSortMode = 'manual' | 'priority' | 'updated' | 'title';
+
+/** P0 (highest) .. P6 (lowest) — migration 117 widened `Priority` from P0-P2. */
+const PRIORITY_RANK: Record<Priority, number> = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+  P4: 4,
+  P5: 5,
+  P6: 6,
+};
+
+/** `priority` sort mode: P0 < P1 < ... < P6, ties via the full manual chain. */
+export function comparePriority(a: BacklogTaskItem, b: BacklogTaskItem): number {
+  const diff = PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
+  return diff !== 0 ? diff : compareBacklogOrder(a, b);
+}
+
+/** `updated` sort mode: raw ISO `updated_at` DESCENDING, ties via the full manual chain. */
+export function compareUpdated(a: BacklogTaskItem, b: BacklogTaskItem): number {
+  if (a.updated_at !== b.updated_at) return a.updated_at > b.updated_at ? -1 : 1;
+  return compareBacklogOrder(a, b);
+}
+
+/** `title` sort mode: case-folded ascending, then raw title, ties via the full manual chain. */
+export function compareTitle(a: BacklogTaskItem, b: BacklogTaskItem): number {
+  const af = a.title.toLowerCase();
+  const bf = b.title.toLowerCase();
+  if (af !== bf) return af < bf ? -1 : 1;
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1;
+  return compareBacklogOrder(a, b);
+}
+
+const SORT_COMPARATORS: Record<BacklogSortMode, (a: BacklogTaskItem, b: BacklogTaskItem) => number> = {
+  manual: compareBacklogOrder,
+  priority: comparePriority,
+  updated: compareUpdated,
+  title: compareTitle,
+};
+
+/** The comparator for a given sort mode — the single lookup `bucketByStage` uses. */
+export function compareForSortMode(mode: BacklogSortMode): (a: BacklogTaskItem, b: BacklogTaskItem) => number {
+  return SORT_COMPARATORS[mode];
+}
+
+// ---------------------------------------------------------------------------
+// Search + membership filtering (IDEA-053, TASK-203)
+// ---------------------------------------------------------------------------
+
+/** One sprint/experiment option surfaced by the "In sprint" / "In experiment" multi-selects. */
+export interface MembershipOption {
+  kind: 'sprint' | 'experiment';
+  id: string;
+  label: string;
+}
+
+/** Accessible evidence of the descendant that matched an active search/membership filter. */
+export interface MatchedChildEvidence {
+  ref: string;
+  title: string;
+}
+
+/**
+ * A {@link BacklogTaskItem} view carrying the ONLY new field this filter pass
+ * introduces: `matchedChildRefs`, set exclusively on a node retained solely
+ * because a descendant (not itself) matched the active search/membership
+ * filter. Deliberately a LOCAL view type, not a change to the shared
+ * `BacklogTaskItem` — this is a frontend rendering concern (Kanban/List show
+ * which child matched), never persisted or sent over IPC.
+ */
+export interface FilteredBacklogTaskItem extends BacklogTaskItem {
+  matchedChildRefs?: readonly MatchedChildEvidence[];
+}
+
+/**
+ * Sprint/experiment filter options, deduped by `(kind, id)` and sorted by
+ * case-folded label, then raw label, then raw id (stable ordering when two
+ * memberships happen to share a label). Walks the FULL tree (top-level items
+ * plus epic `children`) — memberships are only ever populated on
+ * `type === 'task'` rows, which may be nested under an epic.
+ *
+ * Callers MUST pass `filterTasks`'s output (project + archive visibility
+ * applied) — NOT the raw store list, and NOT the search/membership-narrowed
+ * result — so the option list doesn't shrink as the user types or selects
+ * (IDEA-053's explicit ordering requirement).
+ */
+export function deriveMembershipOptions(tasks: readonly BacklogTaskItem[]): MembershipOption[] {
+  const byKey = new Map<string, MembershipOption>();
+  const visit = (items: readonly BacklogTaskItem[]): void => {
+    for (const t of items) {
+      for (const m of t.memberships) {
+        const key = `${m.kind}:${m.id}`;
+        if (!byKey.has(key)) byKey.set(key, { kind: m.kind, id: m.id, label: m.label });
+      }
+      if (t.children !== undefined) visit(t.children);
+    }
+  };
+  visit(tasks);
+  return [...byKey.values()].sort((a, b) => {
+    const af = a.label.toLowerCase();
+    const bf = b.label.toLowerCase();
+    if (af !== bf) return af < bf ? -1 : 1;
+    if (a.label !== b.label) return a.label < b.label ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/** Trimmed, case-folded substring match against `ref` / `title` / nullable `summary`. */
+function searchMatch(task: BacklogTaskItem, foldedQuery: string): boolean {
+  if (foldedQuery === '') return true;
+  if (task.ref.toLowerCase().includes(foldedQuery)) return true;
+  if (task.title.toLowerCase().includes(foldedQuery)) return true;
+  if (task.summary !== null && task.summary.toLowerCase().includes(foldedQuery)) return true;
+  return false;
+}
+
+/**
+ * OR across BOTH kinds and within each kind: any selected sprint id OR any
+ * selected experiment id present on the task's own `memberships` passes. No
+ * selection in either kind (both sets empty) is NOT a constraint — everything
+ * passes. A STALE selected id (its membership just went terminal, so it fell
+ * out of `memberships`) naturally fails to match — no special-casing, and
+ * deliberately never falls back to the coarser `inFlow`/`experimentSeed`
+ * overlays (those are unrelated to EXACT membership).
+ */
+function selfMembershipMatch(
+  task: BacklogTaskItem,
+  sprintIds: ReadonlySet<string>,
+  experimentIds: ReadonlySet<string>,
+): boolean {
+  if (sprintIds.size === 0 && experimentIds.size === 0) return true;
+  return task.memberships.some(
+    (m) => (m.kind === 'sprint' && sprintIds.has(m.id)) || (m.kind === 'experiment' && experimentIds.has(m.id)),
+  );
+}
+
+/** One node's recursive visit result — `selfMatched` lets the parent tell a direct hit from a bubbled-up descendant hit. */
+interface VisitResult {
+  item: FilteredBacklogTaskItem;
+  selfMatched: boolean;
+}
+
+/**
+ * Recursive `selfMatch(node) OR any(treeMatch(child))` visit, generic at
+ * arbitrary depth (in practice idea/epic -> task -> nothing further). Returns
+ * `null` when neither the node nor any descendant matches (drop it).
+ *
+ * A node kept ONLY via a descendant gets a shallow copy: `children` narrowed
+ * to the retained subtree, `childCount`/`pendingTasks` recomputed off THOSE
+ * (mirrors {@link filterTasks}'s copy-on-write — the source object is never
+ * mutated), and `matchedChildRefs` set to the flattened evidence of every
+ * descendant that itself directly matched (bubbling a deeper "child-only"
+ * match's own evidence up unchanged, so an arbitrarily deep chain still
+ * surfaces the real leaf match at every ancestor).
+ */
+function visitTask(
+  task: BacklogTaskItem,
+  foldedQuery: string,
+  sprintIds: ReadonlySet<string>,
+  experimentIds: ReadonlySet<string>,
+): VisitResult | null {
+  const selfMatched = searchMatch(task, foldedQuery) && selfMembershipMatch(task, sprintIds, experimentIds);
+
+  if (task.children === undefined) {
+    return selfMatched ? { item: task, selfMatched: true } : null;
+  }
+
+  const visitedChildren: VisitResult[] = [];
+  for (const child of task.children) {
+    const visited = visitTask(child, foldedQuery, sprintIds, experimentIds);
+    if (visited !== null) visitedChildren.push(visited);
+  }
+
+  if (!selfMatched && visitedChildren.length === 0) return null;
+
+  const visibleChildren = visitedChildren.map((v) => v.item);
+  const evidence: MatchedChildEvidence[] = [];
+  if (!selfMatched) {
+    for (const v of visitedChildren) {
+      if (v.selfMatched) {
+        evidence.push({ ref: v.item.ref, title: v.item.title });
+      } else if (v.item.matchedChildRefs !== undefined) {
+        evidence.push(...v.item.matchedChildRefs);
+      }
+    }
+  }
+
+  const item: FilteredBacklogTaskItem = {
+    ...task,
+    children: visibleChildren,
+    childCount: visibleChildren.length,
+    pendingTasks: visibleChildren.filter((c) => !c.isDone).length,
+    ...(evidence.length > 0 ? { matchedChildRefs: evidence } : {}),
+  };
+  return { item, selfMatched };
+}
+
+/**
+ * Search + membership filter over `filterTasks`'s output, recursive at
+ * arbitrary depth (see {@link visitTask}). Both an active search AND active
+ * membership selections apply to the SAME node for a self-match — a node
+ * never passes because it matched search while a DIFFERENT descendant matched
+ * membership (or vice versa); it passes the tree either via its OWN self-match
+ * or via a descendant's.
+ *
+ * Empty query AND no membership selection ⇒ IDENTITY pass-through (the exact
+ * `tasks` reference/array), preserving manual ordering and every existing
+ * caller's regression expectations verbatim — no evidence is computed or
+ * stored in that case.
+ */
+export function applySearchAndMembership(
+  tasks: readonly BacklogTaskItem[],
+  query: string,
+  selectedSprintIds: readonly string[],
+  selectedExperimentIds: readonly string[],
+): FilteredBacklogTaskItem[] {
+  const foldedQuery = query.trim().toLowerCase();
+  const hasSearch = foldedQuery.length > 0;
+  const hasMembership = selectedSprintIds.length > 0 || selectedExperimentIds.length > 0;
+  if (!hasSearch && !hasMembership) return tasks as FilteredBacklogTaskItem[];
+
+  const sprintIds = new Set(selectedSprintIds);
+  const experimentIds = new Set(selectedExperimentIds);
+  const result: FilteredBacklogTaskItem[] = [];
+  for (const t of tasks) {
+    const visited = visitTask(t, foldedQuery, sprintIds, experimentIds);
+    if (visited !== null) result.push(visited.item);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -21,12 +21,25 @@
  * persistent home session via {@link useIdeaSessionOpener} and focuses it.
  *
  * Render pipeline: filterTasks (project narrow + archive-in-place visibility)
- * -> unifiedStages (per-project boards collapsed into one column set by stage
- * POSITION) -> bucketByStage (keyed on `stage_position`). The header counts
- * derive from the same filtered list — board and header read one source of
- * truth. Archiving stamps `archived_at` in place (no Archived stage exists);
- * the Archived toggle reveals archived cards (dimmed) plus hidden_by_default
- * stages (won't-do), and labels itself with the archived count.
+ * -> deriveMembershipOptions (sprint/experiment filter OPTIONS, snapshotted
+ * off the filterTasks output so the option list doesn't shrink as the user
+ * types/selects) -> applySearchAndMembership (free-text search + "In
+ * sprint"/"In experiment" narrowing, recursive at arbitrary depth — IDEA-053,
+ * TASK-203) -> unifiedStages (per-project boards collapsed into one column set
+ * by stage POSITION) -> bucketByStage (keyed on `stage_position`, sorted
+ * per-stage by the active `sortMode`: manual/priority/updated/title). The
+ * header counts derive from the FINAL narrowed list — board and header read
+ * one source of truth, and Kanban/List both call `bucketByStage` on the SAME
+ * buckets. Archiving stamps `archived_at` in place (no Archived stage
+ * exists); the Archived toggle reveals archived cards (dimmed) plus
+ * hidden_by_default stages (won't-do), and labels itself with the archived
+ * count. Search text, membership selections, and sort mode are in-memory-only
+ * `backlogStore` view state (never persisted, never written to a task) — see
+ * that store's file header.
+ *
+ * Reorder (drag-and-drop + the card menu's Move items) is enabled ONLY while
+ * `sortMode === 'manual'` — gated at three layers (KanbanView's DnD surface,
+ * CardActionsMenu's disabled Move items, and `reorderTask` itself below).
  *
  * EmptyBacklogView shows only when NO projects exist after load.
  *
@@ -34,7 +47,7 @@
  *   terracotta → interactive, gold → status-warning, green → status-success.
  */
 import { useEffect, useState } from 'react';
-import { Kanban, List, Plus, Archive, ChevronDown, FolderOpen } from 'lucide-react';
+import { Kanban, List, Plus, Archive, ChevronDown, FolderOpen, Search, Check, ArrowUpDown } from 'lucide-react';
 import { useBacklogStore } from '../stores/backlogStore';
 import type { BacklogProjectRef } from '../stores/backlogStore';
 import {
@@ -43,10 +56,14 @@ import {
   countArchived,
   bucketByStage,
   deriveCounts,
+  deriveMembershipOptions,
+  applySearchAndMembership,
   isExecutionStage,
   readyForDevChildTaskIds,
   planReorder,
   friendlyStageError,
+  type BacklogSortMode,
+  type MembershipOption,
 } from './Backlog/backlogSelectors';
 import { trpc } from '../trpc/client';
 import { Dropdown, type DropdownItem } from './ui/Dropdown';
@@ -180,8 +197,145 @@ function LayoutToggle({
   );
 }
 
+/** Free-text search box — trimmed/case-folded matching lives in the selector, not here. */
+function BacklogSearchInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (query: string) => void;
+}): React.JSX.Element {
+  return (
+    <div className="relative flex-shrink-0">
+      <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary" aria-hidden />
+      <input
+        type="text"
+        data-testid="backlog-search-input"
+        aria-label="Search backlog"
+        placeholder="Search ref, title, summary…"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-56 rounded-button border border-border-primary bg-bg-primary py-1 pl-7 pr-2 text-[11px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-1 focus:ring-interactive"
+      />
+    </div>
+  );
+}
+
+/**
+ * "In sprint" / "In experiment" multi-select. Options are pre-derived
+ * (deriveMembershipOptions, computed off filterTasks's output — see
+ * BacklogPane) and narrowed to `kind` here; each click TOGGLES that id via
+ * `onToggle` (store's toggleSprintFilter/toggleExperimentFilter) — the menu
+ * stays open across clicks (`closeOnSelect={false}`) so multiple selections
+ * are a series of clicks, not repeated re-opens.
+ */
+function MembershipFilter({
+  kind,
+  label,
+  options,
+  selectedIds,
+  onToggle,
+}: {
+  kind: 'sprint' | 'experiment';
+  label: string;
+  options: MembershipOption[];
+  selectedIds: readonly string[];
+  onToggle: (id: string) => void;
+}): React.JSX.Element {
+  const kindOptions = options.filter((o) => o.kind === kind);
+  const items: DropdownItem[] =
+    kindOptions.length > 0
+      ? kindOptions.map((opt) => {
+          const selected = selectedIds.includes(opt.id);
+          return {
+            id: opt.id,
+            label: (
+              <span className="flex items-center gap-1.5">
+                <Check
+                  className={`h-3 w-3 flex-shrink-0 ${selected ? 'text-interactive opacity-100' : 'opacity-0'}`}
+                  aria-hidden
+                />
+                <span className="truncate">{opt.label}</span>
+              </span>
+            ),
+            onClick: () => onToggle(opt.id),
+          };
+        })
+      : [{ id: 'none', label: 'None yet', disabled: true }];
+  return (
+    <Dropdown
+      position="auto"
+      width="sm"
+      items={items}
+      closeOnSelect={false}
+      trigger={
+        <button
+          type="button"
+          data-testid={`membership-filter-${kind}-trigger`}
+          aria-haspopup="menu"
+          aria-label={label}
+          className={`inline-flex items-center gap-1 rounded-button border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+            selectedIds.length > 0
+              ? 'border-interactive bg-interactive-surface text-interactive'
+              : 'border-border-primary bg-bg-primary text-text-secondary hover:bg-bg-hover'
+          }`}
+        >
+          {label}
+          {selectedIds.length > 0 ? ` (${selectedIds.length})` : ''}
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      }
+    />
+  );
+}
+
+const SORT_MODES: readonly BacklogSortMode[] = ['manual', 'priority', 'updated', 'title'];
+
+const SORT_MODE_LABELS: Record<BacklogSortMode, string> = {
+  manual: 'Manual',
+  priority: 'Priority',
+  updated: 'Recently updated',
+  title: 'Title (A–Z)',
+};
+
+/** Per-stage sort mode select — see backlogSelectors.ts compareForSortMode for the exact comparator chains. */
+function SortModeSelect({
+  mode,
+  onChange,
+}: {
+  mode: BacklogSortMode;
+  onChange: (mode: BacklogSortMode) => void;
+}): React.JSX.Element {
+  const items: DropdownItem[] = SORT_MODES.map((m) => ({
+    id: m,
+    label: SORT_MODE_LABELS[m],
+    onClick: () => onChange(m),
+  }));
+  return (
+    <Dropdown
+      position="auto"
+      width="sm"
+      items={items}
+      selectedId={mode}
+      trigger={
+        <button
+          type="button"
+          data-testid="sort-mode-trigger"
+          aria-haspopup="menu"
+          aria-label="Sort backlog"
+          className="inline-flex items-center gap-1 rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 text-[11px] font-semibold text-text-secondary transition-colors hover:bg-bg-hover"
+        >
+          <ArrowUpDown className="h-3.5 w-3.5" />
+          {SORT_MODE_LABELS[mode]}
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      }
+    />
+  );
+}
+
 interface BacklogHeaderProps {
-  /** The FILTERED list — counts must track the project filter + archive visibility. */
+  /** The FINAL filtered+searched+membership-narrowed list — counts must track ALL active narrowing, not just project/archive visibility. */
   tasks: BacklogTaskItem[];
   /** Archived count from the UNFILTERED list (the toggle label's "(n)"). */
   archivedCount: number;
@@ -193,6 +347,17 @@ interface BacklogHeaderProps {
   onLayoutChange: (mode: LayoutMode) => void;
   onToggleArchived: () => void;
   onNew: () => void;
+  /** Free-text search value + setter (in-memory store state). */
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  /** Sprint/experiment options derived from filterTasks's output (pre-search/membership). */
+  membershipOptions: MembershipOption[];
+  selectedSprintIds: readonly string[];
+  selectedExperimentIds: readonly string[];
+  onToggleSprint: (id: string) => void;
+  onToggleExperiment: (id: string) => void;
+  sortMode: BacklogSortMode;
+  onSortModeChange: (mode: BacklogSortMode) => void;
 }
 
 function BacklogHeader({
@@ -206,6 +371,15 @@ function BacklogHeader({
   onLayoutChange,
   onToggleArchived,
   onNew,
+  searchQuery,
+  onSearchChange,
+  membershipOptions,
+  selectedSprintIds,
+  selectedExperimentIds,
+  onToggleSprint,
+  onToggleExperiment,
+  sortMode,
+  onSortModeChange,
 }: BacklogHeaderProps): React.JSX.Element {
   const counts = deriveCounts(tasks);
   return (
@@ -275,15 +449,42 @@ function BacklogHeader({
           </button>
         </div>
       </div>
+
+      {/* Search / membership filters / sort — in-memory view state (backlogStore),
+          not persisted, survives Kanban<->List switches automatically. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <BacklogSearchInput value={searchQuery} onChange={onSearchChange} />
+        <MembershipFilter
+          kind="sprint"
+          label="In sprint"
+          options={membershipOptions}
+          selectedIds={selectedSprintIds}
+          onToggle={onToggleSprint}
+        />
+        <MembershipFilter
+          kind="experiment"
+          label="In experiment"
+          options={membershipOptions}
+          selectedIds={selectedExperimentIds}
+          onToggle={onToggleExperiment}
+        />
+        <SortModeSelect mode={sortMode} onChange={onSortModeChange} />
+      </div>
     </div>
   );
 }
 
-/** The board body — Kanban or List depending on layoutMode. */
+/**
+ * The board body — Kanban or List depending on layoutMode. Both call the SAME
+ * `bucketByStage(tasks, stages, sortMode)` so they render literally the same
+ * final filtered+sorted buckets (IDEA-053, TASK-203) — List never
+ * reimplements its own filtering/sorting.
+ */
 function BacklogBoard({
   stages,
   tasks,
   layoutMode,
+  sortMode,
   onRun,
   onReorder,
   launchingTaskId,
@@ -291,16 +492,18 @@ function BacklogBoard({
 }: {
   /** Unified visible stages (unifiedStages output). */
   stages: BoardStage[];
-  /** The FILTERED task list (filterTasks output). */
+  /** The FINAL filtered+searched+membership-narrowed task list (applySearchAndMembership output). */
   tasks: BacklogTaskItem[];
   layoutMode: LayoutMode;
+  /** Active per-stage sort mode — drives both bucketByStage's comparator and Kanban's reorder gate. */
+  sortMode: BacklogSortMode;
   onRun: (task: BacklogTaskItem) => void;
   /** Same-column re-rank (Kanban only, DnD + card-menu Move items — the List stays read-only). */
   onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
   launchingTaskId: string | null;
   now: number;
 }): React.JSX.Element {
-  const buckets = bucketByStage(tasks, stages);
+  const buckets = bucketByStage(tasks, stages, sortMode);
   if (layoutMode === 'kanban') {
     return (
       <KanbanView
@@ -309,6 +512,7 @@ function BacklogBoard({
         onReorder={onReorder}
         launchingTaskId={launchingTaskId}
         now={now}
+        isManualSort={sortMode === 'manual'}
       />
     );
   }
@@ -327,6 +531,17 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   const setFilterProject = useBacklogStore((s) => s.setFilterProject);
   const setLayoutMode = useBacklogStore((s) => s.setLayoutMode);
   const toggleShowArchived = useBacklogStore((s) => s.toggleShowArchived);
+  // Search / membership filters / sort (IDEA-053, TASK-203) — in-memory view
+  // state on the store (default-guarded here for older store mocks in tests
+  // that predate these fields).
+  const searchQuery = useBacklogStore((s) => s.searchQuery) ?? '';
+  const selectedSprintIds = useBacklogStore((s) => s.selectedSprintIds) ?? [];
+  const selectedExperimentIds = useBacklogStore((s) => s.selectedExperimentIds) ?? [];
+  const sortMode: BacklogSortMode = useBacklogStore((s) => s.sortMode) ?? 'manual';
+  const setSearchQuery = useBacklogStore((s) => s.setSearchQuery);
+  const toggleSprintFilter = useBacklogStore((s) => s.toggleSprintFilter);
+  const toggleExperimentFilter = useBacklogStore((s) => s.toggleExperimentFilter);
+  const setSortMode = useBacklogStore((s) => s.setSortMode);
 
   const { launchingTaskId, error: launchError, launch, launchSprintBatch } = useTaskRunLauncher();
   // Backlog idea card "Open" (idea sessions plan, Stage 4) — a SEPARATE
@@ -371,9 +586,20 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
     return <EmptyBacklogView />;
   }
 
-  // filterTasks -> unifiedStages -> bucketByStage (inside BacklogBoard); the
-  // header counts read the same filtered list, the archived count the raw one.
+  // filterTasks (project + archive visibility) -> deriveMembershipOptions
+  // (options snapshot BEFORE search/membership narrow the tree, so the option
+  // list doesn't shrink as the user types/selects) -> applySearchAndMembership
+  // (search + "In sprint"/"In experiment" narrowing, recursive at arbitrary
+  // depth) -> unifiedStages / bucketByStage (inside BacklogBoard, sortMode-
+  // aware). Header counts + both Kanban/List read the FINAL narrowed list.
   const filteredTasks = filterTasks(tasks, filterProjectId, showArchived);
+  const membershipOptions = deriveMembershipOptions(filteredTasks);
+  const visibleTasks = applySearchAndMembership(
+    filteredTasks,
+    searchQuery,
+    selectedSprintIds,
+    selectedExperimentIds,
+  );
   const stages = unifiedStages(boards, filterProjectId, showArchived);
   const archivedCount = countArchived(tasks, filterProjectId);
 
@@ -419,9 +645,15 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
    * expectedVersion) the error surfaces via friendlyStageError and a full task
    * refetch re-syncs the board — a mid-plan conflict can leave a seed plan
    * partially applied.
+   *
+   * MANUAL-SORT-ONLY (IDEA-053, TASK-203): a no-op whenever `sortMode` isn't
+   * `'manual'` — the final belt-and-braces gate alongside KanbanView's DnD
+   * guard and CardActionsMenu's disabled Move items, so `planReorder` /
+   * `tasks.update` can never fire from a non-manual-sort interaction attempt.
    */
   const reorderTask = async (task: BacklogTaskItem, targetIndex: number): Promise<void> => {
-    const bucket = bucketByStage(filteredTasks, stages).find(
+    if (sortMode !== 'manual') return;
+    const bucket = bucketByStage(visibleTasks, stages, sortMode).find(
       (b) => b.stage.position === task.stage_position,
     );
     const columnTasks = bucket?.tasks ?? [];
@@ -453,7 +685,7 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="backlog-pane">
       <BacklogHeader
-        tasks={filteredTasks}
+        tasks={visibleTasks}
         archivedCount={archivedCount}
         projects={projects}
         filterProjectId={filterProjectId}
@@ -463,6 +695,15 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
         onLayoutChange={setLayoutMode}
         onToggleArchived={toggleShowArchived}
         onNew={() => setIsNewOpen(true)}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        membershipOptions={membershipOptions}
+        selectedSprintIds={selectedSprintIds}
+        selectedExperimentIds={selectedExperimentIds}
+        onToggleSprint={toggleSprintFilter}
+        onToggleExperiment={toggleExperimentFilter}
+        sortMode={sortMode}
+        onSortModeChange={setSortMode}
       />
 
       {(launchError ?? openError ?? reorderError) && (
@@ -481,8 +722,9 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
         ) : (
           <BacklogBoard
             stages={stages}
-            tasks={filteredTasks}
+            tasks={visibleTasks}
             layoutMode={layoutMode}
+            sortMode={sortMode}
             onRun={handleRun}
             onReorder={(task, targetIndex) => void reorderTask(task, targetIndex)}
             launchingTaskId={busyTaskId}

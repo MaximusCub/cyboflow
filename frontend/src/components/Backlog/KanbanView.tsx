@@ -19,10 +19,17 @@
  * to DnD) are wired here too: the bucket index is at hand, so this layer owns
  * the direction→post-move-index translation and funnels into the SAME
  * `onReorder` — no second write path.
+ *
+ * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `isManualSort` (default
+ * `true`) gates BOTH the drag surface (`draggable` follows it, and
+ * `handleDragStart` no-ops when false — belt-and-braces alongside `draggable`
+ * itself, since a caller could fire a drag event without the browser's native
+ * gesture) and the Move-item translation callback passed to each card, so a
+ * stray activation under a non-manual sort can never reach `onReorder`.
  */
 import { Fragment, useState } from 'react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
-import type { StageBucket } from './backlogSelectors';
+import type { FilteredBacklogTaskItem, StageBucket } from './backlogSelectors';
 import { BoardCard } from './TaskCard';
 
 interface KanbanViewProps {
@@ -36,6 +43,13 @@ interface KanbanViewProps {
   onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
   launchingTaskId: string | null;
   now: number;
+  /**
+   * Whether the active sort mode is `'manual'` (default `true`, so every
+   * pre-existing caller keeps today's drag/Move behavior). `false` disables
+   * dragging and force-disables the card menu's Move items (via
+   * {@link CardActionsMenu}'s own `isManualSort` prop).
+   */
+  isManualSort?: boolean;
 }
 
 /** The card being dragged: its column (stage POSITION) + index within it. */
@@ -56,7 +70,14 @@ function DropIndicator(): React.JSX.Element {
   return <div className="h-0.5 rounded-full bg-interactive" data-testid="drop-indicator" aria-hidden />;
 }
 
-export function KanbanView({ buckets, onRun, onReorder, launchingTaskId, now }: KanbanViewProps): React.JSX.Element {
+export function KanbanView({
+  buckets,
+  onRun,
+  onReorder,
+  launchingTaskId,
+  now,
+  isManualSort = true,
+}: KanbanViewProps): React.JSX.Element {
   const [drag, setDrag] = useState<DragSource | null>(null);
   const [dropSlot, setDropSlot] = useState<DropSlot | null>(null);
 
@@ -66,6 +87,12 @@ export function KanbanView({ buckets, onRun, onReorder, launchingTaskId, now }: 
     index: number,
     columnPosition: number,
   ): void => {
+    // Manual-sort-only (IDEA-053, TASK-203): never START a drag session
+    // outside manual sort, even if fired without the native `draggable`
+    // gesture (e.g. a synthetic event) — this is what makes the whole DnD
+    // path a no-op below (drag stays null, so handleDrop's existing guard
+    // rejects it).
+    if (!isManualSort) return;
     setDrag({ taskId: task.id, columnPosition, fromIndex: index });
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', task.id);
@@ -156,7 +183,7 @@ export function KanbanView({ buckets, onRun, onReorder, launchingTaskId, now }: 
                 <Fragment key={task.id}>
                   {isSlot(stage.position, index) && <DropIndicator />}
                   <div
-                    draggable
+                    draggable={isManualSort}
                     data-testid="kanban-card-slot"
                     data-task-id={task.id}
                     className={drag !== null && drag.taskId === task.id ? 'opacity-50' : undefined}
@@ -173,11 +200,16 @@ export function KanbanView({ buckets, onRun, onReorder, launchingTaskId, now }: 
                       now={now}
                       // Menu reorder: translate direction → post-move index here
                       // (the bucket index is at hand) and reuse the DnD callback.
-                      onReorder={(t, dir) =>
-                        onReorder(t, dir === 'top' ? 0 : dir === 'up' ? index - 1 : index + 1)
-                      }
+                      // Guarded on isManualSort too (defense-in-depth alongside
+                      // CardActionsMenu's own disable + onClick guard).
+                      onReorder={(t, dir) => {
+                        if (!isManualSort) return;
+                        onReorder(t, dir === 'top' ? 0 : dir === 'up' ? index - 1 : index + 1);
+                      }}
                       canMoveUp={index > 0}
                       canMoveDown={index < tasks.length - 1}
+                      isManualSort={isManualSort}
+                      matchedChildRefs={(task as FilteredBacklogTaskItem).matchedChildRefs}
                     />
                   </div>
                 </Fragment>

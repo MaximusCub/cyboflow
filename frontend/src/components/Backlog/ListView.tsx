@@ -6,7 +6,7 @@
  * drag-and-drop).
  */
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
-import type { StageBucket } from './backlogSelectors';
+import type { FilteredBacklogTaskItem, StageBucket } from './backlogSelectors';
 import { hasRunningFlow } from './backlogSelectors';
 import { TaskBody } from './TaskCard';
 
@@ -56,6 +56,7 @@ export function ListView({ buckets, onRun, launchingTaskId, now }: ListViewProps
                     onRun={onRun}
                     launchingTaskId={launchingTaskId}
                     now={now}
+                    matchedChildRefs={(task as FilteredBacklogTaskItem).matchedChildRefs}
                   />
                 </li>
               );

@@ -46,6 +46,15 @@
  * DnD. Without it (ListView, epic children) the Move items are hidden and the
  * menu renders exactly as before.
  *
+ * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `isManualSort` (default
+ * `true`, so every pre-existing caller keeps today's behavior) OVERRIDES the
+ * `canMoveUp`/`canMoveDown` disable logic — under any non-manual sort mode all
+ * three Move items render disabled with the accessible hint "Reordering is
+ * available only in Manual sort", and their `onClick` is ALSO guarded (belt
+ * and braces alongside the dropdown's own `disabled` no-op) so a click can
+ * never invoke `onReorder` while a non-manual sort is active, even a card that
+ * WOULD otherwise be movable.
+ *
  * When `onShowComponents` is wired (ideas with a resolved component ledger
  * only — TaskCard.tsx), the menu also exposes "Show components", a
  * discoverable keyboard-reachable alternative to the card's own small
@@ -96,6 +105,13 @@ interface CardActionsMenuProps {
   /** False on the column's last card — disables Move down. */
   canMoveDown?: boolean;
   /**
+   * Whether the active backlog sort mode is `'manual'` (default `true`).
+   * Reorder (drag-and-drop AND these Move items) is enabled ONLY in manual
+   * sort — `false` force-disables all three Move items regardless of
+   * `canMoveUp`/`canMoveDown` and guards their `onClick`.
+   */
+  isManualSort?: boolean;
+  /**
    * Open the card's ledger-expand section. Omitted (the common case: non-idea
    * cards, or an idea whose components haven't resolved yet) hides the
    * "Show components" item entirely — mirrors `onReorder`'s convention.
@@ -108,6 +124,7 @@ export function CardActionsMenu({
   onReorder,
   canMoveUp = false,
   canMoveDown = false,
+  isManualSort = true,
   onShowComponents,
 }: CardActionsMenuProps): React.JSX.Element | null {
   const boards = useBacklogStore((s) => s.boards);
@@ -254,27 +271,42 @@ export function CardActionsMenu({
   if (onReorder !== undefined) {
     // Reorder is rank-only (no stage write) — deliberately NOT gated on
     // hasActiveRun; only first/last position disables the inapplicable moves.
+    // `isManualSort === false` OVERRIDES canMoveUp/canMoveDown entirely: every
+    // Move item shows disabled with the "Manual sort only" hint, and the
+    // onClick is guarded too so a stray activation (native `disabled` should
+    // already block it, but this is belt-and-braces) can never call
+    // `onReorder` outside manual sort.
+    const reorderHint = !isManualSort ? 'Reordering is available only in Manual sort' : undefined;
     items.push(
       {
         id: 'move-up',
         label: 'Move up',
         icon: ArrowUp,
-        disabled: !canMoveUp,
-        onClick: () => onReorder(task, 'up'),
+        disabled: !isManualSort || !canMoveUp,
+        ...(reorderHint ? { description: reorderHint } : {}),
+        onClick: () => {
+          if (isManualSort) onReorder(task, 'up');
+        },
       },
       {
         id: 'move-down',
         label: 'Move down',
         icon: ArrowDown,
-        disabled: !canMoveDown,
-        onClick: () => onReorder(task, 'down'),
+        disabled: !isManualSort || !canMoveDown,
+        ...(reorderHint ? { description: reorderHint } : {}),
+        onClick: () => {
+          if (isManualSort) onReorder(task, 'down');
+        },
       },
       {
         id: 'move-to-top',
         label: 'Move to top',
         icon: ArrowUpToLine,
-        disabled: !canMoveUp,
-        onClick: () => onReorder(task, 'top'),
+        disabled: !isManualSort || !canMoveUp,
+        ...(reorderHint ? { description: reorderHint } : {}),
+        onClick: () => {
+          if (isManualSort) onReorder(task, 'top');
+        },
       },
     );
   }
