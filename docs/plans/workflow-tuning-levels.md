@@ -1,6 +1,7 @@
 # Workflow tuning levels — implementation plan
 
-Status: DRAFT (pre-implementation; design approved via the "Workflow Tuning Levels" canvas artifact).
+Status: DRAFT r2 (pre-implementation; design approved via the "Workflow Tuning Levels" canvas
+artifact; revised after Codex adversarial review round 1 — see §8).
 Design reference: https://claude.ai/code/artifact/34cc2e25-2c27-415c-9acd-a893d68b62e1
 
 ## 1. What we're building
@@ -31,11 +32,18 @@ not architecture — this plan is about the machinery.
 - **Optional + retries**: `WorkflowStep.optional` / `retries` exist and are mechanically honored on
   the programmatic plane (`workflowController.ts:462/511/596`); on the orchestrated plane they are
   prompt-level guidance (`customFlowPrompt.ts:88`). Presets just set these fields.
-- **Step removal adapts the sprint lanes automatically**: `resolveRunFanOutInner`
+- **Step removal adapts the sprint lane MACHINERY automatically**: `resolveRunFanOutInner`
   (`laneChainResolution.ts:60-78`) derives the lane-step vocabulary from the run's frozen
   definition, and `cyboflow_update_sprint_task`'s `current_step` validation follows it
-  (`mcpQueryHandler.ts:3283`). Removing `write-tests`/`code-review` from the fan-out inner chain
-  is therefore a pure spec edit.
+  (`mcpQueryHandler.ts:3283`). BUT the bundled orchestrator prompt is NOT derived: `sprint.md:18`
+  hard-codes the canonical lane vocabulary (`write-tests`, `code-review`, …) in prose, so a
+  definition with steps removed would hand the orchestrated-plane agent contradictory
+  instructions — and a `current_step` write for a removed id would be REJECTED by the narrowed
+  validation. Prompt-side derivation is therefore in scope (D9).
+- **Lane retries are NOT per-inner-step**: `FanOutInnerStep` has no `retries` field (its schema
+  accepts only id/agent/optional/loopback/name/firmGate), and the programmatic controller uses
+  the global `FAN_OUT_LANE_ATTEMPT_CAP = 3` (`programmatic/types.ts:281`) for every lane failure.
+  Presets can tune `retries` on OUTER steps only (D1).
 - **Per-run spec selection**: `WorkflowRegistry.createRun` freezes
   `effectiveSpecJson = opts?.variantSpecJson ?? workflow.spec_json ?? '{}'`
   (`workflowRegistry.ts:1568`). There is **no per-run ad-hoc definition override today** — this is
@@ -66,8 +74,12 @@ interface TuningPreset {
   agentConfigs: Record<string, { model?: AgentModelAlias; effort?: ReasoningEffort }>;
   // step edits keyed by "<phaseId>/<stepId>" or "<phaseId>/<stepId>/inner/<innerId>"
   removeSteps?: string[];                       // efficient: drop write-tests, code-review
-  stepPatches?: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name'>>>;
-  mergeAddenda?: Record<string, string>;        // see D5 (implement+tests merge)
+  // retries is OUTER-step only — FanOutInnerStep has no retries field and lanes
+  // run under the global FAN_OUT_LANE_ATTEMPT_CAP; inner patches may set only
+  // optional/name. (Per-inner-step retry budgets = possible future work, out of scope.)
+  outerStepPatches?: Record<string, Partial<Pick<WorkflowStep, 'retries' | 'optional' | 'name'>>>;
+  innerStepPatches?: Record<string, Partial<Pick<FanOutInnerStep, 'optional' | 'name'>>>;
+  promptAddenda?: Record<string, string>;       // per agent key — see D5
   evalDefault?: boolean;                        // efficient: false
 }
 
@@ -122,6 +134,14 @@ Display state machine:
 - `tuning_level` NULL + `spec_json` non-empty (existing edited flows) → **CUSTOM**, reset offers
   Standard.
 
+**Reset coherence (review finding):** the existing `resetSpec` (tRPC + MCP
+`cyboflow_reset_workflow`) writes `'{}'` — under the rules above that would leave a stale
+`tuning_level` stamp and immediately read as CUSTOM ("reset" that lands on CUSTOM is a
+contradiction). Fix: `resetSpec` atomically clears `tuning_level` in the same statement/txn, on
+BOTH surfaces. The UI then offers two distinct actions where relevant: "Reset to authored
+default" (resetSpec — clears stamp, no badge) and "Reset to <level>" (re-apply the stamped
+preset). Both round-trips get tests.
+
 ### D4. Per-run override: a `tuningSpecJson` sibling of `variantSpecJson`
 
 Extend `runs.start` input with `tuningLevel?: TuningLevel`. `RunLauncher.launch` computes
@@ -140,20 +160,41 @@ spec choice). Override never writes the workflows row.
 `spec_hash` of an override run hashes the materialized preset spec — identical to the hash of the
 same level applied persistently, so revision stats bucket coherently.
 
-### D5. The efficient-level "implement + write tests" merge
+**Restart semantics (review finding):** `runs.restart` reconstructs launch provenance and today
+pins `baseline: true` when `variant_id` is NULL — an override run would silently restart on the
+workflow's current spec, losing the graph/models/eval default it originally ran with. Fix, two
+parts: (1) at override launch, record the materialized preset spec into `workflow_revisions`
+(idempotent by hash — `recordRevision` already dedupes on the UNIQUE `(workflow_id, spec_hash)`),
+so the frozen spec content is durably recoverable from the run's `spec_hash`; (2) restart
+provenance reads `workflow_runs.tuning_level` + `spec_hash` and relaunches with the EXACT frozen
+spec from `workflow_revisions` (not a re-application of the current calibration — a preset
+upgrade between run and restart must not change what restarts). Restart tests must cover:
+override, persistent-level, custom, variant, and post-preset-upgrade cases.
 
-The lane chain edit is trivial (remove the `write-tests` inner step). The behavioral half —
-implement also writes tests — uses the existing `WorkflowAgentConfig.custom` seam: at **apply
-time**, compose `custom.systemPrompt = <current built-in implement agent body> + mergeAddendum`
-(a short "you also author the tests for your diff; run them targeted" block from the preset
-table). This uses only existing run-side machinery (`applyWorkflowAgentConfigs` already handles
-`custom`). Known semantics, documented in the preset module: the embedded copy freezes the base
-prompt at apply time; base-agent edits don't retroactively flow in until the level is re-applied.
-Re-applying the (already selected) level is allowed as a "refresh" and is idempotent otherwise.
+### D5. The efficient-level "implement + write tests" merge (revised per review)
 
-Alternative considered and rejected for v1: a per-step `promptAddendum` field on
-`FanOutInnerStep` — cleaner long-term but a type + both-planes + Zod ripple; revisit if the
-frozen-copy drift bites.
+The lane chain edit is trivial (remove the `write-tests` inner step). For the behavioral half —
+implement also writes tests — the original draft proposed riding `WorkflowAgentConfig.custom`
+(an apply-time embedded copy of the implement prompt + addendum). Codex review killed that,
+correctly, on two counts: (a) `custom` REPLACES description/systemPrompt/tools/enabledMcps
+wholesale in `applyWorkflowAgentConfigs`, so applying Efficient would silently erase a project's
+own hardened implement override (project `agent_overrides` sits BELOW workflow `agentConfigs` in
+the precedence chain) including its tool/MCP restrictions; (b) the base prompt body lives in
+main-process markdown (`agentCatalogue.ts`), unreachable from a shared transform module.
+
+Revised design: a first-class **`promptAddendum?: string`** field on `WorkflowAgentConfig`
+(shared type + `workflowDefinitionSchema` extension — the same two-place edit `agentConfigs`
+itself required). It is applied at the END of `resolveRunEffectiveAgents`
+(`agentOverlayWriter.ts:195`), AFTER the builtin → project-override → workflow-config → variant
+merge resolves the effective system prompt: the addendum is appended to whatever prompt won,
+touching no other field (tools/MCPs/model preserved). The preset table carries the addendum text
+("you also author the tests for your diff; run them targeted"). No frozen copies, no drift, and
+it composes with project hardening instead of clobbering it.
+
+Cost acknowledged: this IS a new definition key, so it must be added to both the TS interface and
+the Zod schema or it gets silently stripped (see §2), and variant `agent_overrides_json` deltas
+should be defined to preserve it (a variant delta that sets `custom` still wins wholesale —
+addendum then applies on top of the variant's prompt, which is the consistent reading).
 
 ### D6. Eval depth per level
 
@@ -186,6 +227,26 @@ Fallback chain per level card:
 Exposed via one tRPC read used by both the editor selector and the wizard. Estimates
 self-calibrate as stamped runs accumulate. Label estimates as `~` always.
 
+**Scope caveat (review finding):** `run_usage` rolls up the run's own `raw_events`; eval jurors
+run through separate judge queries whose SDK usage is not persisted (`run_evals` records
+verdicts, not tokens). So the median systematically excludes a level-DEPENDENT cost (1 vs 3
+jurors). v1 handles this honestly rather than invisibly: the cards label the number
+"execution tokens (excl. eval)", and the static multipliers are calibrated on execution tokens
+only. Metering + persisting jury usage (then folding it in) is listed as future work, not
+silently promised.
+
+### D9. Orchestrated-plane prompt derivation (new, from review)
+
+`main/src/orchestrator/workflows/sprint.md:18` hard-codes the lane vocabulary in prose (and later
+sections assume per-lane `code-review` output exists). An efficient run's orchestrator would get
+instructions contradicting its frozen definition — and a `current_step` report for a removed id
+is rejected by the definition-derived validation. Fix: scrub fixed lane vocabularies/chain
+assumptions from the bundled sprint/ship prompt bodies and render them from the frozen
+definition at prompt-build time (the fan-out instruction generator already derives the chain —
+extend that seam to own the vocabulary sentence and the review-section conditionals). Add a test
+that builds the complete effective prompt for an efficient run and asserts removed step ids
+appear nowhere operative.
+
 ## 4. UI work
 
 - **`WorkflowEditorModal`** becomes a two-page modal (matches the approved prototype):
@@ -209,25 +270,28 @@ self-calibrate as stamped runs accumulate. Label estimates as `~` always.
 |---|-------|----------|------|
 | 1 | Preset core | `shared/tuning/workflowTuning.ts`: types, sprint+planner preset tables, `applyTuningPreset`, `serializeDefinition`, `detectTuningState`; exhaustive unit tests incl. "every flow × level output passes `workflowDefinitionSchema`" | M |
 | 2 | Persistence | migration 119 (+ test), registry `applyTuningLevel` (spec write + stamp, atomic), `resetToLevel`, tRPC routes, read-surface fields, MCP compact-row exposure | M |
-| 3 | Run stamping + override | `runs.start.tuningLevel`, `RunLauncher` → `createRun` `tuningSpecJson` seam, stamping rules (incl. variant-NULL rule), `evalDefault` consumption; lane-chain adaptation test for the efficient sprint preset | M |
-| 4 | Editor UI | two-page modal, selector, generated phase strip, CUSTOM/reset | L |
-| 5 | Wizard UI | level segment, override plumbing, variant mutual exclusion | S–M |
-| 6 | Estimates | `selectTuningLevelUsage` + median helper + tRPC read + both UI surfaces | S–M |
-| 7 | Eval juror filter | `EvalWorker` slot filter by run level (D6) | S |
-| 8 | Viewport prompt guidance | fan-out instruction line by level (D7) | S |
+| 3 | Run stamping + override | `runs.start.tuningLevel`, `RunLauncher` → `createRun` `tuningSpecJson` seam, override-launch `recordRevision`, restart provenance (D4), stamping rules (incl. variant-NULL rule), `evalDefault` consumption; lane-chain adaptation test for the efficient sprint preset | M–L |
+| 4 | Prompt derivation + addendum | D9 prompt scrubbing/derivation for sprint/ship; `promptAddendum` field (type + Zod + `resolveRunEffectiveAgents` append) (D5) | M |
+| 5 | Editor UI | two-page modal, selector, generated phase strip, CUSTOM + dual reset (D3) | L |
+| 6 | Wizard UI | level segment, override plumbing, variant mutual exclusion | S–M |
+| 7 | Estimates | `selectTuningLevelUsage` + median helper + tRPC read + both UI surfaces, "excl. eval" labeling | S–M |
+| 8 | Eval juror filter | `EvalWorker` slot filter by run level (D6) | S |
+| 9 | Viewport prompt guidance | fan-out instruction line by level (D7) | S |
 
-Suggested checkpoints: after phase 3 the feature is fully functional headless (MCP/tRPC); after
-phase 5 it is user-visible end-to-end; 6–8 are polish/depth.
+Suggested checkpoints: after phase 4 the feature is fully functional headless (MCP/tRPC) and
+safe on both planes; after phase 6 it is user-visible end-to-end; 7–9 are polish/depth.
 
 ## 6. Testing
 
 - Unit (phase-local, per the lane test policy): transform idempotence + schema-validity sweep;
   detection truth table (all 4 display states); migration 119; `createRun` stamp matrix
-  (override/stamped/custom/variant); efficient-sprint `resolveRunFanOutInner` +
-  `current_step` validation adaptation; median query fixture.
+  (override/stamped/custom/variant); restart matrix (override / persistent / custom / variant /
+  post-preset-upgrade); dual-reset round-trips on tRPC + MCP; efficient-sprint
+  `resolveRunFanOutInner` + `current_step` validation adaptation; effective-prompt scrub test
+  (D9); `promptAddendum` append-preserves-policy test; median query fixture.
 - `pnpm test:unit` + `typecheck` + `lint` as the settled-tree gate per phase commit.
-- No `panels/claude` files change (`agentOverlayWriter` untouched) → itest suite not implicated,
-  but run it once at the end anyway since prompts/fan-out-instructions is adjacent.
+- Phase 4 touches `agentOverlayWriter.ts` under `main/src/services/panels/claude/` →
+  `pnpm test:integration` is REQUIRED for that phase (CLAUDE.md rule), and again at the end.
 - Manual smoke (dev app): apply each level on sprint, verify badge/custom/reset; run an
   efficient sprint and confirm the lane rail shows the merged chain; wizard override run stamps
   `workflow_runs.tuning_level`; estimates line appears after ≥1 stamped run.
@@ -238,8 +302,9 @@ phase 5 it is user-visible end-to-end; 6–8 are polish/depth.
    built-ins (e.g. code-review → opus). Users who never touch the dial keep as-authored behavior
    (NULL stamp); the moment they click Standard they opt into the calibration. Confirm this is
    the intended semantics vs "Standard = exactly today's defaults".
-2. **Frozen implement-prompt copy (D5)** drifts from base-agent edits until re-applied. Mitigation
-   documented; the `promptAddendum` field is the escape hatch if it bites.
+2. **`promptAddendum` is a new spec key** (D5) — it must land in the TS interface AND the Zod
+   schema in the same commit or every writer strips it; older app versions reading a newer
+   spec_json will also strip it on their next save (acceptable: level re-apply restores it).
 3. **Orchestrated plane is advisory** for retries/optional-skips (prompt guidance, not mechanics) —
    levels are strictly enforced only on the programmatic plane. Acceptable: same asymmetry the
    editor's existing knobs already have.
@@ -252,3 +317,16 @@ phase 5 it is user-visible end-to-end; 6–8 are polish/depth.
 6. **Launch wizard variant rotation × override** (D4's "force baseline") removes a run from
    rotation stats — acceptable since the user explicitly overrode, but Insights should exclude
    override runs from rotation experiment counts (they already will: no `rotation_experiment_id`).
+
+## 8. Adversarial review log (Codex, round 1 — 2026-08-25)
+
+Verdict: needs-attention; 4 high + 2 medium, all confirmed against the repo and folded in:
+
+| Finding | Disposition |
+|---|---|
+| [high] Inner-lane `retries` not representable (`FanOutInnerStep` has no field; global `FAN_OUT_LANE_ATTEMPT_CAP`) | Fixed — D1 scopes retries to outer steps; inner patches limited to optional/name |
+| [high] Removed lane steps remain in `sprint.md`'s hard-coded prose vocabulary | Fixed — new D9 (prompt derivation/scrub + effective-prompt test), new phase 4 |
+| [high] `custom`-copy merge clobbers project agent policy; shared module can't read main-side prompt bodies | Fixed — D5 rewritten around a first-class `promptAddendum` applied after effective-agent resolution |
+| [high] `runs.restart` loses a per-run tuning override (pins baseline when `variant_id` NULL) | Fixed — D4 restart semantics: revision-record at override launch + frozen-spec relaunch |
+| [medium] Existing `resetSpec` would strand a stale `tuning_level` → contradictory CUSTOM state | Fixed — D3: resetSpec atomically clears the stamp; dual reset actions |
+| [medium] `run_usage` medians exclude eval-jury tokens (level-dependent cost, unmetered) | Fixed — D8 labels estimates "execution tokens (excl. eval)"; jury metering = explicit future work |
