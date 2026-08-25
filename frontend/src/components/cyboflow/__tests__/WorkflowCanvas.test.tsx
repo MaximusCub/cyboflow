@@ -371,6 +371,45 @@ describe('WorkflowCanvas', () => {
     }
   });
 
+  it('keeps the canvas root height-bound to its parent (h-full flex-col) so the graph overflow scrolls instead of growing the pane', () => {
+    render(<WorkflowCanvas definition={TALL_DEFINITION} currentStepId={null} />);
+
+    // The root shell must stay pinned to its parent's height (h-full) and lay
+    // meta/viewport out as a column (flex-col) — this is what lets the bounded
+    // viewport's flex:1/min-height:0 actually take effect instead of the whole
+    // canvas growing to the tall inner content's intrinsic size and inflating
+    // the center pane around it. A regression to e.g. a plain block/`h-auto`
+    // root would defeat the containment even with the viewport/inner split intact.
+    const root = screen.getByTestId('workflow-canvas');
+    expect(root).toHaveClass('h-full');
+    expect(root).toHaveClass('flex-col');
+  });
+
+  it('renders every step of a tall workflow — including the final step — inside the scrollable inner content, not clipped out of the DOM', () => {
+    render(<WorkflowCanvas definition={TALL_DEFINITION} currentStepId={null} />);
+
+    const inner = screen.getByTestId('workflow-canvas-inner');
+    const viewport = screen.getByTestId('workflow-canvas-viewport');
+
+    // The final step of the final phase (the one an operator scrolls all the
+    // way down to reach) must be present and nested under both the inner
+    // content and the scroll viewport — proving it's part of the scrollable
+    // region (reachable via scrollTop against the bounded, overflow:auto
+    // viewport) rather than truncated or rendered outside the scrollport.
+    const lastPhase = TALL_DEFINITION.phases[TALL_DEFINITION.phases.length - 1];
+    const lastStep = lastPhase.steps[lastPhase.steps.length - 1];
+    const lastStepWrapper = screen.getByTestId(`step-wrapper-${lastStep.id}`);
+    expect(inner.contains(lastStepWrapper)).toBe(true);
+    expect(viewport.contains(lastStepWrapper)).toBe(true);
+
+    // Every step card across all 5 phases × 12 steps actually mounts (nothing
+    // is virtualized/dropped past some fixed-height boundary) — the DOM count
+    // must match phases × steps exactly.
+    const allStepWrappers = screen.getAllByTestId(/^step-wrapper-tall-step-/);
+    const totalSteps = TALL_DEFINITION.phases.reduce((sum, p) => sum + p.steps.length, 0);
+    expect(allStepWrappers).toHaveLength(totalSteps);
+  });
+
   it('measures edge/token overlay coordinates relative to the inner content, not the outer scroll viewport', () => {
     // Deliberately give workflow-canvas-viewport a DIFFERENT rect than
     // workflow-canvas-inner — if the measurement effect ever regressed to use
