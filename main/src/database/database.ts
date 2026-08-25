@@ -1810,7 +1810,12 @@ export class DatabaseService {
         return { name, prefix: parseInt(match[1], 10) };
       })
       .filter((x): x is { name: string; prefix: number } => x !== null)
-      .sort((a, b) => a.prefix - b.prefix);
+      // Tie-break by full name: five legacy prefixes (059-063) are shared by
+      // more than one file, and a prefix-only sort leaves their relative order
+      // to readdirSync's filesystem order — platform-undefined. New duplicates
+      // are blocked by migrationPrefixes.test.ts; this keeps the legacy ones
+      // applying in the same order everywhere.
+      .sort((a, b) => a.prefix - b.prefix || a.name.localeCompare(b.name, 'en'));
 
     const selectApplied = this.db.prepare(
       "SELECT value FROM user_preferences WHERE key = ?"

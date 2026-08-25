@@ -561,6 +561,12 @@ are actually new — `094_tracker_direction_modes.sql` shows the pattern: probe
 `pragma_table_info` into a TEMP table BEFORE the `ALTER`s, then gate the `UPDATE`
 on it. Never rely on an early abort to protect the statements below it.
 
+**Numbering:** a new migration takes the next FREE three-digit prefix — after a
+rebase, re-check, because main may have taken your number. Duplicate prefixes
+are blocked by `migrationPrefixes.test.ts` (five legacy prefixes, 059–063, are
+frozen exemptions); the runner tie-breaks same-prefix files by name so the
+legacy pairs order deterministically.
+
 ### SQLite migrations: `PRAGMA foreign_keys` must toggle OUTSIDE `db.transaction()`
 
 SQLite silently no-ops `PRAGMA foreign_keys` issued inside a transaction
