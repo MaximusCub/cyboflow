@@ -10,7 +10,7 @@ import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
 import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../agentProviderGuard';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
-import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
@@ -880,6 +880,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       substrate: 'interactive',
       cliTool: this.getCliToolName(),
       errorClass: spawnErrorClass,
+      ...unclassifiedErrorTags(spawnErrorClass, errorMsg),
     });
     throw new Error(`Failed to spawn ${this.getCliToolName()}: ${errorMsg}`);
   }

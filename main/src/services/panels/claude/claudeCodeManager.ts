@@ -14,7 +14,7 @@ import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { getShellPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
-import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import {
   resolveModelAlias,
   sdkModelAndBetas,
@@ -2157,6 +2157,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
               captureSeamError('sdk-session-terminal-result', new Error(`sdk terminal result (${resultErrorClass})`), {
                 substrate: 'sdk',
                 errorClass: resultErrorClass,
+                // An UNCLASSIFIED result is the common case here and says nothing
+                // on its own; the shape + digest split that bucket into distinct
+                // failures without shipping resultErr itself.
+                ...unclassifiedErrorTags(resultErrorClass, resultErr),
               });
             }
 
@@ -2305,6 +2309,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             substrate: 'sdk',
             packaged: String(Boolean(app.isPackaged)),
             errorClass: sdkErrorClass,
+            ...unclassifiedErrorTags(sdkErrorClass, errMsg),
           });
         }
         // A thrown SDK error (auth / network / spawn failure) is terminal too.

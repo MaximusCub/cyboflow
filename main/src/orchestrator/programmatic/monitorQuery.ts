@@ -31,7 +31,7 @@ import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { emitSeamError } from '../telemetrySink';
-import { classifyErrorPattern } from './systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from './systemicError';
 
 /**
  * Default deadline for a single monitor query (triage OR answer). A hung claude
@@ -191,6 +191,7 @@ export function makeSdkStructuredQuery(
         queryKind: 'triage',
         timedOut: String(didTimeOut()),
         errorClass: triageErrorClass,
+        ...unclassifiedErrorTags(triageErrorClass, message),
       });
       throw new Error(message);
     } finally {
@@ -265,6 +266,7 @@ export function makeSdkTextQuery(
         queryKind: 'answer',
         timedOut: String(didTimeOut()),
         errorClass: answerErrorClass,
+        ...unclassifiedErrorTags(answerErrorClass, message),
       });
       // Graceful degradation: if the monitor produced a partial answer before the
       // error (a turn-cap hit mid-investigation, a timeout after it spoke), surface
