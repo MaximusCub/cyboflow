@@ -132,8 +132,8 @@ const workflowAgentCustomCopySchema = z.object({
 /**
  * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
  * `{}` (none of `model`, `custom`, `runtime`, `providerModel`/`codexModel`,
- * `effort` set) is rejected below — it carries no signal and the editor must
- * prune it before persisting. `effort` accepts the whole cross-provider union
+ * `effort`, `promptAddendum` set) is rejected below — it carries no signal and
+ * the editor must prune it before persisting. `effort` accepts the whole cross-provider union
  * here; the resolved provider narrows it at spawn time (see
  * normalizeEffortSelection). Both `providerModel` and its deprecated alias
  * `codexModel` are accepted: persisted workflow definitions and the MCP
@@ -149,6 +149,7 @@ const workflowAgentConfigSchema = z
     providerModel: z.string().min(1).optional(),
     codexModel: z.string().min(1).optional(),
     effort: z.enum(ALL_EFFORT_LEVELS).optional(),
+    promptAddendum: z.string().min(1).optional(),
   })
   .superRefine((config, ctx) => {
     if (
@@ -157,12 +158,13 @@ const workflowAgentConfigSchema = z
       config.runtime === undefined &&
       config.providerModel === undefined &&
       config.codexModel === undefined &&
-      config.effort === undefined
+      config.effort === undefined &&
+      config.promptAddendum === undefined
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'agentConfigs entry must set "model", "custom", "runtime", "providerModel" (or the deprecated "codexModel"), and/or "effort" — an empty {} config must be pruned before persisting',
+          'agentConfigs entry must set "model", "custom", "runtime", "providerModel" (or the deprecated "codexModel"), "effort", and/or "promptAddendum" — an empty {} config must be pruned before persisting',
       });
     }
   }) satisfies z.ZodType<WorkflowAgentConfig>;

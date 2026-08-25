@@ -622,8 +622,9 @@ export interface WorkflowAgentCustomCopy {
  * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
  *
  * An empty `{}` config (none of `model`, `custom`, `runtime`, `providerModel`
- * (nor its deprecated alias `codexModel`), nor `effort` set) carries no signal
- * and must NEVER be persisted — the workflow editor prunes it before write.
+ * (nor its deprecated alias `codexModel`), `effort`, nor `promptAddendum` set)
+ * carries no signal and must NEVER be persisted — the workflow editor prunes it
+ * before write.
  */
 export interface WorkflowAgentConfig {
   /**
@@ -668,6 +669,18 @@ export interface WorkflowAgentConfig {
    * Absent -> inherit the run/CLI default effort.
    */
   effort?: ReasoningEffort;
+  /**
+   * Extra instructions APPENDED to whatever system prompt the
+   * builtin -> project-override -> workflow-config -> variant merge resolved for
+   * this agent. Unlike `custom` it replaces nothing: tools, MCP grants, model,
+   * and the project's own hardened body all survive, so it composes with a
+   * project's agent policy instead of clobbering it.
+   *
+   * Written by the tuning presets (`shared/tuning/workflowTuning.ts`) to fold a
+   * removed lane step's work into the step that remains; the run-side append
+   * lives at the end of `resolveRunEffectiveAgents`.
+   */
+  promptAddendum?: string;
 }
 
 /**

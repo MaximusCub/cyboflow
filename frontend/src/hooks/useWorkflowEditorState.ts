@@ -222,7 +222,8 @@ function swap<T>(arr: readonly T[], i: number, j: number): T[] {
  * Enforces the two prune invariants so the modal's structural (JSON) dirty
  * check never sees a no-op edit as a diff:
  *   - a config left with none of `model` / `custom` / `runtime` /
- *     `providerModel` / `codexModel` is dropped from the map
+ *     `providerModel` / `codexModel` / `effort` / `promptAddendum` is dropped
+ *     from the map
  *   - a map left empty is removed entirely (key absent, not `{}`)
  */
 function mapAgentConfig(
@@ -241,7 +242,8 @@ function mapAgentConfig(
     next.runtime === undefined &&
     next.providerModel === undefined &&
     next.codexModel === undefined &&
-    next.effort === undefined;
+    next.effort === undefined &&
+    next.promptAddendum === undefined;
   if (isEmpty) {
     delete configs[agentKey];
   } else {
