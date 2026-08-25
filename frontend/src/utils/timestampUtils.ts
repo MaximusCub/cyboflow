@@ -24,11 +24,28 @@ export function formatFullDateTime(timestamp: string | Date): string {
 
 /**
  * Formats the distance between a timestamp and now
+ *
+ * A STRING argument goes through {@link parseTimestamp}, not a bare
+ * `new Date()`: callers pass raw SQLite columns here (e.g. WorkflowCard's
+ * `lastUsedAt`, folded from `workflow_runs.created_at`), and SQLite writes
+ * "YYYY-MM-DD HH:MM:SS" — UTC with no zone marker, which JS reads as LOCAL.
+ * That shifted every such value into the future by the host's UTC offset, and
+ * because the buckets below floor a negative interval into the `else` arm, the
+ * result rendered as a confident "just now" rather than anything that looked
+ * wrong. Every workflow card read "used just now" for any run in the preceding
+ * offset-many hours.
+ *
+ * Already-zoned values (ISO with 'T', including anything serialized from a
+ * main-process `Date` across IPC) pass through untouched, and a `Date` argument
+ * is used as-is — so callers that were already correct, including the ones that
+ * wrap the argument in `parseTimestamp` themselves (ChatTranscript), are
+ * unaffected.
+ *
  * @param date - The date to compare
  * @returns Human-readable time distance
  */
 export function formatDistanceToNow(date: Date | string): string {
-  const dateObj = typeof date === 'string' ? new Date(date) : date;
+  const dateObj = typeof date === 'string' ? parseTimestamp(date) : date;
   const now = new Date();
   const diffMs = now.getTime() - dateObj.getTime();
   const diffSeconds = Math.floor(diffMs / 1000);
