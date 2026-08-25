@@ -23,7 +23,9 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import type { AppServices } from '../../ipc/types';
-import { registerConfigHandlers } from '../../ipc/config';
+import { createConfigOps } from '../../ipc/configOps';
+import { appRouter } from '../../orchestrator/trpc/router';
+import { createContext } from '../../orchestrator/trpc/context';
 import { ConfigManager } from '../configManager';
 import { setCyboflowDirectory } from '../../utils/cyboflowDirectory';
 import type { AppConfig as MainAppConfig, UpdateConfigRequest } from '../../types/config';
@@ -58,33 +60,13 @@ const agentRuntimeParity: [MainAgentRuntime] extends [FrontendAgentRuntime]
     : never
   : never = true;
 
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, handler: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, handler);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invokeHandler(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const handler = handlers.get(channel);
-  if (!handler) throw new Error(`No handler registered for ${channel}`);
-  return handler({} as unknown, ...args);
-}
-
-function registerAgainst(manager: ConfigManager) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerConfigHandlers(
-    ipcMain as unknown as Parameters<typeof registerConfigHandlers>[0],
-    { configManager: manager, claudeCodeManager: {} } as unknown as AppServices,
-  );
-  return handlers;
+/** Build a real cyboflow.config tRPC caller backed by the given ConfigManager. */
+function callerFor(manager: ConfigManager): ReturnType<typeof appRouter.createCaller> {
+  const configOps = createConfigOps({
+    configManager: manager,
+    claudeCodeManager: {} as unknown as AppServices['claudeCodeManager'],
+  });
+  return appRouter.createCaller(createContext({ configOps }));
 }
 
 /** Every .ts file under a directory, excluding test files/directories. */
@@ -120,18 +102,18 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
     expect(agentRuntimeParity).toBe(true);
   });
 
-  it('round-trips both fields through config:update → config:get → a fresh load off disk', async () => {
+  it('round-trips both fields through cyboflow.config.update → .get → a fresh load off disk', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const handlers = registerAgainst(manager);
+    const caller = callerFor(manager);
 
-    const updated = await invokeHandler(handlers, 'config:update', {
+    const updated = await caller.cyboflow.config.update({
       defaultLaunchModel: 'sonnet',
       defaultAgentRuntime: 'codex-sdk',
     } satisfies UpdateConfigRequest);
     expect(updated).toEqual({ success: true });
 
-    const fetched = (await invokeHandler(handlers, 'config:get')) as {
+    const fetched = (await caller.cyboflow.config.get()) as {
       success: boolean;
       data: MainAppConfig;
     };

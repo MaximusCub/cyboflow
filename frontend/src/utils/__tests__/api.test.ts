@@ -26,7 +26,10 @@ describe('API — Electron-absent guard', () => {
     delete (window as unknown as WinWithApi).electronAPI;
     await expect(API.sessions.getAll()).rejects.toThrow('Electron API not available');
     await expect(API.projects.getAll()).rejects.toThrow('Electron API not available');
-    await expect(API.config.get()).rejects.toThrow('Electron API not available');
+    // API.config.* is intentionally excluded here: it moved to the
+    // cyboflow.config tRPC router (pilot slice of the IPC→tRPC migration)
+    // and no longer reads window.electronAPI at all, matching every other
+    // trpc-backed call site in this codebase.
     await expect(API.providers.detect('codex')).rejects.toThrow('Electron API not available');
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
     await expect(API.models.getCatalog('codex')).rejects.toThrow('Electron API not available');

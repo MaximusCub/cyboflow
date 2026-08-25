@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { TRPCError } from '@trpc/server';
 import type { AppServices } from '../../ipc/types';
-import { registerConfigHandlers } from '../../ipc/config';
+import { createConfigOps } from '../../ipc/configOps';
+import { appRouter } from '../../orchestrator/trpc/router';
+import { createContext } from '../../orchestrator/trpc/context';
 import { ConfigManager } from '../configManager';
 import { setCyboflowDirectory } from '../../utils/cyboflowDirectory';
 import type { AppConfig as MainAppConfig } from '../../types/config';
@@ -20,24 +23,13 @@ type FrontendRunTypeDefaults = FrontendAppConfig['runTypeDefaults'];
 const mainRunTypeDefaultsParity: MainRunTypeDefaults extends FrontendRunTypeDefaults ? true : never = true;
 const frontendRunTypeDefaultsParity: FrontendRunTypeDefaults extends MainRunTypeDefaults ? true : never = true;
 
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, handler: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, handler);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invokeHandler(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const handler = handlers.get(channel);
-  if (!handler) throw new Error(`No handler registered for ${channel}`);
-  return handler({} as unknown, ...args);
+/** Build a real cyboflow.config tRPC caller backed by the given ConfigManager. */
+function callerFor(manager: ConfigManager): ReturnType<typeof appRouter.createCaller> {
+  const configOps = createConfigOps({
+    configManager: manager,
+    claudeCodeManager: {} as unknown as AppServices['claudeCodeManager'],
+  });
+  return appRouter.createCaller(createContext({ configOps }));
 }
 
 let tempDir: string;
@@ -196,27 +188,15 @@ describe('ConfigManager run-type defaults', () => {
     expect(result.config.runTypeDefaults).toBeUndefined();
   });
 
-  it('registers the IPC operation, delegates valid input, and rejects invalid input', async () => {
+  it('the cyboflow.config.applyRunTypeDefault procedure delegates valid input and rejects invalid input', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const { ipcMain, handlers } = makeHandlerCapture();
+    const caller = callerFor(manager);
 
-    registerConfigHandlers(
-      ipcMain as unknown as Parameters<typeof registerConfigHandlers>[0],
-      {
-        configManager: manager,
-        claudeCodeManager: {},
-      } as unknown as AppServices,
-    );
-
-    expect(handlers.has('config:apply-run-type-default')).toBe(true);
-
-    const valid = await invokeHandler(
-      handlers,
-      'config:apply-run-type-default',
-      'quick',
-      { kind: 'replace', value: { model: 'opus' } },
-    ) as { success: boolean; data?: { previous: RunTypeDefaults | undefined; config: MainAppConfig } };
+    const valid = (await caller.cyboflow.config.applyRunTypeDefault({
+      key: 'quick',
+      op: { kind: 'replace', value: { model: 'opus' } },
+    })) as { success: boolean; data?: { previous: RunTypeDefaults | undefined; config: MainAppConfig } };
     expect(valid).toEqual({
       success: true,
       data: {
@@ -225,13 +205,13 @@ describe('ConfigManager run-type defaults', () => {
       },
     });
 
-    const invalid = await invokeHandler(
-      handlers,
-      'config:apply-run-type-default',
-      'quick',
-      { kind: 'merge', value: { unknownField: 'nope' } },
-    ) as { success: boolean; error?: string };
-    expect(invalid.success).toBe(false);
-    expect(invalid.error).toContain('config:apply-run-type-default');
+    // An unrecognized field on a merge value fails zod's .strict() at the
+    // router boundary — a TRPCError, not the legacy { success: false } envelope.
+    await expect(
+      caller.cyboflow.config.applyRunTypeDefault({
+        key: 'quick',
+        op: { kind: 'merge', value: { unknownField: 'nope' } } as never,
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
   });
 });

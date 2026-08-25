@@ -21,7 +21,8 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import type { AppServices } from '../../ipc/types';
-import { registerConfigHandlers } from '../../ipc/config';
+import { createConfigOps } from '../../ipc/configOps';
+import type { ConfigOpsLike } from '../../orchestrator/trpc/contracts/configOps';
 import { ConfigManager } from '../configManager';
 import { setCyboflowDirectory } from '../../utils/cyboflowDirectory';
 import type { AppConfig as MainAppConfig, UpdateConfigRequest } from '../../types/config';
@@ -49,33 +50,11 @@ const sprintMaxTasksParity: [MainField] extends [FrontendField]
     : never
   : never = true;
 
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, handler: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, handler);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invokeHandler(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const handler = handlers.get(channel);
-  if (!handler) throw new Error(`No handler registered for ${channel}`);
-  return handler({} as unknown, ...args);
-}
-
-function registerAgainst(manager: ConfigManager) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerConfigHandlers(
-    ipcMain as unknown as Parameters<typeof registerConfigHandlers>[0],
-    { configManager: manager, claudeCodeManager: {} } as unknown as AppServices,
-  );
-  return handlers;
+function configOpsFor(manager: ConfigManager): ConfigOpsLike {
+  return createConfigOps({
+    configManager: manager,
+    claudeCodeManager: {} as unknown as AppServices['claudeCodeManager'],
+  });
 }
 
 async function readPersisted(dir: string): Promise<{ sprintMaxTasks?: Record<string, number> }> {
@@ -134,17 +113,17 @@ describe('resolveSprintMaxTasks / clampSprintMaxTasks', () => {
 });
 
 describe('ConfigManager.getSprintMaxTasks', () => {
-  it('round-trips through config:update → config:get → a fresh load off disk', async () => {
+  it('round-trips through configOps.updateConfig → .getConfig → a fresh load off disk', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const handlers = registerAgainst(manager);
+    const configOps = configOpsFor(manager);
 
-    const updated = await invokeHandler(handlers, 'config:update', {
+    const updated = await configOps.updateConfig({
       sprintMaxTasks: { sdk: 40, interactive: 25 },
     } satisfies UpdateConfigRequest);
     expect(updated).toEqual({ success: true });
 
-    const fetched = (await invokeHandler(handlers, 'config:get')) as {
+    const fetched = (await configOps.getConfig()) as {
       success: boolean;
       data: MainAppConfig;
     };
@@ -161,9 +140,9 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   it('STORES the clamped value — the boundary does not trust the renderer', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const handlers = registerAgainst(manager);
+    const configOps = configOpsFor(manager);
 
-    await invokeHandler(handlers, 'config:update', {
+    await configOps.updateConfig({
       sprintMaxTasks: { sdk: 10_000, interactive: 0 },
     } satisfies UpdateConfigRequest);
 
@@ -176,14 +155,14 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   it('rejects a malformed payload instead of persisting it', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const handlers = registerAgainst(manager);
+    const configOps = configOpsFor(manager);
 
-    const wrongType = await invokeHandler(handlers, 'config:update', {
+    const wrongType = await configOps.updateConfig({
       sprintMaxTasks: 20,
     } as unknown as UpdateConfigRequest);
     expect(wrongType).toEqual({ success: false, error: 'Invalid sprintMaxTasks payload' });
 
-    const wrongMember = (await invokeHandler(handlers, 'config:update', {
+    const wrongMember = (await configOps.updateConfig({
       sprintMaxTasks: { sdk: 'twenty' },
     } as unknown as UpdateConfigRequest)) as { success: boolean; error?: string };
     expect(wrongMember.success).toBe(false);
@@ -196,9 +175,9 @@ describe('ConfigManager.getSprintMaxTasks', () => {
   it('drops a cleared member so the substrate falls back to its built-in default', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    const handlers = registerAgainst(manager);
+    const configOps = configOpsFor(manager);
 
-    await invokeHandler(handlers, 'config:update', {
+    await configOps.updateConfig({
       sprintMaxTasks: { sdk: 40, interactive: undefined },
     } satisfies UpdateConfigRequest);
 

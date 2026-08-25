@@ -15,6 +15,7 @@ import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 import type { AppConfig } from '../types/config';
+import { trpc } from '../trpc/client';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -505,34 +506,50 @@ export class API {
     },
   };
 
-  // Configuration
+  // Configuration — migrated to the cyboflow.config tRPC router (pilot slice
+  // of the IPC→tRPC migration). No isElectron() guard: other trpc-using code
+  // in this codebase does not guard on it either (the ipcLink transport is
+  // Electron-only by construction).
   static config = {
     async get() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.config.get();
+      return trpc.cyboflow.config.get.query();
     },
 
     async update(updates: Record<string, unknown>) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.config.update(updates);
+      // Kept loose (Record<string, unknown>) for call-site compatibility —
+      // some callers (e.g. ThemeContext) pass a single-field patch. The
+      // router's z.custom<UpdateConfigRequest> (main's type, not importable
+      // from the frontend package) only asserts plain-object shape; member
+      // typing is enforced by ConfigManager.updateConfig. Cast derived from
+      // the procedure's own inferred input type rather than a duplicated
+      // frontend interface, so it can't silently drift.
+      return trpc.cyboflow.config.update.mutate(
+        updates as unknown as Parameters<typeof trpc.cyboflow.config.update.mutate>[0],
+      );
     },
 
     async applyRunTypeDefault(
       key: string,
       op: RunTypeDefaultsOp,
     ): Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>> {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.config.applyRunTypeDefault(key, op);
+      return trpc.cyboflow.config.applyRunTypeDefault.mutate({ key, op });
     },
 
     async getSessionPreferences() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.config.getSessionPreferences();
+      return trpc.cyboflow.config.getSessionPreferences.query();
     },
 
     async updateSessionPreferences(preferences: SessionCreationPreferences) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.config.updateSessionPreferences(preferences);
+      // Cast for the same reason as `update` above: the frontend's
+      // SessionCreationPreferences (stores/sessionPreferencesStore) and the
+      // router's (main's AppConfig['sessionCreationPreferences']) are
+      // separately-maintained mirrors that have already drifted (main's
+      // claudeConfig.model omits 'fable', which the frontend type allows) —
+      // pre-existing drift, unrelated to this migration, that only surfaces
+      // now because tRPC type-checks the call the legacy IPC bridge did not.
+      return trpc.cyboflow.config.updateSessionPreferences.mutate(
+        preferences as unknown as Parameters<typeof trpc.cyboflow.config.updateSessionPreferences.mutate>[0],
+      );
     },
   };
 

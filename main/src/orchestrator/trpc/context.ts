@@ -23,6 +23,7 @@ import type { AgentOverrideRow } from '../../database/models';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
+import type { ConfigOpsLike } from './contracts/configOps';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -427,6 +428,23 @@ export interface ContextDeps {
    * answer rather than the reassuring one.
    */
   verifyRunbookStatus?: VerifyRunbookStatusLike;
+
+  /**
+   * Live config-ops implementation (the `config` router's PILOT-slice
+   * business logic — app-wide config.json reads/writes, run-type defaults,
+   * session-creation preferences).
+   *
+   * Injected from `main/src/index.ts` via `createConfigOps({ configManager,
+   * claudeCodeManager })` (main/src/ipc/configOps.ts). Using the narrow
+   * {@link ConfigOpsLike} interface (rather than importing the concrete
+   * factory) preserves the standalone-typecheck invariant: no
+   * 'main/src/services/*' import is needed here.
+   *
+   * Handlers must explicitly check `ctx.configOps` before use — `undefined`
+   * is the intentional default so unit tests that do not need config access
+   * can omit it.
+   */
+  configOps?: ConfigOpsLike;
 }
 
 /**
@@ -481,6 +499,7 @@ export function createContext(deps: ContextDeps = {}): {
   ompFleetLaunchable?: () => boolean;
   ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
+  configOps?: ConfigOpsLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -501,6 +520,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompFleetLaunchable,
     ompAriaMode,
     verifyRunbookStatus,
+    configOps,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -528,6 +548,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompFleetLaunchable,
     ompAriaMode,
     verifyRunbookStatus,
+    configOps,
   };
 }
 

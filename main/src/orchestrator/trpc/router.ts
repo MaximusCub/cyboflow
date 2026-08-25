@@ -8,6 +8,7 @@
 import { router } from './trpc';
 import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
+import { configRouter } from './routers/config';
 import { designRouter } from './routers/design';
 import { runsRouter } from './routers/runs';
 import { approvalsRouter } from './routers/approvals';
@@ -42,6 +43,7 @@ export const appRouter = router({
     approvals: approvalsRouter,
     design: designRouter,
     artifacts: artifactsRouter,
+    config: configRouter,
     dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
     experiments: experimentsRouter,

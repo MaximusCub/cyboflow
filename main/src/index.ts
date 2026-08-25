@@ -140,6 +140,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
+import { createConfigOps } from './ipc/configOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -899,12 +900,14 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   // buildOmpCommandAdapter applies. The capability is OFF unless the operator
   // set CYBOFLOW_OMP_SUPERVISE, so every command is FORBIDDEN by default.
   const ompCommand = buildOmpCommandAdapter();
+  const configOps = createConfigOps({ configManager, claudeCodeManager: defaultCliManager });
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
     createContext: () =>
       createContext({
         db,
+        configOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
         workflowRegistry,
         agentOverrideRouter: AgentOverrideRouter.getInstance(),

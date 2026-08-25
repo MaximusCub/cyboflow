@@ -52,7 +52,10 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       if (response.success && response.data) {
         set({ config: response.data, isLoading: false });
       } else {
-        set({ error: response.error || 'Failed to fetch config', isLoading: false });
+        set({
+          error: (response.success ? undefined : response.error) || 'Failed to fetch config',
+          isLoading: false,
+        });
       }
     } catch (error) {
       set({ error: 'Failed to fetch config', isLoading: false });

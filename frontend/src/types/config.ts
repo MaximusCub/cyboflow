@@ -10,7 +10,11 @@ import type { VisualVerifyConfig } from '../../../shared/types/visualVerificatio
 import type { RunTypeDefaults } from '../../../shared/types/sessionDefaults';
 
 export interface AppConfig {
-  gitRepoPath: string;
+  // Optional to match main's mirror (main/src/types/config.ts) — a
+  // pre-existing type-parity drift (this field is unused in the frontend and
+  // was never actually guaranteed present) that only surfaces now that the
+  // cyboflow.config tRPC router type-checks the response end-to-end.
+  gitRepoPath?: string;
   verbose?: boolean;
   systemPromptAppend?: string;
   runScript?: string[];

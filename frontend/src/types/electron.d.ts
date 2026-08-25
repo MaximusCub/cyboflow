@@ -2,10 +2,8 @@
 import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
-import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
-import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
@@ -39,7 +37,6 @@ import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
-import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
 
 interface LogEntry {
   timestamp: string;
@@ -353,17 +350,6 @@ interface ElectronAPI {
   // Demo-mode tour info (sandbox repo to prefill in the Create Project dialog)
   demo: {
     getInfo: () => Promise<IPCDataResponse<{ demoMode: boolean; sandboxPath: string | null; projectName: string }>>;
-  };
-
-  config: {
-    get: () => Promise<IPCDataResponse<AppConfig>>;
-    update: (updates: Record<string, unknown>) => Promise<IPCResponse<void>>;
-    applyRunTypeDefault: (
-      key: string,
-      op: RunTypeDefaultsOp,
-    ) => Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>>;
-    getSessionPreferences: () => Promise<IPCResponse<SessionCreationPreferences>>;
-    updateSessionPreferences: (preferences: SessionCreationPreferences) => Promise<IPCResponse<void>>;
   };
 
   // Telemetry — fire-and-forget renderer → main usage tracking (returns void, never throws).

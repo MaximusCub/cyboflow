@@ -65,7 +65,10 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
         mergedPreferences.sessionCount = defaultPreferences.sessionCount;
         set({ preferences: mergedPreferences, isLoading: false });
       } else {
-        set({ error: response.error || 'Failed to load session preferences', isLoading: false });
+        set({
+          error: (response.success ? undefined : response.error) || 'Failed to load session preferences',
+          isLoading: false,
+        });
       }
     } catch (error) {
       set({ error: 'Failed to load session preferences', isLoading: false });

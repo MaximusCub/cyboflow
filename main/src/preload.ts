@@ -2,7 +2,6 @@ import '@sentry/electron/preload';
 import { contextBridge, ipcRenderer } from 'electron';
 import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
-import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
@@ -19,7 +18,6 @@ import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
 import type { QuickSessionRow } from '../../shared/types/quickSessions';
 import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../shared/types/ideaSession';
-import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../shared/types/sessionDefaults';
 import type {
   BugReportPreview,
   BugReportRunLink,
@@ -561,18 +559,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   demo: {
     getInfo: (): Promise<IPCResponse<{ demoMode: boolean; sandboxPath: string | null; projectName: string }>> =>
       ipcRenderer.invoke('demo:get-info'),
-  },
-
-  config: {
-    get: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get'),
-    update: (updates: UpdateConfigRequest): Promise<IPCResponse> => ipcRenderer.invoke('config:update', updates),
-    applyRunTypeDefault: (
-      key: string,
-      op: RunTypeDefaultsOp,
-    ): Promise<IPCResponse<{ previous: RunTypeDefaults | undefined; config: AppConfig }>> =>
-      ipcRenderer.invoke('config:apply-run-type-default', key, op),
-    getSessionPreferences: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get-session-preferences'),
-    updateSessionPreferences: (preferences: AppConfig['sessionCreationPreferences']): Promise<IPCResponse> => ipcRenderer.invoke('config:update-session-preferences', preferences),
   },
 
   // Telemetry (fire-and-forget renderer -> main)
