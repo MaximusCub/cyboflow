@@ -3616,17 +3616,20 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       ]);
     });
 
-    it('a TERMINAL batch (completed) emits NO sprint membership', async () => {
-      const db = buildDb();
-      addMembershipSchema(db);
-      const router = TaskChangeRouter.initialize(dbAdapter(db));
-      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
-      seedBatch(db, 'bat-1', 'completed');
-      seedBatchTask(db, 'bat-1', taskId);
+    it.each(['completed', 'failed', 'canceled'] as const)(
+      'a TERMINAL batch (%s) emits NO sprint membership',
+      async (status) => {
+        const db = buildDb();
+        addMembershipSchema(db);
+        const router = TaskChangeRouter.initialize(dbAdapter(db));
+        const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+        seedBatch(db, 'bat-1', status);
+        seedBatchTask(db, 'bat-1', taskId);
 
-      const event = await emitNoopUpdate(router, taskId);
-      expect(event.task.memberships).toEqual([]);
-    });
+        const event = await emitNoopUpdate(router, taskId);
+        expect(event.task.memberships).toEqual([]);
+      },
+    );
 
     it('a LIVE experiment emits exactly ONE membership despite the two per-arm mapping rows', async () => {
       const db = buildDb();
@@ -3651,6 +3654,29 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         { kind: 'experiment', id: 'exp_1', label: 'sprint: Variant A vs Variant B · exp_1', status: 'running' },
       ]);
     });
+
+    it.each(['decided', 'abandoned', 'superseded'] as const)(
+      'a TERMINAL experiment (%s) emits NO experiment membership',
+      async (status) => {
+        const db = buildDb();
+        addMembershipSchema(db);
+        db.prepare(
+          `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+        ).run();
+        const router = TaskChangeRouter.initialize(dbAdapter(db));
+        const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+        seedExperiment(db, { id: 'exp_1', workflowId: 'wf-1', status, variantAId: 'wfv_a', variantBId: 'wfv_b' });
+        seedExperimentSeedTask(db, {
+          experimentId: 'exp_1',
+          originalTaskId: taskId,
+          cloneTaskIdA: 'clone-a',
+          cloneTaskIdB: 'clone-b',
+        });
+
+        const event = await emitNoopUpdate(router, taskId);
+        expect(event.task.memberships).toEqual([]);
+      },
+    );
 
     it('a task with no active batch/experiment emits memberships: []', async () => {
       const db = buildDb();

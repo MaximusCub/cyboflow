@@ -1229,14 +1229,37 @@ describe('taskListing — sprint-batch membership overlay', () => {
     ]);
   });
 
-  it('a batch that has gone terminal (completed/failed/canceled) contributes NO membership', () => {
+  it.each(['completed', 'failed', 'canceled'] as const)(
+    'a batch that has gone terminal (%s) contributes NO membership',
+    (status) => {
+      const db = buildMembershipDb();
+      seedTask(db, 'tsk_a', 'TASK-001', 9);
+      seedBatch(db, 'bat_1', status);
+      seedBatchTask(db, 'bat_1', 'tsk_a');
+
+      const backlog = selectProjectBacklog(dbAdapter(db), 1);
+      expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toEqual([]);
+    },
+  );
+
+  it('two tasks sharing the SAME active batch both resolve the identical label (dedup by batch id)', () => {
     const db = buildMembershipDb();
-    seedTask(db, 'tsk_a', 'TASK-001', 9);
-    seedBatch(db, 'bat_1', 'completed');
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_b', 'TASK-002', 6);
+    seedNamedWorkflow(db, 'wf-sprint-1', 'sprint');
+    seedBatch(db, 'bat_1', 'running');
     seedBatchTask(db, 'bat_1', 'tsk_a');
+    seedBatchTask(db, 'bat_1', 'tsk_b');
+    seedSession(db, 'sess-1', 'shared-session');
+    seedBatchOwningRun(db, { runId: 'run-1', batchId: 'bat_1', workflowId: 'wf-sprint-1', sessionId: 'sess-1' });
 
     const backlog = selectProjectBacklog(dbAdapter(db), 1);
-    expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toEqual([]);
+    const a = backlog.find((t) => t.id === 'tsk_a')!;
+    const b = backlog.find((t) => t.id === 'tsk_b')!;
+    // The label is resolved ONCE per unique batch id (not once per task row) —
+    // both tasks in the SAME batch must read back the IDENTICAL entry.
+    expect(a.memberships).toEqual([{ kind: 'sprint', id: 'bat_1', label: 'shared-session · bat_1', status: 'running' }]);
+    expect(b.memberships).toEqual(a.memberships);
   });
 
   it('planning and finalizing (the other two active lifecycles) both project a membership', () => {
@@ -1318,6 +1341,42 @@ describe('taskListing — sprint-batch membership overlay', () => {
     expect(viaTaskById).toEqual(viaListing);
     expect(viaEpicChildren).toEqual(viaListing);
   });
+
+  it('an EXPERIMENT membership on a nested epic-child task propagates identically across selectProjectBacklog, selectTaskById, and selectIdeaDecomposition', () => {
+    const db = buildMembershipDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    seedNamedWorkflow(db, 'wf-1', 'sprint');
+    seedExperiment(db, { id: 'exp_1', workflowId: 'wf-1', status: 'running', variantAId: 'wfv_a', variantBId: 'wfv_b' });
+    seedExperimentSeedTask(db, {
+      experimentId: 'exp_1',
+      originalTaskId: taskId,
+      cloneTaskIdA: 'tsk_clone_a',
+      cloneTaskIdB: 'tsk_clone_b',
+    });
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_a', 'wf-1', 'Variant A')`).run();
+    db.prepare(`INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_b', 'wf-1', 'Variant B')`).run();
+
+    const expected = [
+      { kind: 'experiment', id: 'exp_1', label: 'sprint: Variant A vs Variant B · exp_1', status: 'running' },
+    ];
+
+    const viaListing = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === epicId)!.children![0]
+      .memberships;
+    expect(viaListing).toEqual(expected);
+
+    const viaTaskById = selectTaskById(dbAdapter(db), taskId)!.memberships;
+    expect(viaTaskById).toEqual(expected);
+
+    const viaEpicChildren = selectTaskById(dbAdapter(db), epicId)!.children![0].memberships;
+    expect(viaEpicChildren).toEqual(expected);
+
+    // selectIdeaDecomposition's epic-children pass is a SEPARATE nested query
+    // path from selectTaskById's — exercise it too.
+    const viaDecomposition = selectIdeaDecomposition(dbAdapter(db), ideaId)!.children!.find(
+      (c) => c.id === epicId,
+    )!.children![0].memberships;
+    expect(viaDecomposition).toEqual(expected);
+  });
 });
 
 describe('taskListing — experiment membership overlay', () => {
@@ -1363,6 +1422,20 @@ describe('taskListing — experiment membership overlay', () => {
     expect(backlog.find((t) => t.id === 'tsk_a')!.memberships[0].status).toBe('grading');
     expect(backlog.find((t) => t.id === 'tsk_b')!.memberships).toEqual([]);
   });
+
+  it.each(['decided', 'abandoned', 'superseded'] as const)(
+    'a terminal experiment status (%s) contributes NO membership',
+    (status) => {
+      const db = buildMembershipDb();
+      seedTask(db, 'tsk_a', 'TASK-001', 6);
+      seedNamedWorkflow(db, 'wf-1', 'sprint');
+      seedExperiment(db, { id: 'exp_a', workflowId: 'wf-1', status, variantAId: 'wfv_a', variantBId: 'wfv_b' });
+      seedExperimentSeedTask(db, { experimentId: 'exp_a', originalTaskId: 'tsk_a', cloneTaskIdA: 'c1', cloneTaskIdB: 'c2' });
+
+      const backlog = selectProjectBacklog(dbAdapter(db), 1);
+      expect(backlog.find((t) => t.id === 'tsk_a')!.memberships).toEqual([]);
+    },
+  );
 
   it('only the VISIBLE ORIGINAL task gets a membership — a hidden per-arm clone does not', () => {
     const db = buildMembershipDb();
