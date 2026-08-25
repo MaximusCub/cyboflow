@@ -1,6 +1,40 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { CodexPtyManager, codexPermissionFlagsForMode } from '../codexPtyManager';
 import type { SessionManager } from '../../../sessionManager';
+
+/** Minimal stand-in for a live node-pty process, recording every write. */
+interface FakePty {
+  writes: string[];
+  killed: boolean;
+  write(data: string): void;
+  kill(): void;
+  pid: undefined;
+}
+
+function makeFakePty(): FakePty {
+  const proc: FakePty = {
+    writes: [],
+    killed: false,
+    write(data: string) {
+      proc.writes.push(data);
+    },
+    kill() {
+      proc.killed = true;
+    },
+    // `undefined` keeps killProcess on its no-PID fallback branch, so stopPanel is
+    // exercised for real without shelling out to pgrep / signalling anything.
+    pid: undefined,
+  };
+  return proc;
+}
+
+interface CliProcessLike {
+  process: pty.IPty;
+  panelId: string;
+  sessionId: string;
+  worktreePath: string;
+}
 
 class TestableCodexPtyManager extends CodexPtyManager {
   callBuildCommandArgs(options: Record<string, unknown>): string[] {
@@ -45,6 +79,16 @@ class TestableCodexPtyManager extends CodexPtyManager {
       panelId,
       sessionId,
     );
+  }
+
+  /** Install a fake live PTY for `panelId` without spawning anything. */
+  seedProcess(panelId: string, proc: FakePty, sessionId = 'session-1'): void {
+    (this.processes as unknown as Map<string, CliProcessLike>).set(panelId, {
+      process: proc as unknown as pty.IPty,
+      panelId,
+      sessionId,
+      worktreePath: '/tmp/worktree',
+    });
   }
 }
 
@@ -140,6 +184,131 @@ describe('CodexPtyManager concurrent spawn context', () => {
 
     expect(capturedFirst).toEqual(first);
     expect(capturedSecond).toEqual(second);
+  });
+});
+
+/**
+ * The composer-relay seam. Regression cover for the "a follow-up typed into the
+ * app's chat composer never sends, but the same text typed straight into the
+ * terminal does" defect: the Codex TUI treats a `body + '\r'` written in ONE
+ * pty.write as a PASTE, so the trailing '\r' is inserted as a literal newline and
+ * the turn sits unsubmitted in the composer forever. Reproduced deterministically
+ * against the bundled Codex CLI 0.144.3 through a node-pty harness (see
+ * COMPOSER_SUBMIT_DELAY_MS in codexPtyManager.ts for the full measurement table).
+ */
+describe('CodexPtyManager.relayUserTurn (composer submit)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('writes the body and the Enter as two distinct writes, body first', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'follow-up turn');
+
+    // The body goes out on its own — no '\r' riding along in the same write.
+    expect(proc.writes).toEqual(['follow-up turn']);
+
+    vi.advanceTimersByTime(1000);
+
+    expect(proc.writes).toEqual(['follow-up turn', '\r']);
+  });
+
+  it('suppresses the deferred Enter when the panel was stopped inside the delay window', async () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'doomed turn');
+    await manager.stopPanel('panel-1');
+
+    vi.advanceTimersByTime(1000);
+
+    // No stray '\r' into a dead process.
+    expect(proc.writes).toEqual(['doomed turn']);
+    expect(manager.isPanelRunning('panel-1')).toBe(false);
+  });
+
+  it('suppresses the deferred Enter when the panel process was REPLACED inside the delay window', () => {
+    // continuePanel / restartPanelWithHistory kill and respawn under the SAME
+    // panelId, so a presence-only guard would fire the Enter into a fresh REPL
+    // that never received the body — committing whatever the new process had.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const original = makeFakePty();
+    manager.seedProcess('panel-1', original);
+
+    manager.relayUserTurn('panel-1', 'turn for the old process');
+    const replacement = makeFakePty();
+    manager.seedProcess('panel-1', replacement);
+
+    vi.advanceTimersByTime(1000);
+
+    expect(original.writes).toEqual(['turn for the old process']);
+    expect(replacement.writes).toEqual([]);
+  });
+
+  it('delivers the turn exactly once and never respawns the persistent process', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'hello codex');
+    vi.advanceTimersByTime(5000);
+
+    expect(proc.writes).toEqual(['hello codex', '\r']);
+    expect(proc.killed).toBe(false);
+    expect(manager.getProcess('panel-1')?.process).toBe(proc as unknown as pty.IPty);
+  });
+
+  it('still throws for a panel with no live process, and schedules nothing', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+
+    expect(() => manager.relayUserTurn('panel-ghost', 'nowhere to go')).toThrow(
+      /No Codex process found/,
+    );
+    expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
+  });
+});
+
+describe('CodexPtyManager.relayRawInput (raw keystroke passthrough)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('forwards bytes verbatim in a single synchronous write, with no split and no delay', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    // A real Enter keystroke already arrives as its own '\r' — it must NOT be
+    // split off or deferred the way the composer path's Enter is.
+    manager.relayRawInput('panel-1', 'ls -la\r');
+    expect(proc.writes).toEqual(['ls -la\r']);
+
+    vi.advanceTimersByTime(1000);
+    expect(proc.writes).toEqual(['ls -la\r']);
+  });
+
+  it('passes control sequences through byte-for-byte', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayRawInput('panel-1', '\x1b[A'); // Up arrow
+    manager.relayRawInput('panel-1', '\x03'); // Ctrl-C
+    manager.relayRawInput('panel-1', '\x1b[200~pasted\r text\x1b[201~'); // bracketed paste
+
+    expect(proc.writes).toEqual(['\x1b[A', '\x03', '\x1b[200~pasted\r text\x1b[201~']);
+    vi.advanceTimersByTime(1000);
+    expect(proc.writes).toHaveLength(3);
   });
 });
 

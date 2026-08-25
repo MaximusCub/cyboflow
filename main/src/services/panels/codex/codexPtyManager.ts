@@ -49,6 +49,31 @@ interface CodexPtySpawnContext {
 
 const PTY_BACKLOG_CAP_BYTES = 200_000;
 
+/**
+ * How long to wait after writing a composer turn's BODY before writing the
+ * SEPARATE '\r' (Enter) that submits it. See {@link CodexPtyManager.relayUserTurn}.
+ *
+ * WHY THE SPLIT EXISTS. The Codex TUI runs paste-burst detection over its stdin:
+ * characters that arrive together are treated as a PASTE, and a '\r' riding
+ * inside that same burst is inserted as a literal NEWLINE instead of acting as
+ * Enter. The turn's text then just sits in the composer, unsubmitted, forever —
+ * which is exactly the "the composer's follow-up never sends, but typing the
+ * same thing into the terminal works" report. (InteractiveClaudeManager hit the
+ * identical class of bug against `claude` and fixes it the same way; see its
+ * SUBMIT_DELAY_MS / submitToRepl.)
+ *
+ * MEASURED against the bundled Codex CLI 0.144.3, driving the real TUI through a
+ * node-pty harness and reading the rendered screen (short body, idle composer,
+ * both on a fresh REPL and as a genuine 2nd turn after a `-- <prompt>` 1st turn):
+ *   body + '\r' in ONE write ............... never submits (stuck in composer)
+ *   '\r' 0ms / 5ms / 10ms / 15ms later ..... never submits
+ *   '\r' 20ms / 60ms / 150ms later ......... submits
+ *   char-by-char, then '\r' (human typing) . submits
+ * So the burst window is >15ms and <=20ms. 150ms is ~7x that floor — margin for a
+ * busy main-process event loop, still far below human perception.
+ */
+const COMPOSER_SUBMIT_DELAY_MS = 150;
+
 export function codexPermissionFlagsForMode(mode: PermissionMode): CodexPermissionFlags {
   switch (mode) {
     case 'default':
@@ -326,10 +351,54 @@ export class CodexPtyManager extends AbstractCliManager {
     await this.startPanel(panelId, sessionId, worktreePath, prompt, permissionMode, model);
   }
 
+  /**
+   * Composer-relay seam: submit a chat-composer turn into the LIVE Codex REPL the
+   * way a human types it — the BODY first, then '\r' (Enter) as its OWN, LATER
+   * write once the TUI's paste-burst window has closed (COMPOSER_SUBMIT_DELAY_MS).
+   * A single `body + '\r'` write is swallowed as a pasted newline and never
+   * submits; see COMPOSER_SUBMIT_DELAY_MS for the measurements.
+   *
+   * The panel receives the message exactly once — nothing here restarts or
+   * replaces the persistent PTY process.
+   *
+   * The raw-keystroke path (xterm -> relayRawInput, where Enter already arrives as
+   * its own '\r') must NOT route through here: it is byte-for-byte passthrough.
+   */
   relayUserTurn(panelId: string, input: string): void {
-    this.sendInput(panelId, `${input}\r`);
+    // Throws when this panel has no live process — preserved from the previous
+    // single-write form so a dead-panel relay still surfaces to the IPC caller
+    // rather than silently half-completing.
+    this.sendInput(panelId, input);
+    // Pin the EXACT process the body went to. stopPanel / continuePanel /
+    // restartPanelWithHistory can kill (and, for the latter two, respawn) this
+    // panelId inside the delay window, so a presence-only `processes.has()` check
+    // is not enough: it would let the deferred Enter land in an UNRELATED fresh
+    // REPL that never received the body. Identity match or nothing.
+    const target = this.getProcess(panelId)?.process;
+    if (!target) return;
+    const timer = setTimeout(() => {
+      if (this.getProcess(panelId)?.process !== target) return;
+      try {
+        this.sendInput(panelId, '\r');
+      } catch (err) {
+        this.logger?.warn(
+          `[Codex] deferred submit '\\r' failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, COMPOSER_SUBMIT_DELAY_MS);
+    // A pending Enter must never hold the event loop open at app quit.
+    if (typeof (timer as { unref?: () => void }).unref === 'function') {
+      (timer as { unref: () => void }).unref();
+    }
   }
 
+  /**
+   * Raw keystroke passthrough from the xterm pane. Deliberately a SINGLE
+   * synchronous write of exactly the bytes received — no splitting, no delay, no
+   * shared code with relayUserTurn's deferred Enter. The user's Enter is already
+   * its own '\r' here, and the TUI's paste-burst detection is precisely what makes
+   * a real paste into the terminal behave like a paste.
+   */
   relayRawInput(panelId: string, input: string): void {
     this.sendInput(panelId, input);
   }
