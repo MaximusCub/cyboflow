@@ -399,6 +399,61 @@ export function applyWorkflowAgentConfigs(
 }
 
 /**
+ * The heading the prompt addendum is filed under in the rendered agent body.
+ *
+ * A heading rather than a bare paragraph on purpose: a builtin body ends with its
+ * `## Result` contract, and text appended without a heading would read as part of
+ * that contract instead of as a separate instruction.
+ */
+const PROMPT_ADDENDUM_HEADING = '## Tuning-level addendum';
+
+/**
+ * Append each workflow agent config's `promptAddendum` to the agent's ALREADY
+ * RESOLVED system prompt (plan D5). Pure — no DB / FS.
+ *
+ * This is the LAST layer, applied after `applyWorkflowAgentConfigs` AND
+ * `applyVariantAgentDeltas`, so the addendum lands on whatever prompt actually
+ * won: a project's hardened `agent_overrides` body, a workflow-scoped `custom`
+ * copy, or a variant delta's wholesale replacement. That ordering is the whole
+ * point of the field — a preset that folded a removed lane step's work into a
+ * surviving agent must COMPOSE with the project's own agent policy rather than
+ * clobber it (an embedded `custom` copy would total-replace
+ * description/systemPrompt/tools/enabledMcps, silently erasing a project's tool
+ * and MCP restrictions).
+ *
+ * It touches exactly ONE field. `tools`, `enabledMcps`, `model`, `runtime`,
+ * `providerModel`, `effort`, `description` and `role` are carried through
+ * untouched by construction.
+ *
+ * `rawContent` is DROPPED and `source` flips `builtin -> builtin-override` on any
+ * agent that receives an addendum — WITHOUT that, the overlay would write the
+ * unoverridden builtin's verbatim `.md` and the addendum would never reach the
+ * spawned subagent at all (`installAgentOverlay` prefers `rawContent` over the
+ * rendered body). An empty / whitespace-only addendum is a no-op, so it can
+ * never trigger a spurious source flip.
+ */
+export function applyPromptAddenda(
+  effective: EffectiveAgent[],
+  configs: Record<string, WorkflowAgentConfig>,
+): EffectiveAgent[] {
+  return effective.map((agent) => {
+    const raw = configs[agent.agentKey]?.promptAddendum;
+    if (typeof raw !== 'string') return agent;
+    const addendum = raw.trim();
+    if (addendum.length === 0) return agent;
+
+    const source = agent.source === 'builtin' ? 'builtin-override' : agent.source;
+    const { rawContent: _dropped, ...rest } = agent;
+    void _dropped;
+    return {
+      ...rest,
+      systemPrompt: `${agent.systemPrompt}\n\n${PROMPT_ADDENDUM_HEADING}\n\n${addendum}`,
+      source,
+    };
+  });
+}
+
+/**
  * Assemble the tRPC `AgentEntry` wire shape from an effective agent, its backing
  * override row (for `lastEditedAt`), and its computed usage.
  *

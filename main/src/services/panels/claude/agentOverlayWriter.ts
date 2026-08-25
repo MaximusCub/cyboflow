@@ -47,6 +47,7 @@ import {
   computeEffectiveAgents,
   applyWorkflowAgentConfigs,
   applyVariantAgentDeltas,
+  applyPromptAddenda,
   type EffectiveAgent,
 } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
@@ -191,6 +192,14 @@ function readWorkflowAgentConfigs(
  * project override — and a variant run's per-agent deltas (A/B testing, migration
  * 048) then apply LAST, so a variant delta still WINS over the workflow config for
  * the fields it touches.
+ *
+ * A workflow agent config's `promptAddendum` (tuning levels, plan D5) is then
+ * APPENDED to whichever system prompt that merge resolved — after the variant
+ * delta, so it composes with a wholesale variant replacement too. It is a pure
+ * append: no other field of the resolved agent moves. Doing it here, at the one
+ * point where the effective prompt is finished, is what makes it reach BOTH planes
+ * — the orchestrated overlay `.md` files and the programmatic `resolveStepAgent`
+ * seam both read this function's return value.
  */
 export function resolveRunEffectiveAgents(
   db: Database.Database,
@@ -212,6 +221,9 @@ export function resolveRunEffectiveAgents(
   const variantDeltas = readVariantAgentDeltas(db, runId, logger);
   if (variantDeltas) {
     effective = applyVariantAgentDeltas(effective, variantDeltas);
+  }
+  if (workflowConfigs) {
+    effective = applyPromptAddenda(effective, workflowConfigs);
   }
   return effective;
 }
