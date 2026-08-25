@@ -15,7 +15,18 @@
  * re-measures) so WorkflowCanvas itself never re-renders at animation-frame
  * rate — see WorkflowCanvasToken for the isolation rationale.
  *
- * TASK-769 / TASK-780 / IDEA-026
+ * The graph region below the (always-stationary) meta row is split into two
+ * nested elements (TASK-204) so it scrolls independently of the active-tab
+ * pane instead of growing it: an outer "viewport" (`workflow-canvas-viewport`,
+ * `flex: 1; min-height: 0`, both overflow axes `auto`) bounded to the
+ * remaining tab space, and a nested "inner" content div
+ * (`workflow-canvas-inner`) that carries the graph's own computed minimum
+ * width/height and the phase columns/cards — the element rects are measured
+ * against. A tall or wide workflow overflows the inner content, which the
+ * viewport then scrolls in either axis; the meta row is a sibling of the
+ * viewport, so it never scrolls with the graph.
+ *
+ * TASK-769 / TASK-780 / TASK-204 / IDEA-026
  */
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import { PauseCircle } from 'lucide-react';
@@ -207,9 +218,17 @@ export function WorkflowCanvas({
     return { phase, x };
   });
 
-  // ── Canvas inner height: tallest column + TOP padding ────────────────────
+  // ── Canvas inner minimum dimensions: these belong to the INNER content
+  // element (not the scroll viewport around it) — see TASK-204. Height =
+  // tallest column + TOP padding; width = every phase column + inter-column
+  // gaps + the inner div's own 12px left/right padding (accounted for via
+  // boxSizing: 'border-box' on that element).
   const maxSteps = Math.max(...definition.phases.map((p) => p.steps.length), 0);
   const canvasInnerHeight = TOP + maxSteps * ROW_H + 12;
+  const canvasInnerWidth =
+    columns.length > 0
+      ? columns.length * COL_W + (columns.length - 1) * COL_GAP + 24
+      : 0;
 
   // ── Refs for rect measurement ─────────────────────────────────────────────
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -423,122 +442,142 @@ export function WorkflowCanvas({
         ) : null}
       </div>
 
-      {/* ── Canvas inner — phase columns with step cards ───────────────────── */}
+      {/* ── Canvas viewport — the scrollable region. Height-constrained to the
+          remaining flex space in the active-tab pane (flex: 1; min-height: 0
+          so it can shrink below its content's intrinsic size instead of
+          growing the center pane); the graph's own minimum dimensions live on
+          the nested "inner" content below, so both axes scroll independently
+          of the pane's computed height. See TASK-204. ────────────────────── */}
       <div
-        ref={innerRef}
         style={{
-          position: 'relative',
           flex: 1,
+          minHeight: 0,
           overflowX: 'auto',
           overflowY: 'auto',
-          display: 'flex',
-          gap: COL_GAP,
-          padding: `${TOP}px 12px 12px`,
-          minHeight: canvasInnerHeight,
-          // 24px dotted-grid backdrop (Protoflow flow canvas)
-          background: GRAPH_PAPER_BACKGROUND,
         }}
-        data-testid="workflow-canvas-inner"
+        data-testid="workflow-canvas-viewport"
       >
-        {/* SVG edge overlay */}
+        {/* ── Canvas inner — phase columns with step cards. Carries the
+            graph's computed minimum width/height (not the viewport above),
+            so this element — not its scroll ancestor — is what actually
+            grows to fit a tall/wide workflow. Also the element step rects
+            and edge/token overlay coordinates are measured relative to
+            (innerRef), so alignment is unaffected by the split. ─────────── */}
         <div
-          data-testid="workflow-canvas-edges-overlay"
-          style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+          ref={innerRef}
+          style={{
+            position: 'relative',
+            display: 'flex',
+            gap: COL_GAP,
+            padding: `${TOP}px 12px 12px`,
+            minWidth: canvasInnerWidth,
+            minHeight: canvasInnerHeight,
+            boxSizing: 'border-box',
+            // 24px dotted-grid backdrop (Protoflow flow canvas)
+            background: GRAPH_PAPER_BACKGROUND,
+          }}
+          data-testid="workflow-canvas-inner"
         >
-          <WorkflowCanvasEdges
-            definition={definition}
-            currentStepIndex={currentIdx}
-            stepRects={stepRects}
-            containerRect={containerRect}
-          />
-          {/* Animated token — isolated child owns the per-frame RAF clock so
-              its ~60-120fps ticks never re-render WorkflowCanvas itself. */}
-          <WorkflowCanvasToken
-            enabled={tokenEnabled}
-            fromX={tokenEndpoints?.fromX}
-            fromY={tokenEndpoints?.fromY}
-            toX={tokenEndpoints?.toX}
-            toY={tokenEndpoints?.toY}
-          />
-        </div>
+          {/* SVG edge overlay */}
+          <div
+            data-testid="workflow-canvas-edges-overlay"
+            style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+          >
+            <WorkflowCanvasEdges
+              definition={definition}
+              currentStepIndex={currentIdx}
+              stepRects={stepRects}
+              containerRect={containerRect}
+            />
+            {/* Animated token — isolated child owns the per-frame RAF clock so
+                its ~60-120fps ticks never re-render WorkflowCanvas itself. */}
+            <WorkflowCanvasToken
+              enabled={tokenEnabled}
+              fromX={tokenEndpoints?.fromX}
+              fromY={tokenEndpoints?.fromY}
+              toX={tokenEndpoints?.toX}
+              toY={tokenEndpoints?.toY}
+            />
+          </div>
 
-        {columns.map(({ phase }, phaseIdx) => {
-          // Track running flat-step index across phases
-          let phaseFlatStart = 0;
-          for (let i = 0; i < phaseIdx; i++) {
-            phaseFlatStart += definition.phases[i].steps.length;
-          }
+          {columns.map(({ phase }, phaseIdx) => {
+            // Track running flat-step index across phases
+            let phaseFlatStart = 0;
+            for (let i = 0; i < phaseIdx; i++) {
+              phaseFlatStart += definition.phases[i].steps.length;
+            }
 
-          return (
-            <div
-              key={phase.id}
-              style={{
-                width: COL_W,
-                flexShrink: 0,
-                position: 'relative',
-              }}
-              data-testid={`phase-column-${phase.id}`}
-            >
-              {/* Band label — absolute, above the column */}
-              <span
+            return (
+              <div
+                key={phase.id}
                 style={{
-                  position: 'absolute',
-                  top: -20,
-                  left: 4,
-                  fontSize: 9,
-                  letterSpacing: '0.18em',
-                  textTransform: 'uppercase',
-                  color: phase.color,
-                  whiteSpace: 'nowrap',
+                  width: COL_W,
+                  flexShrink: 0,
+                  position: 'relative',
                 }}
-                data-testid={`phase-band-${phase.id}`}
+                data-testid={`phase-column-${phase.id}`}
               >
-                {phase.label.toUpperCase()}
-              </span>
+                {/* Band label — absolute, above the column */}
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: -20,
+                    left: 4,
+                    fontSize: 9,
+                    letterSpacing: '0.18em',
+                    textTransform: 'uppercase',
+                    color: phase.color,
+                    whiteSpace: 'nowrap',
+                  }}
+                  data-testid={`phase-band-${phase.id}`}
+                >
+                  {phase.label.toUpperCase()}
+                </span>
 
-              {/* Step cards stacked vertically */}
-              {phase.steps.map((step, stepInPhase) => {
-                const flatIdx = phaseFlatStart + stepInPhase;
-                const derivedStatus = statusFor(flatIdx);
-                const globalStepIndex = flatIdx + 1; // 1-based
+                {/* Step cards stacked vertically */}
+                {phase.steps.map((step, stepInPhase) => {
+                  const flatIdx = phaseFlatStart + stepInPhase;
+                  const derivedStatus = statusFor(flatIdx);
+                  const globalStepIndex = flatIdx + 1; // 1-based
 
-                return (
-                  <div
-                    key={step.id}
-                    ref={(el) => { stepRefs.current.set(step.id, el); }}
-                    style={{ height: ROW_H, position: 'relative' }}
-                    data-testid={`step-wrapper-${step.id}`}
-                  >
-                    <WorkflowStepCard
-                      step={step}
-                      phase={phase}
-                      stepIndex={globalStepIndex}
-                      status={derivedStatus}
-                    />
-                    {/* "creates ⟨artifact⟩" footer chip — absolutely positioned
-                        below the card so it never alters the measured card rect
-                        (edge-overlay anchoring) or the column grid. */}
-                    {step.outputArtifact && (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: ROW_H - 16,
-                          left: 0,
-                          right: 0,
-                        }}
-                      >
-                        <StepArtifactChip
-                          outputArtifact={step.outputArtifact}
-                          sessionKey={sessionKey}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })}
+                  return (
+                    <div
+                      key={step.id}
+                      ref={(el) => { stepRefs.current.set(step.id, el); }}
+                      style={{ height: ROW_H, position: 'relative' }}
+                      data-testid={`step-wrapper-${step.id}`}
+                    >
+                      <WorkflowStepCard
+                        step={step}
+                        phase={phase}
+                        stepIndex={globalStepIndex}
+                        status={derivedStatus}
+                      />
+                      {/* "creates ⟨artifact⟩" footer chip — absolutely positioned
+                          below the card so it never alters the measured card rect
+                          (edge-overlay anchoring) or the column grid. */}
+                      {step.outputArtifact && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: ROW_H - 16,
+                            left: 0,
+                            right: 0,
+                          }}
+                        >
+                          <StepArtifactChip
+                            outputArtifact={step.outputArtifact}
+                            sessionKey={sessionKey}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 /**
- * WorkflowCanvas component tests (TASK-769, TASK-780).
+ * WorkflowCanvas component tests (TASK-769, TASK-780, TASK-204).
  *
  * Behaviors verified:
  *   1. Meta row: workflow title, run label, elapsed, tokens, running pill all present when isRunning=true.
@@ -9,6 +9,10 @@
  *   5. WorkflowCanvasEdges overlay present when currentStepId is supplied.
  *   6. Animated token overlay (WorkflowCanvasToken) present only while running
  *      and mid-workflow; absent when not running or at the final step.
+ *   7. TASK-204: a tall workflow's graph min-height lives on the nested
+ *      "inner" content div, not the bounded "viewport" scrollport around it,
+ *      and workflow-canvas-meta is NOT a descendant of that scrollable
+ *      content (so it stays stationary while the graph scrolls).
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
@@ -43,6 +47,28 @@ const MOCK_DEFINITION: WorkflowDefinition = {
       ],
     },
   ],
+};
+
+// ---------------------------------------------------------------------------
+// Tall/wide fixture: 5 phases × 12 steps each — forces a large computed
+// min-height (and a wide min-width across 5 columns) so the viewport/content
+// containment split (TASK-204) has something to actually separate.
+// ---------------------------------------------------------------------------
+
+const TALL_DEFINITION: WorkflowDefinition = {
+  id: 'sprint-tall',
+  phases: Array.from({ length: 5 }, (_, phaseIdx) => ({
+    id: `phase-${phaseIdx}`,
+    label: `Phase ${phaseIdx}`,
+    color: '#3b6dd6',
+    steps: Array.from({ length: 12 }, (_, stepIdx) => ({
+      id: `tall-step-${phaseIdx}-${stepIdx}`,
+      name: `Step ${phaseIdx}.${stepIdx}`,
+      agent: 'executor',
+      mcps: [],
+      retries: 0,
+    })),
+  })),
 };
 
 // ---------------------------------------------------------------------------
@@ -274,5 +300,68 @@ describe('WorkflowCanvas', () => {
     );
 
     expect(screen.queryByTestId('workflow-canvas-token-overlay')).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // TASK-204: independently-scrollable graph region
+  // -------------------------------------------------------------------------
+
+  it('puts the graph min-height/min-width on the inner content, not the bounded viewport', () => {
+    render(
+      <WorkflowCanvas definition={TALL_DEFINITION} currentStepId={null} />,
+    );
+
+    const viewport = screen.getByTestId('workflow-canvas-viewport');
+    const inner = screen.getByTestId('workflow-canvas-inner');
+
+    // The viewport is the flex child bounded to the remaining pane space —
+    // it must NOT carry the graph's own minimum height/width (that would
+    // defeat the containment and grow the pane instead of scrolling).
+    expect(viewport).toHaveStyle({ flex: '1 1 0%', minHeight: '0px', overflowY: 'auto', overflowX: 'auto' });
+    expect(viewport.style.minWidth).toBe('');
+    expect(viewport.style.height).toBe('');
+
+    // The nested content carries the graph's computed minimums — 12 steps
+    // tall (TOP=28, ROW_H=120, +12) and 5 columns wide (138px + 14px gaps +
+    // 24px horizontal padding).
+    expect(inner).toHaveStyle({ minHeight: '1480px', minWidth: '770px' });
+
+    // workflow-canvas-inner is nested inside workflow-canvas-viewport (the
+    // scrollport actually contains the sized content it scrolls).
+    expect(viewport.contains(inner)).toBe(true);
+  });
+
+  it('keeps workflow-canvas-meta OUTSIDE the scrollable content (stationary while the graph scrolls)', () => {
+    render(
+      <WorkflowCanvas
+        definition={TALL_DEFINITION}
+        workflowTitle="TALL-WORKFLOW"
+        currentStepId={null}
+      />,
+    );
+
+    const meta = screen.getByTestId('workflow-canvas-meta');
+    const viewport = screen.getByTestId('workflow-canvas-viewport');
+    const inner = screen.getByTestId('workflow-canvas-inner');
+
+    // Meta is a sibling of the viewport, never a descendant of the scrollable
+    // inner content — it must not scroll away with the graph.
+    expect(inner.contains(meta)).toBe(false);
+    expect(viewport.contains(meta)).toBe(false);
+  });
+
+  it('wide workflow: horizontal card dimensions, phase gaps, and column count are unchanged by the containment split', () => {
+    render(
+      <WorkflowCanvas definition={TALL_DEFINITION} currentStepId={null} />,
+    );
+
+    const inner = screen.getByTestId('workflow-canvas-inner');
+    expect(inner).toHaveStyle({ gap: '14px' });
+
+    const allColumns = screen.getAllByTestId(/^phase-column-/);
+    expect(allColumns).toHaveLength(TALL_DEFINITION.phases.length);
+    for (const col of allColumns) {
+      expect(col).toHaveStyle({ width: '138px' });
+    }
   });
 });
