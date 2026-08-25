@@ -192,6 +192,34 @@ export interface SchemaVersionStatus {
   tooNew: boolean;
 }
 
+/** `session_summaries.state` values the review-home board understands (migration 121). */
+const SESSION_SUMMARY_STATES = new Set(['working', 'complete', 'needs_input']);
+
+/**
+ * Validates a `session_summaries.state` value at the read/write boundary
+ * (migration 121). No CHECK constraint backs this column — see the migration
+ * header — so anything outside the known set, including a non-string or a
+ * future value this binary doesn't know about yet, degrades to null rather
+ * than propagating.
+ */
+function normalizeSummaryState(value: unknown): string | null {
+  return typeof value === 'string' && SESSION_SUMMARY_STATES.has(value) ? value : null;
+}
+
+const WAITING_ON_MAX_LENGTH = 300;
+
+/**
+ * Validates/clamps a `session_summaries.waiting_on` value at the read/write
+ * boundary (migration 121). Non-string becomes null; blank (after trim)
+ * becomes null; anything past 300 chars is truncated to it.
+ */
+function normalizeWaitingOn(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.length > WAITING_ON_MAX_LENGTH ? trimmed.slice(0, WAITING_ON_MAX_LENGTH) : trimmed;
+}
+
 export class DatabaseService {
   private db: Database.Database;
 
@@ -3893,26 +3921,44 @@ export class DatabaseService {
 
   // Session-summary operations (migration 083, session-summary-plan.md §4).
   getSessionSummary(sessionId: string): SessionSummary | undefined {
-    return this.db.prepare(`
+    const row = this.db.prepare(`
       SELECT * FROM session_summaries WHERE session_id = ?
     `).get(sessionId) as SessionSummary | undefined;
+    if (!row) return undefined;
+    // Normalize state/waiting_on on the way out — a row written by a
+    // different binary, an older migration, or a hand-edited DB must not
+    // leak an unvalidated value to callers (migration 121).
+    return { ...row, state: normalizeSummaryState(row.state), waiting_on: normalizeWaitingOn(row.waiting_on) };
   }
 
-  // Single UPSERT: replaces summary/last_turn_id with the freshly computed
-  // values, but ACCUMULATES calls_count/cost_usd_total across every call for
-  // the session (§3 cost surfacing). Never touches `sessions.updated_at` —
-  // the activity-clock contract (sessionUpdatedAtSemantics.test.ts).
-  upsertSessionSummary(params: { sessionId: string; summary: string; lastTurnId: number; costUsdDelta: number }): void {
+  // Single UPSERT: replaces summary/last_turn_id/state/waiting_on with the
+  // freshly computed values, but ACCUMULATES calls_count/cost_usd_total
+  // across every call for the session (§3 cost surfacing). Never touches
+  // `sessions.updated_at` — the activity-clock contract
+  // (sessionUpdatedAtSemantics.test.ts). `state`/`waitingOn` are optional so
+  // existing call sites keep compiling unchanged; omitted means null.
+  upsertSessionSummary(params: {
+    sessionId: string;
+    summary: string;
+    lastTurnId: number;
+    costUsdDelta: number;
+    state?: string | null;
+    waitingOn?: string | null;
+  }): void {
+    const state = normalizeSummaryState(params.state ?? null);
+    const waitingOn = normalizeWaitingOn(params.waitingOn ?? null);
     this.db.prepare(`
-      INSERT INTO session_summaries (session_id, summary, last_turn_id, calls_count, cost_usd_total, updated_at)
-      VALUES (?, ?, ?, 1, ?, datetime('now'))
+      INSERT INTO session_summaries (session_id, summary, last_turn_id, calls_count, cost_usd_total, state, waiting_on, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?, datetime('now'))
       ON CONFLICT(session_id) DO UPDATE SET
         summary = excluded.summary,
         last_turn_id = excluded.last_turn_id,
         calls_count = calls_count + 1,
         cost_usd_total = cost_usd_total + excluded.cost_usd_total,
+        state = excluded.state,
+        waiting_on = excluded.waiting_on,
         updated_at = datetime('now')
-    `).run(params.sessionId, params.summary, params.lastTurnId, params.costUsdDelta);
+    `).run(params.sessionId, params.summary, params.lastTurnId, params.costUsdDelta, state, waitingOn);
   }
 
   // Append-only per-sitting history sentences (§1), oldest first via id ASC.
@@ -3946,6 +3992,8 @@ export class DatabaseService {
     lastTurnId: number;
     costUsdDelta: number;
     entries: string[];
+    state?: string | null;
+    waitingOn?: string | null;
   }): boolean {
     const persist = this.db.transaction(() => {
       const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(params.sessionId);
@@ -3956,6 +4004,8 @@ export class DatabaseService {
         summary: params.summary,
         lastTurnId: params.lastTurnId,
         costUsdDelta: params.costUsdDelta,
+        state: params.state,
+        waitingOn: params.waitingOn,
       });
       this.appendSessionSummaryEntries(params.sessionId, params.entries);
       return true;

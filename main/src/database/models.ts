@@ -942,6 +942,19 @@ export interface SessionSummary {
   calls_count: number;
   cost_usd_total: number;
   updated_at: string;
+  /**
+   * Review-home board triage verdict (migration 121). Normalized at the read
+   * boundary in database.ts — only 'working' | 'complete' | 'needs_input'
+   * survive; any other value (including a not-yet-summarized row, or a
+   * future/bogus value written some other way) reads as null.
+   */
+  state: string | null;
+  /**
+   * One-sentence "what it asked you", shown on the board for a 'needs_input'
+   * row (migration 121). Normalized at the read boundary: trimmed, blank
+   * becomes null, and anything over 300 chars is truncated to it.
+   */
+  waiting_on: string | null;
 }
 
 /**
