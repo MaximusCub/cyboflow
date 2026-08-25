@@ -192,6 +192,14 @@ export function OnboardingGate(): React.JSX.Element | null {
     };
   }, [hydrate]);
 
+  // E2E boot marker: the tour scrim hydrates asynchronously, so a fixed-timeout
+  // probe in the test helpers races it under machine load. 'active' = the scrim
+  // is (or is about to be) up; 'resolved' = this boot will not show it.
+  useEffect(() => {
+    if (!hydrated) return;
+    document.body.dataset.onboarding = status === 'active' ? 'active' : 'resolved';
+  }, [hydrated, status]);
+
   // Forward the three real-action window events into the store's coach machine.
   useEffect(() => {
     const forward = (kind: OnboardingRealEvent) => () => realEvent(kind);

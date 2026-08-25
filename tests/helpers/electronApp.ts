@@ -104,9 +104,21 @@ export async function launchElectronApp(dataDir: string): Promise<{
  * analytics/consent prompt may also appear. All probes are best-effort.
  */
 export async function dismissDialogs(page: Page): Promise<void> {
-  const onboardingSkip = page.locator('[data-testid="onboarding-skip"]');
-  if (await onboardingSkip.isVisible({ timeout: 2_000 }).catch(() => false)) {
-    await onboardingSkip.click().catch(() => {});
+  // OnboardingGate stamps `body[data-onboarding]` once its async hydration
+  // resolves ('active' = scrim up, 'resolved' = will not show). Waiting on the
+  // marker instead of a fixed-timeout visibility probe removes the race where
+  // slow hydration under load raised the scrim AFTER a 2s probe gave up.
+  await page
+    .locator('body[data-onboarding]')
+    .waitFor({ state: 'attached', timeout: 15_000 })
+    .catch(() => {});
+  const onboarding = await page
+    .locator('body')
+    .getAttribute('data-onboarding')
+    .catch(() => null);
+  if (onboarding === 'active') {
+    const onboardingSkip = page.locator('[data-testid="onboarding-skip"]');
+    await onboardingSkip.click({ timeout: 5_000 }).catch(() => {});
     await settle(page, 300);
   }
 
