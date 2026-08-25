@@ -29,7 +29,6 @@
  */
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
-import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { emitSeamError } from '../telemetrySink';
 import { classifyErrorPattern, unclassifiedErrorTags } from './systemicError';
 
@@ -132,8 +131,13 @@ function makeDeadline(timeoutMs: number, signal?: AbortSignal): {
  * emitting the structured verdict enforced by `schema`. Returns the structured
  * output (or null on drain-without-result; the brain falls back to 'escalate').
  * On timeout/error: aborts and THROWS (the brain escalates).
+ *
+ * @param claudeExecutablePath The packaged-build native-binary path resolved once
+ * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
+ * the wiring site — `undefined` in dev, which lets the SDK resolve it itself.
  */
 export function makeSdkStructuredQuery(
+  claudeExecutablePath: string | undefined,
   logger?: LoggerLike,
   timeoutMs: number = SUPERVISOR_QUERY_TIMEOUT_MS,
 ): StructuredQueryFn {
@@ -164,7 +168,7 @@ export function makeSdkStructuredQuery(
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
-          pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           outputFormat: { type: 'json_schema', schema },
           abortController: controller,
         },
@@ -205,8 +209,13 @@ export function makeSdkStructuredQuery(
  * monitor may inspect the worktree (read-only tools, up to `MONITOR_MAX_TURNS`) and
  * returns the concatenated text of the LAST assistant message ('' if none). On
  * timeout/error: aborts and THROWS (the brain returns an apologetic answer).
+ *
+ * @param claudeExecutablePath The packaged-build native-binary path resolved once
+ * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
+ * the wiring site — `undefined` in dev, which lets the SDK resolve it itself.
  */
 export function makeSdkTextQuery(
+  claudeExecutablePath: string | undefined,
   logger?: LoggerLike,
   timeoutMs: number = SUPERVISOR_QUERY_TIMEOUT_MS,
 ): TextQueryFn {
@@ -240,7 +249,7 @@ export function makeSdkTextQuery(
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
-          pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           abortController: controller,
         },
       });

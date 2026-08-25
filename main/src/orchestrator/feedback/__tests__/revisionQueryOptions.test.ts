@@ -19,11 +19,11 @@ const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (...args: unknown[]) => queryMock(...args),
 }));
-vi.mock('../../../services/panels/claude/claudeExecutablePath', () => ({
-  resolveClaudeExecutablePath: () => '/fake/claude',
-}));
 
 import { makeRevisionQuery } from '../revisionQuery';
+
+/** Stand-in for the boot-resolved path the wiring site now injects as the factory's first argument. */
+const FAKE_CLAUDE_EXECUTABLE_PATH = '/fake/claude';
 
 let lastOptions: unknown;
 
@@ -43,7 +43,7 @@ describe('makeRevisionQuery SDK options', () => {
   it('pins tools to the read-only set and strips MCP + filesystem settings', async () => {
     install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { ok: true } })]));
 
-    await makeRevisionQuery()({ prompt: 'p', schema: { type: 'object' } });
+    await makeRevisionQuery(FAKE_CLAUDE_EXECUTABLE_PATH)({ prompt: 'p', schema: { type: 'object' } });
 
     const opts = lastOptions as Record<string, unknown>;
     expect(opts.tools).toEqual(['Read', 'Grep', 'Glob']);
@@ -52,5 +52,6 @@ describe('makeRevisionQuery SDK options', () => {
     expect(opts.settingSources).toEqual([]);
     expect(opts.strictMcpConfig).toBe(true);
     expect(opts.mcpServers).toEqual({});
+    expect(opts.pathToClaudeCodeExecutable).toBe(FAKE_CLAUDE_EXECUTABLE_PATH);
   });
 });

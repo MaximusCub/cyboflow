@@ -22,16 +22,17 @@
  * options expose NO temperature, so K-sample variance is whatever the model
  * produces; position-bias is cancelled by randomizing which arm is "Solution 1"
  * per sample. Packaged builds MUST pass pathToClaudeCodeExecutable (asar ENOTDIR
- * spawn class) — resolveClaudeExecutablePath() handles it.
+ * spawn class) — the wiring site (`main/src/index.ts`) resolves it once at boot
+ * via `resolveClaudeExecutablePath()` and injects the result as
+ * `claudeExecutablePath` below; this module never calls the resolver itself.
  *
  * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call).
  *
- * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / a
- * concrete service beyond the claude-exe resolver.
+ * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / any
+ * concrete service — the resolved claude-exe path arrives as a plain injected value.
  */
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
-import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 
 /** Default per-sample deadline. A hung claude binary must not stall the worker. */
@@ -104,8 +105,13 @@ function makeDeadline(
  * `EvalJudgeTimeoutError` and a spent turn budget throws `EvalJudgeMaxTurnsError`
  * — so the worker drops that slot without a guaranteed-wasted identical retry;
  * every other failure stays a plain `Error` and keeps its one retry.
+ *
+ * @param claudeExecutablePath The packaged-build native-binary path resolved once
+ * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
+ * the wiring site — `undefined` in dev, which lets the SDK resolve it itself.
  */
 export function makePairwiseJudgeQuery(
+  claudeExecutablePath: string | undefined,
   logger?: LoggerLike,
   timeoutMs: number = PAIRWISE_JUDGE_TIMEOUT_MS,
 ): PairwiseStructuredQueryFn {
@@ -130,7 +136,7 @@ export function makePairwiseJudgeQuery(
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
-          pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           outputFormat: { type: 'json_schema', schema },
           abortController: controller,
         },

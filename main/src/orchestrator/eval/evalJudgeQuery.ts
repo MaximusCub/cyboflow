@@ -18,16 +18,18 @@
  * v1 limitation (documented): the Agent SDK query() options expose NO temperature,
  * so the design's "temp 0" is unsettable; K-sample variance is whatever the model
  * produces. packaged builds MUST pass pathToClaudeCodeExecutable (asar ENOTDIR
- * spawn class) — resolveClaudeExecutablePath() handles it.
+ * spawn class) — the wiring site (`main/src/index.ts`) resolves it once at boot
+ * via `resolveClaudeExecutablePath()` and injects the result as
+ * `claudeExecutablePath` below; this module never calls the resolver itself.
  *
  * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call).
  *
- * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / a
- * concrete service beyond the claude-exe resolver and the pure model-alias helper.
+ * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / any
+ * concrete service beyond the pure model-alias helper — the resolved claude-exe
+ * path arrives as a plain injected value.
  */
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
-import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 import { resolveJudgeDeadlineMs } from './judgeDeadline';
 
@@ -126,8 +128,13 @@ function makeDeadline(
  * may inspect the worktree (read-only, up to JUDGE_MAX_TURNS) before emitting the
  * structured verdict enforced by `schema`. On timeout/error: aborts and THROWS (the
  * jury treats a throw as a malformed sample → retry once, then drop).
+ *
+ * @param claudeExecutablePath The packaged-build native-binary path resolved once
+ * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
+ * the wiring site — `undefined` in dev, which lets the SDK resolve it itself.
  */
 export function makeEvalJudgeQuery(
+  claudeExecutablePath: string | undefined,
   logger?: LoggerLike,
   baseTimeoutMs: number = EVAL_JUDGE_TIMEOUT_MS,
 ): EvalStructuredQueryFn {
@@ -161,7 +168,7 @@ export function makeEvalJudgeQuery(
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
-          pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           outputFormat: { type: 'json_schema', schema },
           abortController: controller,
         },

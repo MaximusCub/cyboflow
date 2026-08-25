@@ -1627,6 +1627,17 @@ async function initializeServices(): Promise<boolean> {
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
   const cyboflowDb = makeDatabaseLike(databaseService);
+  // Resolved once here and threaded into every orchestrator SDK-query factory
+  // below (makeRevisionQuery, makeVerificationAgentQuery, makeRunbookDraftQuery,
+  // makeEvalJudgeQuery, makePairwiseJudgeQuery, makeSdkStructuredQuery,
+  // makeSdkTextQuery) as their leading `claudeExecutablePath` argument, and into
+  // `SessionSummarizerDeps` below. `resolveClaudeExecutablePath()` is a pure,
+  // process-lifetime-constant lookup (packaged-build asar workaround; `undefined`
+  // in dev), so resolving it once at boot and passing the value down keeps the
+  // orchestrator tree itself free of the `services/*` import — the whole point of
+  // this injection (see `orchestrator/verify/verificationAgentQuery.ts`'s module
+  // doc for why that layering matters).
+  const claudeExecutablePath = resolveClaudeExecutablePath();
   // Inject the global-config provider so createRun resolves the global default
   // agent permission mode + CLI substrate via the resolvers (ConfigManager
   // satisfies WorkflowConfigProvider structurally).
@@ -1722,7 +1733,7 @@ async function initializeServices(): Promise<boolean> {
       },
       {
         db: cyboflowDb,
-        queryFn: makeRevisionQuery(cyboflowLogger),
+        queryFn: makeRevisionQuery(claudeExecutablePath, cyboflowLogger),
         feedbackRouter: FeedbackRouter.getInstance(),
         applyTaskChange: (projectId, change) =>
           TaskChangeRouter.getInstance().applyChange(projectId, change),
@@ -2221,7 +2232,7 @@ async function initializeServices(): Promise<boolean> {
   const verificationAgentRunner = new VerificationAgentRunner({
     // The SAME binary the capability gate measured — see verifyPeekabooPath.
     peekabooBin: verifyPeekabooPath,
-    query: makeVerificationAgentQuery(cyboflowLogger),
+    query: makeVerificationAgentQuery(claudeExecutablePath, cyboflowLogger),
     // Codex runtime for a codex-pinned/inherited visual-verify agent; absent Codex CLI fails open to skipped.
     codexQuery: makeCodexVerificationAgentQuery(cyboflowLogger),
     // The workflow-defined 'visual-verify' agent + the run's provider/model, for the
@@ -2348,7 +2359,7 @@ async function initializeServices(): Promise<boolean> {
   // ------------------------------------------------------------------------
   const runbookBootstrapStamps = new RunbookBootstrapStampStore(cyboflowDb, cyboflowLogger);
   const runbookBootstrapSuppression = new BootstrapSuppressionStore(cyboflowDb, cyboflowLogger);
-  const runbookDraftQuery = makeRunbookDraftQuery(cyboflowLogger);
+  const runbookDraftQuery = makeRunbookDraftQuery(claudeExecutablePath, cyboflowLogger);
 
   const runbookBootstrapRunner = (
     args: Parameters<typeof runRunbookBootstrap>[0],
@@ -2610,7 +2621,7 @@ async function initializeServices(): Promise<boolean> {
     }
   };
   const claudeJudge = new ClaudeJudge({
-    structuredQuery: makeEvalJudgeQuery(cyboflowLogger),
+    structuredQuery: makeEvalJudgeQuery(claudeExecutablePath, cyboflowLogger),
     logger: cyboflowLogger,
   });
   const codexJudge = new CodexJudge({
@@ -2683,7 +2694,7 @@ async function initializeServices(): Promise<boolean> {
   // query fn would cross-contaminate the two panels' model provenance. No timeoutMs:
   // the factory already defaults to CODEX_EVAL_JUDGE_TIMEOUT_MS.
   const claudePairwiseJudge = new ClaudePairwiseJudge({
-    structuredQuery: makePairwiseJudgeQuery(cyboflowLogger),
+    structuredQuery: makePairwiseJudgeQuery(claudeExecutablePath, cyboflowLogger),
     logger: cyboflowLogger,
   });
   const codexPairwiseJudge = new CodexPairwiseJudge({
@@ -3319,8 +3330,8 @@ async function initializeServices(): Promise<boolean> {
       ctx: MonitorContext,
       injectEvent: (event: ClaudeStreamEvent) => void,
     ) => MonitorSession | undefined) => {
-      const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
-      const textQuery = makeSdkTextQuery(cyboflowLogger);
+      const structuredQuery = makeSdkStructuredQuery(claudeExecutablePath, cyboflowLogger);
+      const textQuery = makeSdkTextQuery(claudeExecutablePath, cyboflowLogger);
       const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
       // Also published to the module-scoped buildMonitorSession holder so the
       // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
@@ -3914,7 +3925,7 @@ async function initializeServices(): Promise<boolean> {
       sdkQueryLoader: loadSdkQuery,
       // Pin the concrete snapshot id; the alias table only applies via the resolver.
       modelId: resolveModelAlias('haiku') ?? 'claude-haiku-4-5',
-      claudeExecutablePath: resolveClaudeExecutablePath(),
+      claudeExecutablePath,
     },
     cyboflowLogger,
   );

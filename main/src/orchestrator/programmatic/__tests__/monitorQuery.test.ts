@@ -18,9 +18,9 @@ const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (...args: unknown[]) => queryMock(...args),
 }));
-vi.mock('../../../services/panels/claude/claudeExecutablePath', () => ({
-  resolveClaudeExecutablePath: () => '/fake/claude',
-}));
+
+/** Stand-in for the boot-resolved path the wiring site now injects as the factory's first argument. */
+const FAKE_CLAUDE_EXECUTABLE_PATH = '/fake/claude';
 
 import {
   makeSdkStructuredQuery,
@@ -54,7 +54,7 @@ describe('makeSdkStructuredQuery', () => {
       sdkAssistantText('thinking'),
       sdkResultSuccess({ structuredOutput: { decision: 'retry', rationale: 'flaky' } }),
     ]);
-    const fn = makeSdkStructuredQuery();
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     const out = await fn({ prompt: 'p', schema: { type: 'object' }, cwd: '/wt' });
 
@@ -63,7 +63,7 @@ describe('makeSdkStructuredQuery', () => {
 
   it('passes read-only tools, json_schema outputFormat, cwd, model, and a small maxTurns', async () => {
     yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
-    const fn = makeSdkStructuredQuery();
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     await fn({ prompt: 'p', schema: { type: 'object' }, cwd: '/wt', model: 'opus' });
 
@@ -81,26 +81,26 @@ describe('makeSdkStructuredQuery', () => {
     expect(opts.strictMcpConfig).toBe(true);
     expect(opts.mcpServers).toEqual({});
     expect(opts.outputFormat).toEqual({ type: 'json_schema', schema: { type: 'object' } });
-    expect(opts.pathToClaudeCodeExecutable).toBe('/fake/claude');
+    expect(opts.pathToClaudeCodeExecutable).toBe(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(typeof opts.maxTurns).toBe('number');
     expect((opts.maxTurns as number) > 1).toBe(true);
   });
 
   it('returns null when no successful result is drained', async () => {
     yieldsMessages([sdkAssistantText([])]);
-    const fn = makeSdkStructuredQuery();
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('throws when the SDK iterator throws', async () => {
     install(makeRejectingQuery(new Error('sdk boom')));
-    const fn = makeSdkStructuredQuery();
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow('sdk boom');
   });
 
   it('aborts and throws on timeout', async () => {
     install(makeBlockUntilAbortQuery());
-    const fn = makeSdkStructuredQuery(undefined, 5);
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out/);
   });
 
@@ -110,7 +110,7 @@ describe('makeSdkStructuredQuery', () => {
       observedAbort = true;
     }));
     const controller = new AbortController();
-    const fn = makeSdkStructuredQuery();
+    const fn = makeSdkStructuredQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     const p = fn({ prompt: 'p', schema: {}, cwd: '/wt', signal: controller.signal });
     controller.abort();
     // The caller's abort must be bridged to the SDK's abortController (which ends the
@@ -132,20 +132,20 @@ describe('makeSdkTextQuery', () => {
       sdkAssistantText(['final ', 'answer']),
       sdkResultSuccess(),
     ]);
-    const fn = makeSdkTextQuery();
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('final answer');
   });
 
   it("returns '' when there is no assistant message", async () => {
     yieldsMessages([sdkResultSuccess()]);
-    const fn = makeSdkTextQuery();
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('');
   });
 
   it('uses NO outputFormat and read-only tools', async () => {
     yieldsMessages([sdkAssistantText('hi')]);
-    const fn = makeSdkTextQuery();
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     await fn({ prompt: 'p', cwd: '/wt' });
 
@@ -165,7 +165,7 @@ describe('makeSdkTextQuery', () => {
 
   it('throws when the SDK iterator throws BEFORE the monitor speaks (no partial to show)', async () => {
     install(makeRejectingQuery(new Error('text boom')));
-    const fn = makeSdkTextQuery();
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow('text boom');
   });
 
@@ -180,13 +180,13 @@ describe('makeSdkTextQuery', () => {
         new Error('Claude Code returned an error result: Reached maximum number of turns (24)'),
       ),
     );
-    const fn = makeSdkTextQuery();
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('partial state summary');
   });
 
   it('aborts and throws on timeout', async () => {
     install(makeBlockUntilAbortQuery());
-    const fn = makeSdkTextQuery(undefined, 5);
+    const fn = makeSdkTextQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow(/timed out/);
   });
 });

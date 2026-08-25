@@ -15,16 +15,17 @@
  * so the worker passes cwd only when it still exists (mirroring evalWorker).
  *
  * packaged builds MUST pass pathToClaudeCodeExecutable (asar ENOTDIR spawn class) —
- * resolveClaudeExecutablePath() handles it.
+ * the wiring site (`main/src/index.ts`) resolves it once at boot via
+ * `resolveClaudeExecutablePath()` and injects the result as `claudeExecutablePath`
+ * below; this module never calls the resolver itself.
  *
  * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call).
  *
- * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / a
- * concrete service beyond the claude-exe resolver.
+ * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / any
+ * concrete service — the resolved claude-exe path arrives as a plain injected value.
  */
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
-import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 
 /** Default per-revision deadline. A hung claude binary must not stall the worker. */
 export const REVISION_QUERY_TIMEOUT_MS = 300_000;
@@ -94,8 +95,13 @@ function makeDeadline(
  * The judge MODEL is caller-supplied (mirroring evalWorker, where each jury slot
  * carries its own model and the eval query just threads it through); undefined
  * falls through to the SDK default, which is acceptable for the revision agent.
+ *
+ * @param claudeExecutablePath The packaged-build native-binary path resolved once
+ * at boot by `resolveClaudeExecutablePath()` (services layer) and threaded in by
+ * the wiring site — `undefined` in dev, which lets the SDK resolve it itself.
  */
 export function makeRevisionQuery(
+  claudeExecutablePath: string | undefined,
   logger?: LoggerLike,
   timeoutMs: number = REVISION_QUERY_TIMEOUT_MS,
 ): RevisionQueryFn {
@@ -126,7 +132,7 @@ export function makeRevisionQuery(
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
-          pathToClaudeCodeExecutable: resolveClaudeExecutablePath(),
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           outputFormat: { type: 'json_schema', schema },
           abortController: controller,
         },

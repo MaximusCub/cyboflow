@@ -27,11 +27,11 @@ const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (...args: unknown[]) => queryMock(...args),
 }));
-vi.mock('../../../services/panels/claude/claudeExecutablePath', () => ({
-  resolveClaudeExecutablePath: () => '/fake/claude',
-}));
 
 import { makeEvalJudgeQuery, EVAL_JUDGE_TIMEOUT_MS } from '../evalJudgeQuery';
+
+/** Stand-in for the boot-resolved path the wiring site now injects as the factory's first argument. */
+const FAKE_CLAUDE_EXECUTABLE_PATH = '/fake/claude';
 
 let lastOptions: unknown;
 
@@ -59,7 +59,7 @@ describe('makeEvalJudgeQuery', () => {
       sdkAssistantText('grepping snapshot'),
       sdkResultSuccess({ structuredOutput: { verdicts: [{ id: 'COR-1', verdict: 'PASS', evidence: 'x' }] } }),
     ]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     const out = await fn({ prompt: 'p', schema: { type: 'object' }, cwd: '/wt' });
 
@@ -68,7 +68,7 @@ describe('makeEvalJudgeQuery', () => {
 
   it('passes JUDGE_ALLOWED_TOOLS, json_schema outputFormat, cwd, model, exe path, and a bounded maxTurns', async () => {
     yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     await fn({ prompt: 'p', schema: { type: 'object', required: ['verdicts'] }, cwd: '/wt', model: 'opus-x' });
 
@@ -90,7 +90,7 @@ describe('makeEvalJudgeQuery', () => {
       type: 'json_schema',
       schema: { type: 'object', required: ['verdicts'] },
     });
-    expect(opts.pathToClaudeCodeExecutable).toBe('/fake/claude');
+    expect(opts.pathToClaudeCodeExecutable).toBe(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(typeof opts.maxTurns).toBe('number');
     expect((opts.maxTurns as number) > 1).toBe(true);
     expect(opts.abortController).toBeInstanceOf(AbortController);
@@ -98,7 +98,7 @@ describe('makeEvalJudgeQuery', () => {
 
   it('omits cwd and model from the SDK options when not supplied', async () => {
     yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     await fn({ prompt: 'p', schema: {} });
 
@@ -109,37 +109,37 @@ describe('makeEvalJudgeQuery', () => {
 
   it('returns null when the stream drains with no successful result', async () => {
     yieldsMessages([sdkAssistantText([])]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('returns null when the success result carries no structured_output', async () => {
     yieldsMessages([sdkResultSuccess()]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('throws when the SDK iterator throws', async () => {
     install(makeRejectingQuery(new Error('sdk boom')));
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow('sdk boom');
   });
 
   it('aborts and throws a timeout error on a custom timeoutMs deadline', async () => {
     install(makeBlockUntilAbortQuery());
-    const fn = makeEvalJudgeQuery(undefined, 5);
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out after 5ms/);
   });
 
   it('timeout rejects with the TYPED EvalJudgeTimeoutError (worker retry policy branches on it)', async () => {
     install(makeBlockUntilAbortQuery());
-    const fn = makeEvalJudgeQuery(undefined, 5);
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {} })).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
   });
 
   it('leaves the deadline at the base for a small diff', async () => {
     install(makeBlockUntilAbortQuery());
-    const fn = makeEvalJudgeQuery(undefined, 5);
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, diffChars: 1_000 })).rejects.toThrow(
       /timed out after 5ms/,
     );
@@ -152,7 +152,7 @@ describe('makeEvalJudgeQuery', () => {
     vi.useFakeTimers();
     try {
       install(makeBlockUntilAbortQuery());
-      const fn = makeEvalJudgeQuery(undefined, 5);
+      const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
       // 120k chars => 2 steps of headroom over the 5ms base.
       const p = fn({ prompt: 'p', schema: {}, diffChars: 120_000 }).catch((err) => err as Error);
       let settled = false;
@@ -181,7 +181,7 @@ describe('makeEvalJudgeQuery', () => {
       sdkAssistantText('still exploring the worktree'),
       sdkResultError({ subtype: 'error_max_turns' }),
     ]);
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     const p = fn({ prompt: 'p', schema: {}, cwd: '/wt' });
     await expect(p).rejects.toBeInstanceOf(EvalJudgeMaxTurnsError);
     await expect(p).rejects.toThrow(/turn budget/);
@@ -192,7 +192,7 @@ describe('makeEvalJudgeQuery', () => {
     // post-loop guard must still convert that clean drain into a timeout throw — the
     // paid-Claude "no silent empty on a hung binary" contract.
     install(makeBlockUntilAbortQuery());
-    const fn = makeEvalJudgeQuery(undefined, 5);
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH, undefined, 5);
     await expect(fn({ prompt: 'p', schema: {} })).rejects.toThrow(/timed out/);
   });
 
@@ -202,7 +202,7 @@ describe('makeEvalJudgeQuery', () => {
       observedAbort = true;
     }));
     const controller = new AbortController();
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     const p = fn({ prompt: 'p', schema: {}, cwd: '/wt', signal: controller.signal }).catch(() => undefined);
     controller.abort();
     await p;
@@ -216,7 +216,7 @@ describe('makeEvalJudgeQuery', () => {
     }));
     const controller = new AbortController();
     controller.abort(); // pre-aborted
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
     await fn({ prompt: 'p', schema: {}, signal: controller.signal }).catch(() => undefined);
     expect(observedAbort).toBe(true);
   });
@@ -225,7 +225,7 @@ describe('makeEvalJudgeQuery', () => {
     const controller = new AbortController();
     const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
     install(makeRejectingQuery(new Error('boom')));
-    const fn = makeEvalJudgeQuery();
+    const fn = makeEvalJudgeQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
 
     await expect(fn({ prompt: 'p', schema: {}, signal: controller.signal })).rejects.toThrow('boom');
 

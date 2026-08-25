@@ -1161,7 +1161,16 @@ superseded by the live tRPC `cyboflow.approvals.*` path (see "cyboflow.* transpo
 
 The standalone-typecheck invariant on `main/src/orchestrator/**` keeps the orchestrator
 extractable to a standalone Node service (ROADMAP-001 §6.3 — team-tier v2 target). No code
-exists yet; the invariant is preventive.
+exists yet; the invariant is preventive. It is enforced mechanically in two layers: a
+`@typescript-eslint/no-restricted-imports` override over that tree in `main/eslint.config.js`
+(errors on `electron` and on any `**/services/**` specifier, with `allowTypeImports` on since
+tsc erases those), and the ratchet test
+`main/src/orchestrator/__tests__/standaloneInvariant.test.ts`, which scans the same tree for
+the dynamic `require('electron')` forms no import rule can see and holds the frozen exemption
+list — a list that may shrink but not grow, since a stale entry fails the test. The seam for
+new code is the one the rest of the orchestrator already uses: depend on an interface
+(`DatabaseLike`-style) or take the value from the boot wiring in `main/src/index.ts`, the way
+the SDK-query factories receive their resolved `claudeExecutablePath`.
 
 ## Decisions & Trade-offs
 
