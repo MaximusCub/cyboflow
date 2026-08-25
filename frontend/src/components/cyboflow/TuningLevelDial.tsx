@@ -1,5 +1,5 @@
 /**
- * TuningLevelSelector — the four-slot tuning dial on the editor's simple page
+ * TuningLevelDial — the four-slot tuning dial on the editor's simple page
  * (plan `docs/plans/workflow-tuning-levels.md` D3).
  *
  * Segments: EFFICIENT / STANDARD / THOROUGH / CUSTOM, in {@link TUNING_LEVELS}
@@ -38,7 +38,7 @@ const LEVEL_COPY: Readonly<Record<TuningLevel, { label: string; tag: string }>> 
 export const CUSTOM_UNAVAILABLE_HINT =
   "No custom definition yet — edit in Advanced and choose 'Overwrite this flow'.";
 
-export interface TuningLevelSelectorProps {
+export interface TuningLevelDialProps {
   /** The currently selected level. */
   level: TuningLevel;
   /** Is the workflow's custom slot filled? Gates the CUSTOM segment. */
@@ -56,14 +56,14 @@ export interface TuningLevelSelectorProps {
   estimateLabels?: Partial<Record<TuningLevel, string>>;
 }
 
-export function TuningLevelSelector({
+export function TuningLevelDial({
   level,
   hasCustomDefinition,
   onSelect,
   onCustomUnavailable,
   busy = false,
   estimateLabels,
-}: TuningLevelSelectorProps): React.JSX.Element {
+}: TuningLevelDialProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2" data-testid="tuning-level-selector">
       <div className="flex flex-row" style={{ gap: 1 }}>

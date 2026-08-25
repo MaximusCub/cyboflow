@@ -13,7 +13,7 @@
  */
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
-import { TuningLevelSelector } from './TuningLevelSelector';
+import { TuningLevelDial } from './TuningLevelDial';
 import { TuningPhaseStrip } from './TuningPhaseStrip';
 
 export interface WorkflowTuningPageProps {
@@ -47,7 +47,7 @@ export function WorkflowTuningPage({
       className="flex flex-1 flex-col gap-5 overflow-auto p-5"
       data-testid="workflow-tuning-page"
     >
-      <TuningLevelSelector
+      <TuningLevelDial
         level={level}
         hasCustomDefinition={hasCustomDefinition}
         onSelect={onSelectLevel}

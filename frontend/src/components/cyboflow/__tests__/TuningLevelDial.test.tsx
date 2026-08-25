@@ -1,5 +1,5 @@
 /**
- * TuningLevelSelector (editor simple-page dial) — estimate-label rendering
+ * TuningLevelDial (editor simple-page dial) — estimate-label rendering
  * (plan D8, workflow-tuning-levels.md phase 7).
  *
  * Verifies: no estimate line / no caption when `estimateLabels` is absent;
@@ -9,12 +9,12 @@
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import { TuningLevelSelector } from '../TuningLevelSelector';
+import { TuningLevelDial } from '../TuningLevelDial';
 
-describe('TuningLevelSelector (editor)', () => {
+describe('TuningLevelDial (editor)', () => {
   it('renders no estimate lines and no caption when estimateLabels is omitted', () => {
     render(
-      <TuningLevelSelector
+      <TuningLevelDial
         level="standard"
         hasCustomDefinition={false}
         onSelect={vi.fn()}
@@ -29,7 +29,7 @@ describe('TuningLevelSelector (editor)', () => {
 
   it('renders an estimate line only for the levels that supply one, plus the excl.-eval caption', () => {
     render(
-      <TuningLevelSelector
+      <TuningLevelDial
         level="standard"
         hasCustomDefinition={false}
         onSelect={vi.fn()}
@@ -46,7 +46,7 @@ describe('TuningLevelSelector (editor)', () => {
 
   it('renders no caption for an empty estimateLabels object', () => {
     render(
-      <TuningLevelSelector
+      <TuningLevelDial
         level="standard"
         hasCustomDefinition={false}
         onSelect={vi.fn()}
