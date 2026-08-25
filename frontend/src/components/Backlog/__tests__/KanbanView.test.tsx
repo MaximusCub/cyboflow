@@ -254,3 +254,48 @@ describe('KanbanView context-menu reorder (Move up / down / to top)', () => {
     expect(sole).toHaveAttribute('data-can-move-down', 'false');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Manual-sort-only reorder gating (IDEA-053, TASK-203)
+// ---------------------------------------------------------------------------
+
+describe('KanbanView — isManualSort = false disables reorder entirely', () => {
+  function renderNonManual() {
+    return render(
+      <KanbanView
+        buckets={BUCKETS}
+        onRun={onRun}
+        onReorder={onReorder}
+        launchingTaskId={null}
+        now={Date.now()}
+        isManualSort={false}
+      />,
+    );
+  }
+
+  it('renders every card slot NOT draggable', () => {
+    renderNonManual();
+    const slots = screen.getAllByTestId('kanban-card-slot');
+    expect(slots).toHaveLength(4);
+    for (const slot of slots) expect(slot).toHaveAttribute('draggable', 'false');
+  });
+
+  it('drag never starts, so a same-column drop attempt cannot invoke onReorder', () => {
+    renderNonManual();
+    fireEvent.dragStart(slotOf('t1'), { dataTransfer: dataTransfer() });
+    // No live drag source: dragover on a same-column card does NOT
+    // preventDefault (fireEvent returns true) and no insertion indicator shows.
+    expect(fireEvent.dragOver(slotOf('t3'), { dataTransfer: dataTransfer() })).toBe(true);
+    expect(screen.queryByTestId('drop-indicator')).not.toBeInTheDocument();
+    fireEvent.drop(slotOf('t3'), { dataTransfer: dataTransfer() });
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it('the card menu Move-item translation guard no-ops outside manual sort', () => {
+    renderNonManual();
+    fireEvent.click(within(slotOf('t2')).getByTestId('menu-move-up'));
+    fireEvent.click(within(slotOf('t2')).getByTestId('menu-move-down'));
+    fireEvent.click(within(slotOf('t3')).getByTestId('menu-move-top'));
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+});

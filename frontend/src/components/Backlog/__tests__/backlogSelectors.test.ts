@@ -34,8 +34,15 @@ import {
   seedPlan,
   planReorder,
   compareBacklogOrder,
+  deriveMembershipOptions,
+  applySearchAndMembership,
+  comparePriority,
+  compareUpdated,
+  compareTitle,
+  compareForSortMode,
+  type FilteredBacklogTaskItem,
 } from '../backlogSelectors';
-import type { BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
+import type { BacklogMembership, BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
 
 function stage(position: number, label: string, opts: Partial<BoardStage> = {}): BoardStage {
   return {
@@ -720,6 +727,325 @@ describe('readyForDevChildTaskIds', () => {
         item({ id: 'EPIC-3', type: 'epic', children: [item({ id: 'TASK-x', stage_position: 1 })] }),
       ),
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search + membership filtering (IDEA-053, TASK-203)
+// ---------------------------------------------------------------------------
+
+function sprintMembership(id: string, label: string): BacklogMembership {
+  return { kind: 'sprint', id, label, status: 'running' };
+}
+
+function experimentMembership(id: string, label: string): BacklogMembership {
+  return { kind: 'experiment', id, label, status: 'running' };
+}
+
+describe('deriveMembershipOptions', () => {
+  it('dedupes by (kind, id), sorted by case-folded label, then raw label, then id', () => {
+    const tasks = [
+      item({ id: 'T1', memberships: [sprintMembership('s2', 'zulu'), experimentMembership('e1', 'Alpha')] }),
+      item({ id: 'T2', memberships: [sprintMembership('s2', 'zulu')] }), // duplicate (kind, id)
+      item({ id: 'T3', memberships: [sprintMembership('s1', 'Alpha')] }), // same label as e1, different kind/id
+    ];
+    const options = deriveMembershipOptions(tasks);
+    expect(options).toEqual([
+      { kind: 'experiment', id: 'e1', label: 'Alpha' },
+      { kind: 'sprint', id: 's1', label: 'Alpha' },
+      { kind: 'sprint', id: 's2', label: 'zulu' },
+    ]);
+  });
+
+  it('sorts case-folded first, then raw label breaks a case-fold tie', () => {
+    const tasks = [
+      item({ id: 'T1', memberships: [sprintMembership('s1', 'bravo')] }),
+      item({ id: 'T2', memberships: [sprintMembership('s2', 'Bravo')] }),
+    ];
+    // Case-folded labels tie ('bravo'); raw string comparison breaks it ('Bravo' < 'bravo').
+    expect(deriveMembershipOptions(tasks).map((o) => o.id)).toEqual(['s2', 's1']);
+  });
+
+  it('breaks a same-label tie by raw id when case-folded AND raw label are identical', () => {
+    const tasks = [
+      item({ id: 'T1', memberships: [sprintMembership('s2', 'same')] }),
+      item({ id: 'T2', memberships: [sprintMembership('s1', 'same')] }),
+    ];
+    expect(deriveMembershipOptions(tasks).map((o) => o.id)).toEqual(['s1', 's2']);
+  });
+
+  it('walks epic children — memberships are only ever populated on task rows', () => {
+    const child = item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', memberships: [sprintMembership('s1', 'Sprint 1')] });
+    const epic = item({ id: 'EPIC-1', type: 'epic', children: [child], childCount: 1, pendingTasks: 1 });
+    expect(deriveMembershipOptions([epic])).toEqual([{ kind: 'sprint', id: 's1', label: 'Sprint 1' }]);
+  });
+
+  it('returns [] when nothing carries any membership', () => {
+    expect(deriveMembershipOptions([item({ id: 'T1' })])).toEqual([]);
+  });
+});
+
+describe('applySearchAndMembership', () => {
+  it('empty query and no membership selection is an IDENTITY pass-through', () => {
+    const tasks = [item({ id: 'T1' }), item({ id: 'T2' })];
+    expect(applySearchAndMembership(tasks, '', [], [])).toBe(tasks);
+    expect(applySearchAndMembership(tasks, '   ', [], [])).toBe(tasks);
+  });
+
+  it('matches ref, title, and summary — trimmed and case-folded', () => {
+    const tasks = [
+      item({ id: 'T1', ref: 'TASK-042', title: 'Wire the parser', summary: null }),
+      item({ id: 'T2', ref: 'TASK-999', title: 'Unrelated', summary: 'mentions the Parser somewhere' }),
+      item({ id: 'T3', ref: 'TASK-999', title: 'Nothing matches', summary: null }),
+    ];
+    const byRef = applySearchAndMembership(tasks, '  task-042  ', [], []);
+    expect(byRef.map((t) => t.id)).toEqual(['T1']);
+
+    const byTitle = applySearchAndMembership(tasks, 'PARSER', [], []);
+    expect(byTitle.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+
+    const bySummary = applySearchAndMembership(tasks, 'parser', [], []);
+    expect(bySummary.map((t) => t.id).sort()).toEqual(['T1', 'T2']);
+  });
+
+  it('a task with summary === null never matches on summary (no crash on null)', () => {
+    const tasks = [item({ id: 'T1', summary: null })];
+    expect(applySearchAndMembership(tasks, 'anything', [], [])).toEqual([]);
+  });
+
+  it('a leaf (no children) that matches neither search nor membership is dropped entirely', () => {
+    const tasks = [item({ id: 'T1', title: 'no match here' })];
+    expect(applySearchAndMembership(tasks, 'zzz', [], [])).toEqual([]);
+  });
+
+  it('recursive: a CHILD-ONLY match retains the parent, narrows children, recomputes rollups, and never mutates the source', () => {
+    const matchingChild = item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', ref: 'TASK-014', title: 'Add retry guard' });
+    const otherChild = item({ id: 'TASK-c2', parent_epic_id: 'EPIC-1', ref: 'TASK-015', title: 'Unrelated', isDone: true });
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      title: 'Parent epic (no match itself)',
+      children: [matchingChild, otherChild],
+      childCount: 2,
+      pendingTasks: 1,
+    });
+    const [result] = applySearchAndMembership([epic], 'retry', [], []) as FilteredBacklogTaskItem[];
+    expect(result.id).toBe('EPIC-1');
+    expect(result).not.toBe(epic); // shallow copy, source untouched
+    expect(result.children?.map((c) => c.id)).toEqual(['TASK-c1']);
+    expect(result.childCount).toBe(1);
+    expect(result.pendingTasks).toBe(1);
+    // Accessible child evidence for both Kanban and List (rendered from this field).
+    expect(result.matchedChildRefs).toEqual([{ ref: 'TASK-014', title: 'Add retry guard' }]);
+    // Source object is untouched.
+    expect(epic.children).toHaveLength(2);
+    expect(epic.childCount).toBe(2);
+    expect(epic.pendingTasks).toBe(1);
+  });
+
+  it('a node that matches SELF never carries matchedChildRefs, even with matching children too', () => {
+    const child = item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', ref: 'TASK-014', title: 'retry guard' });
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      title: 'retry epic', // self matches "retry" too
+      children: [child],
+      childCount: 1,
+      pendingTasks: 1,
+    });
+    const [result] = applySearchAndMembership([epic], 'retry', [], []) as FilteredBacklogTaskItem[];
+    expect(result.matchedChildRefs).toBeUndefined();
+    // Self-matched epics keep ALL children as given (filter only narrows a
+    // child-only-match ancestor, per visitTask — every child that itself
+    // matched-or-bubbled is retained).
+    expect(result.children?.map((c) => c.id)).toEqual(['TASK-c1']);
+  });
+
+  it('search AND membership apply to the SAME node — a search-only self-match fails when membership is also active', () => {
+    const tasks = [
+      // Matches search, but not a member of the selected sprint.
+      item({ id: 'T1', title: 'wire the parser', memberships: [] }),
+    ];
+    expect(applySearchAndMembership(tasks, 'parser', ['sprint-1'], [])).toEqual([]);
+  });
+
+  it('a descendant match must satisfy BOTH the search text and the membership selection on itself', () => {
+    // The epic self fails both; one child matches search but not membership,
+    // another matches membership but not search — neither is a valid
+    // self-match under both predicates, so the whole subtree is dropped.
+    const searchOnlyChild = item({
+      id: 'C1',
+      parent_epic_id: 'EPIC-1',
+      title: 'wire the parser',
+      memberships: [],
+    });
+    const membershipOnlyChild = item({
+      id: 'C2',
+      parent_epic_id: 'EPIC-1',
+      title: 'unrelated title',
+      memberships: [sprintMembership('sprint-1', 'Sprint 1')],
+    });
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      title: 'epic',
+      children: [searchOnlyChild, membershipOnlyChild],
+      childCount: 2,
+      pendingTasks: 2,
+    });
+    expect(applySearchAndMembership([epic], 'parser', ['sprint-1'], [])).toEqual([]);
+
+    // A child that satisfies BOTH on itself keeps the whole tree.
+    const bothChild = item({
+      id: 'C3',
+      parent_epic_id: 'EPIC-1',
+      ref: 'TASK-020',
+      title: 'wire the parser',
+      memberships: [sprintMembership('sprint-1', 'Sprint 1')],
+    });
+    const epic2 = item({
+      id: 'EPIC-2',
+      type: 'epic',
+      title: 'epic',
+      children: [searchOnlyChild, bothChild],
+      childCount: 2,
+      pendingTasks: 2,
+    });
+    const [result] = applySearchAndMembership([epic2], 'parser', ['sprint-1'], []) as FilteredBacklogTaskItem[];
+    expect(result.children?.map((c) => c.id)).toEqual(['C3']);
+    expect(result.matchedChildRefs).toEqual([{ ref: 'TASK-020', title: 'wire the parser' }]);
+  });
+
+  it('OR semantics within a kind: any selected sprint id matches', () => {
+    const tasks = [
+      item({ id: 'T1', memberships: [sprintMembership('s1', 'Sprint 1')] }),
+      item({ id: 'T2', memberships: [sprintMembership('s2', 'Sprint 2')] }),
+      item({ id: 'T3', memberships: [sprintMembership('s3', 'Sprint 3')] }),
+    ];
+    expect(applySearchAndMembership(tasks, '', ['s1', 's2'], []).map((t) => t.id)).toEqual(['T1', 'T2']);
+  });
+
+  it('OR semantics across kinds: a sprint OR an experiment selection both pass', () => {
+    const tasks = [
+      item({ id: 'T1', memberships: [sprintMembership('s1', 'Sprint 1')] }),
+      item({ id: 'T2', memberships: [experimentMembership('e1', 'Experiment 1')] }),
+      item({ id: 'T3', memberships: [] }),
+    ];
+    expect(applySearchAndMembership(tasks, '', ['s1'], ['e1']).map((t) => t.id)).toEqual(['T1', 'T2']);
+  });
+
+  it('no selection in either kind is NOT a constraint — every item passes membership', () => {
+    const tasks = [item({ id: 'T1', memberships: [] }), item({ id: 'T2', memberships: [sprintMembership('s1', 'S1')] })];
+    expect(applySearchAndMembership(tasks, '', [], []).map((t) => t.id)).toEqual(['T1', 'T2']);
+  });
+
+  it('a STALE selected id (no longer in memberships) fails to match — no fallback to inFlow/experimentSeed', () => {
+    const tasks = [
+      item({
+        id: 'T1',
+        memberships: [], // membership went terminal and fell out
+        inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+        experimentSeed: true,
+      }),
+    ];
+    expect(applySearchAndMembership(tasks, '', ['stale-sprint-id'], [])).toEqual([]);
+  });
+});
+
+describe('comparePriority', () => {
+  it('orders P0 (highest) before P6 (lowest)', () => {
+    const p6 = item({ id: 'a', priority: 'P6' });
+    const p0 = item({ id: 'b', priority: 'P0' });
+    const p3 = item({ id: 'c', priority: 'P3' });
+    expect([p6, p0, p3].sort(comparePriority).map((t) => t.id)).toEqual(['b', 'c', 'a']);
+  });
+
+  it('ties fall through to the full compareBacklogOrder chain (sort_order first)', () => {
+    const a = item({ id: 'a', priority: 'P1', sort_order: 2048 });
+    const b = item({ id: 'b', priority: 'P1', sort_order: 1024 });
+    expect([a, b].sort(comparePriority).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('compareUpdated', () => {
+  it('orders raw ISO updated_at DESCENDING (most recent first)', () => {
+    const older = item({ id: 'a', updated_at: '2026-06-01T00:00:00Z' });
+    const newer = item({ id: 'b', updated_at: '2026-06-05T00:00:00Z' });
+    expect([older, newer].sort(compareUpdated).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+
+  it('ties fall through to the full compareBacklogOrder chain', () => {
+    const a = item({ id: 'a', updated_at: '2026-06-01T00:00:00Z', sort_order: 2048 });
+    const b = item({ id: 'b', updated_at: '2026-06-01T00:00:00Z', sort_order: 1024 });
+    expect([a, b].sort(compareUpdated).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('compareTitle', () => {
+  it('orders case-folded ascending', () => {
+    const zulu = item({ id: 'a', title: 'zulu' });
+    const alpha = item({ id: 'b', title: 'Alpha' });
+    expect([zulu, alpha].sort(compareTitle).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+
+  it('breaks a case-fold tie via the raw title', () => {
+    const upper = item({ id: 'a', title: 'Bravo' });
+    const lower = item({ id: 'b', title: 'bravo' });
+    // Same case-folded value ('bravo'); raw string comparison: 'Bravo' < 'bravo'.
+    expect([lower, upper].sort(compareTitle).map((t) => t.id)).toEqual(['a', 'b']);
+  });
+
+  it('falls through to the full compareBacklogOrder chain once title AND case-fold tie', () => {
+    const a = item({ id: 'a', title: 'same', sort_order: 2048 });
+    const b = item({ id: 'b', title: 'same', sort_order: 1024 });
+    expect([a, b].sort(compareTitle).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('compareForSortMode', () => {
+  it('returns the matching comparator for each mode', () => {
+    expect(compareForSortMode('manual')).toBe(compareBacklogOrder);
+    expect(compareForSortMode('priority')).toBe(comparePriority);
+    expect(compareForSortMode('updated')).toBe(compareUpdated);
+    expect(compareForSortMode('title')).toBe(compareTitle);
+  });
+});
+
+describe('bucketByStage — sortMode', () => {
+  it('sorts each stage bucket independently by the active sort mode, never moving items between stages', () => {
+    const stages = unifiedStages([defaultBoard()], null, false);
+    const tasks = [
+      item({ id: 'ready-p2', stage_position: 6, priority: 'P2', title: 'B' }),
+      item({ id: 'ready-p0', stage_position: 6, priority: 'P0', title: 'A' }),
+      item({ id: 'idea-p1', type: 'idea', stage_position: 1, priority: 'P1' }),
+    ];
+    const buckets = bucketByStage(tasks, stages, 'priority');
+    expect(buckets.find((b) => b.stage.position === 6)?.tasks.map((t) => t.id)).toEqual([
+      'ready-p0',
+      'ready-p2',
+    ]);
+    // The idea stays in its own stage (1), unaffected by the position-6 sort.
+    expect(buckets.find((b) => b.stage.position === 1)?.tasks.map((t) => t.id)).toEqual(['idea-p1']);
+  });
+
+  it('defaults to manual (compareBacklogOrder) when sortMode is omitted', () => {
+    const stages = unifiedStages([defaultBoard()], null, false);
+    const tasks = [
+      item({ id: 'late', stage_position: 6, sort_order: 2048 }),
+      item({ id: 'early', stage_position: 6, sort_order: 512 }),
+    ];
+    const buckets = bucketByStage(tasks, stages);
+    expect(buckets.find((b) => b.stage.position === 6)?.tasks.map((t) => t.id)).toEqual(['early', 'late']);
+  });
+
+  it('title sort mode orders each column case-foldedly, independent of manual sort_order', () => {
+    const stages = unifiedStages([defaultBoard()], null, false);
+    const tasks = [
+      item({ id: 'z', stage_position: 6, title: 'zulu', sort_order: 0 }),
+      item({ id: 'a', stage_position: 6, title: 'alpha', sort_order: 100 }),
+    ];
+    const buckets = bucketByStage(tasks, stages, 'title');
+    expect(buckets.find((b) => b.stage.position === 6)?.tasks.map((t) => t.id)).toEqual(['a', 'z']);
   });
 });
 

@@ -12,7 +12,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { BacklogTaskItem, Board, BoardStage } from '../../../../shared/types/tasks';
+import type { BacklogMembership, BacklogTaskItem, Board, BoardStage } from '../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
 // Mutable store snapshot shared with the mock factory.
@@ -30,10 +30,28 @@ let mockProjects: MockProjectRef[] = [];
 let mockFilterProjectId: number | null = null;
 let mockLayout: 'kanban' | 'list' = 'kanban';
 let mockShowArchived = false;
+// Search / membership filter / sort view state (IDEA-053, TASK-203).
+let mockSearchQuery = '';
+let mockSelectedSprintIds: string[] = [];
+let mockSelectedExperimentIds: string[] = [];
+let mockSortMode: 'manual' | 'priority' | 'updated' | 'title' = 'manual';
 const mockInit = vi.fn(() => () => {});
 const mockSetFilterProject = vi.fn((id: number | null) => { mockFilterProjectId = id; });
 const mockSetLayout = vi.fn((m: 'kanban' | 'list') => { mockLayout = m; });
 const mockToggleArchived = vi.fn(() => { mockShowArchived = !mockShowArchived; });
+const mockSetSearchQuery = vi.fn((q: string) => { mockSearchQuery = q; });
+const mockToggleSprintFilter = vi.fn((id: string) => {
+  mockSelectedSprintIds = mockSelectedSprintIds.includes(id)
+    ? mockSelectedSprintIds.filter((x) => x !== id)
+    : [...mockSelectedSprintIds, id];
+});
+const mockToggleExperimentFilter = vi.fn((id: string) => {
+  mockSelectedExperimentIds = mockSelectedExperimentIds.includes(id)
+    ? mockSelectedExperimentIds.filter((x) => x !== id)
+    : [...mockSelectedExperimentIds, id];
+});
+const mockSetSortMode = vi.fn((m: typeof mockSortMode) => { mockSortMode = m; });
+const mockReplaceTasks = vi.fn();
 
 function snapshot() {
   return {
@@ -45,10 +63,19 @@ function snapshot() {
     layoutMode: mockLayout,
     showArchived: mockShowArchived,
     connectionStatus: 'connected' as const,
+    searchQuery: mockSearchQuery,
+    selectedSprintIds: mockSelectedSprintIds,
+    selectedExperimentIds: mockSelectedExperimentIds,
+    sortMode: mockSortMode,
     setFilterProject: mockSetFilterProject,
     setLayoutMode: mockSetLayout,
     toggleShowArchived: mockToggleArchived,
+    setSearchQuery: mockSetSearchQuery,
+    toggleSprintFilter: mockToggleSprintFilter,
+    toggleExperimentFilter: mockToggleExperimentFilter,
+    setSortMode: mockSetSortMode,
     init: mockInit,
+    replaceTasks: mockReplaceTasks,
   };
 }
 
@@ -65,12 +92,21 @@ const mockWorkflowsList = vi
   .fn()
   .mockResolvedValue([{ id: 'wf-1', name: 'planner' }, { id: 'wf-sprint', name: 'sprint' }]);
 
+// Same-column reorder writes (planReorder -> tasks.update, IDEA-053/TASK-203
+// manual-sort gating tests exercise these directly).
+const mockTaskUpdate = vi.fn().mockResolvedValue({ taskId: 'tsk_1' });
+const mockTaskList = vi.fn().mockResolvedValue([]);
+
 vi.mock('../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       workflows: { list: { query: () => mockWorkflowsList() } },
       runs: { start: { mutate: (args: unknown) => mockStart(args) } },
-      tasks: { create: { mutate: (args: unknown) => mockCreate(args) } },
+      tasks: {
+        create: { mutate: (args: unknown) => mockCreate(args) },
+        update: { mutate: (args: unknown) => mockTaskUpdate(args) },
+        list: { query: (args: unknown) => mockTaskList(args) },
+      },
     },
   },
 }));
@@ -209,16 +245,27 @@ beforeEach(() => {
   mockFilterProjectId = null;
   mockLayout = 'kanban';
   mockShowArchived = false;
+  mockSearchQuery = '';
+  mockSelectedSprintIds = [];
+  mockSelectedExperimentIds = [];
+  mockSortMode = 'manual';
   mockInit.mockClear();
   mockSetFilterProject.mockClear();
   mockSetLayout.mockClear();
   mockToggleArchived.mockClear();
+  mockSetSearchQuery.mockClear();
+  mockToggleSprintFilter.mockClear();
+  mockToggleExperimentFilter.mockClear();
+  mockSetSortMode.mockClear();
+  mockReplaceTasks.mockClear();
   mockStart.mockClear();
   mockCreate.mockClear();
   mockWorkflowsList.mockClear();
   mockSetActiveSession.mockClear();
   mockNavigateToSessions.mockClear();
   mockOpenIdeaSession.mockClear();
+  mockTaskUpdate.mockClear().mockResolvedValue({ taskId: 'tsk_1' });
+  mockTaskList.mockClear().mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -589,5 +636,257 @@ describe('BacklogPane', () => {
     const inFlow = screen.getByTestId('in-flow-chip');
     expect(within(inFlow).getByText(/in flow/)).toBeInTheDocument();
     expect(screen.getByTestId('awaiting-review-chip')).toHaveTextContent('awaiting review');
+  });
+
+  // -- Search / membership filters / sort (IDEA-053, TASK-203) ---------------
+
+  describe('search toolbar', () => {
+    it('renders the current store search value and calls setSearchQuery on input', () => {
+      mockSearchQuery = 'parser';
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByTestId('backlog-search-input')).toHaveValue('parser');
+      fireEvent.change(screen.getByTestId('backlog-search-input'), { target: { value: 'retry guard' } });
+      expect(mockSetSearchQuery).toHaveBeenCalledWith('retry guard');
+    });
+
+    it('narrows visible cards and header counts to ref/title/summary matches', () => {
+      mockSearchQuery = 'parser';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', title: 'Wire the parser' }),
+        task({ id: 't2', stage_id: 's-ready', title: 'Unrelated', summary: null }),
+        task({ id: 't3', stage_id: 's-ready', title: 'Also unrelated', summary: 'mentions the Parser once' }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByText('Wire the parser')).toBeInTheDocument();
+      expect(screen.getByText('Also unrelated')).toBeInTheDocument(); // summary match
+      expect(screen.queryByText('Unrelated')).not.toBeInTheDocument();
+      // Header counts derive from the FINAL narrowed (post-search) list.
+      expect(screen.getByTestId('backlog-counts')).toHaveTextContent('2');
+    });
+
+    it('a search that matches only a nested task keeps the parent epic and shows child evidence', () => {
+      mockSearchQuery = 'retry';
+      const matchingChild = task({
+        id: 'c1',
+        stage_id: 's-ready',
+        parent_epic_id: 'e1',
+        ref: 'TASK-014',
+        title: 'Add retry guard',
+      });
+      const otherChild = task({ id: 'c2', stage_id: 's-ready', parent_epic_id: 'e1', title: 'Unrelated child' });
+      mockTasks = [
+        task({
+          id: 'e1',
+          type: 'epic',
+          stage_id: 's-ready',
+          title: 'Parent epic',
+          children: [matchingChild, otherChild],
+          childCount: 2,
+          pendingTasks: 2,
+        }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByText('Parent epic')).toBeInTheDocument();
+      expect(screen.getByTestId('matched-child-evidence')).toHaveTextContent('TASK-014');
+      expect(screen.getByTestId('matched-child-evidence')).toHaveTextContent('Add retry guard');
+    });
+  });
+
+  describe('membership filters', () => {
+    const SPRINT_MEMBERSHIP: BacklogMembership = { kind: 'sprint', id: 'sprint-1', label: 'Sprint Alpha', status: 'running' };
+    const EXPERIMENT_MEMBERSHIP: BacklogMembership = { kind: 'experiment', id: 'exp-1', label: 'Experiment Beta', status: 'running' };
+
+    it('derives sprint/experiment options from filterTasks output and toggles the selection on click', () => {
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', memberships: [SPRINT_MEMBERSHIP] }),
+        task({ id: 't2', stage_id: 's-ready', memberships: [EXPERIMENT_MEMBERSHIP] }),
+      ];
+      render(<BacklogPane projectId={1} />);
+
+      fireEvent.click(screen.getByTestId('membership-filter-sprint-trigger'));
+      expect(screen.getByText('Sprint Alpha')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Sprint Alpha'));
+      expect(mockToggleSprintFilter).toHaveBeenCalledWith('sprint-1');
+
+      fireEvent.click(screen.getByTestId('membership-filter-experiment-trigger'));
+      expect(screen.getByText('Experiment Beta')).toBeInTheDocument();
+      fireEvent.click(screen.getByText('Experiment Beta'));
+      expect(mockToggleExperimentFilter).toHaveBeenCalledWith('exp-1');
+    });
+
+    it('narrows the board to selected sprint members only (OR semantics — no fallback to inFlow)', () => {
+      mockSelectedSprintIds = ['sprint-1'];
+      mockTasks = [
+        task({ id: 'member', stage_id: 's-ready', title: 'In the sprint', memberships: [SPRINT_MEMBERSHIP] }),
+        task({
+          id: 'non-member',
+          stage_id: 's-ready',
+          title: 'Not in the sprint',
+          memberships: [],
+          // A live run association must NOT substitute for an exact membership match.
+          inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+        }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByText('In the sprint')).toBeInTheDocument();
+      expect(screen.queryByText('Not in the sprint')).not.toBeInTheDocument();
+    });
+
+    it('the option list does NOT shrink as a selection narrows the board (derived pre-narrowing)', () => {
+      mockSelectedSprintIds = ['sprint-1'];
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', memberships: [SPRINT_MEMBERSHIP] }),
+        task({ id: 't2', stage_id: 's-ready', memberships: [EXPERIMENT_MEMBERSHIP] }), // narrowed OUT of the board
+      ];
+      render(<BacklogPane projectId={1} />);
+      // t2 is narrowed off the board (not a sprint-1 member)...
+      fireEvent.click(screen.getByTestId('membership-filter-experiment-trigger'));
+      // ...yet its experiment option is STILL offered.
+      expect(screen.getByText('Experiment Beta')).toBeInTheDocument();
+    });
+  });
+
+  describe('sort mode', () => {
+    it('renders the active sort mode label and calls setSortMode on selection', () => {
+      mockSortMode = 'priority';
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByTestId('sort-mode-trigger')).toHaveTextContent('Priority');
+      fireEvent.click(screen.getByTestId('sort-mode-trigger'));
+      fireEvent.click(screen.getByText('Title (A–Z)'));
+      expect(mockSetSortMode).toHaveBeenCalledWith('title');
+    });
+
+    it('priority sort mode orders cards within a stage independent of manual sort_order', () => {
+      mockSortMode = 'priority';
+      mockTasks = [
+        task({ id: 'low', stage_id: 's-ready', title: 'Low priority item', priority: 'P4', sort_order: 0 }),
+        task({ id: 'high', stage_id: 's-ready', title: 'High priority item', priority: 'P0', sort_order: 100 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const titles = screen.getAllByText(/priority item$/).map((el) => el.textContent);
+      expect(titles).toEqual(['High priority item', 'Low priority item']);
+    });
+
+    it('sorting changes order within a stage only — items never move between stages', () => {
+      mockSortMode = 'title';
+      mockTasks = [
+        task({ id: 'idea1', type: 'idea', stage_id: 's-idea', title: 'Zulu idea' }),
+        task({ id: 'ready1', stage_id: 's-ready', title: 'Zulu task' }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const columns = screen.getAllByTestId('kanban-column');
+      const ideaColumn = columns.find((c) => c.getAttribute('data-stage-id') === 's-idea');
+      const readyColumn = columns.find((c) => c.getAttribute('data-stage-id') === 's-ready');
+      expect(ideaColumn).toBeDefined();
+      expect(readyColumn).toBeDefined();
+      expect(within(ideaColumn as HTMLElement).getByText('Zulu idea')).toBeInTheDocument();
+      expect(within(readyColumn as HTMLElement).getByText('Zulu task')).toBeInTheDocument();
+    });
+  });
+
+  describe('toolbar state survives layout switching (in-memory store, not component state)', () => {
+    it('the search value and sort mode read the SAME store fields in both Kanban and List', () => {
+      mockSearchQuery = 'parser';
+      mockSortMode = 'priority';
+      mockLayout = 'kanban';
+      const { unmount } = render(<BacklogPane projectId={1} />);
+      expect(screen.getByTestId('backlog-search-input')).toHaveValue('parser');
+      expect(screen.getByTestId('sort-mode-trigger')).toHaveTextContent('Priority');
+      unmount();
+
+      mockLayout = 'list';
+      render(<BacklogPane projectId={1} />);
+      expect(screen.getByTestId('list-view')).toBeInTheDocument();
+      expect(screen.getByTestId('backlog-search-input')).toHaveValue('parser');
+      expect(screen.getByTestId('sort-mode-trigger')).toHaveTextContent('Priority');
+    });
+
+    it('never persists search/membership/sort to a task write — pure view state', () => {
+      mockSearchQuery = 'parser';
+      mockSelectedSprintIds = ['sprint-1'];
+      mockSortMode = 'priority';
+      render(<BacklogPane projectId={1} />);
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203)', () => {
+    /** A minimal dataTransfer stub for native HTML5 DnD fireEvent calls. */
+    function dataTransfer() {
+      return { effectAllowed: '', setData: vi.fn(), getData: vi.fn() };
+    }
+
+    it('Kanban cards are NOT draggable outside manual sort', () => {
+      mockSortMode = 'priority';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', sort_order: 0 }),
+        task({ id: 't2', stage_id: 's-ready', sort_order: 1024 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      for (const slot of screen.getAllByTestId('kanban-card-slot')) {
+        expect(slot).toHaveAttribute('draggable', 'false');
+      }
+    });
+
+    it('a drag/drop attempt outside manual sort cannot invoke tasks.update', () => {
+      mockSortMode = 'priority';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', sort_order: 0 }),
+        task({ id: 't2', stage_id: 's-ready', sort_order: 1024 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const slots = screen.getAllByTestId('kanban-card-slot');
+      fireEvent.dragStart(slots[0], { dataTransfer: dataTransfer() });
+      fireEvent.dragOver(slots[1], { dataTransfer: dataTransfer() });
+      fireEvent.drop(slots[1], { dataTransfer: dataTransfer() });
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
+    it('the card menu\'s Move items are disabled with the accessible hint outside manual sort', () => {
+      mockSortMode = 'priority';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', sort_order: 0 }),
+        task({ id: 't2', stage_id: 's-ready', sort_order: 1024 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const triggers = screen.getAllByTestId('task-actions-trigger');
+      fireEvent.click(triggers[0]);
+      expect(screen.getByText('Move up').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move down').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
+      expect(screen.getAllByText('Reordering is available only in Manual sort').length).toBeGreaterThan(0);
+      fireEvent.click(screen.getByText('Move up'));
+      expect(mockTaskUpdate).not.toHaveBeenCalled();
+    });
+
+    it('manual sort keeps reorder fully functional (regression guard)', async () => {
+      mockSortMode = 'manual';
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', sort_order: 1024, version: 3 }),
+        task({ id: 't2', stage_id: 's-ready', sort_order: 2048, version: 5 }),
+        task({ id: 't3', stage_id: 's-ready', sort_order: 3072, version: 7 }),
+      ];
+      render(<BacklogPane projectId={1} />);
+      const slots = screen.getAllByTestId('kanban-card-slot');
+      for (const slot of slots) expect(slot).toHaveAttribute('draggable', 'true');
+      // Drag t1 (index 0) onto t3 (index 2): insert-before t3 with t1 removed
+      // from index 0 → post-drop index 1 (an actual move, not a same-slot no-op).
+      // Separate act() per event: dragStart's setState must flush before
+      // dragOver reads the drag source, and likewise for drop.
+      await act(async () => {
+        fireEvent.dragStart(slots[0], { dataTransfer: dataTransfer() });
+      });
+      await act(async () => {
+        fireEvent.dragOver(slots[2], { dataTransfer: dataTransfer() });
+      });
+      await act(async () => {
+        fireEvent.drop(slots[2], { dataTransfer: dataTransfer() });
+      });
+      await vi.waitFor(() => expect(mockTaskUpdate).toHaveBeenCalledTimes(1));
+      expect(mockTaskUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 1, taskId: 't1', sortOrder: 2560 }),
+      );
+    });
   });
 });

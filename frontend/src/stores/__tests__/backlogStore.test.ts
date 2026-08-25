@@ -140,6 +140,12 @@ beforeEach(() => {
     filterProjectId: null,
     connectionStatus: 'idle',
     showArchived: false,
+    // Search / membership filter / sort view state (IDEA-053, TASK-203) —
+    // reset between tests so toolbar reducer tests never leak into each other.
+    searchQuery: '',
+    selectedSprintIds: [],
+    selectedExperimentIds: [],
+    sortMode: 'manual',
   });
   localStorage.clear();
 });
@@ -332,6 +338,70 @@ describe('setFilterProject', () => {
     useBacklogStore.setState({ tasks: [makeTask({ id: 'tsk_a', project_id: 1 })] });
     useBacklogStore.getState().setFilterProject(2);
     expect(useBacklogStore.getState().tasks).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search / membership filter / sort view state (IDEA-053, TASK-203)
+// ---------------------------------------------------------------------------
+
+describe('search / membership filter / sort view state', () => {
+  it('defaults: empty search, no membership selections, manual sort', () => {
+    const s = useBacklogStore.getState();
+    expect(s.searchQuery).toBe('');
+    expect(s.selectedSprintIds).toEqual([]);
+    expect(s.selectedExperimentIds).toEqual([]);
+    expect(s.sortMode).toBe('manual');
+  });
+
+  it('setSearchQuery sets the in-memory query verbatim (no trimming/folding at the store layer)', () => {
+    useBacklogStore.getState().setSearchQuery('  Parser  ');
+    expect(useBacklogStore.getState().searchQuery).toBe('  Parser  ');
+    useBacklogStore.getState().setSearchQuery('');
+    expect(useBacklogStore.getState().searchQuery).toBe('');
+  });
+
+  it('setSearchQuery does not touch tasks (view-only)', () => {
+    useBacklogStore.setState({ tasks: [makeTask({ id: 'tsk_a' })] });
+    useBacklogStore.getState().setSearchQuery('anything');
+    expect(useBacklogStore.getState().tasks).toHaveLength(1);
+  });
+
+  it('toggleSprintFilter adds then removes an id (in/out toggle)', () => {
+    useBacklogStore.getState().toggleSprintFilter('sprint-1');
+    expect(useBacklogStore.getState().selectedSprintIds).toEqual(['sprint-1']);
+    useBacklogStore.getState().toggleSprintFilter('sprint-2');
+    expect(useBacklogStore.getState().selectedSprintIds).toEqual(['sprint-1', 'sprint-2']);
+    useBacklogStore.getState().toggleSprintFilter('sprint-1');
+    expect(useBacklogStore.getState().selectedSprintIds).toEqual(['sprint-2']);
+  });
+
+  it('toggleExperimentFilter adds then removes an id independently of the sprint selection', () => {
+    useBacklogStore.getState().toggleSprintFilter('sprint-1');
+    useBacklogStore.getState().toggleExperimentFilter('exp-1');
+    expect(useBacklogStore.getState().selectedSprintIds).toEqual(['sprint-1']);
+    expect(useBacklogStore.getState().selectedExperimentIds).toEqual(['exp-1']);
+    useBacklogStore.getState().toggleExperimentFilter('exp-1');
+    expect(useBacklogStore.getState().selectedExperimentIds).toEqual([]);
+    // The sprint selection is untouched by the experiment toggle.
+    expect(useBacklogStore.getState().selectedSprintIds).toEqual(['sprint-1']);
+  });
+
+  it('setSortMode sets the active per-stage sort mode', () => {
+    useBacklogStore.getState().setSortMode('priority');
+    expect(useBacklogStore.getState().sortMode).toBe('priority');
+    useBacklogStore.getState().setSortMode('title');
+    expect(useBacklogStore.getState().sortMode).toBe('title');
+    useBacklogStore.getState().setSortMode('manual');
+    expect(useBacklogStore.getState().sortMode).toBe('manual');
+  });
+
+  it('none of the toolbar reducers are persisted to localStorage (unlike layoutMode)', () => {
+    useBacklogStore.getState().setSearchQuery('parser');
+    useBacklogStore.getState().toggleSprintFilter('sprint-1');
+    useBacklogStore.getState().setSortMode('priority');
+    expect(localStorage.getItem('cyboflow-backlog-search')).toBeNull();
+    expect(localStorage.getItem('cyboflow-backlog-sort')).toBeNull();
   });
 });
 

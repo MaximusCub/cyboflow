@@ -569,5 +569,52 @@ describe('CardActionsMenu', () => {
       expect(screen.getByText('Move down').closest('button')).toBeEnabled();
       expect(screen.getByText('Move to top').closest('button')).toBeEnabled();
     });
+
+    // -- Manual-sort-only gating (IDEA-053, TASK-203) ------------------------
+
+    it('isManualSort=false disables ALL THREE Move items regardless of canMoveUp/canMoveDown, with the accessible hint', () => {
+      const onReorder = vi.fn();
+      render(
+        <CardActionsMenu
+          task={makeTask()}
+          onReorder={onReorder}
+          canMoveUp
+          canMoveDown
+          isManualSort={false}
+        />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.getByText('Move up').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move down').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
+      // The equivalent-of-required accessible explanation, once per item.
+      expect(screen.getAllByText('Reordering is available only in Manual sort')).toHaveLength(3);
+    });
+
+    it('isManualSort=false guards onClick too — a stray activation can never invoke onReorder', () => {
+      const onReorder = vi.fn();
+      render(
+        <CardActionsMenu
+          task={makeTask()}
+          onReorder={onReorder}
+          canMoveUp
+          canMoveDown
+          isManualSort={false}
+        />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Move up'));
+      fireEvent.click(screen.getByText('Move down'));
+      fireEvent.click(screen.getByText('Move to top'));
+      expect(onReorder).not.toHaveBeenCalled();
+    });
+
+    it('isManualSort defaults to true — no hint, and first/last-card disabling behaves as before', () => {
+      const onReorder = vi.fn();
+      render(<CardActionsMenu task={makeTask()} onReorder={onReorder} canMoveUp canMoveDown />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.queryByText('Reordering is available only in Manual sort')).not.toBeInTheDocument();
+      expect(screen.getByText('Move up').closest('button')).toBeEnabled();
+    });
   });
 });
