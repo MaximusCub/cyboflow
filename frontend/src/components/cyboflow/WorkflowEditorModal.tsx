@@ -1,6 +1,20 @@
 /**
- * WorkflowEditorModal — full-screen blueprint editor for a workflow's
- * phase/step graph.
+ * WorkflowEditorModal — full-screen editor for a workflow, in TWO PAGES
+ * (plan `docs/plans/workflow-tuning-levels.md` D3 / §4):
+ *
+ *   - `view: 'simple'`   — {@link WorkflowTuningPage}: the four-slot tuning dial
+ *     (Efficient / Standard / Thorough / Custom) over a strip of what that level
+ *     runs. The DEFAULT page for a BUILT-IN flow. A non-built-in ("save as new")
+ *     flow has no built-in baseline to transform, so it has no dial and opens
+ *     straight to advanced — zero change for those flows.
+ *   - `view: 'advanced'` — the blueprint editor proper (canvas, inspector,
+ *     agents, variants, A/B), unchanged, seeded from the CURRENTLY SELECTED
+ *     level's effective definition so "start from Efficient and tweak" works.
+ *
+ * Level selection is one cheap `setTuningLevel` write that never touches
+ * `spec_json` — `spec_json` is the CUSTOM slot, written only by the Advanced
+ * page's "Overwrite this flow" save (which stamps `'custom'` server-side) and by
+ * MCP `cyboflow_update_workflow`.
  *
  * Two modes:
  *   - 'edit'   — seed from `trpc.cyboflow.workflows.getDefinition.query({ workflowId })`.
@@ -10,11 +24,15 @@
  * Header actions:
  *   Cancel              — close without saving.
  *   Reset to default    — built-in flows only; `resetSpec` then close + onSaved.
- *   Save                — edit mode: opens the {@link SaveScopeDialog} (migration
- *                         030) — "Save globally" (`updateSpec` on the shared row,
- *                         the default) vs "Create a project-specific copy"
- *                         (`createCustom` with a chosen project, forking the
- *                         global flow). Disabled when not dirty.
+ *   Save                — edit mode: opens the {@link SaveScopeDialog}, the
+ *                         save-TARGET prompt — "Overwrite this flow"
+ *                         (`updateSpec`, the default; server stamps
+ *                         `tuning_level='custom'`), "Create a project-specific
+ *                         copy" (`createCustom`, migration 030), "Save as new
+ *                         flow", or "Save as new variant of this flow"
+ *                         (`variants.create` carrying the edited graph, draft
+ *                         status, base flow untouched). Disabled when not dirty,
+ *                         so the prompt only appears for a real edit.
  *   Save as new flow    — ask for a name (FlowNameDialog); `createCustom` then onSaved(newId).
  *   Run with modifications — persist (updateSpec OR createCustom) then
  *                            `runs.start`, set the active run, close.
@@ -31,12 +49,17 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
-import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
+import { hasCustomSpecSlot, isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import {
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,
 } from '../../../../shared/types/sessionDefaults';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
+import {
+  DEFAULT_TUNING_LEVEL,
+  resolveEffectiveDefinition,
+  type TuningLevel,
+} from '../../../../shared/tuning/workflowTuning';
 import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
@@ -45,6 +68,9 @@ import { FlowNameDialog } from './FlowNameDialog';
 import { SaveScopeDialog, type SaveScopeProject, type SaveScopeChoice } from './SaveScopeDialog';
 import { PHASE_COLORS } from './workflowEditorOptions';
 import { VariantManagerSection } from './VariantManagerSection';
+import { WorkflowTuningPage } from './WorkflowTuningPage';
+import { ConfirmDialog } from '../ConfirmDialog';
+import { useVariantsStore } from '../../stores/variantsStore';
 
 export interface WorkflowEditorModalProps {
   isOpen: boolean;
@@ -136,7 +162,31 @@ export function WorkflowEditorModal({
   const [isLoading, setIsLoading] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Non-error confirmation line (currently: "saved as draft variant '<label>'").
+   * A separate slot from `error` so a success message never renders in the alert
+   * role, and so neither clobbers the other.
+   */
+  const [notice, setNotice] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(false);
+  /** Which page is showing. Resolved on seed; see the module doc comment. */
+  const [view, setView] = useState<'simple' | 'advanced'>('advanced');
+  /** The workflow's stamped tuning level (edit mode); the dial's selection. */
+  const [level, setLevel] = useState<TuningLevel>(DEFAULT_TUNING_LEVEL);
+  /**
+   * The source row's `spec_json` — the CUSTOM slot. Kept so level switching can
+   * re-derive the effective definition client-side (the same shared transform
+   * the server resolves through) without a refetch per switch, and so
+   * `hasCustomSpecSlot` can gate the CUSTOM segment.
+   */
+  const [sourceSpecJson, setSourceSpecJson] = useState<string | null>(null);
+  /**
+   * The source row's NAME, captured on seed. Distinct from `state.name`, which
+   * the header input lets the user retype for a "save as new": the level
+   * transforms are keyed by the BUILT-IN flow name, so resolving them off a
+   * half-typed rename would silently fall back to the custom-flow path.
+   */
+  const [sourceName, setSourceName] = useState('');
   /** Snapshot of the loaded definition+name, to compute dirty state + reset. */
   const [baseline, setBaseline] = useState<{ definition: WorkflowDefinition; name: string } | null>(null);
   /**
@@ -206,7 +256,16 @@ export function WorkflowEditorModal({
   const [nameDialogOpen, setNameDialogOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<'save-as-new' | 'run-with-modifications' | null>(null);
 
+  /** "Delete custom definition" confirmation (simple page). */
+  const [deleteCustomOpen, setDeleteCustomOpen] = useState(false);
+
   const isBuiltIn = isCyboflowWorkflowName(state.name);
+  /**
+   * Does THIS row have a tuning dial? Keyed off the row's own name (not the
+   * editable header field) and edit mode only — create mode has no row to stamp.
+   */
+  const hasTuningDial = mode === 'edit' && isCyboflowWorkflowName(sourceName);
+  const hasCustomDefinition = hasCustomSpecSlot(sourceSpecJson);
 
   // ── Seed on open ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -214,6 +273,7 @@ export function WorkflowEditorModal({
     let cancelled = false;
     setIsLoading(true);
     setError(null);
+    setNotice(null);
     setIsDirty(false);
 
     const seed = (definition: WorkflowDefinition, name: string) => {
@@ -232,6 +292,14 @@ export function WorkflowEditorModal({
         if (cancelled) return;
         setSourcePermissionMode(row.permission_mode);
         setSourceProjectId(row.project_id);
+        setSourceName(row.name);
+        setSourceSpecJson(row.spec_json);
+        setLevel(row.tuning_level);
+        // A built-in opens on the dial; a custom flow has no dial and lands on
+        // the blueprint editor exactly as it always has.
+        setView(isCyboflowWorkflowName(row.name) ? 'simple' : 'advanced');
+        // `getDefinition` already returns the STAMPED level's effective graph,
+        // so the canvas baseline agrees with the dial without a second resolve.
         seed(definition, row.name);
       } catch (err: unknown) {
         if (cancelled) return;
@@ -249,6 +317,11 @@ export function WorkflowEditorModal({
       setSourcePermissionMode(initialPermissionMode ?? 'default');
       // A brand-new flow has no source row; its scope is decided by GalleryNew.
       setSourceProjectId(null);
+      // No row ⇒ no custom slot and no level stamp; create mode has no dial.
+      setSourceName('');
+      setSourceSpecJson(null);
+      setLevel(DEFAULT_TUNING_LEVEL);
+      setView('advanced');
       seed(initialDefinition ?? SKELETON_DEFINITION, initialName ? initialName + '-copy' : '');
     };
 
@@ -336,6 +409,89 @@ export function WorkflowEditorModal({
     [projectId, state.definition, sourcePermissionMode],
   );
 
+  // ── Tuning levels (the simple page) ─────────────────────────────────────────
+
+  /**
+   * The SELECTED level's effective definition — what the phase strip renders.
+   * Derived through the SHARED transform, never hand-maintained: a preset level
+   * resolves `applyTuningPreset(builtin, …)`, `'custom'` resolves the slot. Null
+   * only for an unresolvable custom flow, which the strip states plainly.
+   */
+  const effectiveDefinition = useMemo(
+    () => resolveEffectiveDefinition(sourceName, sourceSpecJson, level),
+    [sourceName, sourceSpecJson, level],
+  );
+
+  /**
+   * Re-seed the Advanced canvas from a level's effective definition, so opening
+   * Advanced after switching the dial starts from THAT level's graph ("start
+   * from Efficient and tweak"). Derived client-side from the same shared
+   * transform the server resolves through, because the dial can move without a
+   * refetch. Also resets the baseline: dirty means "differs from the level I
+   * started from", not "differs from the level that was stamped when I opened".
+   */
+  const reseedFromLevel = useCallback(
+    (next: TuningLevel) => {
+      const definition = resolveEffectiveDefinition(sourceName, sourceSpecJson, next);
+      if (definition === null) return;
+      dispatch({ type: 'SET_DEFINITION', definition, name: state.name });
+      setBaseline({ definition, name: state.name });
+      setIsDirty(false);
+    },
+    [sourceName, sourceSpecJson, state.name, dispatch],
+  );
+
+  /** Stamp a new level (one cheap write; `spec_json` is never touched). */
+  const handleSelectLevel = useCallback(
+    async (next: TuningLevel) => {
+      if (next === level || actionInFlightRef.current) return;
+      actionInFlightRef.current = true;
+      setError(null);
+      setNotice(null);
+      setIsBusy(true);
+      try {
+        await trpc.cyboflow.workflows.setTuningLevel.mutate({ workflowId, level: next });
+        setLevel(next);
+        reseedFromLevel(next);
+        onSaved?.(workflowId);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Could not change the tuning level');
+      } finally {
+        setIsBusy(false);
+        actionInFlightRef.current = false;
+      }
+    },
+    [level, workflowId, reseedFromLevel, onSaved],
+  );
+
+  /**
+   * "Delete custom definition" — `resetSpec` clears the slot AND flips a
+   * `'custom'` stamp back to `'standard'` in the same transaction (an empty slot
+   * has nothing for Custom to select), so the local state mirrors both halves.
+   * Unlike the header's "Reset to default" this stays on the page: the user is
+   * managing the flow's levels, not leaving.
+   */
+  const handleDeleteCustom = useCallback(async () => {
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+    setError(null);
+    setNotice(null);
+    setIsBusy(true);
+    try {
+      await trpc.cyboflow.workflows.resetSpec.mutate({ workflowId });
+      setSourceSpecJson(null);
+      const nextLevel: TuningLevel = level === 'custom' ? 'standard' : level;
+      setLevel(nextLevel);
+      reseedFromLevel(nextLevel);
+      onSaved?.(workflowId);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Could not delete the custom definition');
+    } finally {
+      setIsBusy(false);
+      actionInFlightRef.current = false;
+    }
+  }, [workflowId, level, reseedFromLevel, onSaved]);
+
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   /**
@@ -359,38 +515,71 @@ export function WorkflowEditorModal({
     return false;
   }, [state.definition]);
 
-  // Save presents the scope choice (migration 030): "Save globally" updates the
-  // (global) row; "Create a project-specific copy" forks via createCustom. The
-  // dialog opening is non-mutating, so it does NOT take the in-flight latch — the
-  // latch is acquired only on the dialog's confirm (handleSaveScopeConfirm).
+  // Save presents the save-TARGET choice: overwrite this flow / project copy /
+  // new flow / new draft variant. The dialog opening is non-mutating, so it does
+  // NOT take the in-flight latch — the latch is acquired only on the dialog's
+  // confirm (handleSaveScopeConfirm). `canSave` gates on `isDirty`, so an
+  // unchanged graph never raises the prompt.
   const handleSave = useCallback(() => {
     if (!canSave || actionInFlightRef.current) return;
     if (blockOnEmptyWorkflowPrompt()) return;
     setError(null);
+    setNotice(null);
     setSaveScopeOpen(true);
   }, [canSave, blockOnEmptyWorkflowPrompt]);
 
   /**
-   * Resolve of the Save-scope dialog. 'global' updates the existing row in place
-   * (the edit fans out to every project); 'project' forks the working definition
-   * into a new project-scoped copy via createCustom, leaving the global row
-   * intact. Each path owns the in-flight latch + busy lifecycle.
+   * Resolve of the save-target dialog. Each path owns the in-flight latch + busy
+   * lifecycle:
+   *   'global'      — write the edited graph into the flow's CUSTOM slot
+   *                   (`updateSpec`, which stamps `tuning_level='custom'`), then
+   *                   return to the simple page with CUSTOM selected.
+   *   'project'     — fork into a new project-scoped copy via createCustom,
+   *                   leaving the source row intact (migration 030).
+   *   'new-flow'    — hand off to the name dialog + the existing createCustom
+   *                   "save as new" path, unchanged.
+   *   'new-variant' — freeze the edited graph as a DRAFT variant; the base flow
+   *                   and its level stamp are untouched, so the editor stays
+   *                   dirty (nothing was saved TO the flow) and stays put.
    */
   const handleSaveScopeConfirm = useCallback(
     async (choice: SaveScopeChoice) => {
       setSaveScopeOpen(false);
+      if (choice.scope === 'new-flow') {
+        // Same downstream path as the header's "Save as new flow": collect a
+        // name, then createCustom. The latch is taken on the name confirm.
+        setPendingAction('save-as-new');
+        setNameDialogOpen(true);
+        return;
+      }
       if (actionInFlightRef.current) return;
       actionInFlightRef.current = true;
       setError(null);
       setIsBusy(true);
       try {
-        if (choice.scope === 'global') {
+        if (choice.scope === 'new-variant') {
+          await trpc.cyboflow.variants.create.mutate({
+            workflowId,
+            label: choice.label,
+            definition: state.definition,
+          });
+          useVariantsStore.getState().invalidate(workflowId);
+          setNotice(
+            `Saved as draft variant “${choice.label}” — opt it into rotation from the variant manager.`,
+          );
+        } else if (choice.scope === 'global') {
           const savedId = await saveEdit();
           trackEvent('workflow_saved', { scope: 'global' });
           // The row was edited in place — refresh the baseline so it is no longer
           // dirty and a re-save reopens the dialog cleanly.
           setBaseline({ definition: state.definition, name: state.name });
           setIsDirty(false);
+          // The slot now holds this graph and the server stamped 'custom'.
+          setSourceSpecJson(JSON.stringify(state.definition));
+          if (hasTuningDial) {
+            setLevel('custom');
+            setView('simple');
+          }
           onSaved?.(savedId);
         } else {
           // Fork into a project-scoped copy. The fork ALWAYS takes a `-copy` name
@@ -410,7 +599,7 @@ export function WorkflowEditorModal({
         actionInFlightRef.current = false;
       }
     },
-    [saveEdit, saveCustom, state.definition, state.name, onSaved, onClose],
+    [saveEdit, saveCustom, state.definition, state.name, workflowId, hasTuningDial, onSaved, onClose],
   );
 
   // Opening the name dialog is non-mutating, so it does NOT take the in-flight
@@ -585,6 +774,18 @@ export function WorkflowEditorModal({
           className="flex items-center gap-3 px-4 py-3 border-b border-border-primary"
           style={{ background: 'var(--color-bg-secondary)', flexShrink: 0 }}
         >
+          {/* Back nav to the dial — only where there IS a dial to go back to. */}
+          {hasTuningDial && view === 'advanced' && (
+            <button
+              type="button"
+              onClick={() => setView('simple')}
+              className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-hover"
+              data-testid="editor-back-to-tuning"
+            >
+              ← Tuning level
+            </button>
+          )}
+
           <h2 className="text-sm font-semibold text-text-primary" style={{ letterSpacing: '0.04em' }}>
             {title}
           </h2>
@@ -614,7 +815,10 @@ export function WorkflowEditorModal({
 
           <div className="flex-1" />
 
-          {isBuiltIn && mode === 'edit' && (
+          {/* Graph-editing actions belong to the Advanced page. The simple page
+              cannot make an edit, and carries its own "Delete custom definition"
+              in place of the generic reset. */}
+          {isBuiltIn && mode === 'edit' && view === 'advanced' && (
             <button
               type="button"
               onClick={() => void handleReset()}
@@ -626,17 +830,19 @@ export function WorkflowEditorModal({
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={handleSaveAsNew}
-            disabled={isBusy || isLoading}
-            className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-            data-testid="editor-save-as-new-button"
-          >
-            Save as new flow
-          </button>
+          {view === 'advanced' && (
+            <button
+              type="button"
+              onClick={handleSaveAsNew}
+              disabled={isBusy || isLoading}
+              className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="editor-save-as-new-button"
+            >
+              Save as new flow
+            </button>
+          )}
 
-          {mode === 'edit' && (
+          {mode === 'edit' && view === 'advanced' && (
             <button
               type="button"
               onClick={handleSave}
@@ -681,14 +887,36 @@ export function WorkflowEditorModal({
           </div>
         )}
 
-        {/* ── Body — canvas + inspector ───────────────────────────────────── */}
-        <div className="flex flex-row flex-1 overflow-hidden">
-          {isLoading ? (
-            <div className="flex flex-1 items-center justify-center">
-              <p className="text-xs text-text-secondary">Loading workflow…</p>
-            </div>
-          ) : (
-            <>
+        {/* ── Inline confirmation (non-error) ─────────────────────────────── */}
+        {notice !== null && (
+          <div
+            role="status"
+            className="px-4 py-2 text-xs text-text-secondary border-b border-border-primary"
+            style={{ background: 'var(--color-bg-secondary)', flexShrink: 0 }}
+            data-testid="editor-notice"
+          >
+            {notice}
+          </div>
+        )}
+
+        {/* ── Body — the tuning dial, or the blueprint editor ─────────────── */}
+        {isLoading ? (
+          <div className="flex flex-1 items-center justify-center">
+            <p className="text-xs text-text-secondary">Loading workflow…</p>
+          </div>
+        ) : view === 'simple' ? (
+          <WorkflowTuningPage
+            level={level}
+            hasCustomDefinition={hasCustomDefinition}
+            definition={effectiveDefinition}
+            busy={isBusy}
+            onSelectLevel={(next) => void handleSelectLevel(next)}
+            onOpenAdvanced={() => setView('advanced')}
+            onDeleteCustom={() => setDeleteCustomOpen(true)}
+          />
+        ) : (
+          <>
+            <div className="flex flex-row flex-1 overflow-hidden">
               <WorkflowEditorCanvas
                 definition={state.definition}
                 selectedStepId={state.selectedStepId}
@@ -704,14 +932,18 @@ export function WorkflowEditorModal({
                 customAgentKeys={customAgentKeys}
                 agentEntries={agentEntries}
               />
-            </>
-          )}
-        </div>
+            </div>
 
-        {/* Variant management (migration 048 / workflow A/B testing) — a variant
-            always snapshots an EXISTING workflow row, so this is edit-mode only. */}
-        {mode === 'edit' && !isLoading && (
-          <VariantManagerSection workflowId={workflowId} projectId={projectId} editorDirty={isDirty} />
+            {/* Variant management (migration 048 / workflow A/B testing) — a variant
+                always snapshots an EXISTING workflow row, so this is edit-mode only. */}
+            {mode === 'edit' && (
+              <VariantManagerSection
+                workflowId={workflowId}
+                projectId={projectId}
+                editorDirty={isDirty}
+              />
+            )}
+          </>
         )}
       </div>
 
@@ -728,14 +960,33 @@ export function WorkflowEditorModal({
         onClose={handleNameDialogClose}
       />
 
-      {/* Save-scope choice (edit mode, migration 030): Save globally vs project copy. */}
+      {/* Save-target choice (edit mode): overwrite / project copy / new flow /
+          new draft variant. */}
       <SaveScopeDialog
         isOpen={saveScopeOpen}
         projects={saveScopeProjects}
         defaultProjectId={saveScopeDefaultProjectId}
+        hasCustomDefinition={hasCustomDefinition}
         onConfirm={(choice) => void handleSaveScopeConfirm(choice)}
         onClose={() => setSaveScopeOpen(false)}
       />
+
+      {deleteCustomOpen && (
+        <div data-testid="tuning-delete-custom-confirm">
+          <ConfirmDialog
+            isOpen
+            onClose={() => setDeleteCustomOpen(false)}
+            onConfirm={() => void handleDeleteCustom()}
+            title="Delete custom definition?"
+            message={
+              'This clears the flow’s Custom slot and selects Standard. ' +
+              'Preset levels are unaffected, and past runs keep the spec they froze.'
+            }
+            confirmText="Delete"
+            cancelText="Cancel"
+          />
+        </div>
+      )}
     </Modal>
   );
 }

@@ -15,7 +15,7 @@
  * global setup stub with a file-local vi.mock of '../../../trpc/client').
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { WorkflowDefinition, WorkflowRow } from '../../../../../shared/types/workflows';
 import type { AgentEntry } from '../../../../../shared/types/agents';
@@ -107,6 +107,7 @@ vi.mock('../../../trpc/client', () => ({
         updateSpec: { mutate: vi.fn() },
         resetSpec: { mutate: vi.fn() },
         createCustom: { mutate: vi.fn() },
+        setTuningLevel: { mutate: vi.fn() },
       },
       agents: {
         list: { query: vi.fn() },
@@ -171,6 +172,8 @@ const mockList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockUpdateSpec = vi.mocked(trpc.cyboflow.workflows.updateSpec.mutate);
 const mockResetSpec = vi.mocked(trpc.cyboflow.workflows.resetSpec.mutate);
 const mockCreateCustom = vi.mocked(trpc.cyboflow.workflows.createCustom.mutate);
+const mockSetTuningLevel = vi.mocked(trpc.cyboflow.workflows.setTuningLevel.mutate);
+const mockVariantCreate = vi.mocked(trpc.cyboflow.variants.create.mutate);
 const mockAgentsList = vi.mocked(trpc.cyboflow.agents.list.query);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
@@ -191,6 +194,7 @@ beforeEach(() => {
   mockUpdateSpec.mockResolvedValue({ ok: true });
   mockResetSpec.mockResolvedValue({ ok: true });
   mockCreateCustom.mockResolvedValue(structuredClone(NEW_CUSTOM_ROW));
+  mockSetTuningLevel.mockResolvedValue({ ok: true });
   // Default: no custom agents. Tests that need one override this per-case.
   mockAgentsList.mockResolvedValue([]);
   mockRunStart.mockResolvedValue({
@@ -209,8 +213,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Render the modal in edit mode and wait for the async seed to resolve. */
-async function renderEditMode(onSaved = vi.fn(), onClose = vi.fn()) {
+/**
+ * Render the modal in edit mode and wait for the async seed to resolve, landing
+ * on the SIMPLE (tuning) page — the default for a built-in flow like the
+ * 'planner' fixture.
+ */
+async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn()) {
   render(
     <WorkflowEditorModal
       isOpen
@@ -221,9 +229,27 @@ async function renderEditMode(onSaved = vi.fn(), onClose = vi.fn()) {
       onSaved={onSaved}
     />,
   );
-  // Wait until the seed completes — the canvas (post-loading) renders.
-  await screen.findByTestId('workflow-editor-canvas');
+  await screen.findByTestId('workflow-tuning-page');
   return { onSaved, onClose };
+}
+
+/**
+ * Render the modal in edit mode and cross into the ADVANCED page (the blueprint
+ * editor). A built-in flow now opens on the tuning dial, so the graph-editing
+ * tests below take the one click that gets there.
+ */
+async function renderEditMode(onSaved = vi.fn(), onClose = vi.fn()) {
+  const handles = await renderTuningPage(onSaved, onClose);
+  await openAdvanced();
+  return handles;
+}
+
+/** Cross from the tuning page to the blueprint editor. */
+async function openAdvanced(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('tuning-open-advanced'));
+  });
+  await screen.findByTestId('workflow-editor-canvas');
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +976,10 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     ]);
     expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
 
+    // "Overwrite this flow" lands back on the tuning page with Custom selected,
+    // so re-enter the blueprint editor to keep editing the chain.
+    await openAdvanced();
+
     // Now remove the first row — the chain collapses to the remaining step.
     fireEvent.click(screen.getByTestId('inspector-fanout-inner-remove-0'));
     await waitFor(() => expect(screen.queryByTestId('inspector-fanout-inner-1')).toBeNull());
@@ -1053,6 +1083,340 @@ describe('WorkflowEditorModal — fan-out editing', () => {
 
     const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
     expect(savedStep?.fanOut?.inner[1].loopback).toBe('item');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tuning levels — the simple page (workflow-tuning-levels D3 / §4)
+// ---------------------------------------------------------------------------
+
+/** Re-seed `workflows.get` with a patched row for the next render. */
+function seedRow(patch: Partial<WorkflowRow>): void {
+  mockGet.mockResolvedValue({ ...structuredClone(SEED_ROW), ...patch });
+}
+
+describe('WorkflowEditorModal — tuning level selector', () => {
+  it('opens a built-in flow on the tuning page with all four segments', async () => {
+    await renderTuningPage();
+
+    expect(screen.getByTestId('tuning-level-selector')).toBeInTheDocument();
+    for (const level of ['efficient', 'standard', 'thorough', 'custom']) {
+      expect(screen.getByTestId(`tuning-level-segment-${level}`)).toBeInTheDocument();
+    }
+    // The stamped level is the selected one.
+    expect(screen.getByTestId('tuning-level-segment-standard')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // The blueprint editor is behind a click, not on screen.
+    expect(screen.queryByTestId('workflow-editor-canvas')).toBeNull();
+  });
+
+  it('disables CUSTOM with a hint while the slot is empty, and clicking it opens Advanced', async () => {
+    await renderTuningPage();
+
+    const custom = screen.getByTestId('tuning-level-segment-custom');
+    expect(custom).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByTestId('tuning-custom-hint')).toHaveTextContent('No custom definition yet');
+
+    // The disabled segment is the discovery path to where a custom definition
+    // comes from — it must not swallow the click.
+    await act(async () => {
+      fireEvent.click(custom);
+    });
+    await screen.findByTestId('workflow-editor-canvas');
+    expect(mockSetTuningLevel).not.toHaveBeenCalled();
+  });
+
+  it('enables CUSTOM (no hint) once the slot holds a definition', async () => {
+    seedRow({ spec_json: JSON.stringify(SEED_DEFINITION), tuning_level: 'custom' });
+    await renderTuningPage();
+
+    expect(screen.getByTestId('tuning-level-segment-custom')).toHaveAttribute(
+      'aria-disabled',
+      'false',
+    );
+    expect(screen.getByTestId('tuning-level-segment-custom')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.queryByTestId('tuning-custom-hint')).toBeNull();
+  });
+
+  it('selecting a segment stamps the level via setTuningLevel and moves the selection', async () => {
+    const { onSaved } = await renderTuningPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));
+    });
+
+    expect(mockSetTuningLevel).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      level: 'efficient',
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('tuning-level-segment-efficient')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
+    );
+    expect(screen.getByTestId('tuning-level-segment-standard')).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+  });
+
+  it('surfaces a failed level write inline and keeps the previous selection', async () => {
+    mockSetTuningLevel.mockRejectedValue(new Error('empty custom slot'));
+    await renderTuningPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tuning-level-segment-thorough'));
+    });
+
+    expect(await screen.findByTestId('editor-error')).toHaveTextContent('empty custom slot');
+    expect(screen.getByTestId('tuning-level-segment-standard')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('a NON-built-in flow has no dial and opens straight to the blueprint editor', async () => {
+    seedRow({ name: 'my-custom-flow', spec_json: JSON.stringify(SEED_DEFINITION) });
+    render(
+      <WorkflowEditorModal
+        isOpen
+        onClose={vi.fn()}
+        workflowId={EDIT_WORKFLOW_ID}
+        projectId={1}
+        mode="edit"
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId('workflow-editor-canvas');
+    expect(screen.queryByTestId('workflow-tuning-page')).toBeNull();
+    expect(screen.queryByTestId('tuning-level-selector')).toBeNull();
+    // No dial ⇒ no back nav either.
+    expect(screen.queryByTestId('editor-back-to-tuning')).toBeNull();
+  });
+
+  it('the back nav returns from Advanced to the dial', async () => {
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-back-to-tuning'));
+    });
+    expect(screen.getByTestId('workflow-tuning-page')).toBeInTheDocument();
+  });
+});
+
+describe('WorkflowEditorModal — tuning phase strip', () => {
+  /** Render the sprint built-in (the flow whose lane chain a level changes most). */
+  async function renderSprint(level: WorkflowRow['tuning_level']) {
+    seedRow({ name: 'sprint', tuning_level: level });
+    return renderTuningPage();
+  }
+
+  it('renders the full sprint lane chain at STANDARD (the identity transform)', async () => {
+    await renderSprint('standard');
+
+    for (const inner of ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify']) {
+      expect(screen.getByTestId(`tuning-lane-chip-${inner}`)).toBeInTheDocument();
+    }
+    // Standard pins nothing, so no chip carries a model · effort sub-label.
+    expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
+  });
+
+  it('derives the EFFICIENT strip from the shared transform — merged lane + model·effort pins', async () => {
+    await renderSprint('efficient');
+
+    // The efficient preset removes these three inner steps; the strip shows what
+    // RUNS, so they are simply absent (no ghost row).
+    expect(screen.queryByTestId('tuning-lane-chip-write-tests')).toBeNull();
+    expect(screen.queryByTestId('tuning-lane-chip-code-review')).toBeNull();
+    expect(screen.queryByTestId('tuning-lane-chip-visual-verify')).toBeNull();
+    expect(screen.getByTestId('tuning-lane-chip-implement')).toBeInTheDocument();
+    expect(screen.getByTestId('tuning-lane-chip-task-verify')).toBeInTheDocument();
+
+    // The preset's per-agent pins surface as the chip sub-label.
+    expect(screen.getByTestId('tuning-lane-chip-implement-pin')).toHaveTextContent(
+      'sonnet · medium',
+    );
+    expect(screen.getByTestId('tuning-lane-chip-task-verify-pin')).toHaveTextContent('sonnet · low');
+  });
+
+  it('switching the dial re-renders the strip for the newly selected level', async () => {
+    await renderSprint('standard');
+    expect(screen.getByTestId('tuning-lane-chip-code-review')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));
+    });
+
+    await waitFor(() => expect(screen.queryByTestId('tuning-lane-chip-code-review')).toBeNull());
+  });
+});
+
+describe('WorkflowEditorModal — save-target prompt', () => {
+  /** Enter Advanced and make one real edit so Save is enabled. */
+  async function renderDirtyAdvanced(onSaved = vi.fn(), onClose = vi.fn()) {
+    const handles = await renderEditMode(onSaved, onClose);
+    fireEvent.change(screen.getByTestId('inspector-name-input'), {
+      target: { value: 'Context (edited)' },
+    });
+    await waitFor(() => expect(screen.getByTestId('editor-save-button')).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-button'));
+    });
+    await screen.findByTestId('save-scope-confirm');
+    return handles;
+  }
+
+  it('offers all four targets', async () => {
+    await renderDirtyAdvanced();
+
+    expect(screen.getByTestId('save-scope-global-radio')).toBeChecked();
+    expect(screen.getByTestId('save-scope-project-radio')).toBeInTheDocument();
+    expect(screen.getByTestId('save-scope-new-flow-radio')).toBeInTheDocument();
+    expect(screen.getByTestId('save-scope-new-variant-radio')).toBeInTheDocument();
+  });
+
+  it('"Overwrite this flow" calls updateSpec and returns to the dial with CUSTOM selected', async () => {
+    await renderDirtyAdvanced();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-confirm'));
+    });
+
+    expect(mockUpdateSpec).toHaveBeenCalledOnce();
+    const page = await screen.findByTestId('workflow-tuning-page');
+    expect(page).toBeInTheDocument();
+    expect(screen.getByTestId('tuning-level-segment-custom')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // The slot is filled now, so the "no custom definition yet" hint is gone.
+    expect(screen.queryByTestId('tuning-custom-hint')).toBeNull();
+    expect(mockVariantCreate).not.toHaveBeenCalled();
+  });
+
+  it('"Save as new variant" creates a DRAFT variant with the EDITED graph and leaves the flow alone', async () => {
+    mockVariantCreate.mockResolvedValue({
+      id: 'wfv_abc',
+      workflow_id: EDIT_WORKFLOW_ID,
+      label: 'challenger',
+      spec_json: '{}',
+      agent_overrides_json: null,
+      model: null,
+      execution_model: null,
+      agent_provider: null,
+      agent_runtime: null,
+      status: 'draft',
+      weight: 1,
+      archived_at: null,
+      created_at: '',
+      updated_at: '',
+    });
+    await renderDirtyAdvanced();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-new-variant-radio'));
+    });
+    fireEvent.change(screen.getByTestId('save-scope-variant-label'), {
+      target: { value: 'challenger' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-confirm'));
+    });
+
+    expect(mockVariantCreate).toHaveBeenCalledOnce();
+    const arg = mockVariantCreate.mock.calls[0][0];
+    expect(arg.workflowId).toBe(EDIT_WORKFLOW_ID);
+    expect(arg.label).toBe('challenger');
+    const editedStep = arg.definition?.phases[0].steps.find((s) => s.id === 'context');
+    expect(editedStep?.name).toBe('Context (edited)');
+
+    // The base flow's spec + level stamp are untouched, and the user is told
+    // where the variant went.
+    expect(mockUpdateSpec).not.toHaveBeenCalled();
+    expect(mockSetTuningLevel).not.toHaveBeenCalled();
+    expect(await screen.findByTestId('editor-notice')).toHaveTextContent('draft variant');
+  });
+
+  it('"Save as new flow" collects a name and calls createCustom, never updateSpec', async () => {
+    await renderDirtyAdvanced();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-new-flow-radio'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-confirm'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    expect(mockCreateCustom.mock.calls[0][0].name).toBe('my-flow');
+    expect(mockUpdateSpec).not.toHaveBeenCalled();
+    expect(mockVariantCreate).not.toHaveBeenCalled();
+  });
+
+  it('cancelling the prompt mutates nothing', async () => {
+    await renderDirtyAdvanced();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-cancel'));
+    });
+
+    expect(mockUpdateSpec).not.toHaveBeenCalled();
+    expect(mockCreateCustom).not.toHaveBeenCalled();
+    expect(mockVariantCreate).not.toHaveBeenCalled();
+    // Still on the blueprint editor, still dirty.
+    expect(screen.getByTestId('workflow-editor-canvas')).toBeInTheDocument();
+    expect(screen.getByTestId('editor-save-button')).not.toBeDisabled();
+  });
+});
+
+describe('WorkflowEditorModal — delete custom definition', () => {
+  it('is hidden while the slot is empty', async () => {
+    await renderTuningPage();
+    expect(screen.queryByTestId('tuning-delete-custom')).toBeNull();
+  });
+
+  it('confirms, calls resetSpec, and falls back to STANDARD', async () => {
+    seedRow({ spec_json: JSON.stringify(SEED_DEFINITION), tuning_level: 'custom' });
+    const { onSaved } = await renderTuningPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tuning-delete-custom'));
+    });
+    const dialog = await screen.findByTestId('tuning-delete-custom-confirm');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
+    });
+
+    expect(mockResetSpec).toHaveBeenCalledWith({ workflowId: EDIT_WORKFLOW_ID });
+    await waitFor(() =>
+      expect(screen.getByTestId('tuning-level-segment-standard')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
+    );
+    // Slot emptied: CUSTOM goes back to unavailable and the action disappears.
+    expect(screen.getByTestId('tuning-level-segment-custom')).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+    expect(screen.queryByTestId('tuning-delete-custom')).toBeNull();
+    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+    // The modal stays open — this is level management, not an exit.
+    expect(screen.getByTestId('workflow-tuning-page')).toBeInTheDocument();
   });
 });
 
