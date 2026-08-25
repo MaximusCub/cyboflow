@@ -1,8 +1,13 @@
 # Workflow tuning levels — implementation plan
 
-Status: DRAFT r3 (pre-implementation; design approved via the "Workflow Tuning Levels" canvas
-artifact; r2 = Codex adversarial round 1 folded in (§8); r3 = user decisions: Standard =
-as-authored defaults, Custom = selectable 4th level, Advanced-save three-way prompt (§9)).
+Status: IMPLEMENTED 2026-08-25 (all 8 phases, commits 1f2c08aa3..81b6288aa on
+bright-marsh-20260824; migration landed as 122; full gate green, not yet live-smoked).
+r2 = Codex adversarial round 1 folded in (§8); r3 = user decisions: Standard =
+as-authored defaults, Custom = selectable 4th level, Advanced-save three-way prompt (§9).
+Implementation deltas vs this plan: the save prompt kept "create a project-specific copy"
+as a 4th option; the missing-step prompt rule in planner/ship .md was reversed (absent
+from the appended list = skip work AND report); no model-color chip tokens (model·effort
+sub-labels instead); the editor selector component is named TuningLevelDial.
 Design reference: https://claude.ai/code/artifact/34cc2e25-2c27-415c-9acd-a893d68b62e1
 
 ## 1. What we're building
