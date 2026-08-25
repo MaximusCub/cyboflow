@@ -16,6 +16,15 @@ function row(o: Partial<QuickSessionRow>): QuickSessionRow {
     state: o.state ?? 'idle',
     idleSince: o.idleSince ?? null,
     unviewed: o.unviewed ?? false,
+    updatedAtIso: o.updatedAtIso ?? null,
+    rawStatus: o.rawStatus ?? 'completed',
+    exitCode: o.exitCode ?? null,
+    summary: o.summary ?? null,
+    summaryState: o.summaryState ?? null,
+    waitingOn: o.waitingOn ?? null,
+    summarySupported: o.summarySupported ?? true,
+    worktreeName: o.worktreeName ?? null,
+    git: o.git ?? null,
   };
 }
 

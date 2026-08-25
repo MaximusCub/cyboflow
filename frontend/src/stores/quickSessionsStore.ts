@@ -19,7 +19,7 @@
  */
 import { create } from 'zustand';
 import { API } from '../utils/api';
-import type { QuickSessionRow } from '../../../shared/types/quickSessions';
+import type { QuickSessionGitSnapshot, QuickSessionRow } from '../../../shared/types/quickSessions';
 
 /** Board refresh cadence. Quick enough that a new block/turn-end shows within ~a breath. */
 const POLL_INTERVAL_MS = 3000;
@@ -41,6 +41,20 @@ interface QuickSessionsState {
 let pollHandle: ReturnType<typeof setInterval> | null = null;
 let consumerCount = 0;
 
+/** Field-by-field equality over a {@link QuickSessionGitSnapshot} (or its absence). */
+function gitSnapshotEqual(a: QuickSessionGitSnapshot | null, b: QuickSessionGitSnapshot | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return (
+    a.isReadyToMerge === b.isReadyToMerge &&
+    a.hasUncommittedChanges === b.hasUncommittedChanges &&
+    a.hasUntrackedFiles === b.hasUntrackedFiles &&
+    a.ahead === b.ahead &&
+    a.behind === b.behind &&
+    a.lastCheckedIso === b.lastCheckedIso
+  );
+}
+
 /** Field-by-field equality over every field the UI consumes (see {@link QuickSessionRow}). */
 function rowsEqual(a: QuickSessionRow, b: QuickSessionRow): boolean {
   return (
@@ -50,7 +64,16 @@ function rowsEqual(a: QuickSessionRow, b: QuickSessionRow): boolean {
     a.runId === b.runId &&
     a.state === b.state &&
     a.idleSince === b.idleSince &&
-    a.unviewed === b.unviewed
+    a.unviewed === b.unviewed &&
+    a.updatedAtIso === b.updatedAtIso &&
+    a.rawStatus === b.rawStatus &&
+    a.exitCode === b.exitCode &&
+    a.summary === b.summary &&
+    a.summaryState === b.summaryState &&
+    a.waitingOn === b.waitingOn &&
+    a.summarySupported === b.summarySupported &&
+    a.worktreeName === b.worktreeName &&
+    gitSnapshotEqual(a.git, b.git)
   );
 }
 

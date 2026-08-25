@@ -29,6 +29,15 @@ function makeRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
     state: 'idle',
     idleSince: null,
     unviewed: false,
+    updatedAtIso: '2026-07-06T00:00:00.000Z',
+    rawStatus: 'completed',
+    exitCode: null,
+    summary: null,
+    summaryState: null,
+    waitingOn: null,
+    summarySupported: true,
+    worktreeName: null,
+    git: null,
     ...overrides,
   };
 }

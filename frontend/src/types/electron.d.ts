@@ -170,8 +170,9 @@ interface ElectronAPI {
     getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
     markViewed: (sessionId: string) => Promise<IPCResponse<void>>;
-    getSummary: (sessionId: string) => Promise<IPCResponse<SessionSummaryPayload>>;
+    getSummary: (sessionId: string, opts?: { catchUp?: boolean }) => Promise<IPCResponse<SessionSummaryPayload>>;
     listQuick: (projectId?: number) => Promise<IPCResponse<QuickSessionRow[]>>;
+    warmQuickGit: (sessionIds: string[]) => Promise<IPCResponse>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Execution and Git operations

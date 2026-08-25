@@ -16,6 +16,12 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     chat_run_id: 'run-1',
     idle_since_iso: '2026-07-16T09:00:00Z',
     unviewed: 1,
+    exit_code: null,
+    agent_provider: 'claude',
+    worktree_name: 'smooth-falcon-worktree',
+    summary: null,
+    summary_state: null,
+    waiting_on: null,
     ...overrides,
   };
 }
@@ -83,6 +89,74 @@ describe('toQuickSessionRow', () => {
       false,
     );
   });
+
+  it('maps a summary row through when present', () => {
+    const r = toQuickSessionRow(
+      row({ summary: 'Refactored the auth module.', summary_state: 'complete', waiting_on: null }),
+      new Set(),
+    );
+    expect(r.summary).toBe('Refactored the auth module.');
+    expect(r.summaryState).toBe('complete');
+    expect(r.waitingOn).toBeNull();
+  });
+
+  it('maps needs_input with a waiting_on sentence through', () => {
+    const r = toQuickSessionRow(
+      row({ summary_state: 'needs_input', waiting_on: 'Ship as a boot check or a settings dialog?' }),
+      new Set(),
+    );
+    expect(r.summaryState).toBe('needs_input');
+    expect(r.waitingOn).toBe('Ship as a boot check or a settings dialog?');
+  });
+
+  it('normalizes a bogus joined summary_state to null', () => {
+    expect(toQuickSessionRow(row({ summary_state: 'not-a-real-state' }), new Set()).summaryState).toBeNull();
+  });
+
+  it('normalizes a blank joined waiting_on to null', () => {
+    expect(toQuickSessionRow(row({ waiting_on: '   ' }), new Set()).waitingOn).toBeNull();
+  });
+
+  it('truncates an over-length joined waiting_on to 300 chars', () => {
+    const long = 'x'.repeat(400);
+    const r = toQuickSessionRow(row({ waiting_on: long }), new Set());
+    expect(r.waitingOn).toHaveLength(300);
+  });
+
+  it('no summary row (LEFT JOIN miss) maps to all-null summary fields', () => {
+    const r = toQuickSessionRow(row({ summary: null, summary_state: null, waiting_on: null }), new Set());
+    expect(r.summary).toBeNull();
+    expect(r.summaryState).toBeNull();
+    expect(r.waitingOn).toBeNull();
+  });
+
+  it('summarySupported is false for a codex row and true for claude/omp/null', () => {
+    expect(toQuickSessionRow(row({ agent_provider: 'codex' }), new Set()).summarySupported).toBe(false);
+    expect(toQuickSessionRow(row({ agent_provider: 'omp' }), new Set()).summarySupported).toBe(false);
+    expect(toQuickSessionRow(row({ agent_provider: 'claude' }), new Set()).summarySupported).toBe(true);
+    expect(toQuickSessionRow(row({ agent_provider: null }), new Set()).summarySupported).toBe(true);
+  });
+
+  it('passes exit_code through unchanged', () => {
+    expect(toQuickSessionRow(row({ exit_code: 1 }), new Set()).exitCode).toBe(1);
+    expect(toQuickSessionRow(row({ exit_code: null }), new Set()).exitCode).toBeNull();
+  });
+
+  it('updatedAtIso is present regardless of state (unlike idleSince)', () => {
+    expect(toQuickSessionRow(row({ status: 'running' }), new Set()).updatedAtIso).toBe('2026-07-16T10:00:00Z');
+    expect(toQuickSessionRow(row({ status: 'completed' }), new Set()).updatedAtIso).toBe('2026-07-16T10:00:00Z');
+  });
+
+  it('rawStatus carries the DB status verbatim, distinct from the derived state', () => {
+    expect(toQuickSessionRow(row({ status: 'stopped' }), new Set()).rawStatus).toBe('stopped');
+    expect(toQuickSessionRow(row({ status: 'failed' }), new Set()).rawStatus).toBe('failed');
+  });
+
+  it('worktreeName maps through and git is always null from the pure module', () => {
+    const r = toQuickSessionRow(row({ worktree_name: 'my-branch' }), new Set());
+    expect(r.worktreeName).toBe('my-branch');
+    expect(r.git).toBeNull();
+  });
 });
 
 describe('listQuickSessions', () => {
@@ -136,5 +210,15 @@ describe('listQuickSessions', () => {
     listQuickSessions(db, new Set());
     expect(capture.params[0]).toEqual([]);
     expect(capture.sql[0]).not.toContain('s.project_id = ?');
+  });
+
+  it('joins session_summaries in both the scoped and unscoped query', () => {
+    const capture = { sql: [] as string[], params: [] as unknown[][] };
+    const db = fakeDb([row()], capture);
+    listQuickSessions(db, new Set(), 7);
+    listQuickSessions(db, new Set());
+    for (const sql of capture.sql) {
+      expect(sql).toContain('LEFT JOIN session_summaries ss ON ss.session_id = s.id');
+    }
   });
 });

@@ -29,6 +29,7 @@ import {
 } from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
+import type { QuickSessionRow, QuickSessionGitSnapshot } from '../../../shared/types/quickSessions';
 import type { SessionOutput, Session as SessionType } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
@@ -2781,8 +2782,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // §7). A pure read: it never blocks on or mutates summary state. When it
   // observes content above the summarizer's watermark it fires the §2.7 lazy
   // catch-up kick — fire-and-forget, bounded by the scheduler's own cooldown so
-  // the renderer's 30s poll cannot become a hot retry loop.
-  ipcMain.handle('sessions:get-summary', async (_event, sessionId: string) => {
+  // the renderer's 30s poll cannot become a hot retry loop. `opts.catchUp`
+  // (default true, matching every existing caller) can be set to `false` to
+  // skip that kick entirely and make this a pure read with no side effect —
+  // for a caller (e.g. a board-wide batch read) that wants the summary without
+  // risking triggering a summarizer run.
+  ipcMain.handle('sessions:get-summary', async (_event, sessionId: string, opts?: { catchUp?: boolean }) => {
     try {
       const sessionValidation = validateSessionExists(sessionId);
       if (!sessionValidation.valid) {
@@ -2797,9 +2802,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Lazy catch-up decision (§2.7): any conversation_messages row above the
       // watermark means unsummarized content — kick the scheduler (which re-runs
       // every other gate). The read itself is not awaited and mutates nothing.
+      const catchUp = opts?.catchUp ?? true;
       const watermark = summaryRow?.last_turn_id ?? 0;
       const hasNewerContent = databaseService.getConversationMessagesAfter(sessionId, watermark).length > 0;
-      if (enabled && hasNewerContent) {
+      if (enabled && hasNewerContent && catchUp) {
         services.sessionSummaryScheduler?.maybeSummarizeNow(sessionId, 'lazy-catchup');
       }
 
@@ -3425,7 +3431,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // run has a pending AskUserQuestion / permission gate (SDK gates via the
   // Question/Approval routers; PTY gates via the interactive manager's
   // awaiting-input flag), else `running`/`idle` from the DB status. `projectId`
-  // scopes to one project; omit for the cross-project review home.
+  // scopes to one project; omit for the cross-project review home. Two things
+  // happen ONLY at this seam (never in the pure listing module): (1) a
+  // cache-only git snapshot is attached from GitStatusManager.peekCachedStatus
+  // — never a fresh fetch, so the 3s poll can't spawn git subprocesses; (2)
+  // when the session-summary feature toggle is off, summary/summaryState/
+  // waitingOn are nulled so a toggle-off can't leak a persisted summary onto
+  // the board (mirrors sessions:get-summary's `enabled` contract).
   ipcMain.handle('sessions:list-quick', async (_event, projectId?: number) => {
     try {
       const blockedRunIds = new Set<string>();
@@ -3433,16 +3445,56 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       for (const a of ApprovalRouter.getInstance().getPending()) blockedRunIds.add(a.runId);
       for (const runId of interactiveCliManager.getAwaitingInputRunIds()) blockedRunIds.add(runId);
 
+      const summaryEnabled = configManager.isSessionSummaryEnabled();
       const rows = listQuickSessions(
         makeDatabaseLike(databaseService),
         blockedRunIds,
         typeof projectId === 'number' ? projectId : undefined,
-      );
+      ).map((row): QuickSessionRow => {
+        const cached = gitStatusManager.peekCachedStatus(row.sessionId);
+        const git: QuickSessionGitSnapshot | null = cached
+          ? {
+              isReadyToMerge: cached.status.isReadyToMerge ?? false,
+              hasUncommittedChanges: cached.status.hasUncommittedChanges ?? false,
+              hasUntrackedFiles: cached.status.hasUntrackedFiles ?? false,
+              ahead: cached.status.ahead ?? 0,
+              behind: cached.status.behind ?? 0,
+              lastCheckedIso: new Date(cached.lastChecked).toISOString(),
+            }
+          : null;
+        return {
+          ...row,
+          git,
+          summary: summaryEnabled ? row.summary : null,
+          summaryState: summaryEnabled ? row.summaryState : null,
+          waitingOn: summaryEnabled ? row.waitingOn : null,
+        };
+      });
       return { success: true, data: rows };
     } catch (error) {
       console.error('Failed to list quick sessions:', error);
       return { success: false, error: 'Failed to list quick sessions' };
     }
+  });
+
+  // Warm the git-status cache for a batch of quick-session board rows. The
+  // git watcher pipeline (badge auto-refresh) is disabled in production
+  // (GIT_STATUS_BADGE_ENABLED=false), so the cache `sessions:list-quick`
+  // reads is otherwise cold for quick sessions. The frontend calls this on
+  // triage-board mount plus a slow interval; the 3s list poll itself stays
+  // cache-only (never fetches). Fire-and-forget: getGitStatus is already
+  // TTL-aware, coalesced, and concurrency-bounded internally, so this just
+  // kicks it and returns immediately without waiting on the fetches.
+  ipcMain.handle('sessions:warm-quick-git', async (_event, sessionIds: unknown) => {
+    if (!Array.isArray(sessionIds) || !sessionIds.every((id) => typeof id === 'string')) {
+      return { success: false, error: 'sessionIds must be an array of strings' };
+    }
+    for (const sessionId of sessionIds.slice(0, 20)) {
+      void gitStatusManager.getGitStatus(sessionId).catch((error) => {
+        console.error(`Failed to warm git status for session ${sessionId}:`, error);
+      });
+    }
+    return { success: true };
   });
 
   ipcMain.handle('sessions:stop', async (_event, sessionId: string) => {

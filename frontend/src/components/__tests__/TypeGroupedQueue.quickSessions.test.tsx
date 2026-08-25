@@ -105,6 +105,15 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
     state: overrides.state ?? 'idle',
     idleSince: overrides.idleSince ?? '2026-07-06T00:00:00.000Z',
     unviewed: overrides.unviewed ?? true,
+    updatedAtIso: overrides.updatedAtIso ?? '2026-07-06T00:00:00.000Z',
+    rawStatus: overrides.rawStatus ?? 'completed',
+    exitCode: overrides.exitCode ?? null,
+    summary: overrides.summary ?? null,
+    summaryState: overrides.summaryState ?? null,
+    waitingOn: overrides.waitingOn ?? null,
+    summarySupported: overrides.summarySupported ?? true,
+    worktreeName: overrides.worktreeName ?? null,
+    git: overrides.git ?? null,
   };
 }
 

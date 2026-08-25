@@ -187,14 +187,19 @@ export class API {
       return window.electronAPI.sessions.markViewed(sessionId);
     },
 
-    async getSummary(sessionId: string): Promise<IPCResponse<SessionSummaryPayload>> {
+    async getSummary(sessionId: string, opts?: { catchUp?: boolean }): Promise<IPCResponse<SessionSummaryPayload>> {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getSummary(sessionId);
+      return window.electronAPI.sessions.getSummary(sessionId, opts);
     },
 
     async listQuick(projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.listQuick(projectId) as Promise<IPCResponse<QuickSessionRow[]>>;
+      return window.electronAPI.sessions.listQuick(projectId);
+    },
+
+    async warmQuickGit(sessionIds: string[]): Promise<IPCResponse> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.warmQuickGit(sessionIds);
     },
 
     async stop(sessionId: string) {
