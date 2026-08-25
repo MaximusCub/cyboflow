@@ -55,6 +55,8 @@ import {
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
   selectSessionRunTokenTotals,
+  selectTuningLevelUsage,
+  selectWorkflowName,
   getRunEval,
 } from '../insightsQueries';
 import { computeSpecHash } from '../specHash';
@@ -87,6 +89,12 @@ function createInsightsDb(): Database.Database {
       session_id TEXT,
       substrate TEXT NOT NULL DEFAULT 'sdk',
       spec_hash TEXT,
+      -- migration 122: the tuning level this run was stamped at (NULL =
+      -- unattributed — a pre-feature or non-built-in run).
+      tuning_level TEXT,
+      -- migration 048: non-NULL when this run pinned a specific A/B variant
+      -- (excluded from tuning-level attribution — see selectTuningLevelUsage).
+      variant_id TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
       ended_at DATETIME
@@ -212,13 +220,17 @@ interface SeedRunOpts {
   sessionId?: string | null;
   /** CLI substrate stamp (IDEA-013); defaults to 'sdk'. The SDK `__quick__` sentinel exclusion keys off it. */
   substrate?: string;
+  /** workflow_runs.tuning_level (migration 122); null/omitted = unattributed. */
+  tuningLevel?: string | null;
+  /** workflow_runs.variant_id (migration 048); non-null = a pinned A/B variant run. */
+  variantId?: string | null;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, tuning_level, variant_id, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
@@ -228,6 +240,8 @@ function seedRun(db: Database.Database, opts: SeedRunOpts): void {
     opts.sessionId ?? null,
     opts.substrate ?? 'sdk',
     opts.specHash ?? null,
+    opts.tuningLevel ?? null,
+    opts.variantId ?? null,
     opts.createdAt ?? null,
     opts.startedAt ?? null,
     opts.endedAt ?? null,
@@ -2442,5 +2456,96 @@ describe('getRunEval', () => {
     expect(evalRow?.evalStatus).toBe('pending');
     expect(evalRow?.overallScore).toBeNull();
     expect(evalRow?.band).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectTuningLevelUsage / selectWorkflowName
+// ---------------------------------------------------------------------------
+
+describe('selectTuningLevelUsage', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createInsightsDb();
+    seedWorkflow(db, { id: 'wf-sprint', name: 'sprint' });
+  });
+
+  it('groups completed, attributed, non-variant runs by tuning_level', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf-sprint', tuningLevel: 'efficient' });
+    seedRunUsage(db, { runId: 'r1', totalTokens: 100_000 });
+    seedRun(db, { id: 'r2', workflowId: 'wf-sprint', tuningLevel: 'efficient' });
+    seedRunUsage(db, { runId: 'r2', totalTokens: 120_000 });
+    seedRun(db, { id: 'r3', workflowId: 'wf-sprint', tuningLevel: 'standard' });
+    seedRunUsage(db, { runId: 'r3', totalTokens: 300_000 });
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+
+    expect(samples.efficient.slice().sort((a, b) => a - b)).toEqual([100_000, 120_000]);
+    expect(samples.standard).toEqual([300_000]);
+    expect(samples.thorough).toEqual([]);
+    expect(samples.custom).toEqual([]);
+  });
+
+  it('excludes a run with tuning_level IS NULL (unattributed)', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf-sprint', tuningLevel: null });
+    seedRunUsage(db, { runId: 'r1', totalTokens: 999_999 });
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+    expect(samples.efficient).toEqual([]);
+    expect(samples.standard).toEqual([]);
+    expect(samples.thorough).toEqual([]);
+    expect(samples.custom).toEqual([]);
+  });
+
+  it('excludes a run that pinned an A/B variant (variant_id NOT NULL), even when tuning_level is set', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf-sprint', tuningLevel: 'thorough', variantId: 'var-1' });
+    seedRunUsage(db, { runId: 'r1', totalTokens: 999_999 });
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+    expect(samples.thorough).toEqual([]);
+  });
+
+  it('excludes a non-completed run', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf-sprint', tuningLevel: 'standard', status: 'failed' });
+    seedRunUsage(db, { runId: 'r1', totalTokens: 999_999 });
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+    expect(samples.standard).toEqual([]);
+  });
+
+  it('excludes a run with no materialized run_usage row', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf-sprint', tuningLevel: 'standard' });
+    // No seedRunUsage call — the run never finalized a usage rollup.
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+    expect(samples.standard).toEqual([]);
+  });
+
+  it('scopes strictly to the requested workflow', () => {
+    seedWorkflow(db, { id: 'wf-other', name: 'planner' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-other', tuningLevel: 'standard' });
+    seedRunUsage(db, { runId: 'r1', totalTokens: 500_000 });
+
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-sprint');
+    expect(samples.standard).toEqual([]);
+  });
+
+  it('returns empty arrays for every level on an unknown/empty workflow', () => {
+    const samples = selectTuningLevelUsage(dbAdapter(db), 'wf-does-not-exist');
+    expect(samples).toEqual({ efficient: [], standard: [], thorough: [], custom: [] });
+  });
+});
+
+describe('selectWorkflowName', () => {
+  it('returns the workflow row name', () => {
+    const db = createInsightsDb();
+    seedWorkflow(db, { id: 'wf-sprint', name: 'sprint' });
+    expect(selectWorkflowName(dbAdapter(db), 'wf-sprint')).toBe('sprint');
+  });
+
+  it('returns null for an unknown workflow id', () => {
+    const db = createInsightsDb();
+    expect(selectWorkflowName(dbAdapter(db), 'wf-does-not-exist')).toBeNull();
   });
 });

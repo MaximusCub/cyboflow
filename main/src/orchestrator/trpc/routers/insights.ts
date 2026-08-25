@@ -12,6 +12,7 @@
  *   - stepTokens       : query -> StepTokenBucket[]     (tokens attributed per workflow step)
  *   - usageTrend       : query -> UsageTrendPoint[]     (time-bucketed sparkline points)
  *   - revisionHistory  : query -> WorkflowRevisionStats[] (per-spec_hash run stats, newest-first)
+ *   - tuningLevelUsage : query -> Record<TuningLevel, TuningLevelEstimate> (D8 per-level token estimates)
  *   - dailyUsage       : query -> DailyModelUsagePoint[] (per-(day, model) token buckets)
  *
  * Every procedure is a thin wrapper over a pure SELECT helper in
@@ -48,6 +49,11 @@ import type {
   RunEval,
 } from '../../../../../shared/types/insights';
 import type { VariantStats } from '../../../../../shared/types/experiments';
+import type { TuningLevel } from '../../../../../shared/tuning/workflowTuning';
+import {
+  estimateTuningLevelTokens,
+  type TuningLevelEstimate,
+} from '../../../../../shared/tuning/workflowTuningEstimates';
 import {
   selectWorkflowRunStats,
   selectWorkflowUsageStats,
@@ -59,6 +65,8 @@ import {
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
   selectVariantStats,
+  selectTuningLevelUsage,
+  selectWorkflowName,
   getRunEval,
 } from '../../insightsQueries';
 
@@ -264,6 +272,25 @@ export const insightsRouter = router({
     .query(({ ctx, input }): WorkflowRevisionStats[] => {
       const db = requireDb(ctx.db, 'revisionHistory');
       return selectWorkflowRevisionStats(db, input.workflowId);
+    }),
+
+  /**
+   * Per-level token estimates for one workflow's tuning dial (plan D8),
+   * derived from `run_usage.total_tokens` via a median + fallback chain (see
+   * `shared/tuning/workflowTuningEstimates.estimateTuningLevelTokens`):
+   * measured (>=3 same-level samples) -> derived (overall workflow median x
+   * the level's static multiplier) -> static (a per-flow fresh-install
+   * default). Numbers are EXECUTION tokens only — `run_usage` excludes
+   * eval-jury usage (unmetered separately); callers must render an "excl.
+   * eval" qualifier alongside these labels, once per surface.
+   */
+  tuningLevelUsage: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .query(({ ctx, input }): Record<TuningLevel, TuningLevelEstimate> => {
+      const db = requireDb(ctx.db, 'tuningLevelUsage');
+      const samples = selectTuningLevelUsage(db, input.workflowId);
+      const flowName = selectWorkflowName(db, input.workflowId) ?? '';
+      return estimateTuningLevelTokens(flowName, samples);
     }),
 
   /**

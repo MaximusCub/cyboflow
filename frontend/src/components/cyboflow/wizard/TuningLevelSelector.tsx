@@ -22,9 +22,11 @@
  * variant runs its own frozen definition, so a level choice would be
  * meaningless and the server rejects `tuningLevel` + `variantId` together.
  *
- * `estimateLabels` is a clean, UNUSED seam for the token-estimate phase (plan
- * §5 phase 7) — no query is wired yet; passing a label renders a small
- * secondary line under that segment.
+ * `estimateLabels` (plan §5 phase 7, `shared/tuning/workflowTuningEstimates`)
+ * renders a small secondary line under whichever segment(s) supply one. Those
+ * figures are EXECUTION tokens only (eval-jury usage is unmetered — D8's
+ * "Scope caveat"), so whenever any label is supplied this also renders a
+ * one-line "excl. eval" caption below the segments, once per surface.
  */
 import { cn } from '../../../utils/cn';
 import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
@@ -123,6 +125,12 @@ export function TuningLevelSelector({
           Override for this run only — the {flowTitle} workflow keeps {TUNING_LEVEL_LABELS[savedLevel]}.
         </p>
       ) : null}
+
+      {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
+        <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-estimate-caption">
+          Estimated execution tokens (excl. eval)
+        </p>
+      )}
     </div>
   );
 }

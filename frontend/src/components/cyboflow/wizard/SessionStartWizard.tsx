@@ -106,7 +106,7 @@ import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
 import { useWorkflowVariants } from '../../../stores/variantsStore';
 import { TuningLevelSelector } from './TuningLevelSelector';
-import type { TuningLevel } from '../../../../../shared/tuning/workflowTuning';
+import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import {
   effortLevelsForProvider,
@@ -681,6 +681,40 @@ export default function SessionStartWizard(): React.JSX.Element {
     setVariantSelection({ mode: 'rotation' });
     setTuningLevelOverride(null);
   }, [selectedWorkflowId]);
+
+  /**
+   * Per-level token estimates for the tuning-level control (plan D8), fetched
+   * once per selected BUILT-IN workflow — `TuningLevelSelector` is hidden
+   * entirely for a non-built-in flow (see the render site below), so there is
+   * nothing to fetch for one. A fetch failure just leaves this empty; the
+   * control renders fine with no estimate lines.
+   */
+  const [tuningEstimateLabels, setTuningEstimateLabels] = useState<Partial<Record<TuningLevel, string>>>({});
+  useEffect(() => {
+    const isBuiltInSelection =
+      selectedWorkflowId !== null && workflowMetas.find((m) => m.id === selectedWorkflowId)?.isBuiltIn === true;
+    if (!isBuiltInSelection || selectedWorkflowId === null) {
+      setTuningEstimateLabels({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const estimates = await trpc.cyboflow.insights.tuningLevelUsage.query({
+          workflowId: selectedWorkflowId,
+        });
+        if (cancelled) return;
+        const labels: Partial<Record<TuningLevel, string>> = {};
+        for (const tuningLevel of TUNING_LEVELS) labels[tuningLevel] = estimates[tuningLevel].label;
+        setTuningEstimateLabels(labels);
+      } catch {
+        if (!cancelled) setTuningEstimateLabels({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWorkflowId, workflowMetas]);
 
   // D4 mutual exclusion, half 1: pinning a SPECIFIC variant runs its own frozen
   // definition, so any pending level override is meaningless — and sending
@@ -1911,6 +1945,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                   setTuningLevelOverride(level === selectedMeta.tuningLevel ? null : level);
                 }}
                 id="wizard-tuning-level"
+                estimateLabels={tuningEstimateLabels}
               />
             )}
 

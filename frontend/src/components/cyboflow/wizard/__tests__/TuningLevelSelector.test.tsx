@@ -109,4 +109,48 @@ describe('TuningLevelSelector', () => {
     // No override caption while disabled, even though value !== savedLevel.
     expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
   });
+
+  it('(e) renders no estimate lines and no caption when estimateLabels is omitted', () => {
+    render(
+      <TuningLevelSelector
+        value="standard"
+        savedLevel="standard"
+        flowTitle="Sprint"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('wizard-tuning-estimate-caption')).not.toBeInTheDocument();
+  });
+
+  it('(f) renders a per-segment estimate line for whichever level(s) supply one, plus the excl.-eval caption', () => {
+    render(
+      <TuningLevelSelector
+        value="standard"
+        savedLevel="standard"
+        flowTitle="Sprint"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+        estimateLabels={{ efficient: '~150k', standard: '~300k' }}
+      />,
+    );
+    expect(screen.getByTestId('wizard-tuning-level-efficient')).toHaveTextContent('~150k');
+    expect(screen.getByTestId('wizard-tuning-level-standard')).toHaveTextContent('~300k');
+    expect(screen.getByTestId('wizard-tuning-level-thorough')).not.toHaveTextContent('~');
+    expect(screen.getByTestId('wizard-tuning-estimate-caption')).toHaveTextContent(/excl\. eval/i);
+  });
+
+  it('(g) renders no caption for an empty estimateLabels object', () => {
+    render(
+      <TuningLevelSelector
+        value="standard"
+        savedLevel="standard"
+        flowTitle="Sprint"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+        estimateLabels={{}}
+      />,
+    );
+    expect(screen.queryByTestId('wizard-tuning-estimate-caption')).not.toBeInTheDocument();
+  });
 });

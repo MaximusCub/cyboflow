@@ -58,6 +58,7 @@ import type { WorkflowDefinition, PermissionMode } from '../../../../shared/type
 import {
   DEFAULT_TUNING_LEVEL,
   resolveEffectiveDefinition,
+  TUNING_LEVELS,
   type TuningLevel,
 } from '../../../../shared/tuning/workflowTuning';
 import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
@@ -266,6 +267,36 @@ export function WorkflowEditorModal({
    */
   const hasTuningDial = mode === 'edit' && isCyboflowWorkflowName(sourceName);
   const hasCustomDefinition = hasCustomSpecSlot(sourceSpecJson);
+
+  /**
+   * Per-level token estimates for the simple page's dial (plan D8), fetched
+   * once per (open, workflowId) while the workflow has a tuning dial. A fetch
+   * failure or a flow with no dial just leaves this empty — the static
+   * multiplier tags in {@link TuningLevelSelector} already render regardless
+   * (fail-soft: no labels, never a broken editor).
+   */
+  const [estimateLabels, setEstimateLabels] = useState<Partial<Record<TuningLevel, string>>>({});
+  useEffect(() => {
+    if (!isOpen || !hasTuningDial) {
+      setEstimateLabels({});
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const estimates = await trpc.cyboflow.insights.tuningLevelUsage.query({ workflowId });
+        if (cancelled) return;
+        const labels: Partial<Record<TuningLevel, string>> = {};
+        for (const tuningLevel of TUNING_LEVELS) labels[tuningLevel] = estimates[tuningLevel].label;
+        setEstimateLabels(labels);
+      } catch {
+        if (!cancelled) setEstimateLabels({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, hasTuningDial, workflowId]);
 
   // ── Seed on open ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -913,6 +944,7 @@ export function WorkflowEditorModal({
             onSelectLevel={(next) => void handleSelectLevel(next)}
             onOpenAdvanced={() => setView('advanced')}
             onDeleteCustom={() => setDeleteCustomOpen(true)}
+            estimateLabels={estimateLabels}
           />
         ) : (
           <>

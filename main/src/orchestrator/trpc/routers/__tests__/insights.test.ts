@@ -29,6 +29,8 @@ import type {
   WorkflowRevisionStats,
   RunEval,
 } from '../../../../../../shared/types/insights';
+import { estimateTuningLevelTokens } from '../../../../../../shared/tuning/workflowTuningEstimates';
+import type { TuningLevelUsageSamples } from '../../../../../../shared/tuning/workflowTuningEstimates';
 
 // ---------------------------------------------------------------------------
 // Mock the (concurrently-authored) insightsQueries module at the canonical
@@ -48,6 +50,8 @@ vi.mock('../../../insightsQueries', () => ({
   selectStepTokenBuckets: vi.fn(),
   selectUsageTrend: vi.fn(),
   selectWorkflowRevisionStats: vi.fn(),
+  selectTuningLevelUsage: vi.fn(),
+  selectWorkflowName: vi.fn(),
   getRunEval: vi.fn(),
 }));
 
@@ -577,5 +581,76 @@ describe('cyboflow.insights.revisionHistory', () => {
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
     expect(insightsQueries.selectWorkflowRevisionStats).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tuningLevelUsage
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.insights.tuningLevelUsage', () => {
+  const samples: TuningLevelUsageSamples = {
+    efficient: [100_000, 120_000, 140_000],
+    standard: [],
+    thorough: [],
+    custom: [],
+  };
+
+  it('resolves the workflow name, runs the real fallback-chain estimator over the helper samples, and returns it verbatim', async () => {
+    mocked('selectTuningLevelUsage').mockReturnValue(samples);
+    mocked('selectWorkflowName').mockReturnValue('sprint');
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.tuningLevelUsage({ workflowId: 'wf-1' });
+
+    expect(insightsQueries.selectTuningLevelUsage).toHaveBeenCalledWith(fakeDb, 'wf-1');
+    expect(insightsQueries.selectWorkflowName).toHaveBeenCalledWith(fakeDb, 'wf-1');
+    expect(result).toEqual(estimateTuningLevelTokens('sprint', samples));
+    // Sanity: the real estimator produced a measured efficient card off the
+    // helper's samples (not a stub/passthrough).
+    expect(result.efficient).toEqual({ label: '~120k', source: 'measured', samples: 3 });
+  });
+
+  it('falls back to the unknown-flow default when the workflow name cannot be resolved', async () => {
+    mocked('selectTuningLevelUsage').mockReturnValue({
+      efficient: [],
+      standard: [],
+      thorough: [],
+      custom: [],
+    });
+    mocked('selectWorkflowName').mockReturnValue(null);
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.tuningLevelUsage({ workflowId: 'wf-deleted' });
+
+    expect(result).toEqual(
+      estimateTuningLevelTokens('', {
+        efficient: [],
+        standard: [],
+        thorough: [],
+        custom: [],
+      }),
+    );
+  });
+
+  it('rejects an empty workflowId without calling either helper', async () => {
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    await expect(
+      caller.cyboflow.insights.tuningLevelUsage({ workflowId: '' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+    expect(insightsQueries.selectTuningLevelUsage).not.toHaveBeenCalled();
+    expect(insightsQueries.selectWorkflowName).not.toHaveBeenCalled();
+  });
+
+  it('throws PRECONDITION_FAILED when ctx.db is missing', async () => {
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(
+      caller.cyboflow.insights.tuningLevelUsage({ workflowId: 'wf-1' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+    expect(insightsQueries.selectTuningLevelUsage).not.toHaveBeenCalled();
   });
 });

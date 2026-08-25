@@ -14,9 +14,12 @@
  * `onCustomUnavailable`.
  *
  * The multiplier tags are STATIC copy calibrated on execution tokens. Real
- * per-level token estimates (derived from `run_usage`) arrive in a later phase
- * and land through `estimateLabels` — an optional per-level string rendered
- * under the tag when present, so wiring the query later needs no layout change.
+ * per-level token estimates (`shared/tuning/workflowTuningEstimates`, backed
+ * by `run_usage`) land through `estimateLabels` — an optional per-level string
+ * rendered under the tag when present. Those numbers are EXECUTION tokens only
+ * (eval-jury usage is unmetered — plan D8's "Scope caveat"), so whenever any
+ * label is supplied this also renders a one-line "excl. eval" caption below
+ * the strip, once per surface rather than once per segment.
  */
 import {
   TUNING_LEVELS,
@@ -132,6 +135,12 @@ export function TuningLevelSelector({
       {!hasCustomDefinition && (
         <p className="text-[10px] text-text-tertiary" data-testid="tuning-custom-hint">
           {CUSTOM_UNAVAILABLE_HINT}
+        </p>
+      )}
+
+      {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
+        <p className="text-[10px] text-text-tertiary" data-testid="tuning-estimate-caption">
+          Estimated execution tokens (excl. eval)
         </p>
       )}
     </div>

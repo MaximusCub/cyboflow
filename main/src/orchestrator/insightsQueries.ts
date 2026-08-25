@@ -64,6 +64,8 @@ import type {
   ExperimentStatus,
 } from '../../../shared/types/experiments';
 import { MIN_VARIANT_RUNS, BASELINE_VARIANT_SENTINEL, isBaselineArm } from '../../../shared/types/experiments';
+import { isTuningLevel, type TuningLevel } from '../../../shared/tuning/workflowTuning';
+import type { TuningLevelUsageSamples } from '../../../shared/tuning/workflowTuningEstimates';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
 // with at createRun; hashing the live workflows.spec_json the identical way lets
 // us flag the current revision. It imports only node:crypto (verified), so it
@@ -1693,6 +1695,78 @@ export function selectWorkflowRevisionStats(
         row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// 8a. selectTuningLevelUsage (D8 — per-level token estimates)
+// ---------------------------------------------------------------------------
+
+interface TuningLevelUsageRow {
+  tuningLevel: string;
+  totalTokens: number;
+}
+
+/**
+ * The workflow's `name` column — the built-in-flow key
+ * {@link estimateTuningLevelTokens}'s static-default table is keyed by.
+ * `null` when the id is unknown (deleted row); callers fall back to the
+ * estimator's own unknown-flow default rather than failing the read.
+ */
+export function selectWorkflowName(db: DatabaseLike, workflowId: string): string | null {
+  const row = db.prepare(`SELECT name FROM workflows WHERE id = ?`).get(workflowId) as
+    | { name: string }
+    | undefined;
+  return row?.name ?? null;
+}
+
+/**
+ * The `run_usage.total_tokens` samples backing the tuning-level token
+ * estimates (plan D8), grouped by level, for ONE workflow's own runs.
+ *
+ * Scoped to runs that are ATTRIBUTED and comparable:
+ *   - `status = 'completed'` — only finished runs carry a settled token total.
+ *   - `tuning_level IS NOT NULL` — NULL is unattributed (a pre-feature or
+ *     non-built-in run), never folded in as if it were 'standard'.
+ *   - `variant_id IS NULL` — an A/B variant runs its own frozen definition,
+ *     not the level's calibrated preset, so its tokens would misattribute the
+ *     level's true cost (mirrors `selectVariantStats`'s baseline exclusion).
+ *   - `JOIN run_usage` — a run with no materialized usage row (never
+ *     finalized) contributes no sample rather than a phantom zero.
+ *
+ * Returns one array per {@link TuningLevel} (empty when the workflow has no
+ * qualifying runs at that level yet) — the caller,
+ * {@link estimateTuningLevelTokens} in `shared/tuning/workflowTuningEstimates`,
+ * runs the median + fallback chain over these.
+ *
+ * @param db         - Narrow DatabaseLike surface.
+ * @param workflowId - The workflow to scope samples to.
+ */
+export function selectTuningLevelUsage(
+  db: DatabaseLike,
+  workflowId: string,
+): TuningLevelUsageSamples {
+  const rows = db
+    .prepare(
+      `SELECT r.tuning_level AS tuningLevel, u.total_tokens AS totalTokens
+       FROM workflow_runs r
+       JOIN run_usage u ON u.run_id = r.id
+       WHERE r.workflow_id = ?
+         AND r.status = 'completed'
+         AND r.tuning_level IS NOT NULL
+         AND r.variant_id IS NULL`,
+    )
+    .all(workflowId) as TuningLevelUsageRow[];
+
+  const samples: Record<TuningLevel, number[]> = {
+    efficient: [],
+    standard: [],
+    thorough: [],
+    custom: [],
+  };
+  for (const row of rows) {
+    if (isTuningLevel(row.tuningLevel)) samples[row.tuningLevel].push(asNumber(row.totalTokens));
+  }
+  return samples;
 }
 
 // ---------------------------------------------------------------------------
