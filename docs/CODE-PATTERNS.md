@@ -351,6 +351,42 @@ and audit greps live here.
   \(evt: unknown\)|onData: \(event:" frontend/src` — each production hit is a candidate for
   inference (test files intentionally fake the shape and are exempt).
 
+### `cyboflow_*` MCP tools are declared ONCE, in the tool registry
+
+The same silent-drop class as the IPC rules above, on the orchestrator socket. A tool used to
+live in three hand-maintained places — a JSON Schema literal in `cyboflowMcpServer.ts`'s
+ListTools reply, a `case 'cyboflow_…'` arm that re-typechecked the same fields and hand-built
+the camelCase envelope, and the `McpQueryMessage` union member `mcpQueryHandler.ts` reads. The
+envelope crosses the socket as JSON and is re-typed by a blind
+`parsed as McpQueryMessage` cast (`orchSocketServer.ts`), so a mis-renamed key compiled,
+shipped, and arrived at the handler as `undefined`.
+
+**Add or change a tool in exactly one place:** an entry in
+`main/src/orchestrator/mcpServer/toolRegistry/` — `runScopeTools.ts`,
+`globalAgentTools.ts`, or `designTools.ts`, keyed by (scope, name). One `defineTool({ name,
+description, input, envelope, toEnvelope })` carries a zod schema; the advertised JSON Schema,
+the argument validation, and the `invalid_arguments` `expected` string are all DERIVED from it,
+and `toEnvelope`'s return type is checked against `EnvelopeParams<T>` — the union member for the
+envelope the entry names — so a wrong camelCase key is now a build error rather than a runtime
+`undefined`.
+
+- **Never add a `case 'cyboflow_…'` arm or an `inputSchema:` literal to `cyboflowMcpServer.ts`.**
+  It dispatches generically (`findTool` → `tool.prepare` → `executeMcpQuery`) and holds no
+  per-tool code. `toolRegistryRatchet.test.ts` fails CI on either.
+- **Scope is part of the key, not a filter.** `cyboflow_report_artifact` and
+  `cyboflow_create_task` are advertised in more than one scope with a different schema and a
+  different mapping (the design session narrows both), so they are separate entries.
+- **Preserve deliberate looseness.** A field the arm forwarded unvalidated because the handler
+  re-narrows it (`buildFindingExtras`, `parseFindingLocations`, `parseFindingImpact`,
+  `parseViewports`, `parseVerificationTaskV1`) stays permissive, declared via
+  `declareAs(z.unknown(), {…})` so the advertised shape stays rich. Tightening one into a strict
+  `z.enum`/`z.object` turns an agent typo into a rejected write, which is what those narrowers
+  exist to prevent.
+- **The registry is bundled into the standalone MCP subprocess** (`scripts/bundle-mcp-server.mjs`),
+  so it may import only `zod` and its siblings. Its `McpQueryMessage` import is `import type`
+  on purpose: a value import would drag electron, better-sqlite3, and the services layer into
+  the subprocess bundle.
+
 ### Per-session mutation serialization
 
 Any state mutation for a workflow run passes through a per-run `SimpleQueue({concurrency: 1})`.

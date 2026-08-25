@@ -452,6 +452,36 @@ plugin cache.
 > async-deferred `shell-approval-request` branch on the interactive substrate and holds the
 > socket reply open until the user decides (the `socketReply` invariant).
 
+#### The `cyboflow_*` MCP tool seam
+
+Flow agents reach cyboflow through `cyboflowMcpServer.ts`, a **standalone node subprocess**
+(esbuild-bundled self-contained by `scripts/bundle-mcp-server.mjs`, so it cannot import electron,
+better-sqlite3, or `main/src/services/**`). It advertises tools to the SDK over stdio and
+forwards each call as a JSON envelope over the orch unix socket to `McpQueryHandler` in the main
+process, which dispatches on the envelope's `type`.
+
+Which tools it advertises depends on `CYBOFLOW_MCP_SCOPE`, resolved once at module init and fixed
+for the subprocess's lifetime: **run** (the default flow family), **global-agent** (the
+cross-project read + propose-action family), or **design** (the minimal Design Mode family). Scope
+is enforced by lookup, not by filtering — a tool the active scope does not advertise throws
+`Unknown tool` on direct invocation, not merely absent from ListTools.
+
+**All three surfaces derive from one registry** (`mcpServer/toolRegistry/`). Each tool is one
+`defineTool` entry — name, description, a zod schema, the envelope it forwards, and a
+`toEnvelope` mapping the snake_case arguments to the handler's camelCase params. From that entry
+the ListTools declaration (zod → JSON Schema, `toolSchema.ts`), the argument validation, and the
+`invalid_arguments` reply are all generated; `cyboflowMcpServer.ts` itself holds no per-tool code,
+only the generic `findTool → prepare → executeMcpQuery` dispatch and a small table for the one
+locally-served tool (`cyboflow_reference`, whose content is compiled in).
+
+The entry's `toEnvelope` is typechecked against `EnvelopeParams<T>` — the `McpQueryMessage` union
+member for the envelope it names — which closes the seam's real hole: the envelope crosses the
+socket as JSON and is re-typed by a blind `parsed as McpQueryMessage` cast, so before the registry
+a mis-renamed camelCase key compiled and arrived at the handler as `undefined`. The
+declaration/validation/dispatch lockstep is held by
+`mcpServer/__tests__/toolRegistryRatchet.test.ts`. Adding a tool means adding one entry; see
+`docs/CODE-PATTERNS.md` → "`cyboflow_*` MCP tools are declared ONCE".
+
 ### Telemetry (`main/src/services/telemetry/`)
 
 Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`initTelemetry` in
