@@ -187,4 +187,29 @@ describe('QuickSessionsTable — rename affordance', () => {
 
     expectNotOpened();
   });
+
+  it('a native-order click-away dismiss (mousedown → blur → click) commits the rename without opening the session', () => {
+    // Real browsers dispatch the dismissing click's mousedown, then the input's
+    // blur (which saves and closes the editor), then the click — so by click
+    // time the row's isEditing guard already sees false. The mousedown-armed
+    // suppression must swallow exactly that click.
+    render(<QuickSessionsTable />);
+    fireEvent.click(screen.getByRole('button', { name: 'Rename session' }));
+    const input = screen.getByDisplayValue('smooth-falcon');
+    fireEvent.change(input, { target: { value: 'clicked-away' } });
+
+    const chip = screen.getByText('idle');
+    fireEvent.mouseDown(chip);
+    fireEvent.blur(input);
+    fireEvent.click(chip);
+
+    expect(mockRename).toHaveBeenCalledTimes(1);
+    expect(mockRename).toHaveBeenCalledWith('sess-a', 'clicked-away');
+    expectNotOpened();
+
+    // The suppression is one-shot: the next ordinary click opens the session.
+    fireEvent.mouseDown(chip);
+    fireEvent.click(chip);
+    expect(mockSetActiveQuickSession).toHaveBeenCalledTimes(1);
+  });
 });

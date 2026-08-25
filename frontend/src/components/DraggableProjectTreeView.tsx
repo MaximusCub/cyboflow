@@ -281,6 +281,18 @@ export const SessionRow = memo(function SessionRow({
     }
   };
 
+  // A native click-away dismiss dispatches blur BEFORE click. On the
+  // unchanged-name path handleSaveRename flips isEditingName synchronously in
+  // the blur handler, so the row's onClick guard below would already see false
+  // and navigate anyway. Arm suppression on mousedown instead — it fires before
+  // blur, while isEditingName is still true; a later genuine click re-runs
+  // mousedown with isEditingName false and disarms.
+  const suppressClickRef = useRef(false);
+
+  const handleRowMouseDown = () => {
+    suppressClickRef.current = isEditingName;
+  };
+
   return (
     <div className="relative" style={{ marginLeft: '16px' }}>
       <div className="absolute inset-0 pointer-events-none">
@@ -311,13 +323,20 @@ export const SessionRow = memo(function SessionRow({
         onDragEnd={onDragEnd}
         onDragEnter={onDragEnter}
         onDragLeave={onDragLeave}
+        onMouseDown={handleRowMouseDown}
         onClick={(e) => {
           // Guard against the double-click-to-rename affordance below: a dblclick
           // sequence dispatches click(detail=1), click(detail=2), dblclick in that
           // order, so the second click has already reached us by the time dblclick
           // fires — stopPropagation() there can't retroactively cancel it. Also
           // guard on isEditingName so clicking a non-input part of the row (e.g.
-          // the relative-time label) while the editor is open doesn't navigate.
+          // the relative-time label) while the editor is open doesn't navigate —
+          // suppressClickRef covers the blur-before-click native ordering where
+          // isEditingName has already flipped false (see handleRowMouseDown).
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
           if (isEditingName || e.detail > 1) return;
           onSessionClick(session);
         }}
@@ -343,6 +362,7 @@ export const SessionRow = memo(function SessionRow({
             onChange={(e) => setEditName(e.target.value)}
             onKeyDown={handleNameInputKeyDown}
             onBlur={handleSaveRename}
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
             className="flex-1 min-w-0 text-sm bg-surface-primary text-text-primary px-1 py-0 rounded border border-interactive focus:outline-none focus:ring-1 focus:ring-interactive"

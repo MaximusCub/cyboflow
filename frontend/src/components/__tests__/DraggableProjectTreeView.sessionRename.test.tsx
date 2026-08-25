@@ -181,4 +181,31 @@ describe('SessionRow — inline rename', () => {
 
     expect(onSessionClick).not.toHaveBeenCalled();
   });
+
+  it('a native-order click-away dismiss (mousedown → blur → click) does not invoke onSessionClick', () => {
+    // Real browsers dispatch the dismissing click's mousedown, then the input's
+    // blur, then the click. On the unchanged-name path handleSaveRename closes
+    // the editor synchronously inside the blur handler, so the row's
+    // isEditingName guard already sees false by click time — the mousedown-armed
+    // suppression must swallow exactly that click.
+    const onSessionClick = vi.fn();
+    const props = makeProps({ session: makeSession({ name: 'My Session' }), onSessionClick });
+    render(<SessionRow {...props} />);
+
+    fireEvent.doubleClick(screen.getByText('My Session'));
+    const input = screen.getByDisplayValue('My Session');
+
+    const label = screen.getByText('5 minutes ago');
+    fireEvent.mouseDown(label);
+    fireEvent.blur(input);
+    fireEvent.click(label);
+
+    expect(onSessionClick).not.toHaveBeenCalled();
+    expect(screen.queryByDisplayValue('My Session')).toBeNull();
+
+    // The suppression is one-shot: the next ordinary click opens the session.
+    fireEvent.mouseDown(label);
+    fireEvent.click(label);
+    expect(onSessionClick).toHaveBeenCalledTimes(1);
+  });
 });

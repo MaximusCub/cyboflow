@@ -217,15 +217,34 @@ function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: numb
     saveEdit();
   };
 
+  // A native click-away dismiss dispatches blur BEFORE click, so by the time
+  // the row's onClick runs, saveEdit() has already flipped isEditing to false
+  // and the `if (isEditing) return` guard is bypassed — the dismissing click
+  // would still open the session and stamp last_viewed_at. Arm suppression on
+  // mousedown instead (it fires before blur, while isEditing is still true);
+  // a later genuine click re-runs mousedown with isEditing false and disarms.
+  const suppressClickRef = React.useRef(false);
+
+  const handleRowMouseDown = (): void => {
+    suppressClickRef.current = isEditing;
+  };
+
   return (
     <div
       role="button"
       tabIndex={0}
+      onMouseDown={handleRowMouseDown}
       onClick={() => {
         // Only the <input> stops propagation on its own clicks; the rest of the
         // row (status dot, chip, elapsed label) stays a live click target while
         // editing, so dismissing the editor by clicking there must not also open
-        // the session and stamp last_viewed_at.
+        // the session and stamp last_viewed_at. suppressClickRef covers the
+        // native ordering where the dismissing click's blur already closed the
+        // editor before this handler runs (see handleRowMouseDown).
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          return;
+        }
         if (isEditing) return;
         openQuickSession(row);
       }}
@@ -256,6 +275,7 @@ function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: numb
           type="text"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
+          onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
           onKeyDown={handleInputKeyDown}
           onBlur={handleInputBlur}
