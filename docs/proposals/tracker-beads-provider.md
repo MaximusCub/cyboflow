@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-15 absorbed (21 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-16 absorbed (22 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -239,6 +239,19 @@ leaves TOCTOU windows), applied per direction:
   so no duplicate and no local corruption. Atomically binding a CLI spawn to an instance id is
   not possible from outside the process; this residual is the floor, and it is non-corrupting on
   both sides of the link.
+
+**Same-instance mutations need a separate guard for archival** (Codex round-16: identity
+catches replacement, not concurrency — a concurrent `bd dolt pull` can RESTORE an issue after
+its absent-id lookup but before local archival, same instance id throughout, and Auto mode then
+archives a live issue; this race exists for the HTTP providers too and is silently accepted
+there, but beads' expected same-workspace concurrency makes it worth closing). The identity
+probe additionally returns the workspace's **Dolt HEAD**; the sweep captures it at start and
+re-probes before applying decisions. If HEAD moved, ONLY the destructive subset — archival
+decisions — is discarded ("deferred — workspace changed mid-sweep"; deletion handling is not
+urgent and a quiet window recurs), while imports and merges still apply (each is individually
+safe under ordinary merge semantics). Scoping the guard to archival keeps busy workspaces from
+starving the whole sweep. Negative test: restore an absent issue between lookup and archival,
+prove no local archive.
 
 Negative tests: same-path reinit (a) before a pass, (b) between the initial check and
 `listIssueIds`, (c) between `listIssues` and the apply loop, (d) between `listIssueIds` and an
@@ -698,3 +711,14 @@ absorbed:
    Absorbed: `guardedUpdates` capability + `requiresGuardedUpdates` provider flag; all
    existing-issue mutations gated at the ENQUEUE chokepoint in fallback mode (the proven
    'off'-mode pattern, no stranded rows); creates-still-flow test (see "Dual writers").
+
+Codex adversarial round 16 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] Same-INSTANCE concurrency evaded the identity sandwich: a concurrent `bd dolt pull`
+   restoring an issue between its absent-id lookup and archival archives a live issue (identity
+   unchanged throughout). Absorbed: Dolt HEAD added to the identity probe; HEAD moved across
+   the sweep ⇒ discard the archival decisions only (imports/merges still apply — each is
+   individually safe), defer to a quiet window; restoration-race negative test. Noted: the same
+   race exists and is accepted for HTTP providers; beads gets the stronger guard because
+   same-workspace concurrency is its expected mode (see "Same-instance mutations").
