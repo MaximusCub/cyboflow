@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-8 absorbed (12 high + 2 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-9 absorbed (13 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -298,12 +298,28 @@ invisible, with no error.
 
 Fix rides the pass structure that already exists: the every-12th-pass (and every manual
 "Sync now") sweep already fetches the **full remote id set**. Extend that pass, gated by a new
-`capabilities.requiresIdReconciliation` flag (true only for beads), to also diff the id set
-against known links **plus permanently-skipped ids** — any unseen id gets a `getIssue` point
+`capabilities.requiresIdReconciliation` flag (true only for beads), to diff the id set against
+known links plus a **durable reconciliation ledger** — any unseen id gets a `getIssue` point
 fetch and runs through the ordinary import path. Bounded (point lookups only for the delta),
 timestamp-independent, and "the user just pulled" has an immediate manual remedy since Sync now
 always sweeps. The incremental `--updated-after` cursor stays the fast path; reconciliation is
 the periodic backstop.
+
+**The ledger is new, durable state — the engine has none to reuse** (Codex round-9 finding 2:
+inbound "permanent skips" today are cursor-advances plus in-memory report counters; no external
+id or reason is persisted anywhere, so a subtract-the-skipped design would re-point-fetch every
+non-imported id on every sweep — thousands of CLI spawns per hour on a workspace dominated by
+skipped classes). Design: a `tracker_reconciliation_ledger` table in the same migration —
+`(connection_id, external_id, reason, config_generation, seen_at)`, `UNIQUE(connection_id,
+external_id)` — written whenever reconciliation resolves an unseen id WITHOUT minting a link
+(imported ids need no row; their link is the record). `config_generation` is a counter stamped
+on the connection and bumped by any mapping/state-mapping/selection change; ledger rows from an
+older generation are treated as absent, so a config change re-evaluates previously skipped ids
+exactly once. Rows for ids that vanish from the remote set are deleted opportunistically during
+the same sweep. Tests: a repeat sweep over unchanged skips performs ZERO point lookups; a
+mapping change re-considers exactly the eligible skipped ids. Sizing note: the first
+reconciliation over a legacy workspace point-fetches every unlinked id once (closed issues
+included) — a bounded one-time cost, after which each id is linked or ledgered.
 
 Phase 0 negative control: advance the cursor, introduce an issue with an older `updated_at`
 (via `bd import` of a backdated record, simulating a pull), prove the reconciliation pass
@@ -389,11 +405,32 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   expected). Carry `revision` from the pre-send read into every update; a revision mismatch
   settles the row unsent as a held conflict for the next inbound merge, exactly like the
   divergence guard. **If Phase 0 finds no guard mechanism** — probe both `bd update`'s flag
-  surface and a conditional-`UPDATE … WHERE revision = N` via Dolt SQL as the escape hatch —
+  surface and a conditional-`UPDATE … WHERE revision = N` via Dolt SQL as the escape hatch (the
+  SQL path is only a valid guard if the probe ALSO proves it preserves beads' `revision`
+  increment, `updated_at` stamping, validation, and event semantics — a raw write bypassing
+  those is not an escape hatch, it is corruption) —
   **v1 ships import + create-push only**: `contentWrite` all-false and status write-back
   disabled for beads (creates race nothing — a fresh issue has no concurrent editor), with
   outbound edits deferred until a guarded transport exists (`bd serve`, SQL, or upstream flag).
   No unguarded fallback ships.
+
+  **The guard is an adapter-contract change, not adapter-internal** (Codex round-9 finding 1:
+  the current interface cannot express it — `TrackerIssue` exposes no revision and
+  `updateIssueState`/`updateIssueContent` accept no expected-revision, so an implementer
+  "following the plan" would either write unguarded or hide a second read inside the adapter,
+  reopening the race). Contract changes, enumerated:
+  - `TrackerIssue` gains an optional opaque `concurrencyToken?: string` — populated only by
+    adapters that support guarded writes (beads: the `revision`); HTTP adapters leave it
+    undefined.
+  - `updateIssueState`/`updateIssueContent` gain an optional `expectedToken?: string` final
+    parameter; existing adapters ignore it (unguarded, their status quo).
+  - A distinct typed outcome, `TrackerRevisionMismatchError`, which the outbox drain consumes
+    exactly like the `contentDivergence` hold: settle the row unsent, no baseline stamp, the
+    inbound conflict machinery owns it.
+  - Callers enumerated: `drainContentWrite` already does the pre-send `getIssue` — it forwards
+    that read's token; the state-write drain path gains the same pre-send read + token when
+    (and only when) the adapter populates `concurrencyToken`. No other mutation callers exist
+    (creates and archive are not existing-issue updates).
 - **Scale**: beads self-reports fast at thousands of issues; our full-fetch sweep every 12th pass
   is a `bd list` of ids — fine at that scale.
 
@@ -507,3 +544,19 @@ absorbed:
    post-listing re-check would let a moved issue's null lookup archive its live twin. Absorbed:
    the inbound re-check moves after ALL of a phase's adapter reads (listing + point lookups),
    immediately before archival; negative test (d) added.
+
+Codex adversarial round 9 (2026-08-26), verdict needs-attention, 1 high + 1 medium — both
+CONFIRMED and absorbed:
+
+1. [high] The revision guard was required but inexpressible: `TrackerIssue` has no revision
+   field and the update methods take no expected-revision, so a compliant implementer would
+   write unguarded or hide a second read in the adapter. Absorbed as an explicit contract
+   change: optional `concurrencyToken` on `TrackerIssue`, optional `expectedToken` on both
+   update methods, a typed `TrackerRevisionMismatchError` consumed as a held conflict, callers
+   enumerated; the Dolt-SQL escape hatch now requires proving revision/timestamp/event
+   preservation (see "Dual writers").
+2. [medium] Reconciliation subtracted a permanent-skip set the engine never persists → every
+   sweep would re-point-fetch all skipped ids indefinitely. Absorbed as the
+   `tracker_reconciliation_ledger` table (same migration) with `config_generation`
+   invalidation, opportunistic cleanup, zero-lookup repeat-sweep + mapping-change tests, and a
+   sizing note for the one-time first reconciliation (see "Pull reconciliation").
