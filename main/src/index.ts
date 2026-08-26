@@ -195,6 +195,7 @@ import { setAgentProviderAccessResolver } from './services/agentProviderGuard';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
+import { runQuitDrain } from './services/quitDrain';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
@@ -6479,50 +6480,20 @@ app.on('will-quit', () => {
   dockBadgeService.setBadgeCount(0);
 });
 
-app.on('before-quit', async (event) => {
-  // Drain the debounced provider-usage write before anything can preventDefault
-  // or tear the DB down — a trailing 2s debounce is otherwise lost on quit.
-  try {
-    tryGetProviderUsageStore()?.flush();
-  } catch (error) {
-    console.warn('[Main] providerUsage flush on quit failed:', error);
-  }
-
-  // Check if there are active archive tasks
-  if (archiveProgressManager && archiveProgressManager.hasActiveTasks()) {
-    event.preventDefault();
-    
-    console.log('[Main] Archive tasks in progress, showing warning dialog...');
-    const activeCount = archiveProgressManager.getActiveTaskCount();
-    const choice = mainWindow 
-      ? dialog.showMessageBoxSync(mainWindow, {
-          type: 'warning',
-          title: 'Archive Tasks In Progress',
-          message: `Cyboflow is removing ${activeCount} worktree${activeCount > 1 ? 's' : ''} in the background.`,
-          detail: 'Git worktree removal can take time, especially for large repositories with many files. If you quit now, the worktree directories may not be fully cleaned up and you may need to remove them manually.\n\nDo you want to quit anyway?',
-          buttons: ['Wait', 'Quit Anyway'],
-          defaultId: 0,
-          cancelId: 0
-        })
-      : dialog.showMessageBoxSync({
-          type: 'warning',
-          title: 'Archive Tasks In Progress',
-          message: `Cyboflow is removing ${activeCount} worktree${activeCount > 1 ? 's' : ''} in the background.`,
-          detail: 'Git worktree removal can take time, especially for large repositories with many files. If you quit now, the worktree directories may not be fully cleaned up and you may need to remove them manually.\n\nDo you want to quit anyway?',
-          buttons: ['Wait', 'Quit Anyway'],
-          defaultId: 0,
-          cancelId: 0
-        });
-    
-    if (choice === 1) {
-      // User chose to quit anyway
-      archiveProgressManager.clearAll();
-      app.exit(0);
-    }
-    // Otherwise, the quit is cancelled and app continues
-    return;
-  }
-  
+/**
+ * Everything that must happen before this process may exit: settle in-flight
+ * runs, kill child and remote processes, release ports, flush writes.
+ *
+ * Extracted from the `before-quit` listener so it can be AWAITED. It previously
+ * ran inside an `async` listener, which Electron does not wait on — see
+ * services/quitDrain.ts for what that race cost us (a fatal abort during Node
+ * environment teardown, and runs stranded in `running` across restarts).
+ *
+ * Ordering is load-bearing and unchanged: stop the things that SCHEDULE work
+ * before the things that DO it, settle runs before tearing down the processes
+ * running them, and close the logger last.
+ */
+async function drainOnQuit(): Promise<void> {
   // Clear any pending idle session-summary timers (session-summary-plan.md §5).
   if (sessionSummaryScheduler) {
     sessionSummaryScheduler.dispose();
@@ -6658,6 +6629,90 @@ app.on('before-quit', async (event) => {
   if (logger) {
     logger.close();
   }
+}
+
+/**
+ * Quit passes. `draining` holds the quit open while drainOnQuit runs; `drained`
+ * lets the re-issued quit straight through, so the normal `will-quit` → `quit`
+ * sequence still fires (that is where the dock badge is cleared) rather than
+ * being skipped by a hard `app.exit`.
+ */
+let quitDrainState: 'idle' | 'draining' | 'drained' = 'idle';
+
+app.on('before-quit', (event) => {
+  // Second pass: the teardown has already run to completion (or to its
+  // deadline) and re-issued the quit. Nothing is left to hold it for.
+  if (quitDrainState === 'drained') return;
+
+  // A quit arriving while the teardown is mid-flight (an impatient second
+  // Cmd-Q): keep holding it, but do not start a second drain over the same
+  // services — and do not re-run the flush or re-raise the archive dialog
+  // below, both of which the first pass already settled.
+  if (quitDrainState === 'draining') {
+    event.preventDefault();
+    return;
+  }
+
+  // Drain the debounced provider-usage write before anything can preventDefault
+  // or tear the DB down — a trailing 2s debounce is otherwise lost on quit.
+  try {
+    tryGetProviderUsageStore()?.flush();
+  } catch (error) {
+    console.warn('[Main] providerUsage flush on quit failed:', error);
+  }
+
+  // Check if there are active archive tasks
+  if (archiveProgressManager && archiveProgressManager.hasActiveTasks()) {
+    event.preventDefault();
+    
+    console.log('[Main] Archive tasks in progress, showing warning dialog...');
+    const activeCount = archiveProgressManager.getActiveTaskCount();
+    const choice = mainWindow 
+      ? dialog.showMessageBoxSync(mainWindow, {
+          type: 'warning',
+          title: 'Archive Tasks In Progress',
+          message: `Cyboflow is removing ${activeCount} worktree${activeCount > 1 ? 's' : ''} in the background.`,
+          detail: 'Git worktree removal can take time, especially for large repositories with many files. If you quit now, the worktree directories may not be fully cleaned up and you may need to remove them manually.\n\nDo you want to quit anyway?',
+          buttons: ['Wait', 'Quit Anyway'],
+          defaultId: 0,
+          cancelId: 0
+        })
+      : dialog.showMessageBoxSync({
+          type: 'warning',
+          title: 'Archive Tasks In Progress',
+          message: `Cyboflow is removing ${activeCount} worktree${activeCount > 1 ? 's' : ''} in the background.`,
+          detail: 'Git worktree removal can take time, especially for large repositories with many files. If you quit now, the worktree directories may not be fully cleaned up and you may need to remove them manually.\n\nDo you want to quit anyway?',
+          buttons: ['Wait', 'Quit Anyway'],
+          defaultId: 0,
+          cancelId: 0
+        });
+    
+    if (choice === 1) {
+      // User chose to quit anyway
+      archiveProgressManager.clearAll();
+      app.exit(0);
+    }
+    // Otherwise, the quit is cancelled and app continues
+    return;
+  }
+
+  // This listener body must stay SYNCHRONOUS up to here. preventDefault is the
+  // only thing that keeps the app alive past this tick, and Electron ignores a
+  // promise returned from a before-quit listener entirely.
+  event.preventDefault();
+  quitDrainState = 'draining';
+  void runQuitDrain({
+    drain: drainOnQuit,
+    finish: () => {
+      quitDrainState = 'drained';
+      app.quit();
+    },
+    // console, not `logger` — the teardown closes the logger as its last step.
+    logger: {
+      info: (message) => console.log(message),
+      warn: (message, error) => (error === undefined ? console.warn(message) : console.warn(message, error)),
+    },
+  });
 });
 
 // Export getter function for mainWindow
