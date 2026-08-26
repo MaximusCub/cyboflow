@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-13 absorbed (18 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-14 absorbed (19 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -74,7 +74,8 @@ of their own." `writeBack.ts` makes zero network calls by design and needs nothi
 | `listStates(selection)` | status vocabulary from config/`bd` | built-ins `open, in_progress, blocked, deferred, closed` + custom statuses; each custom status carries a behavior category (`active/wip/done/frozen`) that seeds `TrackerStateGroup` like Plane's `group` field |
 | `listFieldOptions()` | static + config | priorities 0–4; types `bug/feature/task/epic/chore` (+ customs) |
 | `listIssues(sel, sinceIso)` | `bd list --all --json --limit 0 --updated-after <iso>` | `--all` is load-bearing: default `bd list` **excludes closed issues**, so without it a remote close never syncs as a state transition. Keep the Dart hedge on the bound: send it widened, re-apply the exact inclusive bound client-side (gt-vs-gte undocumented) |
-| `listIssueIds(sel)` | `bd list --all --json --limit 0` (ids only) | sweep ground truth — MUST include closed issues, or the sweep misreads every closed linked issue as deleted and orphans its link. Closed-then-`bd prune`/`bd gc`-decayed issues (default: closed >90d) *do* drop out of `--all` — the sweep then archives the local twin, which is the correct reading of a remote GC |
+| `listIssueIds(sel)` | — (superseded for beads) | beads implements the OPTIONAL `listIssueRevisions(sel)` instead (see "Pull reconciliation" — the sweep needs (id, revision) pairs, which `listIssueIds(): Promise<string[]>` cannot carry); the engine's sweep uses `listIssueRevisions` when the adapter provides it, else `listIssueIds` (HTTP providers unchanged). Ground-truth rules are identical: `--all --limit 0`, closed issues MUST be included; `bd prune`/`bd gc`-decayed issues drop out and the sweep archiving the local twin is the correct reading of a remote GC |
+| `listIssueRevisions(sel)` *(new, optional)* | `bd list --all --limit 0 --format <id+revision template>` | `Promise<Array<{id: string; revision: string}>>`; declared alongside `capabilities.requiresIdReconciliation` |
 | `getIssue(id)` | `bd show <id> --json` | local + fast; sweep's N point-lookups are fine |
 | `createIssue` / `createSubIssue` | `bd create --json` (+ `--parent <id>`) | client key via `--metadata` (below) |
 | `updateIssueState(id, stateId)` | `bd update <id> --status … --json` | |
@@ -340,7 +341,13 @@ already-linked issue — edited offline before the cursor position, pushed after
 incremental listing, and an unseen-id diff sees the id as known; the change stays invisible and
 outbound sync may later overwrite it). So the sweep projection is **(id, revision) pairs**, not
 bare ids — `revision` is a template-renderable field ("always present"), adding it to the
-`--format` projection costs nothing. Each link persists its last-seen revision inside
+`--format` projection costs nothing. **This is an adapter-contract addition** (Codex round-14:
+`listIssueIds(): Promise<string[]>` cannot carry it): a new OPTIONAL method
+`listIssueRevisions(selection): Promise<Array<{id: string; revision: string}>>`, implemented
+only by adapters declaring `capabilities.requiresIdReconciliation`; the deletion-sweep consumer
+calls it when present and falls back to `listIssueIds` otherwise, so the three HTTP providers
+change nothing. Contract tests: changed linked and ledgered revisions trigger point fetches;
+unchanged entries trigger none. Each link persists its last-seen revision inside
 `baseline_json` (no new column; our own outbound writes stamp the response, revision included,
 so echoes never false-positive). A linked id whose swept revision differs from the stored one
 gets a `getIssue` point fetch and runs through the ordinary inbound merge/conflict path. If
@@ -651,3 +658,13 @@ text) and absorbed:
    Absorbed: bullet rewritten to defer to the state machine (authoritative for content AND
    state writes); bounded-retry exhaustion specified as degrading to hold-as-conflict; the
    four-outcome test matrix named for both write kinds.
+
+Codex adversarial round 14 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] The (id, revision) sweep projection had no adapter seam — `listIssueIds()` returns
+   `Promise<string[]>` and the contract-change list never widened it, so the engine could not
+   receive revisions. Absorbed: new optional `listIssueRevisions(selection)` adapter method,
+   paired with `requiresIdReconciliation`; sweep consumer prefers it, falls back to
+   `listIssueIds` (HTTP providers untouched); contract tests named (see "Pull reconciliation"
+   and the method-mapping table).
