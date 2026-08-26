@@ -196,6 +196,7 @@ import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { runQuitDrain } from './services/quitDrain';
+import { terminalPanelManager } from './services/terminalPanelManager';
 import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { VitestOrphanReaper } from './services/vitestOrphanReaper';
 import { McpOrphanTripwire } from './services/mcpOrphanTripwire';
@@ -6597,6 +6598,18 @@ async function drainOnQuit(): Promise<void> {
     runShellManager.destroyAll();
     console.log('[Main] Run user-shells destroyed');
   }
+
+  // Kill the PTY behind every open terminal tool panel. This is a THIRD
+  // independent pty owner (alongside the CLI factory and RunShellManager), and
+  // until now nothing called its teardown at all: destroyTerminal ran on panel
+  // delete, destroyAllTerminals had no caller, so any terminal panel still open
+  // at quit kept a live pty — and a live node-pty onData callback — straight
+  // through Node's environment disposal. That is the shape of the fatal abort in
+  // CYBOFLOW-APP-12 (a napi ThreadSafeFunction callback firing under
+  // node::FreeEnvironment). Synchronous and internally fail-soft.
+  console.log('[Main] Destroying all terminal panels...');
+  terminalPanelManager.destroyAllTerminals();
+  console.log('[Main] Terminal panels destroyed');
 
   // TASK-057: SIGTERM any detached ui-prototype http.server still serving under
   // this instance's artifacts/runs root, so quitting leaves zero prototype

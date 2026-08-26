@@ -26,13 +26,13 @@ const INDEX = path.join(__dirname, '..', 'index.ts');
 const source = readFileSync(INDEX, 'utf8');
 
 /**
- * The body of the `app.on('before-quit', ...)` listener, by brace matching from
- * its opening `{`. String and comment contents are not parsed out, which is fine
- * for the coarse presence/absence assertions below.
+ * The body of a top-level construct, by brace matching from the first `{` at or
+ * after `declaration`. String and comment contents are not parsed out, which is
+ * fine for the coarse presence/absence assertions below.
  */
-function beforeQuitListenerBody(): string {
-  const start = source.indexOf("app.on('before-quit'");
-  expect(start).toBeGreaterThan(-1);
+function bodyOf(declaration: string): string {
+  const start = source.indexOf(declaration);
+  expect(start, `${declaration} not found in index.ts`).toBeGreaterThan(-1);
   const open = source.indexOf('{', start);
   expect(open).toBeGreaterThan(-1);
   let depth = 0;
@@ -43,8 +43,11 @@ function beforeQuitListenerBody(): string {
       if (depth === 0) return source.slice(open + 1, i);
     }
   }
-  throw new Error('unbalanced braces in the before-quit listener');
+  throw new Error(`unbalanced braces in ${declaration}`);
 }
+
+const beforeQuitListenerBody = (): string => bodyOf("app.on('before-quit'");
+const drainBody = (): string => bodyOf('async function drainOnQuit()');
 
 describe('before-quit wiring (index.ts)', () => {
   it('registers exactly one before-quit listener', () => {
@@ -83,5 +86,21 @@ describe('before-quit wiring (index.ts)', () => {
     // `will-quit` is where the dock badge is cleared; app.exit() would skip it.
     const body = beforeQuitListenerBody();
     expect(body).toMatch(/finish:\s*\(\)\s*=>\s*\{[\s\S]*app\.quit\(\)/);
+  });
+
+  // Every owner of a node-pty handle must be torn down inside the drain. A pty
+  // still live when Node disposes its environment is the mechanism behind the
+  // CYBOFLOW-APP-12 abort — its onData callback fires through a napi
+  // ThreadSafeFunction into an environment that is already going away. Wiring one
+  // of these up is easy to forget precisely because nothing fails without it:
+  // terminalPanelManager.destroyAllTerminals() sat with ZERO callers, so every
+  // open terminal panel survived into teardown, silently, for as long as the
+  // feature had existed.
+  it.each([
+    ['CLI panel processes', 'cliManagerFactory.shutdown()'],
+    ['run user-shells', 'runShellManager.destroyAll()'],
+    ['terminal tool panels', 'terminalPanelManager.destroyAllTerminals()'],
+  ])('tears down %s inside the quit drain', (_label, call) => {
+    expect(drainBody()).toContain(call);
   });
 });
