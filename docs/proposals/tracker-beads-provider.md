@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-3 absorbed (6 high + 1 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-4 absorbed (7 high + 1 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -129,7 +129,7 @@ is safe.
 - **Identifier**: beads ids (`bd-a1b2`, hash-based, collision-safe across clones) are both
   `externalId` and `external_identifier` — human-readable enough, like Dart.
 
-## The four genuinely new pieces
+## The five genuinely new pieces
 
 ### 1. Keyless connect
 
@@ -236,7 +236,29 @@ Three writer populations contend for the embedded lock: our tick/outbox, session
   the *shared* database from a throwaway checkout — worth one sentence in the verify agent docs,
   not machinery.
 
-### 4. Migration + mechanical widenings
+### 4. Pull reconciliation — timestamp-independent discovery
+
+Codex round-4 finding: `bd dolt pull` merges Dolt history while (expectedly — Phase 0 must
+confirm) **preserving each issue's original `updated_at`**. An issue authored on another machine
+and pulled in later can therefore carry a timestamp older than our persisted cursor minus the
+overlap window — `--updated-after` will never return it, and the deletion sweep can't recover it
+because it only compares the remote id set against *already-linked* entities. Permanently
+invisible, with no error.
+
+Fix rides the pass structure that already exists: the every-12th-pass (and every manual
+"Sync now") sweep already fetches the **full remote id set**. Extend that pass, gated by a new
+`capabilities.requiresIdReconciliation` flag (true only for beads), to also diff the id set
+against known links **plus permanently-skipped ids** — any unseen id gets a `getIssue` point
+fetch and runs through the ordinary import path. Bounded (point lookups only for the delta),
+timestamp-independent, and "the user just pulled" has an immediate manual remedy since Sync now
+always sweeps. The incremental `--updated-after` cursor stays the fast path; reconciliation is
+the periodic backstop.
+
+Phase 0 negative control: advance the cursor, introduce an issue with an older `updated_at`
+(via `bd import` of a backdated record, simulating a pull), prove the reconciliation pass
+discovers and imports it — and confirm the pull-preserves-`updated_at` assumption directly.
+
+### 5. Migration + mechanical widenings
 
 Standard CHECK-widening at the next free prefix (≥123): full recreate of `tracker_connections` +
 `entity_external_links` per the `105_tracker_provider_dart.sql` pattern (NOT NULL provider, no
@@ -374,3 +396,12 @@ CONFIRMED (the 10MB `DEFAULT_MAX_BUFFER` verified at `runGit.ts:38`) and absorbe
    transient = infinite retry stall. Absorbed: id-only `--format` projection for the sweep,
    windowed backfill or explicit 64MB cap, overflow mapped to a terminal actionable pause (see
    "Bounded listings").
+
+Codex adversarial round 4 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] A `bd dolt pull` can merge in issues whose preserved `updated_at` predates the cursor
+   minus the overlap window → never returned by `--updated-after`, unrecoverable by the
+   linked-only sweep, permanently invisible with no error. Absorbed as the
+   `requiresIdReconciliation` sweep extension (unseen-id import on the full-id-set pass) + the
+   backdated-import negative control (see "Pull reconciliation").
