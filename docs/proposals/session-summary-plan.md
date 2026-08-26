@@ -144,14 +144,12 @@ pending timers)
 - Session exists, not archived, quick per the sentinel predicate
   `chat_run_id IS NOT NULL` (`main/src/orchestrator/quickSessionListing.ts:40-51`
   — NOT the dead `is_quick` column, `0` for every session since migration 012).
-- **Claude-runtime sessions only (v1)**: the quick-session sentinel also
-  matches Codex-runtime quick sessions, whose turn lifecycle the scheduler
-  does not observe — without this gate, lazy catch-up would fire a
-  cross-provider Haiku call over a Codex transcript (Codex finding #4).
-  Gate on the session's agent provider/runtime columns
-  (`sessions.agent_provider` / `agent_runtime`, migrations 059-061; NULL ⇒
-  Claude default ⇒ eligible). Extending to Codex sessions is a flagged
-  product/privacy decision (§10), not an accidental default.
+- **Claude-runtime sessions only (v1)** — SUPERSEDED 2026-08-26, see §10. The
+  gate is now `isSessionSummarySupported({ agentProvider, substrate })`
+  (`shared/types/sessionSummary.ts`): every SDK lane qualifies whatever its
+  provider, and only a Codex/OMP PTY session is excluded. The v1 concern
+  (Codex finding #4 — an unobserved turn lifecycle) was addressed by
+  subscribing those managers' turn events rather than by excluding them.
 
 Rejected alternatives (for the record): summarize-per-turn (calls scale with
 turns; history becomes per-turn noise); periodic all-session scan (the retired
@@ -448,10 +446,16 @@ SDK/db underneath; scheduler methods are NOT called by hand):
 
 ## 10. Edge cases and open decisions
 
-- **Codex-runtime quick sessions**: excluded in v1 (§2.8). Extending means
-  (a) wiring `codexSdkManager`/codex-PTY turn lifecycle into the scheduler and
-  (b) an explicit decision that sending a Codex transcript to a Claude
-  summarizer is acceptable — flagged, not inherited.
+- **Codex-runtime quick sessions**: excluded in v1 (§2.8); RESOLVED 2026-08-26 —
+  now covered on the SDK substrate. `codexSdkManager`/`ompSdkManager` emit the
+  same per-turn `'exit'`/`'spawned'` pair as `claudeCodeManager` and are all
+  subscribed by `wireSessionSummaryScheduler`; the eligibility gate became the
+  shared `isSessionSummarySupported` predicate over provider x SUBSTRATE
+  (`shared/types/sessionSummary.ts`), which the board row's `summarySupported`
+  flag reads too. Sending a Codex/OMP transcript to the Haiku summarizer was
+  accepted deliberately. Still excluded: Codex/OMP **PTY** sessions, which write
+  no conversation rows and whose REPLs have no transcript the (Claude-CLI-only)
+  `ptyTranscriptIngest` can read.
 - **Dynamic-workflow takeover turns**: verify whether Workflow-tool turns land
   in `conversation_messages` for the chat panel; if not, those sittings
   produce no delta and are correctly skipped.
