@@ -744,6 +744,39 @@ describe('BacklogPane', () => {
       // ...yet its experiment option is STILL offered.
       expect(screen.getByText('Experiment Beta')).toBeInTheDocument();
     });
+
+    it('a stale selected membership (dropped out of deriveMembershipOptions) stays reachable and clearable — not an unremovable empty board', () => {
+      // sprint-1 is selected but no visible task carries that membership
+      // anymore (e.g. the project filter narrowed past it, or the membership
+      // went terminal server-side) — deriveMembershipOptions's output no
+      // longer includes it, yet the selection survives on the store.
+      mockSelectedSprintIds = ['sprint-1'];
+      mockTasks = [
+        task({ id: 't1', stage_id: 's-ready', title: 'Unrelated task', memberships: [] }),
+      ];
+      render(<BacklogPane projectId={1} />);
+
+      // The board is emptied by the stale filter (no task matches sprint-1).
+      expect(screen.queryByText('Unrelated task')).not.toBeInTheDocument();
+      // The trigger still advertises the active selection.
+      expect(screen.getByTestId('membership-filter-sprint-trigger')).toHaveTextContent('In sprint (1)');
+
+      // But the dropdown still offers the stale id as a toggleable item —
+      // labelled distinctly — rather than the disabled "None yet" placeholder
+      // it would otherwise render with zero surviving options.
+      fireEvent.click(screen.getByTestId('membership-filter-sprint-trigger'));
+      expect(screen.queryByText('None yet')).not.toBeInTheDocument();
+      const staleLabel = screen.getByText(
+        (_, el) => (el?.classList.contains('truncate') ?? false) && el?.textContent === 'sprint-1 (stale)',
+      );
+      expect(staleLabel).toBeInTheDocument();
+
+      // Clicking it clears the selection through the SAME reducer as an
+      // ordinary toggle — the user's only in-app escape from the emptied,
+      // read-only board.
+      fireEvent.click(staleLabel);
+      expect(mockToggleSprintFilter).toHaveBeenCalledWith('sprint-1');
+    });
   });
 
   describe('sort mode', () => {

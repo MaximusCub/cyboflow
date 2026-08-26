@@ -447,13 +447,18 @@ export function WorkflowCanvas({
           so it can shrink below its content's intrinsic size instead of
           growing the center pane); the graph's own minimum dimensions live on
           the nested "inner" content below, so both axes scroll independently
-          of the pane's computed height. See TASK-204. ────────────────────── */}
+          of the pane's computed height. See TASK-204.
+          The 24px dotted-grid backdrop lives HERE (not on the inner content
+          div below) so it always covers the viewport's own box — a workflow
+          shorter than the pane (small canvasInnerHeight) would otherwise
+          leave bare background below the inner div's content-sized height. */}
       <div
         style={{
           flex: 1,
           minHeight: 0,
           overflowX: 'auto',
           overflowY: 'auto',
+          background: GRAPH_PAPER_BACKGROUND,
         }}
         data-testid="workflow-canvas-viewport"
       >
@@ -473,8 +478,6 @@ export function WorkflowCanvas({
             minWidth: canvasInnerWidth,
             minHeight: canvasInnerHeight,
             boxSizing: 'border-box',
-            // 24px dotted-grid backdrop (Protoflow flow canvas)
-            background: GRAPH_PAPER_BACKGROUND,
           }}
           data-testid="workflow-canvas-inner"
         >

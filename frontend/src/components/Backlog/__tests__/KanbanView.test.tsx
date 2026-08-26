@@ -259,7 +259,7 @@ describe('KanbanView context-menu reorder (Move up / down / to top)', () => {
 // Manual-sort-only reorder gating (IDEA-053, TASK-203)
 // ---------------------------------------------------------------------------
 
-describe('KanbanView — isManualSort = false disables reorder entirely', () => {
+describe('KanbanView — reorderEnabled = false disables reorder entirely', () => {
   function renderNonManual() {
     return render(
       <KanbanView
@@ -268,7 +268,7 @@ describe('KanbanView — isManualSort = false disables reorder entirely', () => 
         onReorder={onReorder}
         launchingTaskId={null}
         now={Date.now()}
-        isManualSort={false}
+        reorderEnabled={false}
       />,
     );
   }

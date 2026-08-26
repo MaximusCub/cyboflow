@@ -64,6 +64,7 @@ import {
   friendlyStageError,
   type BacklogSortMode,
   type MembershipOption,
+  type FilteredBacklogTaskItem,
 } from './Backlog/backlogSelectors';
 import { trpc } from '../trpc/client';
 import { Dropdown, type DropdownItem } from './ui/Dropdown';
@@ -228,6 +229,19 @@ function BacklogSearchInput({
  * `onToggle` (store's toggleSprintFilter/toggleExperimentFilter) — the menu
  * stays open across clicks (`closeOnSelect={false}`) so multiple selections
  * are a series of clicks, not repeated re-opens.
+ *
+ * STALE SELECTIONS STAY REACHABLE. `options` is a snapshot of what's visible
+ * RIGHT NOW (project filter, archived toggle, the current task list) —
+ * `selectedIds` lives independently on the store, so a selected id can fall
+ * out of `options` at any time (the project filter narrows past it, its
+ * membership goes terminal server-side, the last member task gets archived
+ * while the Archived toggle is off — see deriveMembershipOptions). Without
+ * special-casing this, the dropdown would render ONLY the surviving options
+ * (or the disabled "None yet" placeholder if none survive) while the stale id
+ * keeps narrowing the board to nothing, with no affordance to clear it short
+ * of a reload. So a selected id missing from `options` is rendered anyway,
+ * labelled "(stale)", still wired to `onToggle` — the user can always click
+ * their way back to an unfiltered board.
  */
 function MembershipFilter({
   kind,
@@ -243,25 +257,31 @@ function MembershipFilter({
   onToggle: (id: string) => void;
 }): React.JSX.Element {
   const kindOptions = options.filter((o) => o.kind === kind);
-  const items: DropdownItem[] =
-    kindOptions.length > 0
-      ? kindOptions.map((opt) => {
-          const selected = selectedIds.includes(opt.id);
-          return {
-            id: opt.id,
-            label: (
-              <span className="flex items-center gap-1.5">
-                <Check
-                  className={`h-3 w-3 flex-shrink-0 ${selected ? 'text-interactive opacity-100' : 'opacity-0'}`}
-                  aria-hidden
-                />
-                <span className="truncate">{opt.label}</span>
-              </span>
-            ),
-            onClick: () => onToggle(opt.id),
-          };
-        })
-      : [{ id: 'none', label: 'None yet', disabled: true }];
+  const staleSelectedIds = selectedIds.filter((id) => !kindOptions.some((o) => o.id === id));
+  const toItem = (id: string, optLabel: string, stale: boolean): DropdownItem => {
+    const selected = selectedIds.includes(id);
+    return {
+      id,
+      label: (
+        <span className="flex items-center gap-1.5">
+          <Check
+            className={`h-3 w-3 flex-shrink-0 ${selected ? 'text-interactive opacity-100' : 'opacity-0'}`}
+            aria-hidden
+          />
+          <span className={`truncate ${stale ? 'italic text-text-tertiary' : ''}`}>
+            {optLabel}
+            {stale ? ' (stale)' : ''}
+          </span>
+        </span>
+      ),
+      onClick: () => onToggle(id),
+    };
+  };
+  const items: DropdownItem[] = [
+    ...kindOptions.map((opt) => toItem(opt.id, opt.label, false)),
+    ...staleSelectedIds.map((id) => toItem(id, id, true)),
+  ];
+  if (items.length === 0) items.push({ id: 'none', label: 'None yet', disabled: true });
   return (
     <Dropdown
       position="auto"
@@ -494,14 +514,14 @@ function BacklogBoard({
   /** Unified visible stages (unifiedStages output). */
   stages: BoardStage[];
   /** The FINAL filtered+searched+membership-narrowed task list (applySearchAndMembership output). */
-  tasks: BacklogTaskItem[];
+  tasks: FilteredBacklogTaskItem[];
   layoutMode: LayoutMode;
   /** Active per-stage sort mode — drives bucketByStage's comparator. */
   sortMode: BacklogSortMode;
   /**
    * Whether same-column reorder is offered at all — manual sort AND no active
    * search/membership narrowing (see BacklogPane's `reorderEnabled`). Feeds
-   * KanbanView/CardActionsMenu's `isManualSort` gate.
+   * KanbanView/CardActionsMenu's `reorderEnabled` gate.
    */
   reorderEnabled: boolean;
   onRun: (task: BacklogTaskItem) => void;
@@ -519,7 +539,7 @@ function BacklogBoard({
         onReorder={onReorder}
         launchingTaskId={launchingTaskId}
         now={now}
-        isManualSort={reorderEnabled}
+        reorderEnabled={reorderEnabled}
       />
     );
   }
@@ -539,12 +559,11 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   const setLayoutMode = useBacklogStore((s) => s.setLayoutMode);
   const toggleShowArchived = useBacklogStore((s) => s.toggleShowArchived);
   // Search / membership filters / sort (IDEA-053, TASK-203) — in-memory view
-  // state on the store (default-guarded here for older store mocks in tests
-  // that predate these fields).
-  const searchQuery = useBacklogStore((s) => s.searchQuery) ?? '';
-  const selectedSprintIds = useBacklogStore((s) => s.selectedSprintIds) ?? [];
-  const selectedExperimentIds = useBacklogStore((s) => s.selectedExperimentIds) ?? [];
-  const sortMode: BacklogSortMode = useBacklogStore((s) => s.sortMode) ?? 'manual';
+  // state on the store.
+  const searchQuery = useBacklogStore((s) => s.searchQuery);
+  const selectedSprintIds = useBacklogStore((s) => s.selectedSprintIds);
+  const selectedExperimentIds = useBacklogStore((s) => s.selectedExperimentIds);
+  const sortMode: BacklogSortMode = useBacklogStore((s) => s.sortMode);
   const setSearchQuery = useBacklogStore((s) => s.setSearchQuery);
   const toggleSprintFilter = useBacklogStore((s) => s.toggleSprintFilter);
   const toggleExperimentFilter = useBacklogStore((s) => s.toggleExperimentFilter);

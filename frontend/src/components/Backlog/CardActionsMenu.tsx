@@ -46,7 +46,7 @@
  * DnD. Without it (ListView, epic children) the Move items are hidden and the
  * menu renders exactly as before.
  *
- * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `isManualSort` (default
+ * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `reorderEnabled` (default
  * `true`, so every pre-existing caller keeps today's behavior) OVERRIDES the
  * `canMoveUp`/`canMoveDown` disable logic — under any non-manual sort mode all
  * three Move items render disabled with the accessible hint "Reordering is
@@ -112,7 +112,7 @@ interface CardActionsMenuProps {
    * `false` force-disables all three Move items regardless of
    * `canMoveUp`/`canMoveDown` and guards their `onClick`.
    */
-  isManualSort?: boolean;
+  reorderEnabled?: boolean;
   /**
    * Open the card's ledger-expand section. Omitted (the common case: non-idea
    * cards, or an idea whose components haven't resolved yet) hides the
@@ -126,7 +126,7 @@ export function CardActionsMenu({
   onReorder,
   canMoveUp = false,
   canMoveDown = false,
-  isManualSort = true,
+  reorderEnabled = true,
   onShowComponents,
 }: CardActionsMenuProps): React.JSX.Element | null {
   const boards = useBacklogStore((s) => s.boards);
@@ -273,12 +273,12 @@ export function CardActionsMenu({
   if (onReorder !== undefined) {
     // Reorder is rank-only (no stage write) — deliberately NOT gated on
     // hasActiveRun; only first/last position disables the inapplicable moves.
-    // `isManualSort === false` OVERRIDES canMoveUp/canMoveDown entirely: every
+    // `reorderEnabled === false` OVERRIDES canMoveUp/canMoveDown entirely: every
     // Move item shows disabled with the "Manual sort only" hint, and the
     // onClick is guarded too so a stray activation (native `disabled` should
     // already block it, but this is belt-and-braces) can never call
     // `onReorder` outside manual sort.
-    const reorderHint = !isManualSort
+    const reorderHint = !reorderEnabled
       ? 'Reordering is available only in Manual sort with no search or membership filter'
       : undefined;
     items.push(
@@ -286,30 +286,30 @@ export function CardActionsMenu({
         id: 'move-up',
         label: 'Move up',
         icon: ArrowUp,
-        disabled: !isManualSort || !canMoveUp,
+        disabled: !reorderEnabled || !canMoveUp,
         ...(reorderHint ? { description: reorderHint } : {}),
         onClick: () => {
-          if (isManualSort) onReorder(task, 'up');
+          if (reorderEnabled) onReorder(task, 'up');
         },
       },
       {
         id: 'move-down',
         label: 'Move down',
         icon: ArrowDown,
-        disabled: !isManualSort || !canMoveDown,
+        disabled: !reorderEnabled || !canMoveDown,
         ...(reorderHint ? { description: reorderHint } : {}),
         onClick: () => {
-          if (isManualSort) onReorder(task, 'down');
+          if (reorderEnabled) onReorder(task, 'down');
         },
       },
       {
         id: 'move-to-top',
         label: 'Move to top',
         icon: ArrowUpToLine,
-        disabled: !isManualSort || !canMoveUp,
+        disabled: !reorderEnabled || !canMoveUp,
         ...(reorderHint ? { description: reorderHint } : {}),
         onClick: () => {
-          if (isManualSort) onReorder(task, 'top');
+          if (reorderEnabled) onReorder(task, 'top');
         },
       },
     );

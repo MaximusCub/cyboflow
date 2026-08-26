@@ -11,7 +11,7 @@ import { hasRunningFlow } from './backlogSelectors';
 import { TaskBody } from './TaskCard';
 
 interface ListViewProps {
-  buckets: StageBucket[];
+  buckets: StageBucket<FilteredBacklogTaskItem>[];
   onRun: (task: BacklogTaskItem) => void;
   launchingTaskId: string | null;
   now: number;
@@ -56,7 +56,7 @@ export function ListView({ buckets, onRun, launchingTaskId, now }: ListViewProps
                     onRun={onRun}
                     launchingTaskId={launchingTaskId}
                     now={now}
-                    matchedChildRefs={(task as FilteredBacklogTaskItem).matchedChildRefs}
+                    matchedChildRefs={task.matchedChildRefs}
                   />
                 </li>
               );

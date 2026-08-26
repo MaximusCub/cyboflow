@@ -12,10 +12,16 @@
  */
 import type { BacklogTaskItem, Board, BoardStage, Priority } from '../../../../shared/types/tasks';
 
-/** A board stage paired with the (top-level) tasks currently sitting in it. */
-export interface StageBucket {
+/**
+ * A board stage paired with the (top-level) tasks currently sitting in it.
+ * Generic over the item type so a caller that has already run
+ * {@link applySearchAndMembership} (producing {@link FilteredBacklogTaskItem}
+ * rows) can thread that type through `bucketByStage` and read
+ * `matchedChildRefs` directly, with no unchecked downcast at the render site.
+ */
+export interface StageBucket<T extends BacklogTaskItem = BacklogTaskItem> {
   stage: BoardStage;
-  tasks: BacklogTaskItem[];
+  tasks: T[];
 }
 
 /**
@@ -344,7 +350,7 @@ export function friendlyStageError(err: unknown): string {
  * decomposed ideas (reachable only via their children) and PENDING (unapproved)
  * epics/tasks (backend-invisible until plan approval).
  */
-export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
+export function topLevelTasks<T extends BacklogTaskItem>(tasks: readonly T[]): T[] {
   return tasks.filter(
     (t) => t.parent_epic_id === null && !isDecomposed(t) && !isPending(t),
   );
@@ -398,12 +404,12 @@ export function countActiveBacklogItems(tasks: BacklogTaskItem[]): number {
  * Kanban + List both call this SAME function so they render literally the
  * same buckets.
  */
-export function bucketByStage(
-  tasks: BacklogTaskItem[],
+export function bucketByStage<T extends BacklogTaskItem = BacklogTaskItem>(
+  tasks: readonly T[],
   stages: BoardStage[],
   sortMode: BacklogSortMode = 'manual',
-): StageBucket[] {
-  const byPosition = new Map<number, BacklogTaskItem[]>();
+): StageBucket<T>[] {
+  const byPosition = new Map<number, T[]>();
   for (const stage of stages) byPosition.set(stage.position, []);
   // Iterate the full union of top-level ideas/epics/tasks into the shared board.
   // A live experiment seed is bucketed by its EFFECTIVE position ("In development")

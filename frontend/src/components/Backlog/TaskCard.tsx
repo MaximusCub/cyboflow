@@ -59,7 +59,7 @@ import {
   DoneFlag,
   LedgerChip,
 } from './markers';
-import { compactAgo, isArchived, hasRunningFlow } from './backlogSelectors';
+import { compactAgo, isArchived, hasRunningFlow, type MatchedChildEvidence } from './backlogSelectors';
 import { CardActionsMenu, type ReorderDirection } from './CardActionsMenu';
 import { LedgerExpand } from './LedgerExpand';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
@@ -86,11 +86,12 @@ interface TaskBodyProps {
   /** False on the column's last card — disables Move down. */
   canMoveDown?: boolean;
   /**
-   * Whether the active backlog sort mode is `'manual'` (default `true`).
-   * Forwarded to {@link CardActionsMenu} — reorder (drag + Move items) is
-   * enabled ONLY in manual sort (IDEA-053, TASK-203).
+   * Whether same-column reorder is offered at all — sort mode `'manual'` AND
+   * no active search/membership filter (default `true`). Forwarded to
+   * {@link CardActionsMenu} — reorder (drag + Move items) is enabled ONLY
+   * when this is true (IDEA-053, TASK-203).
    */
-  isManualSort?: boolean;
+  reorderEnabled?: boolean;
   /**
    * Accessible evidence for a card retained ONLY because a nested child
    * matched the active search/membership filter (IDEA-053, TASK-203) — never
@@ -98,7 +99,7 @@ interface TaskBodyProps {
    * "Matches REF — Title" text; only ever populated on an epic (the only
    * `type` with `children`).
    */
-  matchedChildRefs?: ReadonlyArray<{ ref: string; title: string }>;
+  matchedChildRefs?: readonly MatchedChildEvidence[];
 }
 
 /**
@@ -150,7 +151,7 @@ function CardFooter({
   onReorder,
   canMoveUp,
   canMoveDown,
-  isManualSort,
+  reorderEnabled,
   onShowComponents,
 }: TaskBodyProps & {
   onEdit: (e: React.MouseEvent) => void;
@@ -252,7 +253,7 @@ function CardFooter({
           onReorder={onReorder}
           canMoveUp={canMoveUp}
           canMoveDown={canMoveDown}
-          isManualSort={isManualSort}
+          reorderEnabled={reorderEnabled}
           onShowComponents={onShowComponents}
         />
       </div>
@@ -292,7 +293,7 @@ export function TaskBody({
   onReorder,
   canMoveUp,
   canMoveDown,
-  isManualSort,
+  reorderEnabled,
   matchedChildRefs,
 }: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -414,7 +415,7 @@ export function TaskBody({
         onReorder={onReorder}
         canMoveUp={canMoveUp}
         canMoveDown={canMoveDown}
-        isManualSort={isManualSort}
+        reorderEnabled={reorderEnabled}
         onShowComponents={
           task.type === 'idea' && task.components ? () => setLedgerExpanded(true) : undefined
         }
@@ -509,7 +510,7 @@ export function BoardCard({
   onReorder,
   canMoveUp,
   canMoveDown,
-  isManualSort,
+  reorderEnabled,
   matchedChildRefs,
 }: TaskBodyProps): React.JSX.Element {
   // Breathing is an ACTIVE-RUN visual — a live-but-idle association (queued,
@@ -533,7 +534,7 @@ export function BoardCard({
         onReorder={onReorder}
         canMoveUp={canMoveUp}
         canMoveDown={canMoveDown}
-        isManualSort={isManualSort}
+        reorderEnabled={reorderEnabled}
         matchedChildRefs={matchedChildRefs}
       />
     </div>

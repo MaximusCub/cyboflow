@@ -20,7 +20,7 @@
  * the direction→post-move-index translation and funnels into the SAME
  * `onReorder` — no second write path.
  *
- * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `isManualSort` (default
+ * Reorder is MANUAL-SORT-ONLY (IDEA-053, TASK-203): `reorderEnabled` (default
  * `true`) gates BOTH the drag surface (`draggable` follows it, and
  * `handleDragStart` no-ops when false — belt-and-braces alongside `draggable`
  * itself, since a caller could fire a drag event without the browser's native
@@ -33,7 +33,7 @@ import type { FilteredBacklogTaskItem, StageBucket } from './backlogSelectors';
 import { BoardCard } from './TaskCard';
 
 interface KanbanViewProps {
-  buckets: StageBucket[];
+  buckets: StageBucket<FilteredBacklogTaskItem>[];
   onRun: (task: BacklogTaskItem) => void;
   /**
    * Re-rank `task` to `targetIndex` — its desired POST-MOVE index within its
@@ -44,12 +44,13 @@ interface KanbanViewProps {
   launchingTaskId: string | null;
   now: number;
   /**
-   * Whether the active sort mode is `'manual'` (default `true`, so every
-   * pre-existing caller keeps today's drag/Move behavior). `false` disables
-   * dragging and force-disables the card menu's Move items (via
-   * {@link CardActionsMenu}'s own `isManualSort` prop).
+   * Whether same-column reorder is offered at all — sort mode `'manual'` AND
+   * no active search/membership filter (see BacklogPane's `reorderEnabled`;
+   * default `true` here so every pre-existing caller keeps today's drag/Move
+   * behavior). `false` disables dragging and force-disables the card menu's
+   * Move items (via {@link CardActionsMenu}'s own `reorderEnabled` prop).
    */
-  isManualSort?: boolean;
+  reorderEnabled?: boolean;
 }
 
 /** The card being dragged: its column (stage POSITION) + index within it. */
@@ -76,7 +77,7 @@ export function KanbanView({
   onReorder,
   launchingTaskId,
   now,
-  isManualSort = true,
+  reorderEnabled = true,
 }: KanbanViewProps): React.JSX.Element {
   const [drag, setDrag] = useState<DragSource | null>(null);
   const [dropSlot, setDropSlot] = useState<DropSlot | null>(null);
@@ -92,7 +93,7 @@ export function KanbanView({
     // gesture (e.g. a synthetic event) — this is what makes the whole DnD
     // path a no-op below (drag stays null, so handleDrop's existing guard
     // rejects it).
-    if (!isManualSort) return;
+    if (!reorderEnabled) return;
     setDrag({ taskId: task.id, columnPosition, fromIndex: index });
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', task.id);
@@ -183,7 +184,7 @@ export function KanbanView({
                 <Fragment key={task.id}>
                   {isSlot(stage.position, index) && <DropIndicator />}
                   <div
-                    draggable={isManualSort}
+                    draggable={reorderEnabled}
                     data-testid="kanban-card-slot"
                     data-task-id={task.id}
                     className={drag !== null && drag.taskId === task.id ? 'opacity-50' : undefined}
@@ -200,16 +201,16 @@ export function KanbanView({
                       now={now}
                       // Menu reorder: translate direction → post-move index here
                       // (the bucket index is at hand) and reuse the DnD callback.
-                      // Guarded on isManualSort too (defense-in-depth alongside
+                      // Guarded on reorderEnabled too (defense-in-depth alongside
                       // CardActionsMenu's own disable + onClick guard).
                       onReorder={(t, dir) => {
-                        if (!isManualSort) return;
+                        if (!reorderEnabled) return;
                         onReorder(t, dir === 'top' ? 0 : dir === 'up' ? index - 1 : index + 1);
                       }}
                       canMoveUp={index > 0}
                       canMoveDown={index < tasks.length - 1}
-                      isManualSort={isManualSort}
-                      matchedChildRefs={(task as FilteredBacklogTaskItem).matchedChildRefs}
+                      reorderEnabled={reorderEnabled}
+                      matchedChildRefs={task.matchedChildRefs}
                     />
                   </div>
                 </Fragment>

@@ -23,7 +23,7 @@ import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 
-import { WorkflowCanvas } from '../WorkflowCanvas';
+import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from '../WorkflowCanvas';
 import { HEAD_BAR_CENTER_Y } from '../WorkflowCanvasEdges';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 
@@ -75,6 +75,28 @@ const TALL_DEFINITION: WorkflowDefinition = {
       retries: 0,
     })),
   })),
+};
+
+// ---------------------------------------------------------------------------
+// Short fixture: 1 phase × 2 steps — a small computed inner min-height (well
+// under a typical pane height), so the backdrop-coverage regression test
+// below can tell "covers the viewport's own box" apart from "covers only the
+// content's intrinsic height".
+// ---------------------------------------------------------------------------
+
+const SHORT_DEFINITION: WorkflowDefinition = {
+  id: 'sprint-short',
+  phases: [
+    {
+      id: 'phase-1',
+      label: 'Plan',
+      color: '#3b6dd6',
+      steps: [
+        { id: 'short-step-a', name: 'Step A', agent: 'planner', mcps: [], retries: 0 },
+        { id: 'short-step-b', name: 'Step B', agent: 'executor', mcps: [], retries: 0 },
+      ],
+    },
+  ],
 };
 
 // ---------------------------------------------------------------------------
@@ -335,6 +357,24 @@ describe('WorkflowCanvas', () => {
     // workflow-canvas-inner is nested inside workflow-canvas-viewport (the
     // scrollport actually contains the sized content it scrolls).
     expect(viewport.contains(inner)).toBe(true);
+  });
+
+  it('regression: the graph-paper backdrop covers the whole viewport box, not just a short workflow\'s content height', () => {
+    // A short (2-step) workflow gives a small canvasInnerHeight (well under a
+    // typical pane height). Before this fix the dotted backdrop lived on the
+    // content-sized "inner" div, so it stopped at the content's intrinsic
+    // height and left bare background below it once the pane was taller than
+    // the content — a visible horizontal seam. The backdrop must instead live
+    // on the "viewport" scrollport, whose box always fills the pane.
+    render(<WorkflowCanvas definition={SHORT_DEFINITION} currentStepId={null} />);
+
+    const viewport = screen.getByTestId('workflow-canvas-viewport');
+    const inner = screen.getByTestId('workflow-canvas-inner');
+
+    expect(viewport).toHaveStyle({ background: GRAPH_PAPER_BACKGROUND });
+    // The content div must NOT also carry it — a single source of truth for
+    // the backdrop (and proof the fix moved it rather than merely copied it).
+    expect(inner.style.background).toBe('');
   });
 
   it('keeps workflow-canvas-meta OUTSIDE the scrollable content (stationary while the graph scrolls)', () => {

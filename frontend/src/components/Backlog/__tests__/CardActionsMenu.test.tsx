@@ -572,7 +572,7 @@ describe('CardActionsMenu', () => {
 
     // -- Manual-sort-only gating (IDEA-053, TASK-203) ------------------------
 
-    it('isManualSort=false disables ALL THREE Move items regardless of canMoveUp/canMoveDown, with the accessible hint', () => {
+    it('reorderEnabled=false disables ALL THREE Move items regardless of canMoveUp/canMoveDown, with the accessible hint', () => {
       const onReorder = vi.fn();
       render(
         <CardActionsMenu
@@ -580,7 +580,7 @@ describe('CardActionsMenu', () => {
           onReorder={onReorder}
           canMoveUp
           canMoveDown
-          isManualSort={false}
+          reorderEnabled={false}
         />,
       );
       fireEvent.click(screen.getByTestId('task-actions-trigger'));
@@ -591,7 +591,7 @@ describe('CardActionsMenu', () => {
       expect(screen.getAllByText('Reordering is available only in Manual sort with no search or membership filter')).toHaveLength(3);
     });
 
-    it('isManualSort=false guards onClick too — a stray activation can never invoke onReorder', () => {
+    it('reorderEnabled=false guards onClick too — a stray activation can never invoke onReorder', () => {
       const onReorder = vi.fn();
       render(
         <CardActionsMenu
@@ -599,7 +599,7 @@ describe('CardActionsMenu', () => {
           onReorder={onReorder}
           canMoveUp
           canMoveDown
-          isManualSort={false}
+          reorderEnabled={false}
         />,
       );
       fireEvent.click(screen.getByTestId('task-actions-trigger'));
@@ -609,7 +609,7 @@ describe('CardActionsMenu', () => {
       expect(onReorder).not.toHaveBeenCalled();
     });
 
-    it('isManualSort defaults to true — no hint, and first/last-card disabling behaves as before', () => {
+    it('reorderEnabled defaults to true — no hint, and first/last-card disabling behaves as before', () => {
       const onReorder = vi.fn();
       render(<CardActionsMenu task={makeTask()} onReorder={onReorder} canMoveUp canMoveDown />);
       fireEvent.click(screen.getByTestId('task-actions-trigger'));
