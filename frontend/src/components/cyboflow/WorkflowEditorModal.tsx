@@ -295,7 +295,14 @@ export function WorkflowEditorModal({
         const estimates = await trpc.cyboflow.insights.tuningLevelUsage.query({ workflowId });
         if (cancelled) return;
         const labels: Partial<Record<TuningLevel, string>> = {};
-        for (const tuningLevel of TUNING_LEVELS) labels[tuningLevel] = estimates[tuningLevel].label;
+        // MEASURED medians only: the pooled-multiplier and static fallbacks are
+        // invented numbers, and showing them read as real data. A level's line
+        // appears once ≥3 completed runs at that level back it.
+        for (const tuningLevel of TUNING_LEVELS) {
+          if (estimates[tuningLevel].source === 'measured') {
+            labels[tuningLevel] = estimates[tuningLevel].label;
+          }
+        }
         setEstimateLabels(labels);
       } catch {
         if (!cancelled) setEstimateLabels({});

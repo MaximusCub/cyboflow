@@ -705,7 +705,13 @@ export default function SessionStartWizard(): React.JSX.Element {
         });
         if (cancelled) return;
         const labels: Partial<Record<TuningLevel, string>> = {};
-        for (const tuningLevel of TUNING_LEVELS) labels[tuningLevel] = estimates[tuningLevel].label;
+        // MEASURED medians only — same rule as the editor dial: fallback
+        // (pooled/static) figures are invented and read as real data.
+        for (const tuningLevel of TUNING_LEVELS) {
+          if (estimates[tuningLevel].source === 'measured') {
+            labels[tuningLevel] = estimates[tuningLevel].label;
+          }
+        }
         setTuningEstimateLabels(labels);
       } catch {
         if (!cancelled) setTuningEstimateLabels({});

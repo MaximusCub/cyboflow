@@ -112,6 +112,9 @@ vi.mock('../../../trpc/client', () => ({
       agents: {
         list: { query: vi.fn() },
       },
+      insights: {
+        tuningLevelUsage: { query: vi.fn() },
+      },
       runs: {
         start: { mutate: vi.fn() },
       },
@@ -173,6 +176,7 @@ const mockUpdateSpec = vi.mocked(trpc.cyboflow.workflows.updateSpec.mutate);
 const mockResetSpec = vi.mocked(trpc.cyboflow.workflows.resetSpec.mutate);
 const mockCreateCustom = vi.mocked(trpc.cyboflow.workflows.createCustom.mutate);
 const mockSetTuningLevel = vi.mocked(trpc.cyboflow.workflows.setTuningLevel.mutate);
+const mockTuningLevelUsage = vi.mocked(trpc.cyboflow.insights.tuningLevelUsage.query);
 const mockVariantCreate = vi.mocked(trpc.cyboflow.variants.create.mutate);
 const mockAgentsList = vi.mocked(trpc.cyboflow.agents.list.query);
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
@@ -1216,6 +1220,41 @@ describe('WorkflowEditorModal — tuning level selector', () => {
       'aria-pressed',
       'true',
     );
+  });
+
+  it('renders MEASURED estimates only — derived/static fallbacks are invented numbers', async () => {
+    const level = (label: string, source: 'measured' | 'derived' | 'static') => ({
+      label,
+      source,
+      samples: source === 'measured' ? 4 : 0,
+    });
+    mockTuningLevelUsage.mockResolvedValue({
+      efficient: level('~120k', 'measured'),
+      standard: level('~300k', 'static'),
+      thorough: level('~780k', 'derived'),
+      custom: level('~300k', 'static'),
+    });
+    await renderTuningPage();
+
+    await screen.findByTestId('tuning-level-estimate-efficient');
+    expect(screen.getByTestId('tuning-level-estimate-efficient')).toHaveTextContent('~120k');
+    expect(screen.queryByTestId('tuning-level-estimate-standard')).toBeNull();
+    expect(screen.queryByTestId('tuning-level-estimate-thorough')).toBeNull();
+    expect(screen.queryByTestId('tuning-level-estimate-custom')).toBeNull();
+  });
+
+  it('renders no estimate lines and no caption when nothing is measured yet', async () => {
+    const level = (label: string) => ({ label, source: 'static' as const, samples: 0 });
+    mockTuningLevelUsage.mockResolvedValue({
+      efficient: level('~150k'),
+      standard: level('~300k'),
+      thorough: level('~780k'),
+      custom: level('~300k'),
+    });
+    await renderTuningPage();
+
+    expect(screen.queryByTestId('tuning-level-estimate-efficient')).toBeNull();
+    expect(screen.queryByTestId('tuning-estimate-caption')).toBeNull();
   });
 
   it('a NON-built-in flow has no dial and opens straight to the blueprint editor', async () => {
