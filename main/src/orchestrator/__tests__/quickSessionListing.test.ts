@@ -18,6 +18,7 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     unviewed: 1,
     exit_code: null,
     agent_provider: 'claude',
+    substrate: 'sdk',
     worktree_name: 'smooth-falcon-worktree',
     summary: null,
     summary_state: null,
@@ -130,11 +131,25 @@ describe('toQuickSessionRow', () => {
     expect(r.waitingOn).toBeNull();
   });
 
-  it('summarySupported is false for a codex row and true for claude/omp/null', () => {
-    expect(toQuickSessionRow(row({ agent_provider: 'codex' }), new Set()).summarySupported).toBe(false);
-    expect(toQuickSessionRow(row({ agent_provider: 'omp' }), new Set()).summarySupported).toBe(false);
-    expect(toQuickSessionRow(row({ agent_provider: 'claude' }), new Set()).summarySupported).toBe(true);
-    expect(toQuickSessionRow(row({ agent_provider: null }), new Set()).summarySupported).toBe(true);
+  it('summarySupported covers every SDK lane and excludes only codex/omp PTY', () => {
+    // Coverage is provider x substrate: an SDK lane of any provider streams its
+    // own conversation rows, so the summarizer can fold them.
+    for (const provider of ['claude', 'codex', 'omp', null]) {
+      expect(
+        toQuickSessionRow(row({ agent_provider: provider, substrate: 'sdk' }), new Set()).summarySupported,
+      ).toBe(true);
+    }
+    // A Claude PTY session is covered by the Claude-CLI transcript ingest...
+    expect(
+      toQuickSessionRow(row({ agent_provider: 'claude', substrate: 'interactive' }), new Set()).summarySupported,
+    ).toBe(true);
+    // ...but a Codex/OMP REPL has no transcript any ingest can read.
+    expect(
+      toQuickSessionRow(row({ agent_provider: 'codex', substrate: 'interactive' }), new Set()).summarySupported,
+    ).toBe(false);
+    expect(
+      toQuickSessionRow(row({ agent_provider: 'omp', substrate: 'interactive' }), new Set()).summarySupported,
+    ).toBe(false);
   });
 
   it('passes exit_code through unchanged', () => {

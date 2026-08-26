@@ -62,7 +62,7 @@ function SummaryLine({ row }: { row: QuickSessionRow }): React.JSX.Element {
   if (!row.summarySupported) {
     return (
       <div className="italic text-text-muted" style={{ fontSize: '12px' }}>
-        no summaries for this provider
+        no summaries for this session type
       </div>
     );
   }

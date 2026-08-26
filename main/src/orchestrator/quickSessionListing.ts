@@ -15,6 +15,7 @@
  * import services; this module stays pure (db + a plain Set) so it unit-tests
  * against a fake db without the orchestrator layering rule being violated.
  */
+import { isSessionSummarySupported } from '../../../shared/types/sessionSummary';
 import type { DatabaseLike, PreparedStatement } from './types';
 import type { QuickSessionRow, QuickSessionState } from '../../../shared/types/quickSessions';
 
@@ -28,9 +29,6 @@ import type { QuickSessionRow, QuickSessionState } from '../../../shared/types/q
 const SESSION_SUMMARY_STATES = new Set(['working', 'complete', 'needs_input']);
 
 const WAITING_ON_MAX_LENGTH = 300;
-
-/** Providers the summarizer can never cover (see QuickSessionRow.summarySupported). */
-const SUMMARY_UNSUPPORTED_PROVIDERS = new Set(['codex', 'omp']);
 
 /** Validate a joined `summary_state` value; anything outside the known set (including non-string) degrades to null. */
 function normalizeSummaryState(value: unknown): 'working' | 'complete' | 'needs_input' | null {
@@ -79,6 +77,13 @@ export interface QuickSessionCandidateRow {
   exit_code: number | null;
   /** sessions.agent_provider ('claude'/'codex'/'omp'/…); NOT NULL in schema but read defensively. */
   agent_provider: string | null;
+  /**
+   * sessions.substrate ('sdk'/'interactive'). Read for the summary-coverage
+   * predicate, which is provider x SUBSTRATE: an SDK lane of ANY provider
+   * writes conversation rows the summarizer can fold, while a Codex/OMP PTY
+   * lane has no transcript any ingest can read.
+   */
+  substrate: string | null;
   /** sessions.worktree_name. */
   worktree_name: string | null;
   /** session_summaries.summary, via LEFT JOIN — null when never summarized. */
@@ -108,7 +113,7 @@ const SELECT_COLS = `
   strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.idle_since, s.updated_at)) AS idle_since_iso,
   CASE WHEN s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at)
        THEN 1 ELSE 0 END AS unviewed,
-  s.exit_code, s.agent_provider, s.worktree_name,
+  s.exit_code, s.agent_provider, s.substrate, s.worktree_name,
   ss.summary AS summary, ss.state AS summary_state, ss.waiting_on AS waiting_on
 `;
 
@@ -154,7 +159,13 @@ export function toQuickSessionRow(
     summary: row.summary,
     summaryState: normalizeSummaryState(row.summary_state),
     waitingOn: normalizeWaitingOn(row.waiting_on),
-    summarySupported: row.agent_provider === null || !SUMMARY_UNSUPPORTED_PROVIDERS.has(row.agent_provider),
+    // The SAME predicate the summarizer's own eligibility gate reads
+    // (shared/types/sessionSummary.ts) — a row must never render "unsupported"
+    // over a summary the scheduler was willing to produce.
+    summarySupported: isSessionSummarySupported({
+      agentProvider: row.agent_provider,
+      substrate: row.substrate,
+    }),
     worktreeName: row.worktree_name,
     // The pure listing module never touches services (LAYERING RULE above); the
     // IPC seam attaches a cache-only git snapshot via GitStatusManager.peekCachedStatus.

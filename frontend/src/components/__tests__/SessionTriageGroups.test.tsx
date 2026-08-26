@@ -136,12 +136,12 @@ describe('SessionTriageGroups', () => {
     expect(await screen.findByText('summaries are disabled in settings')).toBeInTheDocument();
   });
 
-  it('shows "no summaries for this provider" for a row the summarizer cannot cover', () => {
+  it('shows "no summaries for this session type" for a row the summarizer cannot cover', () => {
     mockQuickRows = [
-      quickRow({ sessionId: 's1', name: 'codex-runner', state: 'idle', unviewed: false, summarySupported: false, summary: null }),
+      quickRow({ sessionId: 's1', name: 'codex-repl', state: 'idle', unviewed: false, summarySupported: false, summary: null }),
     ];
     render(<SessionTriageGroups />);
-    expect(screen.getByText('no summaries for this provider')).toBeInTheDocument();
+    expect(screen.getByText('no summaries for this session type')).toBeInTheDocument();
   });
 
   it('shows "no summary yet" for a supported row that has never been summarized', () => {

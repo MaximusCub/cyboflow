@@ -97,10 +97,12 @@ export interface QuickSessionRow {
   /** One-sentence "what it asked you" for a `needs_input` summaryState. Null when not applicable, or when the toggle is off. */
   waitingOn: string | null;
   /**
-   * False for sessions the summarizer can never cover — a Codex or OMP agent
-   * provider, since the scheduler only summarizes Claude sessions and the PTY
-   * ingest only reads Claude transcripts. Lets the UI distinguish "no summaries
-   * for this provider" from "no summary yet".
+   * False for sessions the summarizer can never cover — a Codex or OMP session
+   * on the INTERACTIVE substrate, which writes no conversation rows of its own
+   * and has no transcript the (Claude-CLI-only) PTY ingest can read. Every SDK
+   * lane is covered, whatever its provider. Derived from the same predicate as
+   * the scheduler's eligibility gate (`isSessionSummarySupported`), and lets the
+   * UI distinguish "never summarized here" from "no summary yet".
    */
   summarySupported: boolean;
   /** sessions.worktree_name — the branch label shown in the details view. */
