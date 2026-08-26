@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-11 absorbed (15 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-12 absorbed (17 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -317,9 +317,16 @@ inbound "permanent skips" today are cursor-advances plus in-memory report counte
 id or reason is persisted anywhere, so a subtract-the-skipped design would re-point-fetch every
 non-imported id on every sweep — thousands of CLI spawns per hour on a workspace dominated by
 skipped classes). Design: a `tracker_reconciliation_ledger` table in the same migration —
-`(connection_id, external_id, reason, config_generation, seen_at)`, `UNIQUE(connection_id,
-external_id)` — written whenever reconciliation resolves an unseen id WITHOUT minting a link
-(imported ids need no row; their link is the record). `config_generation` is a counter stamped
+`(connection_id, external_id, reason, last_seen_revision, config_generation, seen_at)`,
+`UNIQUE(connection_id, external_id)` — written whenever reconciliation resolves an unseen id
+WITHOUT minting a link (imported ids need no row; their link is the record).
+`last_seen_revision` closes Codex round-12 finding 2: a ledgered issue can become eligible
+through a remote property change (e.g. an excluded type edited into an included one) arriving
+backdated — without a stored revision the ledger would suppress it forever. Since the sweep
+projection already carries (id, revision), the comparison is free: a ledgered id whose swept
+revision differs point-fetches and re-evaluates (import, or re-ledger at the new revision).
+The zero-lookup guarantee below holds for UNCHANGED ledgered ids. `config_generation` is a
+counter stamped
 on the connection and bumped by any mapping/state-mapping/selection change; ledger rows from an
 older generation are treated as absent, so a config change re-evaluates previously skipped ids
 exactly once. Rows for ids that vanish from the remote set are deleted opportunistically during
@@ -339,8 +346,9 @@ so echoes never false-positive). A linked id whose swept revision differs from t
 gets a `getIssue` point fetch and runs through the ordinary inbound merge/conflict path. If
 Phase 0 finds the template cannot emit revision, the fallback is a full `listIssues` (no
 `sinceIso`) on reconciliation passes, under the bounded-listing strategy. This completes the
-partition: every id in the full sweep is unseen (ledger/import path), ledgered (zero cost), or
-linked (revision compare) — no remote change class is outside a detection path.
+partition: every id in the full sweep is unseen (point-fetch → import or ledger), ledgered
+(revision compare → zero cost when unchanged, re-evaluate on change), or linked (revision
+compare → merge on change) — no remote change class is outside a detection path.
 
 Phase 0 negative controls: (a) advance the cursor, introduce an issue with an older
 `updated_at` (via `bd import` of a backdated record, simulating a pull), prove the
@@ -425,9 +433,19 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   **revision-conditional writes are a HARD v1 requirement for every outbound mutation of an
   existing issue** — state and content alike (Codex round-2 finding 3, hardened by round-3
   finding 1: an unguarded fallback knowingly loses user data in a race the design itself calls
-  expected). Carry `revision` from the pre-send read into every update; a revision mismatch
-  settles the row unsent as a held conflict for the next inbound merge, exactly like the
-  divergence guard. **If Phase 0 finds no guard mechanism** — probe both `bd update`'s flag
+  expected). Carry `revision` from the pre-send read into every update. **A mismatch is a signal
+  to interpret, not a verdict** (Codex round-12 finding 1: revision is issue-WIDE — concurrent
+  churn on an unrelated field like assignee bumps it, and a settle-unsent-on-any-mismatch rule
+  would permanently drop a non-conflicting title write, since inbound finds no conflict on that
+  field and the settled row never retries; the existing `contentDivergence` guard is
+  field-scoped and does not have this bug — the revision guard must not be coarser than what it
+  strengthens). Mismatch state machine: re-fetch the issue, compare the **patched fields**
+  against the pre-send baseline (`contentDivergence` semantics):
+  - target fields unchanged remotely (unrelated churn) → refresh the token and retry the
+    conditional write, bounded attempts;
+  - a target field genuinely diverged → settle unsent as a held conflict (existing behavior);
+  - the desired values already landed → settle done, unsent.
+  Tests: revision bumps from non-overlapping fields must not lose the write. **If Phase 0 finds no guard mechanism** — probe both `bd update`'s flag
   surface and a conditional-`UPDATE … WHERE revision = N` via Dolt SQL as the escape hatch (the
   SQL path is only a valid guard if the probe ALSO proves it preserves beads' `revision`
   increment, `updated_at` stamping, validation, and event semantics — a raw write bypassing
@@ -604,3 +622,18 @@ absorbed:
    into the ordinary merge; full-`listIssues` fallback if the template can't render revision;
    backdated-linked-edit negative test added. The id-space partition (unseen / ledgered /
    linked) now has a detection path for every class (see "Pull reconciliation").
+
+Codex adversarial round 12 (2026-08-26), verdict needs-attention, 2 high — both CONFIRMED and
+absorbed:
+
+1. [high] Settle-unsent on ANY revision mismatch permanently dropped non-conflicting writes —
+   revision is issue-wide, so unrelated-field churn (assignee, labels) would kill a title write
+   inbound then finds no conflict for. Absorbed: mismatch state machine — re-fetch, compare
+   PATCHED fields against the pre-send baseline (`contentDivergence` semantics); unrelated
+   churn refreshes the token and retries bounded; genuine target-field divergence holds;
+   already-landed settles done. Non-overlapping-churn test added (see "Dual writers").
+2. [high] Ledgered ids sat outside the revision comparison — a skipped issue turned eligible by
+   a backdated remote change would be suppressed forever. Absorbed: `last_seen_revision` column
+   on the ledger (the sweep projection already carries it — comparison is free); changed
+   revision re-evaluates; zero-lookup guarantee narrowed to UNCHANGED ledgered ids (see "Pull
+   reconciliation").
