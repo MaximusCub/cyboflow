@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-16 absorbed (22 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-17 absorbed (23 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -239,6 +239,21 @@ leaves TOCTOU windows), applied per direction:
   so no duplicate and no local corruption. Atomically binding a CLI spawn to an instance id is
   not possible from outside the process; this residual is the floor, and it is non-corrupting on
   both sides of the link.
+
+**Replacement recovery is an explicit state machine, not a resume** (Codex round-17: re-detect
+on a replaced workspace necessarily returns a NEW instance id — resuming the old connection
+against it would rebind every retained link to unrelated issues in the new database, while
+refusing forever strands the paused connection and any ambiguous outbox row). A beads connection
+paused on identity mismatch offers exactly one recovery, **"Adopt new workspace"**, which in
+order: (1) retires the old connection and orphans its links (`orphaned_at`, entities never
+archived — their remote halves are simply gone); (2) settles every pending outbox row for the
+old identity as cancelled, each surfaced as a review finding ("write may exist in the replaced
+workspace — verify manually"), so nothing ever replays against the new instance — the ambiguous
+create included: it is surfaced for manual adoption, never auto-recovered across identities;
+(3) mints a fresh connection scoped to the new instance id (fresh import; local entities
+re-link through the ordinary reconcile path). Declining leaves the pair paused indefinitely,
+which is safe. Negative tests: retained links never resolve against the new instance; pending
+updates never replay; the ambiguous create lands as a finding, not a duplicate.
 
 **Same-instance mutations need a separate guard for archival** (Codex round-16: identity
 catches replacement, not concurrency — a concurrent `bd dolt pull` can RESTORE an issue after
@@ -722,3 +737,14 @@ absorbed:
    individually safe), defer to a quiet window; restoration-race negative test. Noted: the same
    race exists and is accepted for HTTP providers; beads gets the stronger guard because
    same-workspace concurrency is its expected mode (see "Same-instance mutations").
+
+Codex adversarial round 17 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] Replacement had no executable recovery: re-detect returns a new instance id, resuming
+   rebinds old links to unrelated issues, refusing strands the connection and the ambiguous
+   row. Absorbed: the "Adopt new workspace" state machine — retire old connection + orphan
+   links (never archive), settle all pending old-identity outbox rows as cancelled with
+   per-row review findings (nothing replays cross-identity, ambiguous create surfaced for
+   manual adoption), mint a fresh connection for the new instance; declining stays safely
+   paused; three negative tests (see "Replacement recovery").
