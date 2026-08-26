@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-2 absorbed (4 high findings) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-3 absorbed (6 high + 1 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -179,6 +179,31 @@ First non-fetch adapter. Build on `runToolCapture` (`main/src/utils/runGit.ts` �
 session is dismissed). `defaultAdapterFactory` needs the project path — thread it through the
 factory (it already receives the connection row, which carries `project_id`).
 
+**Workspace pinning — never trust inherited env** (Codex round-3 finding 2). `buildCommandEnv`
+copies `process.env`, and beads honors a `BEADS_DIR` override ahead of discovery — an app
+launched with `BEADS_DIR` set (a documented beads usage pattern) would silently probe, import,
+close, and update issues in that one workspace for *every* project while each connection looks
+valid. Fix is deterministic pinning, not just scrubbing: the Detect step resolves the workspace
+(`bd where`) with `BEADS_DIR` **deleted** from the child env, persists the resolved `.beads`
+path on the connection, and every subsequent spawn passes that stored path back explicitly as
+`BEADS_DIR` — discovery can never drift, and a stored path that stops resolving throws
+`TrackerAuthError` (re-detect). Negative test: an inherited `BEADS_DIR` in the parent env must
+not redirect detection, reads, recovery, or writes. External-shared-workspace setups (deliberate
+`BEADS_DIR` decoupling) are out of v1 scope — Detect fails honestly on a repo with no
+discoverable workspace.
+
+**Bounded listings — overflow is terminal, not transient** (Codex round-3 finding 3).
+`runToolCapture`'s default `maxBuffer` is 10MB (`runGit.ts:38`); a large workspace's
+`bd list --all --json --limit 0` can exceed it, and a buffer overflow classified as retryable
+would stall initial import or every sweep in an infinite retry loop. Design: (a) the sweep never
+captures full JSON — project ids only via `bd list`'s `--format` go-template (one id per line;
+bounded at ~20 bytes/issue, fine far past beads' own 100k-issue guidance); (b) incremental
+`listIssues` windows are naturally small; the full backfill (no cursor) pages by
+`--created-after`/`--created-before` time windows if Phase 0 shows single-shot output can be
+large, else runs single-shot under an explicit raised cap (64MB); (c) a `maxBuffer` overflow maps
+to a TERMINAL, actionable failure (pause + "workspace too large — see docs"), never the
+transient-retry path. Phase 0 includes a probe whose listing output exceeds the default 10MB.
+
 Error taxonomy mapping:
 
 - non-zero exit / JSON parse failure / timeout → `TrackerApiError{status: null}` — the existing
@@ -244,7 +269,12 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   **guarded-update semantics**: whether `bd update` can condition on `revision` (expected-revision
   arg? SQL fallback?) and what a mismatch returns — this gates the v1 lost-update design;
   **recovery-after-close control**: create with a metadata client key, close the issue, prove
-  `--all --metadata-field` recovery still finds it.
+  `--all --metadata-field` recovery still finds it;
+  **workspace pinning**: `bd where` output shape; that an explicit `BEADS_DIR` wins over
+  discovery and a deleted one falls back to walk-up; the failure shape when the pinned dir is
+  gone;
+  **scale**: `--format` go-template id-only projection works with `--all`; a listing whose JSON
+  exceeds 10MB (synthetic bulk import) to pin the overflow failure shape.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
 - **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from Phase 0).
 - **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, the
@@ -280,12 +310,17 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   work) is the baseline — but for beads the pre-send read is not atomic with the write, and
   unlike the HTTP providers, concurrent local writers are *expected* (sprint lanes), not rare.
   Beads ships a `revision` guarded-write optimistic-concurrency token ("always present"), so
-  **revision-conditional writes are a v1 requirement, contingent on Phase 0 confirming the CLI's
-  guarded-update semantics** (Codex round-2 finding 3): carry `revision` from the pre-send read
-  into every state/content update; a revision mismatch settles the row unsent as a held conflict
-  for the next inbound merge, exactly like the divergence guard. If Phase 0 finds `bd update`
-  cannot express the guard, fall back to pre-send-divergence parity with the HTTP providers and
-  record the residual race in the docs.
+  **revision-conditional writes are a HARD v1 requirement for every outbound mutation of an
+  existing issue** — state and content alike (Codex round-2 finding 3, hardened by round-3
+  finding 1: an unguarded fallback knowingly loses user data in a race the design itself calls
+  expected). Carry `revision` from the pre-send read into every update; a revision mismatch
+  settles the row unsent as a held conflict for the next inbound merge, exactly like the
+  divergence guard. **If Phase 0 finds no guard mechanism** — probe both `bd update`'s flag
+  surface and a conditional-`UPDATE … WHERE revision = N` via Dolt SQL as the escape hatch —
+  **v1 ships import + create-push only**: `contentWrite` all-false and status write-back
+  disabled for beads (creates race nothing — a fresh issue has no concurrent editor), with
+  outbound edits deferred until a guarded transport exists (`bd serve`, SQL, or upstream flag).
+  No unguarded fallback ships.
 - **Scale**: beads self-reports fast at thousands of issues; our full-fetch sweep every 12th pass
   is a `bd list` of ids — fine at that scale.
 
@@ -323,3 +358,19 @@ Codex adversarial round 2 (2026-08-26), verdict needs-attention, 3 high — all 
    concurrent local writers make the window real while a `revision` token sits unused. Absorbed:
    revision-conditional writes promoted to a v1 requirement contingent on the Phase 0
    guarded-update probe, with divergence-guard parity as the documented fallback.
+
+Codex adversarial round 3 (2026-08-26), verdict needs-attention, 2 high + 1 medium — all
+CONFIRMED (the 10MB `DEFAULT_MAX_BUFFER` verified at `runGit.ts:38`) and absorbed:
+
+1. [high] Round 2's "documented fallback" still knowingly lost updates. Hardened: guarded writes
+   are a hard gate for ALL outbound edits; no guard found ⇒ v1 ships import + create-push only,
+   outbound edits disabled (see "Dual writers"). The Dolt-SQL conditional UPDATE added as a
+   probe avenue.
+2. [high] Inherited `BEADS_DIR` would silently redirect every project's sync to one override
+   workspace. Absorbed as deterministic workspace pinning: detect with the var scrubbed, persist
+   the resolved path, pass it back explicitly on every spawn; negative test required (see
+   "CLI transport").
+3. [medium] `bd list --limit 0` vs `runToolCapture`'s 10MB `maxBuffer` → overflow classified
+   transient = infinite retry stall. Absorbed: id-only `--format` projection for the sweep,
+   windowed backfill or explicit 64MB cap, overflow mapped to a terminal actionable pause (see
+   "Bounded listings").
