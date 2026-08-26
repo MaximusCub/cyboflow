@@ -14,7 +14,16 @@
  * {@link TurnEventSource} structural type any `EventEmitter` satisfies.
  *
  * The two substrate seams (plan §2.1):
- *  - SDK `claudeCodeManager`: per-logical-turn `'exit'` → arm; `'spawned'` → clear.
+ *  - The SDK managers: per-logical-turn `'exit'` → arm; `'spawned'` → clear.
+ *    EVERY SDK lane is passed, not just Claude's — `codexSdkManager` and
+ *    `ompSdkManager` emit the same per-turn pair with the same payload
+ *    (`{ panelId, sessionId }`), and their sessions stream conversation rows
+ *    exactly like Claude's. Subscribing only `claudeCodeManager` left Codex/OMP
+ *    sessions with no idle arming at all: they could be summarized solely by
+ *    the §2.7 lazy catch-up a UI read happens to kick, never by the idle timer
+ *    the feature is built around. The scheduler re-runs its own eligibility
+ *    gate per fire, so passing a manager here never widens WHICH sessions
+ *    qualify — only when they are noticed.
  *  - PTY facade `SubstrateDispatchFacade`: Stop-hook `'turn-end'` → arm.
  *
  * The PTY relay seam (plan §2.2) — where a composer turn on a live REPL emits
@@ -36,8 +45,11 @@ export interface TurnEventSource {
 }
 
 export interface WireSessionSummarySchedulerDeps {
-  /** The SDK Claude manager (`claudeCodeManager`): `'exit'` arms, `'spawned'` clears. */
-  claudeManager: TurnEventSource;
+  /**
+   * Every SDK manager whose turns should arm the idle timer (`claudeCodeManager`,
+   * `codexSdkManager`, `ompSdkManager`): `'exit'` arms, `'spawned'` clears.
+   */
+  sdkManagers: readonly TurnEventSource[];
   /** The `SubstrateDispatchFacade`: its re-emitted `'turn-end'` (PTY Stop-hook) arms. */
   facade: TurnEventSource;
   scheduler: SessionSummarySchedulerLike;
@@ -49,7 +61,7 @@ export interface WireSessionSummarySchedulerDeps {
  * relies on `scheduler.dispose()` for the timers).
  */
 export function wireSessionSummaryScheduler(deps: WireSessionSummarySchedulerDeps): () => void {
-  const { claudeManager, facade, scheduler } = deps;
+  const { sdkManagers, facade, scheduler } = deps;
 
   const onExit = (payload: SessionTurnPayload): void => {
     if (payload?.sessionId) scheduler.noteTurnEnd(payload.sessionId);
@@ -61,13 +73,17 @@ export function wireSessionSummaryScheduler(deps: WireSessionSummarySchedulerDep
     if (payload?.sessionId) scheduler.noteTurnEnd(payload.sessionId);
   };
 
-  claudeManager.on('exit', onExit);
-  claudeManager.on('spawned', onSpawned);
+  for (const manager of sdkManagers) {
+    manager.on('exit', onExit);
+    manager.on('spawned', onSpawned);
+  }
   facade.on('turn-end', onTurnEnd);
 
   return () => {
-    claudeManager.off('exit', onExit);
-    claudeManager.off('spawned', onSpawned);
+    for (const manager of sdkManagers) {
+      manager.off('exit', onExit);
+      manager.off('spawned', onSpawned);
+    }
     facade.off('turn-end', onTurnEnd);
   };
 }

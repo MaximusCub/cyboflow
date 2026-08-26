@@ -4139,8 +4139,12 @@ async function initializeServices(): Promise<boolean> {
   // Subscribe to the substrate turn seams: SDK 'exit' arms / 'spawned' clears;
   // the facade's re-emitted PTY 'turn-end' arms. The PTY relay input seam
   // (no 'spawned') is cleared directly from the sessions:input IPC handler.
+  // ALL THREE SDK lanes are passed: a Codex/OMP session streams conversation
+  // rows exactly like a Claude one, so its turns must arm the idle timer too —
+  // subscribing Claude alone left those sessions dependent on a lazy catch-up
+  // that only fires if someone happens to read the summary.
   wireSessionSummaryScheduler({
-    claudeManager: defaultCliManager,
+    sdkManagers: [defaultCliManager, createdCodexSdkManager, createdOmpSdkManager],
     facade: substrateFacade,
     scheduler: sessionSummaryScheduler,
   });

@@ -13,7 +13,8 @@ import type { SessionSummarizeFn, SessionSummarizerResult } from '../sessionSumm
 
 /**
  * Composition-level tests (plan §8 / Codex finding #7): real EventEmitters
- * standing in for `claudeCodeManager` + the `SubstrateDispatchFacade`, the REAL
+ * standing in for the SDK managers (`claudeCodeManager`, `codexSdkManager`)
+ * + the `SubstrateDispatchFacade`, the REAL
  * `wireSessionSummaryScheduler` under test, and a real scheduler over a fake
  * db + fake summarize. The scheduler's methods are driven by EVENTS, not called
  * by hand — the one exception is the PTY input seam (`scheduler.noteTurnStart`
@@ -44,6 +45,7 @@ function eligibleSession(overrides: Partial<SchedulerSessionRow> = {}): Schedule
     chat_run_id: '__quick__',
     agent_provider: 'claude',
     agent_runtime: 'claude-sdk',
+    substrate: 'sdk',
     updated_at: sqliteTs(0),
     ...overrides,
   };
@@ -59,6 +61,7 @@ const OK_RESULT: SessionSummarizerResult = {
 
 interface Harness {
   claudeManager: EventEmitter;
+  codexManager: EventEmitter;
   facade: EventEmitter;
   summarize: SessionSummarizeFn;
   persistCalls: Array<{ lastTurnId: number; entries: string[] }>;
@@ -77,6 +80,7 @@ function makeHarness(opts: {
   summarizeThrows?: boolean;
 } = {}): Harness {
   const claudeManager = new EventEmitter();
+  const codexManager = new EventEmitter();
   const facade = new EventEmitter();
   const messages = opts.messages ?? [convMsg(1, 'user', 0), convMsg(2, 'assistant', 1000)];
   const persistCalls: Array<{ lastTurnId: number; entries: string[] }> = [];
@@ -107,9 +111,24 @@ function makeHarness(opts: {
     now: () => BASE,
   };
   const scheduler = makeSessionSummaryScheduler(deps);
-  const unwire = wireSessionSummaryScheduler({ claudeManager, facade, scheduler });
+  const unwire = wireSessionSummaryScheduler({
+    sdkManagers: [claudeManager, codexManager],
+    facade,
+    scheduler,
+  });
 
-  return { claudeManager, facade, summarize, persistCalls, messages, gateOpen, turnInFlight, scheduler, unwire };
+  return {
+    claudeManager,
+    codexManager,
+    facade,
+    summarize,
+    persistCalls,
+    messages,
+    gateOpen,
+    turnInFlight,
+    scheduler,
+    unwire,
+  };
 }
 
 async function flush(): Promise<void> {
@@ -198,6 +217,40 @@ describe('wireSessionSummaryScheduler (composition)', () => {
     expect(h.persistCalls[0].lastTurnId).toBe(2);
   });
 
+  it('arms on a Codex SDK exit event, not just the Claude manager', async () => {
+    const h = makeHarness({
+      session: eligibleSession({ agent_provider: 'codex', agent_runtime: 'codex-sdk', substrate: 'sdk' }),
+    });
+
+    h.codexManager.emit('exit', { sessionId: SID });
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS);
+    await flush();
+    expect(h.summarize).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Codex spawned event clears the timer its own exit armed', async () => {
+    const h = makeHarness({
+      session: eligibleSession({ agent_provider: 'codex', agent_runtime: 'codex-sdk', substrate: 'sdk' }),
+    });
+
+    h.codexManager.emit('exit', { sessionId: SID }); // arm
+    h.codexManager.emit('spawned', { sessionId: SID }); // next turn started → clear
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS * 2);
+    await flush();
+    expect(h.summarize).not.toHaveBeenCalled();
+  });
+
+  it('unwire detaches every SDK manager, not only the first', async () => {
+    const h = makeHarness();
+    h.unwire();
+
+    h.claudeManager.emit('exit', { sessionId: SID });
+    h.codexManager.emit('exit', { sessionId: SID });
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS * 2);
+    await flush();
+    expect(h.summarize).not.toHaveBeenCalled();
+  });
+
   it('teardown (dispose) after an exit prevents a summarize mid-shutdown', async () => {
     const h = makeHarness();
 
@@ -255,6 +308,7 @@ function makeHarnessWithClock(
   now: () => number,
 ): Harness {
   const claudeManager = new EventEmitter();
+  const codexManager = new EventEmitter();
   const facade = new EventEmitter();
   const messages = opts?.messages ?? [convMsg(1, 'user', 0), convMsg(2, 'assistant', 1000)];
   const persistCalls: Array<{ lastTurnId: number; entries: string[] }> = [];
@@ -281,6 +335,21 @@ function makeHarnessWithClock(
     hasOpenGate: () => gateOpen.value,
     now,
   });
-  const unwire = wireSessionSummaryScheduler({ claudeManager, facade, scheduler });
-  return { claudeManager, facade, summarize, persistCalls, messages, gateOpen, turnInFlight, scheduler, unwire };
+  const unwire = wireSessionSummaryScheduler({
+    sdkManagers: [claudeManager, codexManager],
+    facade,
+    scheduler,
+  });
+  return {
+    claudeManager,
+    codexManager,
+    facade,
+    summarize,
+    persistCalls,
+    messages,
+    gateOpen,
+    turnInFlight,
+    scheduler,
+    unwire,
+  };
 }
