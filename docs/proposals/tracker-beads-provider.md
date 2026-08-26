@@ -1,6 +1,7 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; pending Codex adversarial review; not started)
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial round 1 finding absorbed —
+see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
 agent-first issue tracker a user has asked us to support. This proposal's core finding: **the
@@ -72,8 +73,8 @@ of their own." `writeBack.ts` makes zero network calls by design and needs nothi
 | `listGroups()` / `listContainers()` / `listNarrows()` | — | one degenerate "workspace" group (Dart-space precedent); narrows = `['all']` |
 | `listStates(selection)` | status vocabulary from config/`bd` | built-ins `open, in_progress, blocked, deferred, closed` + custom statuses; each custom status carries a behavior category (`active/wip/done/frozen`) that seeds `TrackerStateGroup` like Plane's `group` field |
 | `listFieldOptions()` | static + config | priorities 0–4; types `bug/feature/task/epic/chore` (+ customs) |
-| `listIssues(sel, sinceIso)` | `bd list --json --updated-after <iso>` | keep the Dart hedge: send the bound widened, re-apply the exact inclusive bound client-side (gt-vs-gte undocumented) |
-| `listIssueIds(sel)` | `bd list --json` (project ids only) | sweep ground truth |
+| `listIssues(sel, sinceIso)` | `bd list --all --json --limit 0 --updated-after <iso>` | `--all` is load-bearing: default `bd list` **excludes closed issues**, so without it a remote close never syncs as a state transition. Keep the Dart hedge on the bound: send it widened, re-apply the exact inclusive bound client-side (gt-vs-gte undocumented) |
+| `listIssueIds(sel)` | `bd list --all --json --limit 0` (ids only) | sweep ground truth — MUST include closed issues, or the sweep misreads every closed linked issue as deleted and orphans its link. Closed-then-`bd prune`/`bd gc`-decayed issues (default: closed >90d) *do* drop out of `--all` — the sweep then archives the local twin, which is the correct reading of a remote GC |
 | `getIssue(id)` | `bd show <id> --json` | local + fast; sweep's N point-lookups are fine |
 | `createIssue` / `createSubIssue` | `bd create --json` (+ `--parent <id>`) | client key via `--metadata` (below) |
 | `updateIssueState(id, stateId)` | `bd update <id> --status … --json` | |
@@ -215,7 +216,12 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   defaults (priority/status when omitted); `bd update --json` response shape (envelope on);
   `bd close` semantics for the archive fallback; behavior when the workspace is missing/renamed;
   concurrent write contention (two `bd update` racing) and the exact lock-error stderr text;
-  `bd list` output cap (default limit 50 — pass `--limit 0` and verify it means unlimited).
+  `bd list` output cap (default limit 50 — pass `--limit 0` and verify it means unlimited);
+  **negative controls for the list filters** (Codex round-1 finding): prove a closed issue stays
+  present in both `bd list --all` incremental results and the id sweep, and audit which issue
+  types/statuses the default AND `--all` listings exclude (gates, templates, wisps/ephemeral,
+  `deferred`/`frozen`-category customs) — decide explicitly per excluded class whether the adapter
+  needs additional include flags or documents the class as out of sync scope.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
 - **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from Phase 0).
 - **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, `connect()` keyless
@@ -259,3 +265,13 @@ most a docs pointer) · events-journal cursor (`bd events tail --since <seq>` �
 a future upgrade over `--updated-after`) · routing/federation/multi-repo · wisps, molecules,
 formulas, gates (exotic types just map through category) · bundling the `bd` binary · JSONL
 anything.
+
+## Review findings absorbed
+
+Codex adversarial round 1 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and absorbed:
+
+1. [high] `bd list` without `--all` excludes closed issues → remote closures would never sync and
+   the deletion sweep would misclassify every closed linked issue as deleted and orphan its link.
+   Fix folded into the mapping table (`--all --limit 0` on both list paths) and Phase 0 (negative
+   controls proving closed issues survive both listings; per-class audit of default-excluded
+   types with an explicit include-or-out-of-scope ruling each).
