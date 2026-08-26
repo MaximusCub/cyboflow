@@ -38,7 +38,7 @@
  * returns verbatim for a custom issue.
  */
 import { z } from 'zod';
-import { defineTool, type RegisteredTool } from './defineTool';
+import { compact, defineTool, type RegisteredTool } from './defineTool';
 import { declareAs } from './toolSchema';
 
 /**
@@ -446,6 +446,23 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
     input: z.object({}),
     envelope: 'mcp-get-selected-findings',
     toEnvelope: () => ({}),
+  }),
+
+  defineTool({
+    name: 'cyboflow_get_eval',
+    description:
+      'Return the code-review eval\'s FULL verdict for a run in this session: overall score + band + confidence interval, the per-dimension breakdown, the catastrophic-cap triggers and security / requirements-unmet flags, every sub-check the jury FAILED with its evidence, and every finding it raised — each cross-linked to the review_items.id it was filed as, or null when it never reached the queue. Read-only. USE THIS WHENEVER YOU ARE ASKED TO FIX WHAT AN EVAL FLAGGED: cyboflow_list_run_findings shows only the slice that reached the review queue (net-new or majority-catastrophic findings, deduped, advisory-capped at 10) and NEVER the score, because the one summary review item carrying the rollup is written only for an ad-hoc eval — an automatic or A/B-tagged flow eval posts none. A finding here with reviewItemId null is one nothing else surfaces. run_id is OPTIONAL and normally omitted: your own run id in a chat turn is a `__quick__` sentinel that was never graded, so the default walks the runs your SESSION owns and returns the first graded one, reporting the runScope it searched. Naming a run_id explicitly requires it to be in your project (else run_not_in_project). Not gated on a live run — the eval grades AT settle, so the run it graded is usually already terminal. Replies { runScope, evaluation }, with evaluation null when no run in scope has ever been graded.',
+    input: z.object({
+      run_id: z
+        .string()
+        .min(1)
+        .describe(
+          'Optional run to read the eval for. Omit to search the runs this session owns (the right default in a chat turn); must be in your project when named.',
+        )
+        .optional(),
+    }),
+    envelope: 'mcp-get-eval',
+    toEnvelope: (args) => compact({ targetRunId: args.run_id }),
   }),
 
   defineTool({

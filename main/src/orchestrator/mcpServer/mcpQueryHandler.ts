@@ -122,6 +122,7 @@ import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
 import { selectFindingForSeed, selectRunFindingsForRuns } from '../reviewItemListing';
 import { selectSessionRunScope } from '../sessionRunScope';
+import { selectEvalReadout } from '../evalReadout';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
@@ -476,7 +477,19 @@ export type McpQueryMessage =
       runId: string;
     }
   | {
-      /** Read THIS run's own still-open findings, with their resolve handles. */
+      /** Read the code-review eval's full verdict + jury reasoning for a run. */
+      type: 'mcp-get-eval';
+      requestId: string;
+      runId: string;
+      /**
+       * Which run to read. Optional: absent means "this session's runs", which
+       * is what a chat turn wants, since its own runId is a `__quick__`
+       * sentinel that was never graded.
+       */
+      targetRunId?: string;
+    }
+  | {
+      /** Read THIS session's still-open findings, with their resolve handles. */
       type: 'mcp-list-run-findings';
       requestId: string;
       runId: string;
@@ -1820,6 +1833,11 @@ export class McpQueryHandler {
           // Read-only: returns the findings the human seeded into THIS compound
           // run (workflow_runs.seed_finding_ids). Never writes.
           this.handleGetSelectedFindings(msg, client);
+          break;
+        case 'mcp-get-eval':
+          // Read-only: run_evals + the review_items cross-link. Never writes,
+          // and deliberately not gated on a live run — the eval grades AT settle.
+          this.handleGetEval(msg, client);
           break;
         case 'mcp-list-run-findings':
           // Read-only, but AWAITED: it drains the project's review-item queue
@@ -3909,6 +3927,97 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { findings },
+    });
+  }
+
+  /**
+   * Return the code-review eval's FULL verdict for a run in this session — the
+   * score, band, CI, per-dimension breakdown, cap triggers, the sub-checks the
+   * jury failed with its evidence, and every finding it raised cross-linked to
+   * its review item.
+   *
+   * WHY IT EXISTS. The verdict lives in `run_evals`, and nothing in the run
+   * tool scope read that table. What reached an agent instead was a filtered
+   * slice via `review_items`: net-new or majority-catastrophic findings only,
+   * deduped, advisory-capped at ten — and no score at all, because the one
+   * summary item carrying the rollup is written only for `origin = 'adhoc'`,
+   * which an automatic or A/B-tagged flow eval never is. So an agent asked to
+   * fix what the eval flagged could see at most ten of the findings and never
+   * the verdict, and had no way to discover that the rest existed.
+   *
+   * SCOPE. `targetRunId` is optional and usually omitted: a chat turn's own run
+   * id is a `__quick__` sentinel that was never graded, so the default walks the
+   * session's runs ({@link selectSessionRunScope}) and returns the first graded
+   * one. Named explicitly, the target must belong to the caller's PROJECT —
+   * a tighter check than the sibling `mcp-get-run`, which reads any run row by
+   * id, and the right one here because this payload carries review content.
+   *
+   * NOT gated on a live run, by design: the eval fires AT settle, so the run it
+   * graded is usually already terminal by the time anyone can ask about it.
+   * Read-only throughout — no router, no write.
+   */
+  private handleGetEval(
+    msg: Extract<McpQueryMessage, { type: 'mcp-get-eval' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReadOnlyRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    if (msg.targetRunId !== undefined) {
+      const target = this.resolveReadOnlyRunContext(msg.targetRunId);
+      if (!target.ok) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: target.error,
+        });
+        return;
+      }
+      if (target.projectId !== ctx.projectId) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: 'run_not_in_project',
+        });
+        return;
+      }
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: {
+          runScope: [msg.targetRunId],
+          evaluation: selectEvalReadout(this.db, msg.targetRunId),
+        },
+      });
+      return;
+    }
+
+    // Default: the first GRADED run in this session's scope. Scope order puts
+    // the caller's own run first and then walks the session chronologically, so
+    // a chat sentinel (never graded) falls through to the flow run behind it.
+    const runScope = selectSessionRunScope(this.db, msg.runId);
+    let evaluation = null;
+    for (const candidate of runScope) {
+      evaluation = selectEvalReadout(this.db, candidate);
+      if (evaluation !== null) break;
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { runScope, evaluation },
     });
   }
 

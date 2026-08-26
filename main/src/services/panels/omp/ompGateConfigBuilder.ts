@@ -135,6 +135,7 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_fs_grep',
   'cyboflow_fs_list',
   'cyboflow_fs_read',
+  'cyboflow_get_eval',
   'cyboflow_get_run',
   'cyboflow_get_selected_findings',
   'cyboflow_get_task',

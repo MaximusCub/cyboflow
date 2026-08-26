@@ -4653,6 +4653,170 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
   });
 
   // -------------------------------------------------------------------------
+  // get-eval — the jury verdict a chat agent could not previously reach
+  // -------------------------------------------------------------------------
+
+  describe('mcp-get-eval', () => {
+    /** Minimal run_evals table + one complete verdict row for `runId`. */
+    function seedEvalRow(runId: string, perSample: unknown): void {
+      fdb.exec(`
+        CREATE TABLE IF NOT EXISTS run_evals (
+          run_id TEXT NOT NULL,
+          rubric_version TEXT NOT NULL,
+          eval_status TEXT NOT NULL DEFAULT 'pending',
+          origin TEXT,
+          snapshot_at TEXT,
+          human_influenced INTEGER NOT NULL DEFAULT 0,
+          overall_score INTEGER,
+          band TEXT,
+          ci_low REAL,
+          ci_high REAL,
+          sample_count INTEGER,
+          judge_model TEXT,
+          gated INTEGER NOT NULL DEFAULT 0,
+          security_flag INTEGER NOT NULL DEFAULT 0,
+          requirements_unmet INTEGER NOT NULL DEFAULT 0,
+          cap_triggers_json TEXT,
+          dimensions_json TEXT,
+          per_sample_json TEXT,
+          error TEXT,
+          PRIMARY KEY (run_id, rubric_version)
+        );
+      `);
+      fdb
+        .prepare(
+          `INSERT INTO run_evals
+             (run_id, rubric_version, eval_status, snapshot_at, overall_score, band, sample_count,
+              per_sample_json)
+           VALUES (?, '1.1', 'complete', '2026-08-26T10:00:00Z', 62, 'Fair', 2, ?)`,
+        )
+        .run(runId, JSON.stringify(perSample));
+    }
+
+    interface EvalReply {
+      runScope: string[];
+      evaluation: {
+        runId: string;
+        overallScore: number | null;
+        findings: Array<{ title: string; reviewItemId: string | null }>;
+      } | null;
+    }
+
+    it("finds the FLOW run's verdict from a chat sentinel that was never graded", async () => {
+      // The whole defect in one test: the sentinel has no run_evals row, so a
+      // run-bound read returns nothing; the graded run is its session-mate.
+      fdb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      seedCompoundRun(fdb, { runId: 'run-flow', status: 'completed' });
+      seedCompoundRun(fdb, { runId: 'run-sentinel' });
+      fdb
+        .prepare(`UPDATE workflow_runs SET session_id = 'sess-1' WHERE id IN ('run-flow', 'run-sentinel')`)
+        .run();
+      seedEvalRow('run-flow', [
+        { verdicts: [{ id: 'SEC-2', verdict: 'FAIL', evidence: 'unescaped input' }], findings: [{ subCheckId: 'SEC-2', title: 'Filed one', body: 'b' }] },
+        { verdicts: [], findings: [{ subCheckId: 'STY-1', title: 'Never filed', body: 'b' }] },
+      ]);
+      seedFinding(fdb, { id: 'ri_1', title: 'Filed one', runId: 'run-flow' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-1', runId: 'run-sentinel' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as EvalReply;
+      expect(data.evaluation?.runId).toBe('run-flow');
+      expect(data.evaluation?.overallScore).toBe(62);
+      // The link the agent needs to resolve, AND the null that marks a finding
+      // nothing else would ever surface.
+      const byTitle = new Map(data.evaluation!.findings.map((f) => [f.title, f.reviewItemId]));
+      expect(byTitle.get('Filed one')).toBe('ri_1');
+      expect(byTitle.get('Never filed')).toBeNull();
+    });
+
+    it('replies evaluation:null with the searched scope when nothing was graded', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-2', runId: 'run-a' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      // Not an error — "never graded" is a real answer — but the scope is named
+      // so the agent can see what was actually searched.
+      expect(response.data).toEqual({ runScope: ['run-a'], evaluation: null });
+    });
+
+    it('reads a TERMINAL run — the eval only exists once the run has settled', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a', status: 'completed' });
+      seedEvalRow('run-a', []);
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-3', runId: 'run-a' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect((response.data as EvalReply).evaluation?.overallScore).toBe(62);
+    });
+
+    it('honours an explicit run_id in the same project', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+      seedCompoundRun(fdb, { runId: 'run-b', status: 'completed' });
+      seedEvalRow('run-b', []);
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-4', runId: 'run-a', targetRunId: 'run-b' },
+        socket,
+      );
+
+      const data = parseLastWrite(writes).data as EvalReply;
+      expect(data.runScope).toEqual(['run-b']);
+      expect(data.evaluation?.runId).toBe('run-b');
+    });
+
+    it("refuses an explicit run_id in ANOTHER project", async () => {
+      // Tighter than the sibling mcp-get-run, which reads any run row by id —
+      // right here because the payload carries review content.
+      fdb.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Other', '/tmp/p2');
+      seedCompoundRun(fdb, { runId: 'run-a' });
+      fdb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json)
+           VALUES ('run-far', 'wf-c', 2, 'completed', 'compound', '{}')`,
+        )
+        .run();
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-5', runId: 'run-a', targetRunId: 'run-far' },
+        socket,
+      );
+
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'run_not_in_project' });
+    });
+
+    it('refuses an unknown run id rather than replying with a null verdict', async () => {
+      seedCompoundRun(fdb, { runId: 'run-a' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-eval', requestId: 'ge-6', runId: 'run-a', targetRunId: 'run-ghost' },
+        socket,
+      );
+
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'run_not_found' });
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // resolve-finding
   // -------------------------------------------------------------------------
 
