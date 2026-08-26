@@ -963,6 +963,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           projectId={projectId}
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
+          // Dial stamps refresh the picker rows without closing the editor.
+          onMutated={(savedId) => void loadWorkflows(savedId)}
         />
       )}
 

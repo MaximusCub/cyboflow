@@ -557,6 +557,11 @@ export function WorkflowsView(): React.JSX.Element {
             setWfEditor(null);
             void useWorkflowsStore.getState().refresh();
           }}
+          // Tuning-dial stamps / custom-slot deletes: refresh the gallery cards
+          // but keep the editor open — the user is mid-dial.
+          onMutated={() => {
+            void useWorkflowsStore.getState().refresh();
+          }}
         />
       )}
 

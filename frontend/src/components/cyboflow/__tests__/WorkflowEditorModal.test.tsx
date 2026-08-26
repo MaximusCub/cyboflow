@@ -218,7 +218,7 @@ afterEach(() => {
  * on the SIMPLE (tuning) page — the default for a built-in flow like the
  * 'planner' fixture.
  */
-async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn()) {
+async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn(), onMutated = vi.fn()) {
   render(
     <WorkflowEditorModal
       isOpen
@@ -227,10 +227,11 @@ async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn()) {
       projectId={1}
       mode="edit"
       onSaved={onSaved}
+      onMutated={onMutated}
     />,
   );
   await screen.findByTestId('workflow-tuning-page');
-  return { onSaved, onClose };
+  return { onSaved, onClose, onMutated };
 }
 
 /**
@@ -1112,6 +1113,37 @@ describe('WorkflowEditorModal — tuning level selector', () => {
     expect(screen.queryByTestId('workflow-editor-canvas')).toBeNull();
   });
 
+  it('names the stamped level in the header badge, and keeps it there on the Advanced page', async () => {
+    await renderTuningPage();
+
+    expect(screen.getByTestId('tuning-level-badge')).toHaveTextContent(/level:\s*standard/i);
+
+    // The badge is how you know which rung you are editing once the dial itself
+    // is off screen.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tuning-open-advanced'));
+    });
+    await screen.findByTestId('workflow-editor-canvas');
+    expect(screen.getByTestId('tuning-level-badge')).toHaveTextContent(/level:\s*standard/i);
+  });
+
+  it('has no level badge on a flow with no dial', async () => {
+    seedRow({ name: 'my-custom-flow', spec_json: JSON.stringify(SEED_DEFINITION) });
+    render(
+      <WorkflowEditorModal
+        isOpen
+        onClose={vi.fn()}
+        workflowId={EDIT_WORKFLOW_ID}
+        projectId={1}
+        mode="edit"
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId('workflow-editor-canvas');
+    expect(screen.queryByTestId('tuning-level-badge')).toBeNull();
+  });
+
   it('disables CUSTOM with a hint while the slot is empty, and clicking it opens Advanced', async () => {
     await renderTuningPage();
 
@@ -1144,7 +1176,7 @@ describe('WorkflowEditorModal — tuning level selector', () => {
   });
 
   it('selecting a segment stamps the level via setTuningLevel and moves the selection', async () => {
-    const { onSaved } = await renderTuningPage();
+    const { onSaved, onMutated } = await renderTuningPage();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));
@@ -1164,7 +1196,11 @@ describe('WorkflowEditorModal — tuning level selector', () => {
       'aria-pressed',
       'false',
     );
-    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+    // A dial click must NOT fire onSaved — every host closes the modal in
+    // onSaved, and dialing is an in-place action. It fires onMutated instead
+    // so hosts can refresh their card/list metadata.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onMutated).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
   });
 
   it('surfaces a failed level write inline and keeps the previous selection', async () => {
@@ -1229,14 +1265,17 @@ describe('WorkflowEditorModal — tuning phase strip', () => {
     expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
   });
 
-  it('derives the EFFICIENT strip from the shared transform — merged lane + model·effort pins', async () => {
+  it('derives the EFFICIENT strip from the shared transform — dropped lane steps + model·effort pins', async () => {
     await renderSprint('efficient');
 
-    // The efficient preset removes these three inner steps; the strip shows what
-    // RUNS, so they are simply absent (no ghost row).
-    expect(screen.queryByTestId('tuning-lane-chip-write-tests')).toBeNull();
-    expect(screen.queryByTestId('tuning-lane-chip-code-review')).toBeNull();
-    expect(screen.queryByTestId('tuning-lane-chip-visual-verify')).toBeNull();
+    // The efficient preset removes these three inner steps. The strip diffs
+    // against Standard, so they stay on screen struck through rather than
+    // vanishing — what a preset takes away is the point of picking it.
+    for (const dropped of ['write-tests', 'code-review', 'visual-verify']) {
+      const chip = screen.getByTestId(`tuning-lane-chip-${dropped}`);
+      expect(chip).toHaveTextContent('removed');
+      expect(chip.firstElementChild).toHaveStyle({ textDecoration: 'line-through' });
+    }
     expect(screen.getByTestId('tuning-lane-chip-implement')).toBeInTheDocument();
     expect(screen.getByTestId('tuning-lane-chip-task-verify')).toBeInTheDocument();
 
@@ -1249,13 +1288,16 @@ describe('WorkflowEditorModal — tuning phase strip', () => {
 
   it('switching the dial re-renders the strip for the newly selected level', async () => {
     await renderSprint('standard');
-    expect(screen.getByTestId('tuning-lane-chip-code-review')).toBeInTheDocument();
+    // At Standard the step runs, so its sub-label is its agent key, not "removed".
+    expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('code-review');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));
     });
 
-    await waitFor(() => expect(screen.queryByTestId('tuning-lane-chip-code-review')).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('removed'),
+    );
   });
 });
 
@@ -1391,7 +1433,7 @@ describe('WorkflowEditorModal — delete custom definition', () => {
 
   it('confirms, calls resetSpec, and falls back to STANDARD', async () => {
     seedRow({ spec_json: JSON.stringify(SEED_DEFINITION), tuning_level: 'custom' });
-    const { onSaved } = await renderTuningPage();
+    const { onSaved, onMutated } = await renderTuningPage();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('tuning-delete-custom'));
@@ -1414,8 +1456,11 @@ describe('WorkflowEditorModal — delete custom definition', () => {
       'true',
     );
     expect(screen.queryByTestId('tuning-delete-custom')).toBeNull();
-    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
-    // The modal stays open — this is level management, not an exit.
+    // The modal stays open — this is level management, not an exit — so the
+    // write reports through onMutated (refresh-only), never onSaved (hosts
+    // close the modal in onSaved).
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onMutated).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
     expect(screen.getByTestId('workflow-tuning-page')).toBeInTheDocument();
   });
 });

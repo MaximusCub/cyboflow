@@ -103,6 +103,13 @@ export interface WorkflowEditorModalProps {
   /** Called after a successful save / reset / create with the affected workflow id. */
   onSaved?: (workflowId: string) => void;
   /**
+   * Called after a persisted change that keeps the editor OPEN — a tuning-dial
+   * stamp or a custom-slot delete. Hosts close the modal in `onSaved`, and a
+   * dial click must not throw the user out of the editor, so these writes get
+   * their own refresh-only channel.
+   */
+  onMutated?: (workflowId: string) => void;
+  /**
    * Optional seed for create mode — pre-populates the editor with this
    * definition instead of the blank skeleton (e.g. forking an existing flow).
    * Ignored in edit mode (the persisted row definition always wins).
@@ -152,6 +159,7 @@ export function WorkflowEditorModal({
   projects,
   mode = 'edit',
   onSaved,
+  onMutated,
   initialDefinition,
   initialPermissionMode,
   initialName,
@@ -454,6 +462,17 @@ export function WorkflowEditorModal({
   );
 
   /**
+   * The Standard (as-authored) definition of the SAME flow — the baseline the
+   * phase strip diffs against, so a preset's removed steps render struck-through
+   * instead of vanishing. Level-independent by construction: it is what the flow
+   * runs when the dial has never been moved.
+   */
+  const baselineDefinition = useMemo(
+    () => resolveEffectiveDefinition(sourceName, sourceSpecJson, 'standard'),
+    [sourceName, sourceSpecJson],
+  );
+
+  /**
    * Re-seed the Advanced canvas from a level's effective definition, so opening
    * Advanced after switching the dial starts from THAT level's graph ("start
    * from Efficient and tweak"). Derived client-side from the same shared
@@ -484,7 +503,9 @@ export function WorkflowEditorModal({
         await trpc.cyboflow.workflows.setTuningLevel.mutate({ workflowId, level: next });
         setLevel(next);
         reseedFromLevel(next);
-        onSaved?.(workflowId);
+        // onMutated, not onSaved: hosts close the modal in onSaved, and a dial
+        // click must leave the user on the page they are dialing.
+        onMutated?.(workflowId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Could not change the tuning level');
       } finally {
@@ -492,7 +513,7 @@ export function WorkflowEditorModal({
         actionInFlightRef.current = false;
       }
     },
-    [level, workflowId, reseedFromLevel, onSaved],
+    [level, workflowId, reseedFromLevel, onMutated],
   );
 
   /**
@@ -514,14 +535,15 @@ export function WorkflowEditorModal({
       const nextLevel: TuningLevel = level === 'custom' ? 'standard' : level;
       setLevel(nextLevel);
       reseedFromLevel(nextLevel);
-      onSaved?.(workflowId);
+      // onMutated, not onSaved — this action deliberately stays on the page.
+      onMutated?.(workflowId);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Could not delete the custom definition');
     } finally {
       setIsBusy(false);
       actionInFlightRef.current = false;
     }
-  }, [workflowId, level, reseedFromLevel, onSaved]);
+  }, [workflowId, level, reseedFromLevel, onMutated]);
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
@@ -844,6 +866,23 @@ export function WorkflowEditorModal({
             </span>
           )}
 
+          {/* Which rung of the dial this flow currently runs at — visible from
+              the Advanced page too, where the dial itself is off screen. */}
+          {hasTuningDial && (
+            <span
+              className="px-2 py-0.5 text-[9px] font-bold uppercase"
+              style={{
+                letterSpacing: '0.14em',
+                border: `1px solid ${level === 'custom' ? 'var(--color-status-info)' : 'var(--color-text-primary)'}`,
+                color: level === 'custom' ? 'var(--color-status-info)' : 'var(--color-text-primary)',
+                background: 'var(--color-surface-primary)',
+              }}
+              data-testid="tuning-level-badge"
+            >
+              Level: {level}
+            </span>
+          )}
+
           <div className="flex-1" />
 
           {/* Graph-editing actions belong to the Advanced page. The simple page
@@ -940,6 +979,7 @@ export function WorkflowEditorModal({
             level={level}
             hasCustomDefinition={hasCustomDefinition}
             definition={effectiveDefinition}
+            baselineDefinition={baselineDefinition}
             busy={isBusy}
             onSelectLevel={(next) => void handleSelectLevel(next)}
             onOpenAdvanced={() => setView('advanced')}

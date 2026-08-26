@@ -2434,6 +2434,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           projectId={selectedProjectId}
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
+          // Dial stamps refresh the card metadata (tuningLevel) without closing.
+          onMutated={(savedId) => void loadWorkflows(savedId)}
         />
       )}
     </div>
