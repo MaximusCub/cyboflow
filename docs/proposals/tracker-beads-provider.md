@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-17 absorbed (23 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-18 absorbed (25 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -250,10 +250,18 @@ archived — their remote halves are simply gone); (2) settles every pending out
 old identity as cancelled, each surfaced as a review finding ("write may exist in the replaced
 workspace — verify manually"), so nothing ever replays against the new instance — the ambiguous
 create included: it is surfaced for manual adoption, never auto-recovered across identities;
-(3) mints a fresh connection scoped to the new instance id (fresh import; local entities
-re-link through the ordinary reconcile path). Declining leaves the pair paused indefinitely,
-which is safe. Negative tests: retained links never resolve against the new instance; pending
-updates never replay; the ambiguous create lands as a finding, not a duplicate.
+(3) mints a fresh connection scoped to the new instance id, whose first import is preceded by a
+**pre-import reconciliation** (Codex round-18: the ordinary import path CANNOT re-link retained
+entities — `findAdoptableIdea` rejects an idea that already has a provider link, and orphaned
+links are not ignored, so a plain fresh import would mint duplicate locals while the originals
+sit orphaned): match new-workspace issues to retained orphaned-link entities by provenance
+marker / metadata client key, repoint those links atomically, queue ambiguous matches for user
+confirmation, and only then import the remainder as new; outbound-origin entities without
+import provenance stay orphaned unless the user confirms a match (no guessed re-links).
+Declining leaves the pair paused indefinitely, which is safe. Negative tests: retained links
+never resolve against the new instance; pending updates never replay; the ambiguous create
+lands as a finding, not a duplicate; an adopted workspace containing a marker-matched issue
+re-links it instead of duplicating, for both imported and pushed-origin entities.
 
 **Same-instance mutations need a separate guard for archival** (Codex round-16: identity
 catches replacement, not concurrency — a concurrent `bd dolt pull` can RESTORE an issue after
@@ -265,8 +273,16 @@ re-probes before applying decisions. If HEAD moved, ONLY the destructive subset 
 decisions — is discarded ("deferred — workspace changed mid-sweep"; deletion handling is not
 urgent and a quiet window recurs), while imports and merges still apply (each is individually
 safe under ordinary merge semantics). Scoping the guard to archival keeps busy workspaces from
-starving the whole sweep. Negative test: restore an absent issue between lookup and archival,
-prove no local archive.
+starving the whole sweep. **The guard narrows the window; resurrection closes the family**
+(Codex round-18: a restore can still land between the final HEAD probe and the local archive —
+no sequence of probes ends this, because probe and apply can never be atomic over a CLI). So
+sweep-archival is defined as REVERSIBLE end-to-end: it is already a soft archive with an
+orphaned link, and reconciliation gains the inverse rule — an orphaned-link id that REAPPEARS
+in the full sweep under the same instance id un-archives the local twin and un-orphans its link
+(a review finding notes the round trip). Every residual TOCTOU slice in this family thereby
+degrades from "wrongly archived" to "archived for at most one sweep interval, then
+self-healed." Negative tests: restore between lookup and archival AND restore immediately after
+the final HEAD probe — both converge to un-archived within one reconciliation pass.
 
 Negative tests: same-path reinit (a) before a pass, (b) between the initial check and
 `listIssueIds`, (c) between `listIssues` and the apply loop, (d) between `listIssueIds` and an
@@ -748,3 +764,18 @@ absorbed:
    per-row review findings (nothing replays cross-identity, ambiguous create surfaced for
    manual adoption), mint a fresh connection for the new instance; declining stays safely
    paused; three negative tests (see "Replacement recovery").
+
+Codex adversarial round 18 (2026-08-26), verdict needs-attention, 2 high — both CONFIRMED and
+absorbed; this round closes the TOCTOU family terminally:
+
+1. [high] A restore landing after the final HEAD probe still archived a live issue — no probe
+   sequence can be atomic with apply over a CLI. Absorbed by inversion: sweep-archival is
+   defined REVERSIBLE — reconciliation un-archives and un-orphans when an orphaned-link id
+   reappears under the same instance, so every residual window in the family degrades to
+   "archived for at most one sweep interval, then self-healed" (see "Same-instance
+   mutations"). Prevention-only was unreachable; correction-by-design is the closure.
+2. [high] Adopt-new-workspace's fresh import would duplicate retained entities —
+   `findAdoptableIdea` rejects already-linked ideas and orphaned links are not ignored.
+   Absorbed: pre-import reconciliation matches by marker/client key, repoints links atomically,
+   user-confirms ambiguity, suppresses fresh import until done; imported and pushed-origin
+   entities both tested (see "Replacement recovery").
