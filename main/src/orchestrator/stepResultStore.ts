@@ -10,7 +10,7 @@
  */
 import type { DatabaseLike } from './types';
 import { emitSeamError } from './telemetrySink';
-import { classifyErrorPattern } from './programmatic/systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from './programmatic/systemicError';
 
 /** A persisted per-step result row. */
 export interface StepResultRow {
@@ -49,9 +49,9 @@ const COMPLETED_OUTCOMES = new Set<StepResultRow['outcome']>(['done', 'skipped']
  * always, and a `skipped` step ONLY when it carries an error (an optional step
  * that exhausted its retries — a plain skip of a not-needed step has no error and
  * is not reported). Intentional `canceled` (user cancel) and human `rejected`
- * outcomes are never reported. The step id + error ride in the (bounded,
- * scrub-redacted) message; tags stay low-cardinality. No-op until the seam sink
- * is registered at boot.
+ * outcomes are never reported. Neither the step id nor the error text leaves the
+ * machine (see the call-site comment below); tags stay low-cardinality. No-op
+ * until the seam sink is registered at boot.
  *
  * DELIBERATE outcomes are excluded even though they carry an error. Two skip
  * paths set `error` as a human-readable REASON rather than a fault — an operator
@@ -76,6 +76,13 @@ function reportStepIssue(r: StepResultRecord): void {
   emitSeamError('programmatic-step-failed', new Error(`programmatic step ${r.outcome} (${errorClass})`), {
     stepOutcome: r.outcome,
     errorClass,
+    // Because the error text is withheld above, `other` here is otherwise a dead
+    // end — one bucket that cannot say whether it is one failing step or twenty.
+    // The shape + digest are a skeletonized fingerprint of that withheld text
+    // (paths, ids, numbers and quoted spans replaced), so distinct unknown
+    // failures separate and the same one joins up across machines, while nothing
+    // user-derived ships. Attached for the unclassified classes only.
+    ...unclassifiedErrorTags(errorClass, r.error ?? undefined),
   });
 }
 

@@ -226,4 +226,68 @@ describe('StepResultStore seam-error telemetry (seam G)', () => {
     expect(rep!.message).not.toContain('source code');
     expect(rep!.message).toBe('programmatic step failed (other)');
   });
+
+  it('attaches errorShape + errorDigest when the class is the opaque `other`', () => {
+    // Without these, every unclassified step failure collapses into one Sentry
+    // bucket that cannot say whether it is one failing step or twenty — which is
+    // exactly what CYBOFLOW-APP-H became for a real user (46 events, all `other`).
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({
+      runId: 'r',
+      stepId: 'implement',
+      outcome: 'failed',
+      attempts: 1,
+      error: 'the monitor could not reach the worktree',
+    });
+    const rep = calls.find((c) => c.seam === 'programmatic-step-failed');
+    expect(rep!.tags).toMatchObject({ stepOutcome: 'failed', errorClass: 'other' });
+    expect(rep!.tags!.errorShape).toBeTruthy();
+    expect(rep!.tags!.errorDigest).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('gives two DIFFERENT unclassified step failures different digests', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'failed', attempts: 1, error: 'the worktree went missing' });
+    store.record({ runId: 'r', stepId: 'b', outcome: 'failed', attempts: 1, error: 'the schema refused the verdict' });
+    const [first, second] = calls.filter((c) => c.seam === 'programmatic-step-failed');
+    expect(first.tags!.errorDigest).not.toBe(second.tags!.errorDigest);
+  });
+
+  it('gives the SAME failure the same digest despite differing paths and ids', () => {
+    // The point of skeletonizing: the same defect on two machines must join up.
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'failed', attempts: 1, error: 'could not open /Users/ann/proj/x.ts (run 41)' });
+    store.record({ runId: 'r', stepId: 'b', outcome: 'failed', attempts: 1, error: 'could not open /Users/bob/other/y.ts (run 9182)' });
+    const [first, second] = calls.filter((c) => c.seam === 'programmatic-step-failed');
+    expect(first.tags!.errorDigest).toBe(second.tags!.errorDigest);
+  });
+
+  it('does NOT attach shape/digest to an already-classified failure', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'failed', attempts: 1, error: 'API Error: 429 Too Many Requests' });
+    const rep = calls.find((c) => c.seam === 'programmatic-step-failed');
+    expect(rep!.tags).toEqual({ stepOutcome: 'failed', errorClass: 'http-429' });
+  });
+
+  it('leaks nothing user-derived through the digest tags', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({
+      runId: 'r',
+      stepId: 'my-secret-custom-step',
+      outcome: 'failed',
+      attempts: 1,
+      error: 'Command failed: eslint /Users/me/proj/src/Secret.tsx\n<source code snippet here>',
+    });
+    const rep = calls.find((c) => c.seam === 'programmatic-step-failed');
+    const tagged = Object.values(rep!.tags!).join(' ');
+    expect(tagged).not.toContain('Secret.tsx');
+    expect(tagged).not.toContain('/Users/me');
+    expect(tagged).not.toContain('source code');
+    expect(tagged).not.toContain('my-secret-custom-step');
+  });
 });
