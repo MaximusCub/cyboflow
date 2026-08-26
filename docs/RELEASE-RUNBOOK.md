@@ -113,12 +113,16 @@ alongside a stable prod app.
 
  The dev builds **overwrite** the stable staging dirs (`mac-arm64/`, `mac/`), so by
 verify time only the **Dev** `.app` bundles survive there — validate the stable
-apps by mounting their DMGs.
+apps by mounting their DMGs. Both surviving bundles are literally named
+`Cyboflow Dev.app`; refer to them by staging dir as **Cyboflow Dev (arm64)**
+(`mac-arm64/`) and **Cyboflow Dev (x64)** (`mac/`) so the Intel one is never
+mistaken for the app you actually run.
 
 ```bash
 cd dist-electron
 ls -lh Cyboflow*-0.1.25-macOS-*.dmg   # expect ~304M arm64 / ~327M x64 — NOT a 215K stub
 # dev apps still in the staging dirs:
+#   mac-arm64/ = Cyboflow Dev (arm64)   |   mac/ = Cyboflow Dev (x64), Intel-only
 for app in "mac-arm64/Cyboflow Dev.app" "mac/Cyboflow Dev.app"; do
   xcrun stapler validate "$app"        # "The validate action worked!"
   spctl -a -vvv "$app"                 # "accepted" / source=Notarized Developer ID
@@ -147,6 +151,19 @@ cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch   #
   sizes above stale by roughly that much — re-baseline them from the first good
   build rather than treating the jump as a leak, and confirm by inventory as
   above. Re-check this after any future SDK bump; the bundled core moves with it.
+
+- **macOS 26 will warn about "Cyboflow Dev" after the cut — that is
+  Cyboflow Dev (x64), not your arm64 app.** `build:mac:dev:x64` leaves an
+  Intel-only bundle at `dist-electron/mac/Cyboflow Dev.app`, LaunchServices
+  registers it (`lsregister -dump` shows `slices: x86_64`), and Tahoe posts
+  *"Support Ending for Intel-based Apps — This version of 'Cyboflow Dev'
+  includes a component that will not work with a future release of macOS."*
+  The notice carries only the display name, so it reads as if the arm64 Dev app
+  were at fault. It is not: verify with
+  `lipo -archs "dist-electron/mac-arm64/Cyboflow Dev.app/Contents/MacOS/Cyboflow Dev"`
+  (arm64) against the same path under `mac/` (x86_64). Expected after every
+  release; to silence it, `rm -rf dist-electron/mac` and
+  `lsregister -u "dist-electron/mac/Cyboflow Dev.app"`.
 
 - **Bundled `peekaboo` capture binary.** It ships unpacked beside the asar and
   is RE-SIGNED under our Team ID (it arrives already signed as
