@@ -6,8 +6,20 @@ r2 = Codex adversarial round 1 folded in (§8); r3 = user decisions: Standard =
 as-authored defaults, Custom = selectable 4th level, Advanced-save three-way prompt (§9).
 Implementation deltas vs this plan: the save prompt kept "create a project-specific copy"
 as a 4th option; the missing-step prompt rule in planner/ship .md was reversed (absent
-from the appended list = skip work AND report); no model-color chip tokens (model·effort
-sub-labels instead); the editor selector component is named TuningLevelDial.
+from the appended list = skip work AND report); the editor selector component is named
+TuningLevelDial.
+r4 (user decisions, 2026-08-26, post-live-smoke): the simple page was reworked to match
+the design artboard (model-color chips + legend, removed-step strikethrough diff vs the
+Standard baseline, hatched human gates, flat per-task lane chips); dial/delete writes go
+through a new refresh-only `onMutated` host callback (`onSaved` closes the modal at every
+host — a dial click must not); chip model tags fall back level-pin → agent catalogue run
+target → "run model"; token estimates render ONLY `source: 'measured'` medians (invented
+static/derived fallbacks are hidden); and — superseding D1's "Standard is the identity" —
+**Standard now pins the design matrix's aligned-default models on the calibrated flows**
+(sprint + planner; agentConfigs pins only, no structural edits, evalDefault untouched so
+the 3-slot jury stays exactly as shipped). Uncalibrated flows keep the identity and the
+`'{}'` freeze sentinel; sprint/planner standard runs freeze the pinned spec like any
+preset level, so their spec_hash forks from the pre-feature `'{}'` revision by design.
 Design reference: https://claude.ai/code/artifact/34cc2e25-2c27-415c-9acd-a893d68b62e1
 
 ## 1. What we're building
