@@ -3626,6 +3626,44 @@ export class McpQueryHandler {
    * true, narrower return type lets callers that need an even narrower actor
    * type (e.g. ArtifactActor) assign `ctx.actor` directly with no coercion.
    */
+  /**
+   * READ-ONLY sibling of {@link resolveReviewItemRunContext}: resolves the
+   * project without the terminal-run refusal.
+   *
+   * The `run_not_active` gate exists to stop a settled run WRITING — a finding
+   * filed or resolved after the human's gate closed lands where nobody looks.
+   * Applying it to a READ was collateral damage, and it lands squarely on the
+   * case that matters: the code-review eval fires at SETTLE (terminalEvalSubscriber
+   * grades on awaiting_review|completed), so by the time its verdict exists the
+   * run it graded is frequently already `completed` — and the human's very next
+   * move is to open a chat and say "fix what the eval found". That ask was
+   * refused outright, on a run whose findings were sitting in the table.
+   *
+   * A read cannot corrupt a settled run, so the only checks kept are the two that
+   * say the request is meaningless: the 'orchestrator' sentinel (no run row at
+   * all) and an unknown id. Writes keep the full guard — see
+   * {@link resolveTargetInScope} for how a chat still resolves a settled sibling
+   * run's finding without reviving that run.
+   */
+  private resolveReadOnlyRunContext(
+    runId: string,
+  ): { ok: true; projectId: number } | { ok: false; error: string } {
+    if (runId === 'orchestrator') {
+      return { ok: false, error: 'finding_requires_real_run' };
+    }
+    const row = this.db
+      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { projectId?: unknown } | undefined;
+    if (!row) {
+      return { ok: false, error: 'run_not_found' };
+    }
+    const projectId = typeof row.projectId === 'number' ? row.projectId : Number(row.projectId);
+    if (!Number.isFinite(projectId)) {
+      return { ok: false, error: 'run_not_found' };
+    }
+    return { ok: true, projectId };
+  }
+
   private resolveReviewItemRunContext(
     runId: string,
   ): { ok: true; projectId: number; actor: `agent:${string}` } | { ok: false; error: string } {
@@ -3893,8 +3931,11 @@ export class McpQueryHandler {
    * gave the agent no way to tell that empty apart from a genuinely clean run.
    * See selectSessionRunScope for the link and its fail-soft narrowing.
    *
-   * Mid-run-only via the shared run-context guard (a terminal run replies
-   * run_not_active), matching get-selected-findings / resolve-finding.
+   * READABLE AFTER SETTLE, unlike get-selected-findings / resolve-finding: it
+   * takes the read-only run context, which drops the `run_not_active` refusal.
+   * The eval fires AT settle, so gating this read on a live run refused exactly
+   * the "the run finished, now go fix what review found" ask it exists to serve.
+   * The write path keeps the full guard.
    *
    * AWAITED, unlike its read-only sibling get-selected-findings: this read must
    * observe the run's OWN prior `report_finding` writes, and those are enqueued
@@ -3909,7 +3950,7 @@ export class McpQueryHandler {
     msg: Extract<McpQueryMessage, { type: 'mcp-list-run-findings' }>,
     client: net.Socket,
   ): Promise<void> {
-    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    const ctx = this.resolveReadOnlyRunContext(msg.runId);
     if (!ctx.ok) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
@@ -3960,15 +4001,27 @@ export class McpQueryHandler {
    */
   /**
    * Guard `resolve_finding`'s target: it must be a `kind='finding'` row that
-   * THIS run is entitled to close. Two disjoint entitlements, matching the tool's
-   * only two legitimate callers:
+   * THIS run is entitled to close. Three disjoint entitlements, matching the
+   * tool's legitimate callers:
    *
    *  - the run FILED it (`run_id = runId`) — sprint/ship's address-review closing
-   *    out its own code-review findings; or
+   *    out its own code-review findings;
    *  - the run was SEEDED with it (`workflow_runs.seed_finding_ids`) — a compound
    *    run acting on findings a human selected, which by definition belong to
    *    EARLIER runs. This arm is why an ownership check cannot simply be
-   *    `run_id = runId`: that would break compound entirely.
+   *    `run_id = runId`: that would break compound entirely; or
+   *  - a run in the caller's OWN SESSION filed it — a chat turn closing out the
+   *    findings of the flow run it is sitting on top of. Without this arm the
+   *    widened read is half a loop: the agent can now SEE the flow run's
+   *    findings, fix them, and then be refused `finding_not_in_run_scope` on
+   *    every single resolve, because a chat's run id is the `__quick__` sentinel
+   *    and never the run that filed them.
+   *
+   * The third arm deliberately does NOT relax the CALLER's liveness check in
+   * {@link handleResolveFinding}: the caller is the sentinel, which
+   * chatSentinelProvider revives to 'running' for the turn, so a chat resolves a
+   * settled sibling run's finding without that run being revived or written to.
+   * Session membership is the entitlement, session-mate liveness is not.
    *
    * Anything else — another run's finding, a `decision` gate, a `human_task`, a
    * missing id — is refused rather than silently closed. Read-only; the actual
@@ -3987,6 +4040,16 @@ export class McpQueryHandler {
     if (row === undefined) return { ok: false, error: 'not_found' };
     if (row.kind !== 'finding') return { ok: false, error: 'not_a_finding' };
     if (row.runId === runId) return { ok: true };
+
+    // Same-session arm. Checked before the seed arm because it is the common
+    // case for a chat turn and needs no JSON parse.
+    if (
+      typeof row.runId === 'string' &&
+      row.runId.length > 0 &&
+      selectSessionRunScope(this.db, runId).includes(row.runId)
+    ) {
+      return { ok: true };
+    }
 
     // Seeded arm: the compound path. Unparseable / absent seed json ⇒ no
     // entitlement (fail closed), mirroring handleGetSelectedFindings' fail-soft

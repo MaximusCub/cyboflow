@@ -460,7 +460,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_resolve_finding',
     description:
-      'Resolve a finding the run consumed; records the correct resolution prefix; routes through the review-item chokepoint. Call this immediately after each finding\'s action lands — resolves are rejected once the run reaches a terminal status.',
+      'Resolve a finding the run consumed; records the correct resolution prefix; routes through the review-item chokepoint. Call this immediately after each finding\'s action lands — resolves are rejected once YOUR OWN run reaches a terminal status (a chat turn\'s run is its session\'s live `__quick__` sentinel, so a chat is not blocked by this). You may resolve a finding your run filed, one a human seeded into your Compound run, or one filed by any run in YOUR SESSION — that last arm is what lets a chat close out the findings of the flow run it is sitting on, which it could never have filed itself. Anything else is refused with finding_not_in_run_scope.',
     input: z.object({
       review_item_id: z.string().min(1).describe('The review_items.id of the finding to resolve (required)'),
       resolution_kind: z.enum(['fixed', 'triaged', 'promoted']).describe('How the finding was resolved: fixed = quick fix applied in-place, triaged = reviewed/dispositioned (e.g. a docs edit), promoted = minted a backlog task (pair with task_id)'),

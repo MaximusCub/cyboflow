@@ -4272,8 +4272,9 @@ describe('shell-approval-request -> auto-derive sprint lane', () => {
 //     The triage tray seeds a compound run with workflow_runs.seed_finding_ids
 //     (migration 034). get-selected-findings re-reads that set (read-only);
 //     resolve-finding resolves a consumed finding via the ReviewItemRouter
-//     chokepoint, AWAITED so a failure surfaces. Both are mid-run-only — a
-//     terminal run is rejected by the shared run-context guard (run_not_active).
+//     chokepoint, AWAITED so a failure surfaces. get-selected-findings and
+//     resolve-finding stay mid-run-only (run_not_active); list-run-findings is a
+//     pure read and deliberately is NOT — the eval grades AT settle.
 // ---------------------------------------------------------------------------
 
 describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding)', () => {
@@ -4611,8 +4612,13 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       expect(data.findings[0].title).toBe('Races the reader');
     });
 
-    it('is mid-run-only — a terminal run is rejected by the shared run-context guard', async () => {
+    it('READS a terminal run — the eval grades at settle, so its findings outlive the run', async () => {
+      // Previously refused with run_not_active. That gate exists to stop a
+      // settled run WRITING; applying it to a read refused the exact ask this
+      // tool serves — "the run finished, now go fix what review found" — on a
+      // run whose findings were sitting in the table the whole time.
       seedCompoundRun(fdb, { runId: 'run-a', status: 'completed' });
+      seedFinding(fdb, { id: 'ri_after', title: 'Graded at settle', runId: 'run-a' });
 
       const { socket, writes } = makeSocketDouble();
       await fHandler.handleMessage(
@@ -4621,8 +4627,28 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       );
 
       const response = parseLastWrite(writes);
-      expect(response.ok).toBe(false);
-      expect(response.error).toBe('run_not_active');
+      expect(response.ok).toBe(true);
+      const data = response.data as { findings: Array<{ id: string }> };
+      expect(data.findings.map((f) => f.id)).toEqual(['ri_after']);
+    });
+
+    it('still refuses the orchestrator sentinel and an unknown run id', async () => {
+      // The read-only context drops ONLY the terminal-run refusal. A request
+      // that names no real run is still meaningless and must not reply ok:true
+      // with an empty set, which would read as "this run is clean".
+      const { socket: s1, writes: w1 } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-orch', runId: 'orchestrator' },
+        s1,
+      );
+      expect(parseLastWrite(w1)).toMatchObject({ ok: false, error: 'finding_requires_real_run' });
+
+      const { socket: s2, writes: w2 } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-ghost', runId: 'run-ghost' },
+        s2,
+      );
+      expect(parseLastWrite(w2)).toMatchObject({ ok: false, error: 'run_not_found' });
     });
   });
 
@@ -4661,6 +4687,73 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
         status: string;
       };
       expect(row.status).toBe('pending');
+    });
+
+    it("resolves a SETTLED session-mate's finding from a live chat sentinel", async () => {
+      // The other half of the loop the widened read opens. A chat can now SEE
+      // the flow run's findings; without this arm every resolve on one came back
+      // finding_not_in_run_scope, because a chat's run id is the `__quick__`
+      // sentinel and never the run that filed them. Note the flow run is
+      // COMPLETED and stays completed — session membership is the entitlement,
+      // session-mate liveness is not, and nothing here revives it.
+      fdb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      seedCompoundRun(fdb, { runId: 'run-flow', status: 'completed' });
+      seedCompoundRun(fdb, { runId: 'run-sentinel' });
+      fdb
+        .prepare(`UPDATE workflow_runs SET session_id = 'sess-1' WHERE id IN ('run-flow', 'run-sentinel')`)
+        .run();
+      seedFinding(fdb, { id: 'ri_flow', title: 'Filed by the flow run', runId: 'run-flow' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-sess',
+          runId: 'run-sentinel',
+          reviewItemId: 'ri_flow',
+          resolutionKind: 'fixed',
+          note: 'fixed in the chat',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes)).toMatchObject({ ok: true });
+      await drain();
+      const row = fdb.prepare(`SELECT status FROM review_items WHERE id = 'ri_flow'`).get() as {
+        status: string;
+      };
+      expect(row.status).toBe('resolved');
+      // The settled session-mate was NOT revived as a side effect.
+      const flow = fdb.prepare(`SELECT status FROM workflow_runs WHERE id = 'run-flow'`).get() as {
+        status: string;
+      };
+      expect(flow.status).toBe('completed');
+    });
+
+    it('does NOT extend the session arm to another session\'s run', async () => {
+      fdb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      seedCompoundRun(fdb, { runId: 'run-sentinel' });
+      seedCompoundRun(fdb, { runId: 'run-elsewhere' });
+      fdb.prepare(`UPDATE workflow_runs SET session_id = 'sess-1' WHERE id = 'run-sentinel'`).run();
+      fdb.prepare(`UPDATE workflow_runs SET session_id = 'sess-2' WHERE id = 'run-elsewhere'`).run();
+      seedFinding(fdb, { id: 'ri_far', title: 'Another session', runId: 'run-elsewhere' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-far',
+          runId: 'run-sentinel',
+          reviewItemId: 'ri_far',
+          resolutionKind: 'fixed',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes)).toMatchObject({
+        ok: false,
+        error: 'finding_not_in_run_scope',
+      });
     });
 
     it('refuses a non-finding review item (a gate or human task is not triage fodder)', async () => {
