@@ -101,14 +101,17 @@ export function TuningLevelSelector({
                     : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
               )}
             >
-              <span className="flex items-center gap-1">
-                {TUNING_LEVEL_LABELS[level]}
-                {level === savedLevel && (
-                  <span className="eyebrow shrink-0 text-text-muted" data-testid={`wizard-tuning-level-${level}-saved-tag`}>
-                    saved default
-                  </span>
-                )}
-              </span>
+              <span>{TUNING_LEVEL_LABELS[level]}</span>
+              {/* Own line, not inline with the name — inline it overflowed the
+                  segment at wizard widths ("SAVED DEFAUL…"). */}
+              {level === savedLevel && (
+                <span
+                  className="eyebrow text-text-muted"
+                  data-testid={`wizard-tuning-level-${level}-saved-tag`}
+                >
+                  saved default
+                </span>
+              )}
               {estimate !== undefined && (
                 <span className="text-[10px] text-text-tertiary">{estimate}</span>
               )}
