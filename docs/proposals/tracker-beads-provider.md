@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-7 absorbed (11 high + 2 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-8 absorbed (12 high + 2 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -208,8 +208,12 @@ leaves TOCTOU windows), applied per direction:
 - **Inbound (imports, merges, cursor, sweep archival)**: every adapter read returns its complete
   batch before the engine's apply loop begins (adapters paginate internally; `bd` is a single
   process reading one opened database, so a batch is wholly from one instance). Re-check the
-  instance id **after collection, before the first local mutation** — `listIssues` → re-check →
-  apply loop, and `listIssueIds` → re-check → archival. A mismatch or failed re-check discards
+  instance id **after ALL of a phase's adapter reads, before its first local mutation** —
+  `listIssues` → re-check → apply loop, and for the sweep: `listIssueIds` **plus every
+  absent-id `getIssue` disambiguation lookup** → re-check → archival (Codex round-8: the point
+  lookups are adapter reads that influence archival — a re-check placed after the listing but
+  before them would leave lookups running against a replaced database and a moved issue's null
+  answer would archive its live twin). A mismatch or failed re-check discards
   the collected batch and pauses via `TrackerAuthError`. No local write (entity, link, conflict,
   or cursor) ever derives from an unrevalidated batch. This closes every destructive local case,
   including replacement *during* a listing.
@@ -223,8 +227,9 @@ leaves TOCTOU windows), applied per direction:
   not possible from outside the process; this residual is the floor, and it is non-destructive.
 
 Negative tests: same-path reinit (a) before a pass, (b) between the initial check and
-`listIssueIds`, (c) between `listIssues` and the apply loop — zero local mutations in all three —
-and (d) before an outbound drain, proving the preflight pauses the row. Note: keyless identity
+`listIssueIds`, (c) between `listIssues` and the apply loop, (d) between `listIssueIds` and an
+absent-id `getIssue` lookup — zero local mutations in all four — and (e) before an outbound
+drain, proving the preflight pauses the row. Note: keyless identity
 matching must skip `normalizeBaseUrl` URL parsing (`base_url` stays NULL for beads; the path is
 not a URL).
 
@@ -493,3 +498,12 @@ round-6 "harmless by construction" claim was wrong for outbound) and absorbed:
    re-checks identity before settling). Four negative tests enumerated. This closes the
    workspace-replacement thread: the accepted residual is the floor reachable without an atomic
    identity-bound CLI transport, which does not exist.
+
+Codex adversarial round 8 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] The sweep's absent-id `getIssue` disambiguation lookups are adapter reads that
+   influence archival but sat outside the round-7 sandwich — a replacement after the
+   post-listing re-check would let a moved issue's null lookup archive its live twin. Absorbed:
+   the inbound re-check moves after ALL of a phase's adapter reads (listing + point lookups),
+   immediately before archival; negative test (d) added.
