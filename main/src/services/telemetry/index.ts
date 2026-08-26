@@ -133,6 +133,10 @@ export function isSentryActive(): boolean {
  * so context must ride in `tags` — low-cardinality, non-PII values only (seam
  * names, substrate, platform). Detail belongs in the error MESSAGE, which
  * beforeSend home-path-redacts automatically.
+ *
+ * Grouping is fingerprinted EXPLICITLY, never by stack — see `seamFingerprint`.
+ * That makes the `errorClass` and `errorDigest` tags load-bearing rather than
+ * decorative: they are what splits distinct failures at a shared seam.
  */
 export function captureSeamError(
   seam: string,
@@ -148,8 +152,50 @@ export function captureSeamError(
   if (!sentryActive) return;
   try {
     const err = error instanceof Error ? error : new Error(String(error));
-    Sentry.captureException(err, { tags: { seam, ...tags } });
+    Sentry.captureException(err, {
+      tags: { seam, ...tags },
+      fingerprint: seamFingerprint(seam, tags),
+    });
   } catch {
     // Telemetry must never throw into app code.
   }
+}
+
+/**
+ * The explicit Sentry grouping key for a seam capture.
+ *
+ * Sentry's default grouping fingerprints a handled capture by its STACK — which,
+ * in a packaged build, is minified `main.dist/....js:LINE:COL`. Every seam here
+ * constructs its `new Error(...)` at one fixed call site, so that stack carries
+ * no information the seam name does not, while shifting with every build and
+ * differing between the several call sites that share one seam. The observed
+ * result was grouping that failed in both directions at once: `monitor-query-failed`
+ * fragmented across three issues (CYBOFLOW-APP-S / -F / -1D), under-reporting its
+ * true volume, while a single issue (-B) lumped `sdk-session-terminal-result`
+ * together with `sdk-session-error`. Volume ranking is the only tool triage has
+ * for choosing what to fix, and both failures corrupt it.
+ *
+ * So group on the identity the seam has already computed, not on the stack:
+ *
+ *   [seam, errorClass?, errorDigest?]
+ *
+ * `errorClass` comes from `classifyErrorPattern`'s bounded vocabulary, so it
+ * separates genuinely different failures at one seam without unbounded
+ * cardinality. `errorDigest` is attached only for the `other` / `unknown` classes
+ * (see `unclassifiedErrorTags`) and is precisely the discriminator those need —
+ * without it every unclassified failure at a seam piles into one bucket that
+ * cannot say whether it is one bug or twenty.
+ *
+ * Both parts are optional and appended only when present, so a seam that reports
+ * no class still groups cleanly by seam alone.
+ *
+ * NOTE: changing a fingerprint REGROUPS in Sentry — existing issues stop
+ * receiving events and new ones are minted in their place. That one-time
+ * discontinuity is the intended cost of correct grouping from here on.
+ */
+function seamFingerprint(seam: string, tags?: Record<string, string>): string[] {
+  const fingerprint = [seam];
+  if (tags?.errorClass) fingerprint.push(tags.errorClass);
+  if (tags?.errorDigest) fingerprint.push(tags.errorDigest);
+  return fingerprint;
 }

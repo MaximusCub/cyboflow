@@ -52,6 +52,13 @@ export function emitUsage<E extends TelemetryEventName>(event: E, props?: Teleme
 // workflow name, an errorClass label from classifyErrorPattern). Free-form
 // detail belongs in the error MESSAGE, which beforeSend home-path-redacts.
 // NEVER put run ids, file paths, prompts, or repo names in tags.
+//
+// Two of those tags are LOAD-BEARING, not decorative: `errorClass` and
+// `errorDigest` are the explicit Sentry grouping key alongside the seam name
+// (see `seamFingerprint` in services/telemetry/index.ts). Omitting `errorClass`
+// at a seam that can fail several distinct ways collapses those failures into
+// one unreadable issue; spreading `unclassifiedErrorTags(errorClass, message)`
+// is what keeps the `other` bucket separable.
 // ---------------------------------------------------------------------------
 type SeamErrorSink = (seam: string, error: unknown, tags?: Record<string, string>) => void;
 
