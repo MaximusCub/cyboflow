@@ -47,6 +47,26 @@ interface CodexPtySpawnContext {
   runId: string;
 }
 
+/**
+ * The in-flight composer turn for one panel, plus every turn that arrived while
+ * it was still waiting for its deferred Enter. See
+ * {@link CodexPtyManager.relayUserTurn}.
+ */
+interface PendingComposerSubmit {
+  /**
+   * The EXACT pty the in-flight turn's body was written to. Every later step of
+   * this chain re-checks identity against it, so a panel that is stopped — or
+   * killed and respawned under the same panelId by continuePanel /
+   * restartPanelWithHistory — never receives a body or an Enter meant for the
+   * process it replaced.
+   */
+  target: pty.IPty;
+  /** Bodies that arrived mid-chain, in arrival order. Drained one turn at a time. */
+  queue: string[];
+  /** The next scheduled step (Enter for the in-flight body, or a queued body). */
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
 const PTY_BACKLOG_CAP_BYTES = 200_000;
 
 /**
@@ -97,6 +117,8 @@ export class CodexPtyManager extends AbstractCliManager {
   private readonly panelRunIds = new Map<string, string>();
   private readonly ptyBacklog = new Map<string, string>();
   private readonly ptySpawnContext = new AsyncLocalStorage<CodexPtySpawnContext>();
+  /** Per-panel composer chain; see {@link relayUserTurn}. Absent = nothing in flight. */
+  private readonly pendingComposerSubmits = new Map<string, PendingComposerSubmit>();
 
   protected getCliToolName(): string {
     return 'Codex';
@@ -259,6 +281,10 @@ export class CodexPtyManager extends AbstractCliManager {
   // form deleted panelRunIds/ptyBacklog for EVERY panel in the session,
   // including a still-live sibling whose process had not exited.
   protected async cleanupCliResources(panelId: string, _sessionId: string): Promise<void> {
+    // Cancel any armed composer step for this panel. The identity guard already
+    // makes a late step a no-op, so this is hygiene (no orphan timer, no map
+    // entry surviving the process) rather than the correctness barrier.
+    this.clearPendingComposerSubmit(panelId);
     const runId = this.panelRunIds.get(panelId);
     this.panelRunIds.delete(panelId);
     if (runId) {
@@ -361,13 +387,50 @@ export class CodexPtyManager extends AbstractCliManager {
    * The panel receives the message exactly once — nothing here restarts or
    * replaces the persistent PTY process.
    *
+   * TURNS ARE SERIALIZED PER PANEL. The delay opens a ~150ms window in which a
+   * second turn can arrive, and NOTHING upstream closes it: the IPC relays
+   * (`ptyPanelDispatch`, `sessions:input`) call straight through, and
+   * QuickSessionComposer deliberately never gates its busy state on the send, so
+   * the composer is ready for the next message immediately. Writing the second
+   * body during that window would concatenate it onto the FIRST, still-unsubmitted
+   * one inside the TUI composer (`bodyAbodyB`, no separator) — the pending Enter
+   * would then submit both as ONE turn and the second Enter would hit an empty
+   * composer. So a turn that arrives mid-chain is QUEUED, and its body is not
+   * written until the previous turn's Enter has actually gone out. Queued bodies
+   * also wait a full COMPOSER_SUBMIT_DELAY_MS after that Enter, so they never ride
+   * in the same burst as it (which would make the Enter itself a literal newline).
+   *
+   * Flushing the pending Enter EARLY instead of queueing would be wrong: a second
+   * turn arriving a few ms after the first would fire that Enter inside the very
+   * burst window the delay exists to clear, and the first turn would never submit.
+   *
    * The raw-keystroke path (xterm -> relayRawInput, where Enter already arrives as
    * its own '\r') must NOT route through here: it is byte-for-byte passthrough.
    */
   relayUserTurn(panelId: string, input: string): void {
-    // Throws when this panel has no live process — preserved from the previous
-    // single-write form so a dead-panel relay still surfaces to the IPC caller
-    // rather than silently half-completing.
+    const pending = this.pendingComposerSubmits.get(panelId);
+    if (pending && this.getProcess(panelId)?.process === pending.target) {
+      // A turn is mid-flight on the SAME process. Queue behind it; the chain
+      // drains it once the in-flight Enter has been written.
+      pending.queue.push(input);
+      return;
+    }
+    if (pending) {
+      // The chain belongs to a process that is gone or has been replaced. Drop
+      // it (its remaining steps would be suppressed by the identity guard
+      // anyway) so this turn starts clean against whatever is live now.
+      this.clearPendingComposerSubmit(panelId);
+    }
+    this.beginComposerTurn(panelId, input);
+  }
+
+  /**
+   * Write a turn's body immediately and arm its deferred Enter. Throws when the
+   * panel has no live process — preserved from the original single-write form so
+   * a dead-panel relay still surfaces to the IPC caller rather than silently
+   * half-completing.
+   */
+  private beginComposerTurn(panelId: string, input: string): void {
     this.sendInput(panelId, input);
     // Pin the EXACT process the body went to. stopPanel / continuePanel /
     // restartPanelWithHistory can kill (and, for the latter two, respawn) this
@@ -377,25 +440,87 @@ export class CodexPtyManager extends AbstractCliManager {
     //
     // The `!target` guard cannot fire in practice (the sendInput above throws on
     // a missing process, and nothing awaits in between) — it is what NARROWS
-    // `target` to a concrete IPty. Do not "simplify" it away: the comparison
-    // below would then degrade to `undefined !== undefined` on a torn-down
-    // panel, i.e. stop being an identity check at all.
+    // `target` to a concrete IPty. Do not "simplify" it away: the comparisons in
+    // the chain steps would then degrade to `undefined !== undefined` on a
+    // torn-down panel, i.e. stop being identity checks at all.
     const target = this.getProcess(panelId)?.process;
     if (!target) return;
-    const timer = setTimeout(() => {
-      if (this.getProcess(panelId)?.process !== target) return;
-      try {
-        this.sendInput(panelId, '\r');
-      } catch (err) {
-        this.logger?.warn(
-          `[Codex] deferred submit '\\r' failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }, COMPOSER_SUBMIT_DELAY_MS);
-    // A pending Enter must never hold the event loop open at app quit.
+    const pending: PendingComposerSubmit = { target, queue: [], timer: null };
+    this.pendingComposerSubmits.set(panelId, pending);
+    pending.timer = this.scheduleComposerStep(() => this.submitPendingComposerTurn(panelId));
+  }
+
+  /**
+   * COMPOSER_SUBMIT_DELAY_MS after a body write: send the Enter that submits it,
+   * then either arm the next queued turn or retire the chain.
+   */
+  private submitPendingComposerTurn(panelId: string): void {
+    const pending = this.pendingComposerSubmits.get(panelId);
+    if (!pending) return;
+    pending.timer = null;
+    if (this.getProcess(panelId)?.process !== pending.target) {
+      // Stopped or replaced inside the window. Neither this Enter nor anything
+      // queued behind it belongs to whatever is live now — drop the whole chain
+      // rather than commit a stranger's composer.
+      this.pendingComposerSubmits.delete(panelId);
+      return;
+    }
+    try {
+      this.sendInput(panelId, '\r');
+    } catch (err) {
+      this.logger?.warn(
+        `[Codex] deferred submit '\\r' failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.pendingComposerSubmits.delete(panelId);
+      return;
+    }
+    const next = pending.queue.shift();
+    if (next === undefined) {
+      this.pendingComposerSubmits.delete(panelId);
+      return;
+    }
+    pending.timer = this.scheduleComposerStep(() => this.writeQueuedComposerBody(panelId, next));
+  }
+
+  /** Write a queued turn's body onto the now-empty composer and re-arm its Enter. */
+  private writeQueuedComposerBody(panelId: string, input: string): void {
+    const pending = this.pendingComposerSubmits.get(panelId);
+    if (!pending) return;
+    pending.timer = null;
+    if (this.getProcess(panelId)?.process !== pending.target) {
+      this.pendingComposerSubmits.delete(panelId);
+      return;
+    }
+    try {
+      this.sendInput(panelId, input);
+    } catch (err) {
+      this.logger?.warn(
+        `[Codex] queued composer body failed for panel ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.pendingComposerSubmits.delete(panelId);
+      return;
+    }
+    pending.timer = this.scheduleComposerStep(() => this.submitPendingComposerTurn(panelId));
+  }
+
+  /**
+   * One step of a composer chain, one COMPOSER_SUBMIT_DELAY_MS out. Unref'd: a
+   * pending Enter must never hold the event loop open at app quit.
+   */
+  private scheduleComposerStep(step: () => void): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(step, COMPOSER_SUBMIT_DELAY_MS);
     if (typeof (timer as { unref?: () => void }).unref === 'function') {
       (timer as { unref: () => void }).unref();
     }
+    return timer;
+  }
+
+  /** Abandon a panel's composer chain, cancelling whatever step it had armed. */
+  private clearPendingComposerSubmit(panelId: string): void {
+    const pending = this.pendingComposerSubmits.get(panelId);
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.pendingComposerSubmits.delete(panelId);
   }
 
   /**

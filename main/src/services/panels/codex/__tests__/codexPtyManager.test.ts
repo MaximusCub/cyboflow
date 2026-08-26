@@ -296,10 +296,16 @@ describe('CodexPtyManager.relayUserTurn (composer submit)', () => {
     expect(procB.writes).toEqual(['turn for panel two', '\r']);
   });
 
-  it('handles two relayUserTurn calls on the same panel in quick succession as two independent, correctly-ordered submissions', () => {
-    // Each call captures its own process-identity target and schedules its own
-    // timer; back-to-back calls against the SAME still-live process must not
-    // clobber or cancel each other's pending Enter.
+  it('SERIALIZES two relayUserTurn calls on the same panel into two distinct turns instead of merging them', () => {
+    // Regression: each call used to write its body immediately and schedule its
+    // own bare timer, so a second turn arriving inside the ~150ms delay window
+    // produced writes ['bodyA', 'bodyB', '\r', '\r'] — bodyB was appended to the
+    // still-unsubmitted bodyA inside the TUI composer with NO separator, the
+    // first '\r' submitted the concatenation as ONE turn, and the second '\r'
+    // hit an empty composer. The user's two messages silently became one prompt.
+    //
+    // The second body must not be written until the first turn's Enter has
+    // actually gone out.
     const manager = new TestableCodexPtyManager(makeSessionManager());
     const proc = makeFakePty();
     manager.seedProcess('panel-1', proc);
@@ -307,11 +313,115 @@ describe('CodexPtyManager.relayUserTurn (composer submit)', () => {
     manager.relayUserTurn('panel-1', 'first turn');
     manager.relayUserTurn('panel-1', 'second turn');
 
-    expect(proc.writes).toEqual(['first turn', 'second turn']);
+    // Only the FIRST body is on the wire — the second is queued, not written.
+    expect(proc.writes).toEqual(['first turn']);
 
     vi.advanceTimersByTime(1000);
 
-    expect(proc.writes).toEqual(['first turn', 'second turn', '\r', '\r']);
+    // Strict alternation: every body is followed by its OWN Enter, and no body
+    // is ever adjacent to another body.
+    expect(proc.writes).toEqual(['first turn', '\r', 'second turn', '\r']);
+  });
+
+  it('never writes a queued body before the preceding Enter, at any point in the timeline', () => {
+    // Walks the chain in COMPOSER_SUBMIT_DELAY_MS-sized steps so the ORDERING
+    // invariant is checked mid-flight, not just at the end: a fix that wrote
+    // both bodies up front and merely reordered the final array would pass the
+    // end-state assertion above but fail here.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'alpha');
+    manager.relayUserTurn('panel-1', 'beta');
+    manager.relayUserTurn('panel-1', 'gamma');
+
+    expect(proc.writes).toEqual(['alpha']);
+    vi.advanceTimersByTime(150);
+    expect(proc.writes).toEqual(['alpha', '\r']);
+    vi.advanceTimersByTime(150);
+    expect(proc.writes).toEqual(['alpha', '\r', 'beta']);
+    vi.advanceTimersByTime(150);
+    expect(proc.writes).toEqual(['alpha', '\r', 'beta', '\r']);
+    vi.advanceTimersByTime(150);
+    expect(proc.writes).toEqual(['alpha', '\r', 'beta', '\r', 'gamma']);
+    vi.advanceTimersByTime(150);
+    expect(proc.writes).toEqual(['alpha', '\r', 'beta', '\r', 'gamma', '\r']);
+
+    // Chain retired — nothing further is armed.
+    vi.advanceTimersByTime(5000);
+    expect(proc.writes).toEqual(['alpha', '\r', 'beta', '\r', 'gamma', '\r']);
+  });
+
+  it('drops queued turns too when the panel process is replaced mid-chain', () => {
+    // A queued body is written LATER, so the process-identity guard has to cover
+    // the queued steps as well — otherwise a respawn under the same panelId
+    // would receive a body typed for the process it replaced.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const original = makeFakePty();
+    manager.seedProcess('panel-1', original);
+
+    manager.relayUserTurn('panel-1', 'first turn');
+    manager.relayUserTurn('panel-1', 'queued turn');
+    const replacement = makeFakePty();
+    manager.seedProcess('panel-1', replacement);
+
+    vi.advanceTimersByTime(5000);
+
+    expect(original.writes).toEqual(['first turn']);
+    expect(replacement.writes).toEqual([]);
+  });
+
+  it('starts a fresh chain on the replacement process for a turn relayed AFTER the swap', () => {
+    // The stale chain must not swallow the new turn: relayUserTurn sees that the
+    // live process no longer matches the pending chain's target, abandons it, and
+    // submits normally against the replacement.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const original = makeFakePty();
+    manager.seedProcess('panel-1', original);
+
+    manager.relayUserTurn('panel-1', 'turn for the old process');
+    const replacement = makeFakePty();
+    manager.seedProcess('panel-1', replacement);
+    manager.relayUserTurn('panel-1', 'turn for the new process');
+
+    expect(replacement.writes).toEqual(['turn for the new process']);
+
+    vi.advanceTimersByTime(5000);
+
+    expect(original.writes).toEqual(['turn for the old process']);
+    expect(replacement.writes).toEqual(['turn for the new process', '\r']);
+  });
+
+  it('still throws on a dead panel even when a chain is pending, and delivers nothing', async () => {
+    // The synchronous dead-panel throw is the caller's only signal; queueing must
+    // not swallow it.
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'first turn');
+    await manager.stopPanel('panel-1');
+
+    expect(() => manager.relayUserTurn('panel-1', 'after the stop')).toThrow(
+      /No Codex process found/,
+    );
+
+    vi.advanceTimersByTime(5000);
+    expect(proc.writes).toEqual(['first turn']);
+  });
+
+  it('accepts a new turn on the same process once the previous chain has drained', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const proc = makeFakePty();
+    manager.seedProcess('panel-1', proc);
+
+    manager.relayUserTurn('panel-1', 'first turn');
+    vi.advanceTimersByTime(1000);
+    manager.relayUserTurn('panel-1', 'much later turn');
+    vi.advanceTimersByTime(1000);
+
+    expect(proc.writes).toEqual(['first turn', '\r', 'much later turn', '\r']);
   });
 });
 
