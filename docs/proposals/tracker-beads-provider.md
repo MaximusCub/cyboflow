@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-6 absorbed (10 high + 2 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-7 absorbed (11 high + 2 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -202,18 +202,31 @@ payload — no new column) and an **immutable database instance identifier as `w
 (replacing the prefix, which moves to `workspace_name` — committed config survives a reinit, an
 instance id does not). Phase 0 probes the best anchor: a `metadata.json` identifier if beads
 exposes one, else the Dolt database's root-commit hash via SQL (deterministic and immutable per
-init). **Validation is a sandwich, not a preflight** (Codex round-6 finding 1: a top-of-pass
-check leaves a TOCTOU window — `.beads` replaced mid-pass poisons the sweep's collected id set
-and the archive step then destroys local links): check identity at pass start, collect
-sweep/reconciliation results, then **re-check identity before applying any local archival or
-outbound mutation** — a mismatch or second-check failure discards the collected results and
-pauses via `TrackerAuthError`. The residual "replaced then restored between re-check and apply"
-case requires restoring the *same* instance id, i.e. the same database — harmless by
-construction. A full atomicity guarantee is impossible over a non-transactional CLI; the
-sandwich reduces the hazard to that harmless case. Negative tests: reinit at the same path
-(a) before a pass and (b) between the initial check and `listIssueIds`, proving zero local
-entities are archived in both. Note: keyless identity matching must skip `normalizeBaseUrl`
-URL parsing (`base_url` stays NULL for beads; the path is not a URL).
+init). **Validation is a sandwich, not a preflight** (Codex rounds 6-7: a top-of-pass check
+leaves TOCTOU windows), applied per direction:
+
+- **Inbound (imports, merges, cursor, sweep archival)**: every adapter read returns its complete
+  batch before the engine's apply loop begins (adapters paginate internally; `bd` is a single
+  process reading one opened database, so a batch is wholly from one instance). Re-check the
+  instance id **after collection, before the first local mutation** — `listIssues` → re-check →
+  apply loop, and `listIssueIds` → re-check → archival. A mismatch or failed re-check discards
+  the collected batch and pauses via `TrackerAuthError`. No local write (entity, link, conflict,
+  or cursor) ever derives from an unrevalidated batch. This closes every destructive local case,
+  including replacement *during* a listing.
+- **Outbound (creates, updates)**: re-check identity immediately before **each** mutation, inside
+  the same per-project mutex window as the spawn. The residual window — a replacement landing in
+  the sub-second gap between that preflight and the child process opening the database — is
+  **explicitly accepted**: it requires a deliberate same-path reinit mid-write, its worst case is
+  one stray issue in the brand-new (empty) replacement workspace, no local data is touched, and
+  the row then settles through recovery, whose own listing re-checks identity first (wrong
+  instance ⇒ pause, never a blind retry). Atomically binding a CLI spawn to an instance id is
+  not possible from outside the process; this residual is the floor, and it is non-destructive.
+
+Negative tests: same-path reinit (a) before a pass, (b) between the initial check and
+`listIssueIds`, (c) between `listIssues` and the apply loop — zero local mutations in all three —
+and (d) before an outbound drain, proving the preflight pauses the row. Note: keyless identity
+matching must skip `normalizeBaseUrl` URL parsing (`base_url` stays NULL for beads; the path is
+not a URL).
 
 **Error taxonomy: retry only the recognized-transient** (Codex round-5 finding 2). The
 retryable-by-default mapping would let a deterministic failure — unknown flag after a `bd`
@@ -466,3 +479,17 @@ absorbed:
    round-5's inverted taxonomy. Absorbed: stale block deleted; the inverted classification is
    the single authoritative table, with `bd`-missing/workspace-missing folded into the
    deterministic-pause row.
+
+Codex adversarial round 7 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED (the
+round-6 "harmless by construction" claim was wrong for outbound) and absorbed:
+
+1. [high] The sandwich did not enclose all mutations: inbound applies + per-item cursor advance
+   ran before the re-check, and an outbound replacement after the re-check redirects the next
+   `bd` write — one replacement suffices, no restore needed. Absorbed: per-direction sandwich —
+   inbound re-checks between every collected batch and the first local mutation (closing all
+   destructive local cases); outbound re-checks per mutation inside the spawn's mutex window,
+   with the sub-second preflight-to-spawn residual EXPLICITLY ACCEPTED as non-destructive
+   (worst case: one stray issue in the user's own just-reinitialized empty workspace; recovery
+   re-checks identity before settling). Four negative tests enumerated. This closes the
+   workspace-replacement thread: the accepted residual is the floor reachable without an atomic
+   identity-bound CLI transport, which does not exist.
