@@ -7,8 +7,8 @@
  * (`session_summaries.last_turn_id`) is the load-bearing gate. When the timer
  * survives to fire — or a lazy read kicks a catch-up — the full gating stack
  * (§2) runs before any Haiku call: env kill switch, config toggle, session
- * eligibility (exists / not archived / quick-sentinel / Claude runtime),
- * turn-in-flight + open-gate probes, an `updated_at` race guard, the content
+ * eligibility (exists / not archived / quick-sentinel / a summarizable
+ * provider+substrate lane), turn-in-flight + open-gate probes, an `updated_at` race guard, the content
  * watermark + sitting segmentation, a per-session in-flight dedupe behind a
  * global concurrency cap of 1, and an attempted-watermark retry cooldown.
  *
@@ -19,6 +19,7 @@
  * wiring site (`main/src/index.ts`). That keeps every environment coupling out
  * of here and lets the scheduler unit-test against fakes with fake timers.
  */
+import { isSessionSummarySupported } from '../../../../shared/types/sessionSummary';
 import type { LoggerLike } from '../types';
 import type { SessionSummarizeFn } from './sessionSummaryQuery';
 import {
@@ -61,6 +62,8 @@ export interface SchedulerSessionRow {
   chat_run_id?: string | null;
   agent_provider?: string | null;
   agent_runtime?: string | null;
+  /** `sessions.substrate` — 'sdk' | 'interactive'; the second half of the coverage predicate. */
+  substrate?: string | null;
   updated_at: string;
 }
 
@@ -222,14 +225,19 @@ export function makeSessionSummaryScheduler(
     if (process.env[KILL_SWITCH_ENV] === '1') return;
     if (!deps.isEnabled()) return;
 
-    // §2.8 eligibility: exists / not archived / quick sentinel / Claude runtime.
+    // §2.8 eligibility: exists / not archived / quick sentinel / summarizable lane.
     const session = deps.db.getSession(sessionId);
     if (!session) return;
     if (session.archived) return;
     if (session.chat_run_id === null || session.chat_run_id === undefined) return;
-    // NULL provider ⇒ Claude default ⇒ eligible; only an explicit Codex session
-    // is excluded (its turn lifecycle the scheduler does not observe — §2.8).
-    if (session.agent_provider === 'codex') return;
+    // Coverage is provider x SUBSTRATE, via the SHARED predicate the board row's
+    // `summarySupported` flag also reads — the two must never disagree about
+    // which sessions this feature covers. Every SDK lane (Claude, Codex, OMP)
+    // streams conversation rows and is eligible; only a Codex/OMP *PTY* session
+    // is excluded, having no transcript any ingest can read.
+    if (!isSessionSummarySupported({ agentProvider: session.agent_provider, substrate: session.substrate })) {
+      return;
+    }
 
     // §2.3 fire-time state gates.
     if (deps.isTurnInFlight(sessionId)) return;

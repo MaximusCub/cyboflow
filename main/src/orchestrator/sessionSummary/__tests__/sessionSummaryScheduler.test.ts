@@ -59,6 +59,7 @@ function eligibleSession(overrides: Partial<SchedulerSessionRow> = {}): Schedule
     chat_run_id: '__quick__',
     agent_provider: 'claude',
     agent_runtime: 'claude-sdk',
+    substrate: 'sdk',
     updated_at: sqliteTs(0),
     ...overrides,
   };
@@ -397,10 +398,32 @@ describe('sessionSummaryScheduler', () => {
   });
 
   it.each([
+    ['a Codex SDK session', { agent_provider: 'codex', agent_runtime: 'codex-sdk' }],
+    ['an OMP SDK session', { agent_provider: 'omp', agent_runtime: 'omp-sdk' }],
+    ['a legacy row with no provider (Claude default)', { agent_provider: null }],
+  ])('summarizes %s on the SDK substrate', async (_label, overrides) => {
+    const { db } = makeFakeDb({
+      session: eligibleSession({ ...overrides, substrate: 'sdk' }),
+      messages: [convMsg(2, 'assistant', 0)],
+    });
+    const summarize = makeSummarize();
+    const scheduler = makeSessionSummaryScheduler(makeDeps({ summarize }, db));
+
+    scheduler.maybeSummarizeNow(SID, 'lazy-catchup');
+    await flush();
+    expect(summarize).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
     ['a missing session', { session: undefined }],
     ['an archived session', { session: eligibleSession({ archived: true }) }],
     ['a non-quick session (no chat_run_id sentinel)', { session: eligibleSession({ chat_run_id: null }) }],
-    ['a Codex-runtime session', { session: eligibleSession({ agent_provider: 'codex' }) }],
+    ['a Codex PTY session (no transcript any ingest can read)', {
+      session: eligibleSession({ agent_provider: 'codex', substrate: 'interactive' }),
+    }],
+    ['an OMP PTY session', {
+      session: eligibleSession({ agent_provider: 'omp', substrate: 'interactive' }),
+    }],
   ])('is a no-op for %s', async (_label, cfg) => {
     const { db } = makeFakeDb({ ...cfg, messages: [convMsg(2, 'assistant', 0)] });
     const summarize = makeSummarize();
