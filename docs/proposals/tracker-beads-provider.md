@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-10 absorbed (14 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-11 absorbed (15 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -328,9 +328,25 @@ mapping change re-considers exactly the eligible skipped ids. Sizing note: the f
 reconciliation over a legacy workspace point-fetches every unlinked id once (closed issues
 included) — a bounded one-time cost, after which each id is linked or ledgered.
 
-Phase 0 negative control: advance the cursor, introduce an issue with an older `updated_at`
-(via `bd import` of a backdated record, simulating a pull), prove the reconciliation pass
-discovers and imports it — and confirm the pull-preserves-`updated_at` assumption directly.
+**Linked issues need the same backstop** (Codex round-11: a backdated edit to an
+already-linked issue — edited offline before the cursor position, pushed after — evades the
+incremental listing, and an unseen-id diff sees the id as known; the change stays invisible and
+outbound sync may later overwrite it). So the sweep projection is **(id, revision) pairs**, not
+bare ids — `revision` is a template-renderable field ("always present"), adding it to the
+`--format` projection costs nothing. Each link persists its last-seen revision inside
+`baseline_json` (no new column; our own outbound writes stamp the response, revision included,
+so echoes never false-positive). A linked id whose swept revision differs from the stored one
+gets a `getIssue` point fetch and runs through the ordinary inbound merge/conflict path. If
+Phase 0 finds the template cannot emit revision, the fallback is a full `listIssues` (no
+`sinceIso`) on reconciliation passes, under the bounded-listing strategy. This completes the
+partition: every id in the full sweep is unseen (ledger/import path), ledgered (zero cost), or
+linked (revision compare) — no remote change class is outside a detection path.
+
+Phase 0 negative controls: (a) advance the cursor, introduce an issue with an older
+`updated_at` (via `bd import` of a backdated record, simulating a pull), prove the
+reconciliation pass discovers and imports it; (b) backdated edit to an already-LINKED issue,
+prove it merges or opens a conflict; (c) confirm the pull-preserves-`updated_at` assumption
+directly; (d) confirm the `--format` template can render `revision`.
 
 ### 5. Migration + mechanical widenings
 
@@ -577,3 +593,14 @@ round-7 "no local data touched" claim was false for a SUCCESSFUL write) and abso
    re-checked after the CLI exits, before the response reaches any local bookkeeping; mismatch
    discards the response, leaves the row ambiguous, pauses. Negative test (f) added. The
    residual is now non-corrupting on both sides of the link.
+
+Codex adversarial round 11 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED and
+absorbed:
+
+1. [high] Reconciliation covered only unseen ids: a backdated pull-merged edit to an
+   already-LINKED issue evaded both the cursor and the id diff, staying invisible until
+   outbound sync overwrote it. Absorbed: sweep projection widened to (id, revision) pairs,
+   last-seen revision persisted in `baseline_json`, changed-revision linked ids point-fetch
+   into the ordinary merge; full-`listIssues` fallback if the template can't render revision;
+   backdated-linked-edit negative test added. The id-space partition (unseen / ledgered /
+   linked) now has a detection path for every class (see "Pull reconciliation").
