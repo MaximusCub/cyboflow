@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-9 absorbed (13 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-10 absorbed (14 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -217,19 +217,26 @@ leaves TOCTOU windows), applied per direction:
   the collected batch and pauses via `TrackerAuthError`. No local write (entity, link, conflict,
   or cursor) ever derives from an unrevalidated batch. This closes every destructive local case,
   including replacement *during* a listing.
-- **Outbound (creates, updates)**: re-check identity immediately before **each** mutation, inside
-  the same per-project mutex window as the spawn. The residual window — a replacement landing in
-  the sub-second gap between that preflight and the child process opening the database — is
-  **explicitly accepted**: it requires a deliberate same-path reinit mid-write, its worst case is
-  one stray issue in the brand-new (empty) replacement workspace, no local data is touched, and
-  the row then settles through recovery, whose own listing re-checks identity first (wrong
-  instance ⇒ pause, never a blind retry). Atomically binding a CLI spawn to an instance id is
-  not possible from outside the process; this residual is the floor, and it is non-destructive.
+- **Outbound (creates, updates)**: sandwich each mutation — identity check before the spawn AND
+  after the CLI exits, **before its response reaches any local bookkeeping** (Codex round-10:
+  without the post-write check, a create that *succeeds* against a replacement database is
+  adopted locally — link inserted, baseline stamped, outbox row settled — binding the local
+  entity to the wrong workspace with recovery never entered, since no response was lost). On a
+  post-write mismatch: discard the response, leave the outbox row unsettled/ambiguous, touch no
+  link/baseline/entity/cursor, pause via `TrackerAuthError`. The residual — a replacement landing
+  inside the spawn window — then costs at most one stray issue in the user's own just-reinited
+  (empty) workspace plus an ambiguous row that recovery resolves after re-detect; recovery's own
+  listing identity-checks first (wrong instance ⇒ stay ambiguous + paused, never a blind retry),
+  so no duplicate and no local corruption. Atomically binding a CLI spawn to an instance id is
+  not possible from outside the process; this residual is the floor, and it is non-corrupting on
+  both sides of the link.
 
 Negative tests: same-path reinit (a) before a pass, (b) between the initial check and
 `listIssueIds`, (c) between `listIssues` and the apply loop, (d) between `listIssueIds` and an
-absent-id `getIssue` lookup — zero local mutations in all four — and (e) before an outbound
-drain, proving the preflight pauses the row. Note: keyless identity
+absent-id `getIssue` lookup — zero local mutations in all four — (e) before an outbound drain,
+proving the preflight pauses the row, and (f) between the outbound pre-check and the child
+opening the database, with the create SUCCEEDING against the replacement — proving no local
+adoption or settlement occurs and the row lands ambiguous + paused. Note: keyless identity
 matching must skip `normalizeBaseUrl` URL parsing (`base_url` stays NULL for beads; the path is
 not a URL).
 
@@ -560,3 +567,13 @@ CONFIRMED and absorbed:
    `tracker_reconciliation_ledger` table (same migration) with `config_generation`
    invalidation, opportunistic cleanup, zero-lookup repeat-sweep + mapping-change tests, and a
    sizing note for the one-time first reconciliation (see "Pull reconciliation").
+
+Codex adversarial round 10 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED (the
+round-7 "no local data touched" claim was false for a SUCCESSFUL write) and absorbed:
+
+1. [high] A create succeeding against a replacement workspace was adopted locally (link,
+   baseline stamp, settled outbox row) with recovery never entered — local bookkeeping bound to
+   the wrong workspace. Absorbed: the outbound sandwich gains its post-write half — identity
+   re-checked after the CLI exits, before the response reaches any local bookkeeping; mismatch
+   discards the response, leaves the row ambiguous, pauses. Negative test (f) added. The
+   residual is now non-corrupting on both sides of the link.
