@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-12 absorbed (17 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-13 absorbed (18 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -466,8 +466,13 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   - `updateIssueState`/`updateIssueContent` gain an optional `expectedToken?: string` final
     parameter; existing adapters ignore it (unguarded, their status quo).
   - A distinct typed outcome, `TrackerRevisionMismatchError`, which the outbox drain consumes
-    exactly like the `contentDivergence` hold: settle the row unsent, no baseline stamp, the
-    inbound conflict machinery owns it.
+    via the mismatch state machine above — re-fetch, patched-field compare, then
+    retry-with-fresh-token / hold-as-conflict / settle-done — NEVER an unconditional
+    settle-unsent (Codex round-13 caught this bullet contradicting the round-12 state machine;
+    the state machine is authoritative for both content AND state writes). Bounded-retry
+    exhaustion (churn on every attempt, cap ~3) degrades to the hold-as-conflict arm — held,
+    visible, never silently dropped. Tests cover content and state writes across all four
+    outcomes: unrelated churn, already-landed, genuine divergence, retry exhaustion.
   - Callers enumerated: `drainContentWrite` already does the pre-send `getIssue` — it forwards
     that read's token; the state-write drain path gains the same pre-send read + token when
     (and only when) the adapter populates `concurrencyToken`. No other mutation callers exist
@@ -637,3 +642,12 @@ absorbed:
    on the ledger (the sweep projection already carries it — comparison is free); changed
    revision re-evaluates; zero-lookup guarantee narrowed to UNCHANGED ledgered ids (see "Pull
    reconciliation").
+
+Codex adversarial round 13 (2026-08-26), verdict needs-attention, 1 high — CONFIRMED (stale
+text) and absorbed:
+
+1. [high] The round-9 contract bullet still said mismatch is consumed "like `contentDivergence`:
+   settle unsent," contradicting round-12's state machine and re-opening the dropped-write path.
+   Absorbed: bullet rewritten to defer to the state machine (authoritative for content AND
+   state writes); bounded-retry exhaustion specified as degrading to hold-as-conflict; the
+   four-outcome test matrix named for both write kinds.
