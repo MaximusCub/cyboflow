@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-14 absorbed (19 high + 3 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-15 absorbed (21 high + 3 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -169,8 +169,16 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   must survive same-path replacement" under CLI transport). `workspace_name` = the issue prefix;
   `actor_label` = local git `user.name`. `base_url` stays `NULL`
   (`PROVIDER_DEFAULT_BASE_URL.beads = null` — the wizard's instance-URL field already hides
-  itself). A reinit or `bd rename-prefix` therefore pauses the connection for re-detect rather
-  than silently continuing; revival misses are the accepted cost.
+  itself). A reinit pauses the connection because the instance id changes. A `bd rename-prefix`
+  does NOT change the instance id (same database), so the prefix must be **part of the per-pass
+  identity invariant in its own right** (Codex round-15 finding 1: with the prefix persisted
+  only as display metadata, the promised rename-pause was unreachable — and if a rename rewrites
+  issue identifiers, the sweep would read every old id as deleted and archive its twin): the
+  identity probe returns (instance id, prefix); both are compared at every sandwich checkpoint;
+  either changing discards results and pauses for re-detect. Phase 0 probes whether
+  `rename-prefix` rewrites existing issue ids — if it does, the re-detect flow treats the rename
+  as a migration needing explicit link remapping (or a documented deliberate re-import), never a
+  silent continue. Negative test: rename the prefix mid-pass, prove zero local mutations.
 
 ### 2. CLI transport
 
@@ -457,10 +465,18 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   SQL path is only a valid guard if the probe ALSO proves it preserves beads' `revision`
   increment, `updated_at` stamping, validation, and event semantics — a raw write bypassing
   those is not an escape hatch, it is corruption) —
-  **v1 ships import + create-push only**: `contentWrite` all-false and status write-back
-  disabled for beads (creates race nothing — a fresh issue has no concurrent editor), with
-  outbound edits deferred until a guarded transport exists (`bd serve`, SQL, or upstream flag).
-  No unguarded fallback ships.
+  **v1 ships import + create-push only** (creates race nothing — a fresh issue has no
+  concurrent editor), with outbound edits deferred until a guarded transport exists
+  (`bd serve`, SQL, or upstream flag). No unguarded fallback ships. **The disable must be
+  expressible** (Codex round-15 finding 2: `contentWrite: false` gates content writes, but
+  `updateIssueState` has no capability gate — the state outbox path would either send the
+  forbidden unguarded write or strand rows that block the issue's inbound processing). New
+  capability `guardedUpdates: boolean`, paired with a provider-level `requiresGuardedUpdates`
+  (true only for beads): when a provider requires guards but the adapter cannot provide them,
+  **every existing-issue mutation — state, content, and archive-fallback alike — is gated at
+  the ENQUEUE chokepoint** (the same gate-at-enqueue pattern the `'off'` content/archive modes
+  already use, precisely so no undrainable row ever strands inbound). Test: fallback mode
+  enqueues zero update_state/update_content/archive rows while creates still flow.
 
   **The guard is an adapter-contract change, not adapter-internal** (Codex round-9 finding 1:
   the current interface cannot express it — `TrackerIssue` exposes no revision and
@@ -668,3 +684,17 @@ absorbed:
    paired with `requiresIdReconciliation`; sweep consumer prefers it, falls back to
    `listIssueIds` (HTTP providers untouched); contract tests named (see "Pull reconciliation"
    and the method-mapping table).
+
+Codex adversarial round 15 (2026-08-26), verdict needs-attention, 2 high — both CONFIRMED and
+absorbed:
+
+1. [high] The promised `bd rename-prefix` pause was unreachable — validation compared only the
+   instance id, which a rename preserves; if a rename rewrites issue ids, the sweep would
+   archive every twin. Absorbed: the prefix joins the instance id in the per-pass identity
+   invariant at every sandwich checkpoint; mid-pass rename negative test; Phase 0 probes
+   whether rename rewrites ids (migration flow if so) (see "Identity").
+2. [high] The no-guard fallback promised disabled state writes but no capability could express
+   it — `updateIssueState` is unconditionally required and the state outbox path has no gate.
+   Absorbed: `guardedUpdates` capability + `requiresGuardedUpdates` provider flag; all
+   existing-issue mutations gated at the ENQUEUE chokepoint in fallback mode (the proven
+   'off'-mode pattern, no stranded rows); creates-still-flow test (see "Dual writers").
