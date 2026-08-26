@@ -688,6 +688,14 @@ export function selectFindingForSeed(db: DatabaseLike, reviewItemId: string): Fi
  * not just the ones one context window still remembers.
  */
 export interface RunFindingRow extends FindingSeedRow {
+  /**
+   * The run that filed it. Meaningful only now that the read spans a SESSION's
+   * runs rather than one id (see {@link selectRunFindingsForRuns}): a chat agent
+   * triaging a session's findings needs to tell the flow run's code-review
+   * output apart from its own chat sentinel's, and `cyboflow_resolve_finding`'s
+   * scope check keys on it.
+   */
+  runId: string | null;
   /** Free-text grouping category (e.g. 'security', 'test-gap'); null when unset. */
   category: string | null;
   /** Whether this finding gates run resume. */
@@ -696,7 +704,7 @@ export interface RunFindingRow extends FindingSeedRow {
 
 /**
  * Read every still-open (`status = 'pending'`) HUMAN-audience `kind = 'finding'`
- * review item filed by `runId`, oldest first. Returns `[]` when the table is
+ * review item filed by any run in `runIds`, oldest first. Returns `[]` when the table is
  * absent or the run filed nothing. (Strictly: a DB carrying review_items but
  * predating migration 085 would throw on the `audience` column — unreachable in
  * practice, since migrations run to completion at boot.)
@@ -716,6 +724,15 @@ export interface RunFindingRow extends FindingSeedRow {
  *    `agent:<label>` actor as its source, so this keeps exactly the code-review
  *    and sprint-review output and drops everything SYSTEM-minted.
  *
+ *    The eval jury is INSIDE this allow-list, not outside it: EvalWorker writes
+ *    its findings with `source: 'agent:eval'`, so they are returned here like
+ *    any reviewer's. Say so out loud, because the omission reads as an exclusion
+ *    — an agent told only "code review plus sprint review, everything
+ *    system-minted dropped" concludes the jury's output is unreachable and never
+ *    tries. What the jury files here is only its net-new / confirmed-catastrophic
+ *    slice, capped at MAX_FINDINGS_PER_EVAL; the full verdict lives in
+ *    `run_evals` and is read by `cyboflow_get_eval`.
+ *
  * The second is load-bearing and the audience filter alone does NOT imply it:
  * `verdictDelivery` stamps its merge-gate `loopback-implement` record
  * `audience: 'machine'` ONLY when the run is programmatic — on the ORCHESTRATED
@@ -730,19 +747,26 @@ export interface RunFindingRow extends FindingSeedRow {
  * a skipped finding merely stays in the backlog for a human, whereas a wrongly
  * included one can be resolved away.
  */
-export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRow[] {
+export function selectRunFindingsForRuns(
+  db: DatabaseLike,
+  runIds: readonly string[],
+): RunFindingRow[] {
   if (!hasReviewItemsTable(db)) return [];
+  if (runIds.length === 0) return [];
+  const placeholders = runIds.map(() => '?').join(', ');
   const rows = db
     .prepare(
-      `SELECT id, title, body, severity, priority, source, blocking, payload_json AS payloadJson
+      `SELECT id, run_id AS runId, title, body, severity, priority, source, blocking,
+              payload_json AS payloadJson
          FROM review_items
-        WHERE run_id = ? AND kind = 'finding' AND status = 'pending'
+        WHERE run_id IN (${placeholders}) AND kind = 'finding' AND status = 'pending'
           AND (audience IS NULL OR audience != 'machine')
           AND source LIKE 'agent:%'
         ORDER BY created_at ASC, id ASC`,
     )
-    .all(runId) as Array<{
+    .all(...runIds) as Array<{
     id: string;
+    runId: string | null;
     title: string;
     body: string | null;
     severity: 'info' | 'warning' | 'error' | null;
@@ -763,6 +787,7 @@ export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRo
     }
     return {
       id: row.id,
+      runId: row.runId,
       title: row.title,
       body: row.body,
       severity: row.severity,
@@ -776,4 +801,17 @@ export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRo
       locations: liftLocations(payload),
     };
   });
+}
+
+/**
+ * Single-run convenience over {@link selectRunFindingsForRuns}.
+ *
+ * Retained because "the findings THIS run filed" is still the right question in
+ * a flow step, where `CYBOFLOW_RUN_ID` genuinely IS the run doing the work
+ * (sprint/ship `address-review`). The session-widened form exists for the other
+ * caller — a chat turn, whose run id is a `__quick__` sentinel that filed
+ * nothing.
+ */
+export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRow[] {
+  return selectRunFindingsForRuns(db, [runId]);
 }

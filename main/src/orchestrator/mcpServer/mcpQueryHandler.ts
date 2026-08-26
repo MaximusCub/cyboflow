@@ -120,7 +120,8 @@ import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
-import { selectFindingForSeed, selectRunFindings } from '../reviewItemListing';
+import { selectFindingForSeed, selectRunFindingsForRuns } from '../reviewItemListing';
+import { selectSessionRunScope } from '../sessionRunScope';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
@@ -3882,8 +3883,15 @@ export class McpQueryHandler {
    * fire-and-forget by design — it never returns the minted id — so an agent
    * cannot resolve what it filed from memory alone. Reading back from the DB is
    * also the truer set: it spans every lane's `code-review` pass plus
-   * `sprint-review`, including findings filed by a subagent chain whose context
-   * is long gone.
+   * `sprint-review` and the eval jury, including findings filed by a subagent
+   * chain whose context is long gone.
+   *
+   * SCOPED TO THE SESSION'S RUNS, not to `msg.runId` alone. A flow step's run id
+   * is its own, so nothing changes there; a CHAT turn's run id is the session's
+   * `__quick__` sentinel, which by construction filed nothing, so the unwidened
+   * read replied `{ findings: [] }` to every "go fix this run's findings" ask and
+   * gave the agent no way to tell that empty apart from a genuinely clean run.
+   * See selectSessionRunScope for the link and its fail-soft narrowing.
    *
    * Mid-run-only via the shared run-context guard (a terminal run replies
    * run_not_active), matching get-selected-findings / resolve-finding.
@@ -3914,11 +3922,19 @@ export class McpQueryHandler {
 
     await ReviewItemRouter.getInstance().awaitProjectWritesSettled(ctx.projectId);
 
+    // SESSION scope, not this one run id. In a flow step the two are the same
+    // set; in a CHAT turn they are never the same, because chatSentinelProvider
+    // binds the turn to the session's `__quick__` sentinel — a run that filed
+    // nothing — while the findings sit on the flow run the same session owns.
+    // `runScope` rides along in the reply so the agent can see what was covered
+    // rather than infer it from an empty list.
+    const runScope = selectSessionRunScope(this.db, msg.runId);
+
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
-      data: { findings: selectRunFindings(this.db, msg.runId) },
+      data: { findings: selectRunFindingsForRuns(this.db, runScope), runScope },
     });
   }
 

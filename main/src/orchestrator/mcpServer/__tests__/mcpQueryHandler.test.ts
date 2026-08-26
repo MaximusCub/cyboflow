@@ -4511,7 +4511,48 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
 
       const response = parseLastWrite(writes);
       expect(response.ok).toBe(true);
-      expect(response.data).toEqual({ findings: [] });
+      // `runScope` is the widened session scope; with no session_id link it
+      // fail-softs to the caller's own run, i.e. the pre-widening behavior.
+      expect(response.data).toEqual({ findings: [], runScope: ['run-a'] });
+    });
+
+    it("reads the FLOW run's findings when called with the session's chat sentinel", async () => {
+      // THE defect this widening exists for. A chat turn's CYBOFLOW_RUN_ID is
+      // the session's `__quick__` sentinel, which files nothing; the findings
+      // sit on the flow run the same session owns. Before the widening this
+      // replied `{ findings: [] }` — an empty indistinguishable from a clean run.
+      //
+      // Migration 019's own UPDATE joins `sessions`, which this fixture does not
+      // carry, so only its ALTER is applied here.
+      fdb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      seedCompoundRun(fdb, { runId: 'run-flow', status: 'completed' });
+      seedCompoundRun(fdb, { runId: 'run-sentinel' });
+      seedCompoundRun(fdb, { runId: 'run-unrelated' });
+      fdb
+        .prepare(`UPDATE workflow_runs SET session_id = 'sess-1' WHERE id IN ('run-flow', 'run-sentinel')`)
+        .run();
+      fdb.prepare(`UPDATE workflow_runs SET session_id = 'sess-2' WHERE id = 'run-unrelated'`).run();
+
+      seedFinding(fdb, { id: 'ri_flow', title: 'Filed by the flow run', runId: 'run-flow' });
+      seedFinding(fdb, { id: 'ri_other', title: "Another session's", runId: 'run-unrelated' });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-list-run-findings', requestId: 'lf-sess', runId: 'run-sentinel' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as {
+        findings: Array<{ id: string; runId: string | null }>;
+        runScope: string[];
+      };
+      expect(data.findings.map((f) => f.id)).toEqual(['ri_flow']);
+      // The row names the run that filed it, so the agent can tell lanes apart.
+      expect(data.findings[0].runId).toBe('run-flow');
+      // And the scope is reported, so an empty result would be legible too.
+      expect(new Set(data.runScope)).toEqual(new Set(['run-sentinel', 'run-flow']));
     });
 
     it('observes a finding still queued from a fire-and-forget report (drains first)', async () => {

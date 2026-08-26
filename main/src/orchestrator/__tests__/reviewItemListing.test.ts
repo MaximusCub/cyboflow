@@ -20,6 +20,7 @@ import {
   selectPendingBlockingReviewItems,
   selectFindingForSeed,
   selectRunFindings,
+  selectRunFindingsForRuns,
 } from '../reviewItemListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
@@ -229,6 +230,57 @@ describe('selectFindingForSeed', () => {
     });
     // Malformed location entry (path: 42) is dropped; valid ones survive.
     expect(seed?.locations).toEqual([{ path: 'a.ts', line: 5 }, { path: 'b.ts' }]);
+  });
+});
+
+describe('selectRunFindingsForRuns — the session-widened read', () => {
+  /** Seed one pending agent-reported finding on `runId`. */
+  const seed = (db: ReturnType<typeof buildReviewInboxDb>, id: string, runId: string, source: string) => {
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, audience, title, body, severity,
+          priority, source, created_at, updated_at)
+       VALUES (?, 1, ?, 'finding', 'pending', 0, 'human', ?, 'b', 'warning', 'P1', ?, ?, ?)`,
+    ).run(id, runId, `title ${id}`, source, `2026-08-26T10:00:0${id.slice(-1)}Z`, 'x');
+  };
+
+  it("unions several runs' findings, oldest first across the whole set", () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-flow', 'completed');
+    seedInboxRun(db, 'run-sentinel', 'running');
+    seedInboxRun(db, 'run-other', 'running');
+
+    seed(db, 'rvw_2', 'run-flow', 'agent:code-review');
+    seed(db, 'rvw_1', 'run-sentinel', 'agent:sprint-review');
+    seed(db, 'rvw_9', 'run-other', 'agent:code-review');
+
+    // The chat sentinel + the flow run its session owns — but NOT a third run.
+    const found = selectRunFindingsForRuns(dbAdapter(db), ['run-sentinel', 'run-flow']);
+    expect(found.map((f) => f.id)).toEqual(['rvw_1', 'rvw_2']);
+    // runId is projected so a triaging agent can tell the two apart.
+    expect(found.map((f) => f.runId)).toEqual(['run-sentinel', 'run-flow']);
+  });
+
+  it("includes the eval jury's findings — 'agent:eval' is inside the allow-list", () => {
+    // The whole point of the D4 half of this fix: the jury writes source
+    // 'agent:eval', which matches 'agent:%', so it was ALWAYS returned. Only the
+    // tool's own description implied otherwise. Pin the behavior so a later
+    // narrowing of the allow-list has to break a test.
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-flow', 'completed');
+    seed(db, 'rvw_1', 'run-flow', 'agent:eval');
+
+    expect(selectRunFindingsForRuns(dbAdapter(db), ['run-flow']).map((f) => f.source)).toEqual([
+      'agent:eval',
+    ]);
+  });
+
+  it('returns [] for an empty run set rather than preparing an empty IN ()', () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-flow', 'running');
+    seed(db, 'rvw_1', 'run-flow', 'agent:code-review');
+
+    expect(selectRunFindingsForRuns(dbAdapter(db), [])).toEqual([]);
   });
 });
 
