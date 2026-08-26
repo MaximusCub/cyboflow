@@ -18,7 +18,7 @@
  * per-file mocks keep working unchanged.
  */
 import type { query } from '@anthropic-ai/claude-agent-sdk';
-import { assertAgentProviderAllowed } from '../services/agentProviderGuard';
+import { assertAgentProviderAllowed } from '../../../shared/agents/agentProviderGuard';
 import { tryGetProviderUsageStore } from '../services/providerUsage/providerUsageStore';
 import type { RateLimitEvent } from '../../../shared/types/claudeStream';
 

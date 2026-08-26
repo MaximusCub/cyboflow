@@ -20,7 +20,7 @@ import {
   sdkModelAndBetas,
   applyModelAvailabilityFallback,
   resolveUnavailableDefaultModelFallback,
-} from './modelContext';
+} from '../../../../../shared/agents/modelContext';
 import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentModelContext';
 import {
   ModelAvailabilityService,

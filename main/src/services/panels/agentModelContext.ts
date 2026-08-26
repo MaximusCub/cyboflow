@@ -1,6 +1,6 @@
 import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
-import { resolveModelAlias } from './claude/modelContext';
+import { resolveModelAlias } from '../../../../shared/agents/modelContext';
 
 /**
  * Resolve a spawn-seam model value against the agent provider that will run it.

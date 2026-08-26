@@ -60,13 +60,12 @@ const ORCH_ROOT = locateOrchestratorRoot();
  * with the reason it was not inverted. This list may shrink; growing it needs a
  * reviewer to agree the edge genuinely cannot be broken.
  *
- * Only the first two entries actually pull `electron` into the subtree. The rest
- * are electron-free service modules — a layering violation rather than an
- * extraction blocker. streamParser and encodeCwd have already been relocated to
- * shared/ (clearing the entries that cited them); the remaining durable fix is
- * relocating modelContext and agentProviderGuard under shared/ too, which
- * ripples through their many services-side callers and is out of scope for the
- * module that merely consumes them.
+ * The first two entries pull `electron` into the subtree; the third is an
+ * electron-free layering violation (the Codex provider surface) rather than an
+ * extraction blocker. Every relocatable exemption is gone: streamParser,
+ * encodeCwd, modelContext, and agentProviderGuard all moved to shared/,
+ * clearing the run/agent-thread listing entries and the model-catalog and
+ * provider-guard eval entries this list used to carry.
  *
  * Keep in sync with the exemption block in main/eslint.config.js.
  */
@@ -82,18 +81,6 @@ const FROZEN_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
   [
     'verify/codexVerificationAgentQuery.ts',
     'Runtime use of the Codex app-server schema helper and the Codex usage observer — the Codex provider surface lives entirely under services/panels/codex.',
-  ],
-  [
-    'eval/evalJury.ts',
-    'Runtime use of resolveModelAlias from the Claude model catalog. Electron-free; the alias table belongs under shared/.',
-  ],
-  [
-    'eval/pairwiseJudge.ts',
-    'Runtime use of resolveModelAlias — same model-catalog relocation as evalJury.',
-  ],
-  [
-    'eval/codexPairwiseJudge.ts',
-    'Runtime use of AgentProviderDisabledError, the shared provider-guard error type. Electron-free.',
   ],
 ]);
 

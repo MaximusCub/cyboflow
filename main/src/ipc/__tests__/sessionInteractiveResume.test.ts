@@ -66,7 +66,7 @@ vi.mock('../../orchestrator/dynamicWorkflows', () => ({
 
 import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
-import { setAgentProviderAccessResolver } from '../../services/agentProviderGuard';
+import { setAgentProviderAccessResolver } from '../../../../shared/agents/agentProviderGuard';
 import { AGENT_PROVIDER_DISABLED_CODE } from '../../../../shared/types/agentRuntime';
 
 const SESSION_ID = 'sess-001';

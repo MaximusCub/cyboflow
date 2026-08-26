@@ -4,7 +4,7 @@ import type { ClaudeModelCatalog, ClaudeModelOption } from '../../../shared/type
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
 import { loadSdkQuery } from '../utils/lazyAgentSdk';
 import { resolveClaudeExecutablePath } from './panels/claude/claudeExecutablePath';
-import { bareModelId, resolveModelAlias } from './panels/claude/modelContext';
+import { bareModelId, resolveModelAlias } from '../../../shared/agents/modelContext';
 
 /**
  * ClaudeModelCatalogService — the DYNAMIC half of the Claude model picker.

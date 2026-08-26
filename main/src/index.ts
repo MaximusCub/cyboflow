@@ -73,7 +73,7 @@ import { resolvePanelLane, type PanelLane } from './services/panelLane';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
-import { bareModelId, resolveModelAlias } from './services/panels/claude/modelContext';
+import { bareModelId, resolveModelAlias } from '../../shared/agents/modelContext';
 import { resolveClaudeExecutablePath } from './services/panels/claude/claudeExecutablePath';
 import { loadSdkQuery } from './utils/lazyAgentSdk';
 import { makeSessionSummarizer } from './orchestrator/sessionSummary/sessionSummaryQuery';
@@ -191,7 +191,7 @@ import * as net from 'node:net';
 import type { AgentProvider } from '../../shared/types/agentRuntime';
 import type { ClaudePanelState } from '../../shared/types/panels';
 import { isAgentProvider, providerForRuntime } from '../../shared/types/agentRuntime';
-import { setAgentProviderAccessResolver } from './services/agentProviderGuard';
+import { setAgentProviderAccessResolver } from '../../shared/agents/agentProviderGuard';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
@@ -1543,7 +1543,7 @@ async function initializeServices(): Promise<boolean> {
   await configManager.initialize();
 
   // Install the authoritative provider-access resolver for the CALL-LEVEL guard
-  // (services/agentProviderGuard). Everything downstream — every Claude SDK
+  // (shared/agents/agentProviderGuard). Everything downstream — every Claude SDK
   // query(), every CLI/PTY/app-server spawn, every live-PTY relay — asks this
   // closure, so a provider the user switched off in Settings → Integrations
   // cannot be called even by an ALREADY-OPEN session (whose follow-up turns

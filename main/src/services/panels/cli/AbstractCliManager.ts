@@ -8,7 +8,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
-import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../agentProviderGuard';
+import { assertAgentProviderAllowed, isAgentProviderAllowed } from '../../../../../shared/agents/agentProviderGuard';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import { classifyErrorPattern, unclassifiedErrorTags } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';

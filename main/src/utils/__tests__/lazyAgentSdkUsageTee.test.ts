@@ -21,7 +21,7 @@ import {
   _resetProviderUsageStoreForTesting,
   initProviderUsageStore,
 } from '../../services/providerUsage/providerUsageStore';
-import { setAgentProviderAccessResolver } from '../../services/agentProviderGuard';
+import { setAgentProviderAccessResolver } from '../../../../shared/agents/agentProviderGuard';
 
 const RATE_LIMIT_MESSAGE = {
   type: 'rate_limit_event',

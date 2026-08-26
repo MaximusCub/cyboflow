@@ -64,10 +64,7 @@ module.exports = [
     files: [
       'src/orchestrator/trpc/ipcAdapter.ts',
       'src/orchestrator/mcpServer/scriptPath.ts',
-      'src/orchestrator/verify/codexVerificationAgentQuery.ts',
-      'src/orchestrator/eval/evalJury.ts',
-      'src/orchestrator/eval/pairwiseJudge.ts',
-      'src/orchestrator/eval/codexPairwiseJudge.ts'
+      'src/orchestrator/verify/codexVerificationAgentQuery.ts'
     ],
     rules: {
       '@typescript-eslint/no-restricted-imports': 'off'

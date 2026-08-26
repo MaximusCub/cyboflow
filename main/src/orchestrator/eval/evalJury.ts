@@ -28,7 +28,7 @@ import {
 } from './scoring';
 import type { EvalStructuredQueryFn } from './evalJudgeQuery';
 import type { LoggerLike } from '../types';
-import { resolveModelAlias } from '../../services/panels/claude/modelContext';
+import { resolveModelAlias } from '../../../../shared/agents/modelContext';
 
 /** The app's default Opus alias — the v1 judge model (resolved to a concrete id). */
 export const DEFAULT_JUDGE_MODEL_ALIAS = 'opus';

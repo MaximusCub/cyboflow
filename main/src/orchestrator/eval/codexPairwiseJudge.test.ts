@@ -10,7 +10,7 @@ import type { PairwiseStructuredQueryFn } from './pairwiseJudgeQuery';
 import { PAIRWISE_OUTPUT_SCHEMA } from './pairwiseJudge';
 import { CodexPairwiseJudge } from './codexPairwiseJudge';
 import { CodexJurorUnavailableError } from './codexJudge';
-import { AgentProviderDisabledError } from '../../services/agentProviderGuard';
+import { AgentProviderDisabledError } from '../../../../shared/agents/agentProviderGuard';
 import { CODEX_EVAL_JUDGE_TIMEOUT_MS } from '../../services/panels/codex/codexEvalJudgeQuery';
 
 describe('CodexPairwiseJudge', () => {

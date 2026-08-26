@@ -15,7 +15,7 @@ import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { mintOrchToken } from '../../../orchestrator/orchAuthToken';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
-import { interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
+import { interactiveModelArg, applyModelAvailabilityFallback } from '../../../../../shared/agents/modelContext';
 import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentModelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';

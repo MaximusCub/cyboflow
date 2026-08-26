@@ -68,7 +68,7 @@ import {
   QUICK_PI_PTY_BRIEFING,
 } from './quickSessionBriefings';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
-import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../services/agentProviderGuard';
+import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../../../shared/agents/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { isPtyLane, nonClaudeLaneOwner, resolvePanelLane, type PanelLane } from '../services/panelLane';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';

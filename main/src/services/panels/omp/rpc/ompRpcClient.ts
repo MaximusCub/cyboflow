@@ -28,7 +28,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
-import { assertAgentProviderAllowed } from '../../../agentProviderGuard';
+import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';
 import {
   OMP_MAX_FRAME_BYTES,
   OMP_RPC_MODE_ARGS,

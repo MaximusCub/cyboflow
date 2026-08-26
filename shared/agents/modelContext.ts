@@ -1,7 +1,14 @@
 import type { SdkBeta } from '@anthropic-ai/claude-agent-sdk';
-import { GUARDED_MODELS, guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
+import { GUARDED_MODELS, guardedModelByConcreteId } from '../types/modelAvailability';
 
 /**
+ * Relocated from main/src/services/panels/claude/modelContext.ts to shared/ so
+ * main/src/orchestrator/** (which must stay standalone-extractable — see
+ * main/src/orchestrator/__tests__/standaloneInvariant.test.ts) can consume
+ * `resolveModelAlias` without a runtime `services/` import. The `SdkBeta` import
+ * above is type-only (erased by tsc) even though the Claude Agent SDK package
+ * itself is a main-only dependency — a runtime import from here would break that.
+ *
  * The Claude Agent SDK beta flag that enables the 1M-token context window.
  * Sonnet 4/4.5 ONLY (per the SDK's `SdkBeta` docs). `claude-sonnet-4-6` —
  * which {@link resolveModelAlias} pins the bare `'sonnet'` alias to — also

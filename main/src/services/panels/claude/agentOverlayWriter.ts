@@ -53,7 +53,7 @@ import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown'
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import { parseWorkflowDefinition, type WorkflowAgentConfig } from '../../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/experiments';
-import { bareModelId } from './modelContext';
+import { bareModelId } from '../../../../../shared/agents/modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */

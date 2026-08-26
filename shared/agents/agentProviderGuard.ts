@@ -2,6 +2,13 @@
  * agentProviderGuard — the CALL-LEVEL enforcement of the per-provider access
  * toggles (Settings → Integrations / the onboarding Connect step).
  *
+ * Relocated from main/src/services/agentProviderGuard.ts to shared/ so
+ * main/src/orchestrator/** (which must stay standalone-extractable — see
+ * main/src/orchestrator/__tests__/standaloneInvariant.test.ts) can consume
+ * `AgentProviderDisabledError` without a runtime `services/` import. The
+ * resolver-injection design described below already kept this module free of
+ * concrete-service imports, which is what made the relocation a pure move.
+ *
  * Why this exists on top of the launch-seam checks: gating only creation
  * (WorkflowRegistry.createRun, the quick-session IPC handler) leaves every
  * ALREADY-OPEN session able to keep issuing turns — switch Claude off and an
@@ -42,7 +49,7 @@ import {
   AGENT_PROVIDER_LABELS,
   formatAgentProviderDisabled,
   type AgentProvider,
-} from '../../../shared/types/agentRuntime';
+} from '../types/agentRuntime';
 
 /**
  * Thrown when a call is attempted against a provider the user switched off.

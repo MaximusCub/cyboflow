@@ -1,27 +1,30 @@
 /**
- * agentProviderGuard + its two most load-bearing installations.
+ * agentProviderGuard's two most load-bearing installations, exercised against
+ * the real main-side modules they guard.
  *
  * The guard exists because gating only the CREATE seams left every already-open
  * session able to keep issuing turns: a follow-up turn never re-enters a launch
  * path, so switching a provider off did nothing to a live chat. These tests lock
  * the call-level behavior:
- *   - the default resolver allows everything (unit/headless byte-identical);
- *   - a throwing resolver fails OPEN (a bad resolver must not become an outage);
  *   - loadSdkQuery — the single chokepoint every Claude `query()` resolves
  *     through, on EVERY call — refuses while Claude is off, and recovers the
  *     moment it is switched back on (no restart);
+ *   - AbstractCliManager.spawnCliProcess refuses a cold spawn for a
+ *     switched-off provider before probing CLI availability;
  *   - relayOrSpawnPtyPanel refuses a keystroke into an ALREADY-LIVE PTY, the
  *     path that never respawns and so is invisible to the spawn guard.
+ *
+ * The guard module's own pure behavior (default resolver, fail-open on a
+ * throwing resolver, the IPC message helper) is tested independently of any
+ * main-side consumer at shared/agents/__tests__/agentProviderGuard.test.ts —
+ * this file covers only the main-side integrations, which is why it stays
+ * here rather than moving with the guard itself.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   AgentProviderDisabledError,
-  agentProviderDisabledMessage,
-  assertAgentProviderAllowed,
-  isAgentProviderAllowed,
   setAgentProviderAccessResolver,
-} from '../agentProviderGuard';
-import { parseAgentProviderDisabled } from '../../../../shared/types/agentRuntime';
+} from '../../../../shared/agents/agentProviderGuard';
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import { relayOrSpawnPtyPanel } from '../../ipc/ptyPanelDispatch';
 import { AbstractCliManager } from '../panels/cli/AbstractCliManager';
@@ -29,61 +32,6 @@ import { AbstractCliManager } from '../panels/cli/AbstractCliManager';
 afterEach(() => {
   // Never leak an installed resolver across files.
   setAgentProviderAccessResolver(null);
-});
-
-describe('agentProviderGuard', () => {
-  it('allows every provider with no resolver installed (the inert default)', () => {
-    expect(isAgentProviderAllowed('claude')).toBe(true);
-    expect(isAgentProviderAllowed('codex')).toBe(true);
-    expect(() => assertAgentProviderAllowed('codex', 'a turn')).not.toThrow();
-  });
-
-  it('refuses only the switched-off provider, and names it on the error', () => {
-    setAgentProviderAccessResolver((p) => p !== 'codex');
-
-    expect(isAgentProviderAllowed('claude')).toBe(true);
-    expect(() => assertAgentProviderAllowed('codex', 'this chat turn')).toThrow(
-      AgentProviderDisabledError,
-    );
-    try {
-      assertAgentProviderAllowed('codex', 'this chat turn');
-      expect.unreachable('should have thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(AgentProviderDisabledError);
-      expect((error as AgentProviderDisabledError).provider).toBe('codex');
-      // The wire form carries the machine code plus the user-facing sentence.
-      expect((error as Error).message).toMatch(/^ERR_AGENT_PROVIDER_DISABLED\[codex\]:/);
-      expect((error as Error).message).toMatch(/Codex is turned off/);
-      expect((error as Error).message).toMatch(/this chat turn cannot run/);
-      expect((error as Error).message).toMatch(/Settings → Integrations/);
-    }
-  });
-
-  it('fails OPEN when the resolver itself throws (a bad resolver is not an outage)', () => {
-    setAgentProviderAccessResolver(() => {
-      throw new Error('config read blew up');
-    });
-
-    expect(isAgentProviderAllowed('claude')).toBe(true);
-    expect(() => assertAgentProviderAllowed('claude', 'a turn')).not.toThrow();
-  });
-
-  it('re-reads the resolver on every call, so a toggle applies without a restart', () => {
-    let codexOn = false;
-    setAgentProviderAccessResolver((p) => (p === 'codex' ? codexOn : true));
-
-    expect(isAgentProviderAllowed('codex')).toBe(false);
-    codexOn = true;
-    expect(isAgentProviderAllowed('codex')).toBe(true);
-  });
-
-  it('restores the allow-all default when the resolver is cleared', () => {
-    setAgentProviderAccessResolver(() => false);
-    expect(isAgentProviderAllowed('claude')).toBe(false);
-
-    setAgentProviderAccessResolver(null);
-    expect(isAgentProviderAllowed('claude')).toBe(true);
-  });
 });
 
 describe('loadSdkQuery — the Claude SDK call-level guard', () => {
@@ -217,30 +165,5 @@ describe('relayOrSpawnPtyPanel — the live-PTY relay guard', () => {
       relayOrSpawnPtyPanel(deps as any, panel, 'another turn'),
     ).resolves.toBe(true);
     expect(relayUserTurn).toHaveBeenCalledWith('panel-1', 'another turn');
-  });
-});
-
-describe('agentProviderDisabledMessage — the IPC propagation helper', () => {
-  it('returns the user-facing message, parseable back into provider + prose', () => {
-    const error = new AgentProviderDisabledError('claude', 'this chat turn');
-    const message = agentProviderDisabledMessage(error);
-
-    expect(message).not.toBeNull();
-    // The renderer must be able to recover the provider and strip the code — this
-    // is the contract that makes the composer's "Open Settings" action possible.
-    expect(parseAgentProviderDisabled(message)).toMatchObject({ provider: 'claude' });
-    expect(parseAgentProviderDisabled(message)?.message).toMatch(/Claude is turned off/);
-  });
-
-  it('recognizes an error that lost its prototype crossing a boundary', () => {
-    const plain = new Error('ERR_AGENT_PROVIDER_DISABLED[codex]: Codex is turned off.');
-    plain.name = 'AgentProviderDisabledError';
-    expect(agentProviderDisabledMessage(plain)).toMatch(/Codex is turned off/);
-  });
-
-  it('returns null for an ordinary error, so generic copy still wins', () => {
-    expect(agentProviderDisabledMessage(new Error('worktree locked'))).toBeNull();
-    expect(agentProviderDisabledMessage('nope')).toBeNull();
-    expect(agentProviderDisabledMessage(undefined)).toBeNull();
   });
 });

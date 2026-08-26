@@ -55,7 +55,7 @@ import {
   type PairwiseRawResult,
 } from './pairwiseJudge';
 import { CodexJurorUnavailableError } from './codexJudge';
-import { AgentProviderDisabledError } from '../../services/agentProviderGuard';
+import { AgentProviderDisabledError } from '../../../../shared/agents/agentProviderGuard';
 
 interface QueryWithResolvedModel {
   getResolvedModel(): string | null;

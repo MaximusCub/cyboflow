@@ -65,7 +65,7 @@ vi.mock('../../utils/sessionValidation', () => ({
 import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
 import { panelManager } from '../../services/panelManager';
-import { setAgentProviderAccessResolver } from '../../services/agentProviderGuard';
+import { setAgentProviderAccessResolver } from '../../../../shared/agents/agentProviderGuard';
 import { AGENT_PROVIDER_DISABLED_CODE } from '../../../../shared/types/agentRuntime';
 
 type Handler = (...args: unknown[]) => Promise<unknown>;

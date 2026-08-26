@@ -25,7 +25,7 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
 import { isPtyLane, resolvePanelLane, type PanelLane } from '../services/panelLane';
-import { assertAgentProviderAllowed } from '../services/agentProviderGuard';
+import { assertAgentProviderAllowed } from '../../../shared/agents/agentProviderGuard';
 import { providerForRuntime } from '../../../shared/types/agentRuntime';
 import {
   QUICK_PTY_BRIEFING,

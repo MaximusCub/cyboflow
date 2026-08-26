@@ -25,7 +25,7 @@ import { truncateDiff } from './evalJury';
 import { computeSpecHash } from '../specHash';
 import type { PairwiseStructuredQueryFn } from './pairwiseJudgeQuery';
 import type { LoggerLike } from '../types';
-import { resolveModelAlias } from '../../services/panels/claude/modelContext';
+import { resolveModelAlias } from '../../../../shared/agents/modelContext';
 
 /** The app's default Opus alias — the v1 pairwise judge model (resolved to a concrete id). */
 export const DEFAULT_PAIRWISE_JUDGE_MODEL_ALIAS = 'opus';
