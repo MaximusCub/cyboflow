@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-4 absorbed (7 high + 1 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-5 absorbed (8 high + 2 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -163,12 +163,13 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   management re-entry, pause + re-detect resume, and app restart with a NULL secret.
 - **Identity**: `workspace_id = null` matches nothing in `connectionMatchesIdentity`/revival
   (store.ts: "an identity we never learned cannot be claimed BY identity"), so stamp
-  `workspace_id` with the beads **`issue_prefix`** (committed in `.beads/config.yaml`, stable,
-  per-repo; identity is already project-scoped so cross-project prefix collisions don't matter).
-  `workspace_name` = prefix or repo dir name; `actor_label` = local git `user.name`. `base_url`
-  stays `NULL` (`PROVIDER_DEFAULT_BASE_URL.beads = null` — the wizard's instance-URL field already
-  hides itself). Risk: `bd rename-prefix` breaks identity → reconnect re-detects and revival
-  misses; acceptable, document it.
+  `workspace_id` with the **immutable database instance identifier** (NOT the issue prefix —
+  committed config survives a same-path reinit, an instance id does not; see "Workspace identity
+  must survive same-path replacement" under CLI transport). `workspace_name` = the issue prefix;
+  `actor_label` = local git `user.name`. `base_url` stays `NULL`
+  (`PROVIDER_DEFAULT_BASE_URL.beads = null` — the wizard's instance-URL field already hides
+  itself). A reinit or `bd rename-prefix` therefore pauses the connection for re-detect rather
+  than silently continuing; revival misses are the accepted cost.
 
 ### 2. CLI transport
 
@@ -191,6 +192,37 @@ path on the connection, and every subsequent spawn passes that stored path back 
 not redirect detection, reads, recovery, or writes. External-shared-workspace setups (deliberate
 `BEADS_DIR` decoupling) are out of v1 scope — Detect fails honestly on a repo with no
 discoverable workspace.
+
+**Workspace identity must survive same-path replacement** (Codex round-5 finding 1). A pinned
+path is a location, not an identity: `rm -rf .beads && bd init` (same committed prefix) resolves
+cleanly at the same path, `listIssueIds` returns none of the old ids, and the deletion sweep
+would archive every linked local entity. So the connection stores TWO things, with explicit
+homes: the canonical workspace path (in `source_json`, alongside the existing opaque selection
+payload — no new column) and an **immutable database instance identifier as `workspace_id`**
+(replacing the prefix, which moves to `workspace_name` — committed config survives a reinit, an
+instance id does not). Phase 0 probes the best anchor: a `metadata.json` identifier if beads
+exposes one, else the Dolt database's root-commit hash via SQL (deterministic and immutable per
+init). **Both are validated at the top of every pass** — the `assertContainerExists` lesson,
+promoted from container-existence to database-identity — and a mismatch throws `TrackerAuthError`
+(paused, re-detect required); the sweep and reconciliation never run against an unverified
+database. Negative test: reinit at the same path, prove the pass pauses and zero local entities
+are archived. Note: keyless identity matching must skip `normalizeBaseUrl` URL parsing
+(`base_url` stays NULL for beads; the path is not a URL).
+
+**Error taxonomy: retry only the recognized-transient** (Codex round-5 finding 2). The
+retryable-by-default mapping would let a deterministic failure — unknown flag after a `bd`
+downgrade, incompatible output after an upgrade, permission failure, corrupt workspace — churn
+forever at the release velocity this proposal itself documents. Inverted classification:
+- recognized transient (embedded-lock contention, timeout) → `TrackerApiError{status: null}`,
+  the retry path;
+- deterministic configuration/compat failures (unrecognized-flag usage errors, envelope/schema
+  parse mismatch, `schema_version` ≠ 1, permission errors, workspace-integrity failures,
+  version-below-minimum) → `TrackerAuthError` — paused with the actionable stderr in the banner;
+- unclassified non-zero exits → retryable, but with a consecutive-failure threshold per
+  connection (N failed passes → escalate to the paused state with the last stderr) so unknown
+  deterministic failures cannot loop silently.
+Phase 0 pins the failure shapes for: downgraded/upgraded `bd`, malformed JSON, permission
+denial, and the reinit case above.
 
 **Bounded listings — overflow is terminal, not transient** (Codex round-3 finding 3).
 `runToolCapture`'s default `maxBuffer` is 10MB (`runGit.ts:38`); a large workspace's
@@ -405,3 +437,18 @@ absorbed:
    linked-only sweep, permanently invisible with no error. Absorbed as the
    `requiresIdReconciliation` sweep extension (unseen-id import on the full-id-set pass) + the
    backdated-import negative control (see "Pull reconciliation").
+
+Codex adversarial round 5 (2026-08-26), verdict needs-attention, 1 high + 1 medium — both
+CONFIRMED and absorbed:
+
+1. [high] A pinned path is a location, not an identity: same-path `.beads` reinit (prefix
+   unchanged — it's committed config) would resolve cleanly and the sweep would archive every
+   linked entity; the persisted-path storage was also unspecified. Absorbed: `workspace_id`
+   becomes an immutable database instance id (prefix → `workspace_name`), path persisted in
+   `source_json`, both validated at the top of every pass, mismatch = paused; reinit negative
+   test (see "Workspace identity").
+2. [medium] Every non-zero exit was classified retryable → deterministic failures (downgrade
+   flags, schema mismatch, permissions, corrupt workspace) would churn forever. Absorbed:
+   inverted taxonomy — recognized-transient retries only, deterministic failures pause via
+   `TrackerAuthError`, unclassified failures get a consecutive-failure escalation threshold
+   (see "Error taxonomy").
