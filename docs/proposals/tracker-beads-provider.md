@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial round 1 finding absorbed —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-2 absorbed (4 high findings) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -99,7 +99,11 @@ beads: {
 
 **Client key via `metadata`, not a description marker.** Beads has a first-class arbitrary-JSON
 `metadata` field with a `--metadata-field key=value` list filter. Recovery for a create whose
-response was lost = `bd list --metadata-field cyboflow_client_key=<uuid>` — cleaner than the
+response was lost = `bd list --all --json --limit 0 --metadata-field cyboflow_client_key=<uuid>`
+(`--all` here too — Codex round-2 finding 2: a create that lands, loses its response, and is
+closed before recovery runs — e.g. across an app restart — would otherwise report "no match" and
+the non-idempotent retry duplicates it; Phase 0 gets the matching negative control) — cleaner
+than the
 Plane/Dart description-marker hack, and the marker never pollutes descriptions a user reads in
 `bd show`. Caveat carried into implementation: the caller-side body-write marker re-append
 (field-writeback invariant 4) exists *because* the key lives in the description for Plane/Dart;
@@ -140,8 +144,23 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   `probeCliVersion` + `getShellPath` — the macOS-GUI-minimal-PATH problem is already solved) and
   confirm `project.path` is `bd init`ed. Failure copy distinguishes "bd not installed" from
   "repo has no beads workspace" with the init hint.
-- `connect()` grows a keyless branch that skips encryption and stores `secret_ciphertext = NULL`.
-  `updateCredentials`/reconnect surfaces render as re-detect for a keyless provider.
+- **Every NULL-secret consumer becomes provider-aware, not just `connect()`** (Codex round-2
+  finding 1: a connect-only branch produces a connection that pauses on its first sync).
+  Introduce a single `providerNeedsSecret(provider)` predicate (a
+  `Record<TrackerProvider, boolean>` beside the capabilities tables) and consult it at every
+  guard that currently treats an absent ciphertext as fatal:
+  - `buildAdapter()` (`trackerSyncService.ts:1229-1243`) — throws `TrackerCredentialsError` on
+    null/empty cipher before the factory runs; every inbound pass and outbox drain routes through
+    it. Keyless providers skip decryption and hand the factory an empty secret.
+  - `credentialsForConnection()` (`:1352`) — throws `TrackerAuthError` on missing cipher, which
+    would dead-end mapping management (add-mapping wizard re-entry). Keyless providers return a
+    credentials value with no key.
+  - `connect()` skips `encryptTrackerSecret` and stores `secret_ciphertext = NULL`; the
+    disconnect-clears-the-key / credential-carrier machinery degrades to a no-op for keyless rows.
+  - `updateCredentials`/reconnect surfaces render as **re-detect** (probe again, no paste field).
+  NULL stays invalid for the three keyed providers — the predicate makes that explicit rather
+  than loosening the guards globally. Tests must cover: initial sync, Sync now, mapping
+  management re-entry, pause + re-detect resume, and app restart with a NULL secret.
 - **Identity**: `workspace_id = null` matches nothing in `connectionMatchesIdentity`/revival
   (store.ts: "an identity we never learned cannot be claimed BY identity"), so stamp
   `workspace_id` with the beads **`issue_prefix`** (committed in `.beads/config.yaml`, stable,
@@ -221,11 +240,17 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   present in both `bd list --all` incremental results and the id sweep, and audit which issue
   types/statuses the default AND `--all` listings exclude (gates, templates, wisps/ephemeral,
   `deferred`/`frozen`-category customs) — decide explicitly per excluded class whether the adapter
-  needs additional include flags or documents the class as out of sync scope.
+  needs additional include flags or documents the class as out of sync scope;
+  **guarded-update semantics**: whether `bd update` can condition on `revision` (expected-revision
+  arg? SQL fallback?) and what a mismatch returns — this gates the v1 lost-update design;
+  **recovery-after-close control**: create with a metadata client key, close the issue, prove
+  `--all --metadata-field` recovery still finds it.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
 - **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from Phase 0).
-- **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, `connect()` keyless
-  branch, re-detect reconnect surface.
+- **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, the
+  `providerNeedsSecret` predicate threaded through every NULL-secret consumer
+  (`buildAdapter`/`credentialsForConnection`/`connect`/reconnect), re-detect reconnect surface,
+  plus the five keyless lifecycle tests listed above.
 - **Phase 4 — factory/service wiring** (project path into the factory, per-project spawn mutex,
   lock-error recognition).
 - **Phase 5 — full gate + live smoke** against a real beads repo: connect wizard end-to-end,
@@ -252,9 +277,15 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   the adapter).
 - **Dual writers on one issue** (session agent's `bd` + our write-back): the existing echo
   suppression + pre-send `contentDivergence` guard (Codex round-3 fix from the field-writeback
-  work) is what keeps this convergent — same machinery, the "remote" is just very local. Beads'
-  `revision` optimistic-concurrency token is available as a future strengthening (send-if-unchanged),
-  not needed for v1.
+  work) is the baseline — but for beads the pre-send read is not atomic with the write, and
+  unlike the HTTP providers, concurrent local writers are *expected* (sprint lanes), not rare.
+  Beads ships a `revision` guarded-write optimistic-concurrency token ("always present"), so
+  **revision-conditional writes are a v1 requirement, contingent on Phase 0 confirming the CLI's
+  guarded-update semantics** (Codex round-2 finding 3): carry `revision` from the pre-send read
+  into every state/content update; a revision mismatch settles the row unsent as a held conflict
+  for the next inbound merge, exactly like the divergence guard. If Phase 0 finds `bd update`
+  cannot express the guard, fall back to pre-send-divergence parity with the HTTP providers and
+  record the residual race in the docs.
 - **Scale**: beads self-reports fast at thousands of issues; our full-fetch sweep every 12th pass
   is a `bd list` of ids — fine at that scale.
 
@@ -275,3 +306,20 @@ Codex adversarial round 1 (2026-08-26), verdict needs-attention, 1 high — CONF
    Fix folded into the mapping table (`--all --limit 0` on both list paths) and Phase 0 (negative
    controls proving closed issues survive both listings; per-class audit of default-excluded
    types with an explicit include-or-out-of-scope ruling each).
+
+Codex adversarial round 2 (2026-08-26), verdict needs-attention, 3 high — all CONFIRMED (finding
+1 verified against `trackerSyncService.ts` guards) and absorbed:
+
+1. [high] Keyless connections failed every operational path, not just connect: `buildAdapter()`
+   and `credentialsForConnection()` both reject a NULL ciphertext before any provider code runs,
+   so a detected beads connection would pause on first sync and mapping management would dead-end.
+   Absorbed as the `providerNeedsSecret` predicate consulted at every guard + the five lifecycle
+   tests (see "Keyless connect").
+2. [high] Client-key recovery reused the default (closed-excluding) listing → a create whose
+   response was lost and whose issue was closed before recovery would be retried as a duplicate.
+   Absorbed: `--all --limit 0` on `findIssueByClientKey` + a recovery-after-close negative
+   control in Phase 0.
+3. [high] The pre-send divergence guard is not atomic with the write, and beads' expected
+   concurrent local writers make the window real while a `revision` token sits unused. Absorbed:
+   revision-conditional writes promoted to a v1 requirement contingent on the Phase 0
+   guarded-update probe, with divergence-guard parity as the documented fallback.
