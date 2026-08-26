@@ -20,6 +20,20 @@ static/derived fallbacks are hidden); and — superseding D1's "Standard is the 
 the 3-slot jury stays exactly as shipped). Uncalibrated flows keep the identity and the
 `'{}'` freeze sentinel; sprint/planner standard runs freeze the pinned spec like any
 preset level, so their spec_hash forks from the pre-feature `'{}'` revision by design.
+r5 (user decisions, 2026-08-26): every built-in is now calibrated. **Ship's three
+levels are the sprint ∪ planner union** — the phase/step paths match both parents
+exactly, so pins, the efficient structural edits (lane collapse + design-track drop +
+merged-tasks/merged-lane addenda), and thorough's always-on design track transfer
+verbatim; ship.md gained planner's "when `tasks` is absent from the appended step list"
+rule so the efficient removeSteps stays prose-consistent (planner's decomposed-stories
+re-home does NOT transfer — ship's tasks step mints no artifact). **Compound, launch,
+and verify-setup get pins-only presets** (compound/verify-setup: their single agent at
+sonnet·medium / opus·medium / opus·high; launch mirrors the planner matrix plus
+`interview` tracking `context`'s tier) — launch deliberately takes no structural edits
+because launch.md has no absent-step rule (plan D9). Standard everywhere is pins-only
+with no evalDefault; efficient everywhere carries evalDefault:false (a no-op on the
+eval-exempt compound/verify-setup, kept uniform). materializeForLevel's `'{}'` arm is
+now an unreachable future-flow guard.
 Design reference: https://claude.ai/code/artifact/34cc2e25-2c27-415c-9acd-a893d68b62e1
 
 ## 1. What we're building
