@@ -108,14 +108,35 @@ describe('resolveRunEffectiveAgents — promptAddendum from the frozen spec', ()
     }
   });
 
-  it('a standard run resolves byte-identical agents to a run with no spec at all', () => {
+  it('a standard run applies ONLY the aligned model pins — the prompts stay untouched', () => {
+    // Standard carries the aligned-defaults pins (model/effort per agent) and
+    // nothing else: modulo the fields pin-application touches (the pin values,
+    // the dropped rawContent, the builtin -> builtin-override source flip, and
+    // the runtime keys it materializes as undefined) the agents are
+    // byte-identical to a run with no spec at all, and no prompt anywhere gains
+    // an addendum.
+    const stripPins = (agents: ReturnType<typeof resolveRunEffectiveAgents>) =>
+      agents.map(
+        ({
+          model: _m,
+          effort: _e,
+          rawContent: _r,
+          source: _s,
+          runtime: _rt,
+          providerModel: _pm,
+          codexModel: _cm,
+          ...rest
+        }) => rest,
+      );
+
     const standardRunId = seedRun(db, materializeForLevel('sprint', '', 'standard'));
     const standard = resolveRunEffectiveAgents(db, standardRunId);
+    expect(standard.find((a) => a.agentKey === 'implement')?.model).toBe('sonnet');
 
     const bare = makeDb();
     try {
       const bareRunId = seedRun(bare, '');
-      expect(standard).toEqual(resolveRunEffectiveAgents(bare, bareRunId));
+      expect(stripPins(standard)).toEqual(stripPins(resolveRunEffectiveAgents(bare, bareRunId)));
     } finally {
       bare.close();
     }

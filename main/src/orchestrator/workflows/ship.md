@@ -175,7 +175,13 @@ work never done. The per-step stamps are called out below.
      pointer to the idea); exactly 1 task → no epic.
 9. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
-   hints, parent epic/idea linkage). **Fallback epic first:** for an idea with no
+   hints, parent epic/idea linkage).
+   **When `tasks` is absent from the appended step list**, this run's definition
+   merged decomposition into `epics`: do not delegate `cyboflow-tasks`. The epics
+   step's own result already carries the complete task list, so create those tasks
+   there with everything below applied unchanged (fallback epic first, id/title
+   tracking, stamps) and report nothing for `tasks`.
+   **Fallback epic first:** for an idea with no
    epic yet, count the returned tasks before creating any — **>1** → create the
    step-8 fallback epic (`task_type='epic'`, title = the idea's title,
    `originating_idea_id` = the idea) FIRST, then create every task with

@@ -22,11 +22,17 @@ function sprintAt(level: 'standard' | 'efficient') {
   return definition;
 }
 
-/** The ship built-in — UNCALIBRATED, so its standard carries no pins at all. */
-function shipAt(level: 'standard') {
-  const definition = resolveEffectiveDefinition('ship', null, level);
-  if (definition === null) throw new Error(`ship did not resolve at ${level}`);
-  return definition;
+/**
+ * The ship built-in at standard with its level pins STRIPPED — the fixture for
+ * the fallback tests below. Every built-in now carries standard pins, so a
+ * pinless step only exists on a definition without agentConfigs (a user-edited
+ * custom slot is the real-world case).
+ */
+function shipWithoutPins() {
+  const definition = resolveEffectiveDefinition('ship', null, 'standard');
+  if (definition === null) throw new Error('ship did not resolve at standard');
+  const { agentConfigs: _stripped, ...rest } = definition;
+  return rest;
 }
 
 /** The chip's name span (first child) — where the strike-through lives. */
@@ -99,10 +105,9 @@ describe('TuningPhaseStrip', () => {
   });
 
   it('falls back to the honest "run model" tag for a step nothing pins', () => {
-    // Ship is UNCALIBRATED: its standard is the as-authored identity, so its
-    // steps carry no level pin — and with no catalogue targets either, the
-    // model is only decided at launch.
-    const standard = shipAt('standard');
+    // No level pin and no catalogue target either — the model is only decided
+    // at launch.
+    const standard = shipWithoutPins();
     render(<TuningPhaseStrip definition={standard} baselineDefinition={standard} />);
 
     expect(screen.queryByTestId('tuning-step-chip-context-pin')).toBeNull();
@@ -110,7 +115,7 @@ describe('TuningPhaseStrip', () => {
   });
 
   it('falls back to the agent catalogue run target when the level pins nothing', () => {
-    const standard = shipAt('standard');
+    const standard = shipWithoutPins();
     render(
       <TuningPhaseStrip
         definition={standard}

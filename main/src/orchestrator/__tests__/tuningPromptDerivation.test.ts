@@ -81,16 +81,11 @@ describe('D9 — an efficient run is never instructed to drive a removed lane st
         expect(standard).toContain(id);
       }
 
-      // `ship`'s preset table is uncalibrated (agentConfigs only), so only
-      // `sprint` actually loses steps — assert the ids vanish where they should
-      // and stay put where the preset removes nothing.
+      // Ship's efficient inherits sprint's lane collapse verbatim (its Execute
+      // phase IS sprint's), so both flows lose the same lane steps.
       const efficient = effectivePromptFor(row, 'efficient');
       for (const id of REMOVED_AT_EFFICIENT) {
-        if (flow === 'sprint') {
-          expect(efficient).not.toContain(id);
-        } else {
-          expect(efficient).toContain(id);
-        }
+        expect(efficient).not.toContain(id);
       }
     });
   }

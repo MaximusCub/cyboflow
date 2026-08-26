@@ -344,7 +344,7 @@ function insertWorkflow(
 }
 
 describe('cyboflow.workflows.getDefinition', () => {
-  it('returns the built-in definition when spec_json is "{}" and name is a built-in', async () => {
+  it('returns the built-in at standard (aligned pins applied) when spec_json is "{}"', async () => {
     const rawDb = createWorkflowTestDb();
     const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
     insertWorkflow(rawDb, 'wf-1-planner', 1, 'planner');
@@ -353,7 +353,7 @@ describe('cyboflow.workflows.getDefinition', () => {
     const result = await caller.cyboflow.workflows.getDefinition({ workflowId: 'wf-1-planner' });
 
     expect(result.id).toBe('planner');
-    expect(result).toEqual(WORKFLOW_DEFINITIONS.planner);
+    expect(result).toEqual(applyTuningPreset(WORKFLOW_DEFINITIONS.planner, 'planner', 'standard'));
   });
 
   it('prefers a valid spec_json override over the built-in definition', async () => {

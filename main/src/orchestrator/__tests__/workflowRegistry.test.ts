@@ -23,6 +23,7 @@ import { writeFileSync } from 'fs';
 import * as path from 'path';
 import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type WorkflowConfigProvider } from '../workflowRegistry';
 import { computeSpecHash } from '../specHash';
+import { materializeForLevel } from '../../../../shared/tuning/workflowTuning';
 import {
   WORKFLOW_LAUNCHABLE_RUNTIMES,
   type WorkflowRunStorableRuntime,
@@ -2376,7 +2377,7 @@ describe('WorkflowRegistry', () => {
 
     // ───── spec_hash freeze + workflow_revisions snapshot (spec-capture / migration 026) ─────
 
-    it("stamps spec_hash = computeSpecHash(workflow.spec_json) onto the run row (frozen at creation)", async () => {
+    it("stamps spec_hash = the hash of the run's MATERIALIZED spec onto the run row (frozen at creation)", async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'spec-hash-stamp.md', '---\n---\n');
         registry.seed(1, [{ name: 'planner', path }]);
@@ -2387,9 +2388,13 @@ describe('WorkflowRegistry', () => {
 
         interface HashRow { spec_hash: string | null }
         const row = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
-        // Seeded rows carry the '{}' default; the stamped hash matches it exactly.
-        expect(row.spec_hash).toBe(computeSpecHash(wf.spec_json));
-        expect(row.spec_hash).toBe(computeSpecHash('{}'));
+        // Seeded rows carry the '{}' default and no level stamp, so the run
+        // freezes STANDARD — the aligned-defaults materialization of the
+        // built-in, never the raw slot (which standard deliberately ignores).
+        expect(row.spec_hash).toBe(
+          computeSpecHash(materializeForLevel('planner', wf.spec_json, 'standard')),
+        );
+        expect(row.spec_hash).not.toBe(computeSpecHash('{}'));
       });
     });
 
@@ -2426,9 +2431,12 @@ describe('WorkflowRegistry', () => {
         const rev = db
           .prepare('SELECT workflow_id, spec_hash, spec_json FROM workflow_revisions WHERE workflow_id = ?')
           .get(wf.id) as RevRow | undefined;
+        // The recorded revision is what the run FROZE — the standard
+        // materialization of the built-in, not the row's '{}' slot.
+        const frozen = materializeForLevel('sprint', wf.spec_json, 'standard');
         expect(rev).toBeDefined();
-        expect(rev!.spec_hash).toBe(computeSpecHash(wf.spec_json));
-        expect(rev!.spec_json).toBe(wf.spec_json);
+        expect(rev!.spec_hash).toBe(computeSpecHash(frozen));
+        expect(rev!.spec_json).toBe(frozen);
       });
     });
 
@@ -2447,7 +2455,7 @@ describe('WorkflowRegistry', () => {
         interface CountRow { count: number }
         const { count } = db
           .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ? AND spec_hash = ?')
-          .get(workflowId, computeSpecHash('{}')) as CountRow;
+          .get(workflowId, computeSpecHash(materializeForLevel('planner', '{}', 'standard'))) as CountRow;
         expect(count).toBe(1);
       });
     });
@@ -2466,7 +2474,7 @@ describe('WorkflowRegistry', () => {
         const { count } = db
           .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
           .get(workflowId) as CountRow;
-        // Both runs froze the SAME '{}' spec → one revision row, not two.
+        // Both runs froze the SAME materialized spec → one revision row, not two.
         expect(count).toBe(1);
       });
     });
@@ -2489,7 +2497,9 @@ describe('WorkflowRegistry', () => {
 
         const after = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
         expect(after.spec_hash).toBe(before.spec_hash);
-        expect(after.spec_hash).toBe(computeSpecHash('{}'));
+        expect(after.spec_hash).toBe(
+          computeSpecHash(materializeForLevel('planner', '{}', 'standard')),
+        );
       });
     });
   });

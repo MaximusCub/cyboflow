@@ -272,19 +272,189 @@ const PLANNER_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>
 };
 
 /**
- * The uncalibrated built-ins (launch, compound, ship, verify-setup): identity
- * plus the eval lever only. Per-flow calibration is future work — each needs its
- * own matrix before pins or structural edits can be justified.
- *
- * `evalDefault: false` is a no-op for compound and verify-setup (both are
- * eval-EXEMPT by name in `snapshotRunForEval`); it is kept uniform so the lever
- * means the same thing on every flow.
+ * Ship — planner concatenated with sprint in one run, and its phase/step paths
+ * mirror both parents exactly (planner's `refine/*`, sprint's
+ * `execute/execute-tasks/inner/*`). Each level is therefore the UNION of the two
+ * parent presets: pins, structural edits, and addenda transfer verbatim. The
+ * agent-key sets are disjoint, so the union never conflicts. One planner piece
+ * does NOT transfer: the efficient `decomposed-stories` re-home
+ * (`outerStepPatches` on `refine/epics`) — ship's `tasks` step mints no artifact
+ * (the approve-plan surface is orchestrator-templated), so there is nothing to
+ * re-home.
  */
-const UNCALIBRATED_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
-  // No `standard` entry: uncalibrated flows stay the as-authored identity at
-  // Standard (a standard preset exists only where a matrix agreed the pins).
-  efficient: { agentConfigs: {}, evalDefault: false },
-  thorough: { agentConfigs: {} },
+const SHIP_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
+  efficient: {
+    agentConfigs: {
+      // Sprint side.
+      'dependency-analyzer': { model: 'haiku', effort: 'low' },
+      implement: { model: 'sonnet', effort: 'medium' },
+      'task-verify': { model: 'sonnet', effort: 'low' },
+      'sprint-verify': { model: 'haiku', effort: 'low' },
+      'sprint-review': { model: 'sonnet', effort: 'high' },
+      'address-review': { model: 'sonnet', effort: 'high' },
+      // Planner side.
+      context: { model: 'sonnet', effort: 'medium' },
+      epics: { model: 'sonnet', effort: 'medium' },
+    },
+    removeSteps: [
+      // Planner-efficient: drop the optional design track and merge task detail
+      // into epic creation (ship.md carries the same "when `tasks` is absent"
+      // merged-decomposition rule as planner.md).
+      'refine/ui-prototype',
+      'refine/architecture',
+      'refine/adversarial-review',
+      'refine/tasks',
+      // Sprint-efficient: collapse the lane to implement → task-verify.
+      'execute/execute-tasks/inner/write-tests',
+      'execute/execute-tasks/inner/code-review',
+      'execute/execute-tasks/inner/visual-verify',
+    ],
+    promptAddenda: {
+      implement:
+        'This tuning level runs a MERGED implementation lane — the separate write-tests and code-review lane steps are disabled. In the same turn as your diff you also author the unit tests covering it and run them TARGETED (only the test files that touch your change, never the full suite), and you self-review the diff for correctness and pattern compliance before you finish.',
+      epics:
+        'This tuning level runs a MERGED decomposition step — the separate "fill out task details" step is disabled. Alongside the epic breakdown, return the COMPLETE task list for every epic (title, body, and acceptance criteria per task) so the orchestrator can persist execution-ready tasks straight from your output.',
+    },
+    evalDefault: false,
+  },
+  // The aligned defaults — the sprint + planner Standard columns unioned. Pins
+  // only, jury untouched.
+  standard: {
+    agentConfigs: {
+      // Sprint side.
+      'dependency-analyzer': { model: 'sonnet', effort: 'medium' },
+      implement: { model: 'sonnet', effort: 'high' },
+      'write-tests': { model: 'sonnet', effort: 'medium' },
+      'code-review': { model: 'opus', effort: 'high' },
+      'task-verify': { model: 'opus', effort: 'medium' },
+      'visual-verify': { model: 'opus', effort: 'medium' },
+      'sprint-verify': { model: 'opus', effort: 'high' },
+      'sprint-review': { model: 'opus', effort: 'high' },
+      'address-review': { model: 'opus', effort: 'high' },
+      // Planner side.
+      context: { model: 'sonnet', effort: 'high' },
+      'ui-prototype': { model: 'sonnet', effort: 'medium' },
+      architecture: { model: 'opus', effort: 'medium' },
+      'adversarial-review': { model: 'opus', effort: 'high' },
+      epics: { model: 'sonnet', effort: 'medium' },
+      tasks: { model: 'sonnet', effort: 'medium' },
+    },
+  },
+  thorough: {
+    agentConfigs: {
+      // Sprint side.
+      'dependency-analyzer': { model: 'sonnet', effort: 'high' },
+      implement: { model: 'opus', effort: 'high' },
+      'write-tests': { model: 'sonnet', effort: 'high' },
+      'code-review': { model: 'opus', effort: 'high' },
+      'task-verify': { model: 'opus', effort: 'high' },
+      'visual-verify': { model: 'opus', effort: 'high' },
+      'sprint-verify': { model: 'opus', effort: 'high' },
+      'sprint-review': { model: 'fable', effort: 'medium' },
+      'address-review': { model: 'opus', effort: 'high' },
+      // Planner side.
+      context: { model: 'opus', effort: 'high' },
+      'ui-prototype': { model: 'sonnet', effort: 'high' },
+      architecture: { model: 'opus', effort: 'high' },
+      'adversarial-review': { model: 'fable', effort: 'medium' },
+      epics: { model: 'opus', effort: 'high' },
+      tasks: { model: 'opus', effort: 'medium' },
+    },
+    // Planner-thorough: the whole design track always-on.
+    outerStepPatches: {
+      'refine/ui-prototype': { optional: false },
+      'refine/architecture': { optional: false },
+      'refine/adversarial-review': { optional: false },
+      'refine/approve-design': { optional: false },
+    },
+  },
+};
+
+/**
+ * Compound — a single `compounder` agent drives all three agent steps
+ * (load-sprint / extract / write-back), so one pin covers the flow. Extraction
+ * is the judgment-heavy core, which sets the tier. Pins only: the five-step
+ * propose → gate → apply → gate shape has nothing removable.
+ *
+ * `evalDefault: false` is a no-op here (compound is eval-EXEMPT by name in
+ * `snapshotRunForEval`); kept uniform so the lever means the same thing on
+ * every flow.
+ */
+const COMPOUND_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
+  efficient: {
+    agentConfigs: { compounder: { model: 'sonnet', effort: 'medium' } },
+    evalDefault: false,
+  },
+  standard: {
+    agentConfigs: { compounder: { model: 'opus', effort: 'medium' } },
+  },
+  thorough: {
+    agentConfigs: { compounder: { model: 'opus', effort: 'high' } },
+  },
+};
+
+/**
+ * Launch — pins only, no structural edits: launch.md hard-codes its step list in
+ * prose and (unlike planner/ship) carries no "absent from the appended list"
+ * rule, so a `removeSteps` here would hand the orchestrator contradictory
+ * instructions (plan D9). The planner-shared agents mirror the planner matrix;
+ * `interview` (the interview / project-brief / ideas steps) tracks `context`'s
+ * tier — the same probe-and-synthesize work at project scope.
+ */
+const LAUNCH_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
+  efficient: {
+    agentConfigs: {
+      interview: { model: 'sonnet', effort: 'medium' },
+      context: { model: 'sonnet', effort: 'medium' },
+      'ui-prototype': { model: 'sonnet', effort: 'medium' },
+      architecture: { model: 'sonnet', effort: 'medium' },
+      'adversarial-review': { model: 'sonnet', effort: 'medium' },
+      epics: { model: 'sonnet', effort: 'medium' },
+      tasks: { model: 'sonnet', effort: 'medium' },
+    },
+    evalDefault: false,
+  },
+  standard: {
+    agentConfigs: {
+      interview: { model: 'sonnet', effort: 'high' },
+      context: { model: 'sonnet', effort: 'high' },
+      'ui-prototype': { model: 'sonnet', effort: 'medium' },
+      architecture: { model: 'opus', effort: 'medium' },
+      'adversarial-review': { model: 'opus', effort: 'high' },
+      epics: { model: 'sonnet', effort: 'medium' },
+      tasks: { model: 'sonnet', effort: 'medium' },
+    },
+  },
+  thorough: {
+    agentConfigs: {
+      interview: { model: 'opus', effort: 'high' },
+      context: { model: 'opus', effort: 'high' },
+      'ui-prototype': { model: 'sonnet', effort: 'high' },
+      architecture: { model: 'opus', effort: 'high' },
+      'adversarial-review': { model: 'fable', effort: 'medium' },
+      epics: { model: 'opus', effort: 'high' },
+      tasks: { model: 'opus', effort: 'medium' },
+    },
+  },
+};
+
+/**
+ * Verify-setup — a single `verify-setup` agent drives inspect / derive / prove.
+ * The prove step's diagnose-and-retry loop over real build/serve failures is the
+ * hard part, which sets the tier. Pins only; eval-exempt like compound (the
+ * `evalDefault: false` is the same uniform no-op).
+ */
+const VERIFY_SETUP_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
+  efficient: {
+    agentConfigs: { 'verify-setup': { model: 'sonnet', effort: 'medium' } },
+    evalDefault: false,
+  },
+  standard: {
+    agentConfigs: { 'verify-setup': { model: 'opus', effort: 'medium' } },
+  },
+  thorough: {
+    agentConfigs: { 'verify-setup': { model: 'opus', effort: 'high' } },
+  },
 };
 
 /** Every built-in flow's preset table, keyed by flow then level. */
@@ -293,16 +463,17 @@ export const TUNING_PRESETS: Readonly<
 > = {
   planner: PLANNER_PRESETS,
   sprint: SPRINT_PRESETS,
-  compound: UNCALIBRATED_PRESETS,
-  ship: UNCALIBRATED_PRESETS,
-  'verify-setup': UNCALIBRATED_PRESETS,
-  launch: UNCALIBRATED_PRESETS,
+  compound: COMPOUND_PRESETS,
+  ship: SHIP_PRESETS,
+  'verify-setup': VERIFY_SETUP_PRESETS,
+  launch: LAUNCH_PRESETS,
 };
 
 /**
  * The preset for a flow × level, or `undefined` when there is none — a
  * non-built-in flow, `custom` (reads the stored slot, never a transform), or
- * `standard` on a flow with no aligned-defaults entry (the identity).
+ * `standard` on a flow with no aligned-defaults entry (the identity; every
+ * CURRENT built-in carries one, so today that arm only guards a future flow).
  *
  * Main-side callers read `evalDefault` through this. A `standard` preset never
  * carries `evalDefault` (jury as shipped), so the eval lever still resolves to
@@ -508,8 +679,8 @@ function applyInnerPatches(
  * A preset pin wins over an existing entry for the FIELDS IT SETS ONLY —
  * everything else on that entry (a `custom` copy, a `runtime` / `providerModel`
  * routing decision) is preserved. `agentConfigs` stays absent when the preset
- * contributes nothing, so an uncalibrated flow's output is structurally
- * identical to the built-in.
+ * contributes nothing, so a pinless preset's output is structurally identical
+ * to the built-in.
  */
 function mergeAgentConfigs(def: WorkflowDefinition, preset: TuningPreset): void {
   const pins = Object.entries(preset.agentConfigs).filter(
@@ -542,8 +713,8 @@ function mergeAgentConfigs(def: WorkflowDefinition, preset: TuningPreset): void 
  * deep-equals the input. (`custom` never reaches a preset — its definition comes
  * from the workflow's own slot, see {@link resolveEffectiveDefinition} — but
  * returning the identity here keeps the function total over the level union.)
- * `standard` applies the flow's aligned-defaults pins where a matrix agreed
- * them (sprint, planner) and is the identity everywhere else.
+ * `standard` applies the flow's aligned-defaults pins — every built-in carries
+ * a standard preset now — and is the identity only for a flow without one.
  */
 export function applyTuningPreset(
   builtin: WorkflowDefinition,
@@ -600,9 +771,10 @@ export function resolveEffectiveDefinition(
  *     to what an untouched flow has always stamped — no revision fork, no stats
  *     re-bucketing. (A flow whose slot holds a definition while the dial sits on
  *     `standard` deliberately freezes `'{}'` too: `standard` never reads the
- *     slot.) On a flow WITH one (sprint, planner) `standard` materializes like
- *     any preset level — the aligned pins must reach the frozen spec or the run
- *     would not honour them.
+ *     slot.) Every CURRENT built-in carries a standard preset, so this arm only
+ *     guards a future uncalibrated flow; on a flow WITH one, `standard`
+ *     materializes like any preset level — the aligned pins must reach the
+ *     frozen spec or the run would not honour them.
  *   `custom`   -> the workflow's own slot — today's exact path.
  *   otherwise  -> the preset applied to the built-in, through the canonical
  *     {@link serializeDefinition}, so the same level on the same flow always

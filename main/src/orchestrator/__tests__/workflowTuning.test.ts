@@ -6,7 +6,7 @@
  * and because main's vitest config only collects `main/src/**`.
  *
  * What is pinned here:
- *   1. standard/custom are the identity, and the transform is pure;
+ *   1. custom is the identity, standard is pins-only, and the transform is pure;
  *   2. EVERY built-in flow × EVERY level produces a definition the write-path
  *      schema accepts (the sweep that catches a preset removing a phase's last
  *      step, orphaning a loopback, or writing an empty agentConfigs entry);
@@ -62,38 +62,27 @@ describe('tuning level vocabulary', () => {
     expect(getTuningPreset('sprint', 'efficient')).toBeDefined();
   });
 
-  it('standard has an aligned-defaults preset on the calibrated flows only', () => {
-    // Calibrated (design-matrix Standard column): pins only — no structural
-    // edits, and NEVER evalDefault (the jury stays exactly as shipped).
-    for (const flow of ['sprint', 'planner'] as const) {
+  it('standard is an aligned-defaults preset on EVERY built-in: pins only', () => {
+    // Design-matrix Standard column (sprint/planner/ship) or the flow's own
+    // reasonable defaults (compound/launch/verify-setup): model pins only — no
+    // structural edits, and NEVER evalDefault (the jury stays exactly as
+    // shipped).
+    for (const flow of CYBOFLOW_WORKFLOW_NAMES) {
       const preset = getTuningPreset(flow, 'standard');
-      expect(preset).toBeDefined();
-      expect(Object.keys(preset?.agentConfigs ?? {}).length).toBeGreaterThan(0);
-      expect(preset?.removeSteps).toBeUndefined();
-      expect(preset?.outerStepPatches).toBeUndefined();
-      expect(preset?.innerStepPatches).toBeUndefined();
-      expect(preset?.promptAddenda).toBeUndefined();
-      expect(preset?.evalDefault).toBeUndefined();
-    }
-    // Uncalibrated flows stay the as-authored identity at Standard.
-    for (const flow of ['launch', 'compound', 'ship', 'verify-setup'] as const) {
-      expect(getTuningPreset(flow, 'standard')).toBeUndefined();
+      expect(preset, flow).toBeDefined();
+      expect(Object.keys(preset?.agentConfigs ?? {}).length, flow).toBeGreaterThan(0);
+      expect(preset?.removeSteps, flow).toBeUndefined();
+      expect(preset?.outerStepPatches, flow).toBeUndefined();
+      expect(preset?.innerStepPatches, flow).toBeUndefined();
+      expect(preset?.promptAddenda, flow).toBeUndefined();
+      expect(preset?.evalDefault, flow).toBeUndefined();
     }
   });
 });
 
 describe('applyTuningPreset — identity levels', () => {
-  it.each(['launch', 'compound', 'ship', 'verify-setup'] as const)(
-    'standard is the identity for the uncalibrated %s',
-    (flow) => {
-      expect(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'standard')).toEqual(
-        WORKFLOW_DEFINITIONS[flow],
-      );
-    },
-  );
-
-  it.each(['sprint', 'planner'] as const)(
-    'standard on calibrated %s pins models but never touches the graph',
+  it.each(CYBOFLOW_WORKFLOW_NAMES)(
+    'standard on %s pins models but never touches the graph',
     (flow) => {
       const out = applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'standard');
       expect(Object.keys(out.agentConfigs ?? {}).length).toBeGreaterThan(0);
@@ -381,18 +370,96 @@ describe('planner × thorough', () => {
   });
 });
 
-describe('uncalibrated built-ins', () => {
-  const uncalibrated: CyboflowWorkflowName[] = ['launch', 'compound', 'ship', 'verify-setup'];
+describe('ship — the sprint ∪ planner union', () => {
+  /** The ship fan-out step's inner chain in the output of a level. */
+  const shipLaneIds = (def: WorkflowDefinition): string[] => {
+    const phase = def.phases.find((candidate) => candidate.id === 'execute');
+    const step = phase?.steps.find((candidate) => candidate.id === 'execute-tasks');
+    return (step?.fanOut?.inner ?? []).map((inner) => inner.id);
+  };
 
-  it.each(uncalibrated)('%s is structurally identical at every level', (flow) => {
+  it.each(['efficient', 'standard', 'thorough'] as const)(
+    'every %s pin equals its sprint/planner parent pin',
+    (level) => {
+      const ship = TUNING_PRESETS.ship[level];
+      const parents = {
+        ...TUNING_PRESETS.planner[level]?.agentConfigs,
+        ...TUNING_PRESETS.sprint[level]?.agentConfigs,
+      };
+      for (const [key, pin] of Object.entries(ship?.agentConfigs ?? {})) {
+        expect(pin, `ship/${level} pin "${key}" drifted from its parent`).toEqual(
+          parents[key],
+        );
+      }
+    },
+  );
+
+  describe('× efficient', () => {
+    const out = applyTuningPreset(WORKFLOW_DEFINITIONS.ship, 'ship', 'efficient');
+
+    it('collapses the lane chain to implement -> task-verify (the sprint edit)', () => {
+      expect(shipLaneIds(out)).toEqual(['implement', 'task-verify']);
+    });
+
+    it('drops the design track and the separate task-detail step (the planner edit)', () => {
+      const refineStepIds = out.phases
+        .find((phase) => phase.id === 'refine')
+        ?.steps.map((step) => step.id);
+      expect(refineStepIds).toEqual(['expand-spec', 'approve-design', 'epics', 'approve-plan']);
+    });
+
+    it('carries BOTH merged-step addenda', () => {
+      expect(out.agentConfigs?.implement?.promptAddendum).toContain('write-tests');
+      expect(out.agentConfigs?.epics?.promptAddendum).toContain('task');
+    });
+
+    it('defaults eval off', () => {
+      expect(getTuningPreset('ship', 'efficient')?.evalDefault).toBe(false);
+    });
+  });
+
+  describe('× thorough', () => {
+    const out = applyTuningPreset(WORKFLOW_DEFINITIONS.ship, 'ship', 'thorough');
+
+    it('turns the design track always-on (the planner edit)', () => {
+      const refine = out.phases.find((phase) => phase.id === 'refine');
+      for (const id of ['ui-prototype', 'architecture', 'adversarial-review', 'approve-design']) {
+        expect(refine?.steps.find((step) => step.id === id)?.optional, id).toBe(false);
+      }
+    });
+
+    it('keeps the full lane chain and pins it at the sprint tiers', () => {
+      expect(shipLaneIds(out)).toEqual([
+        'implement',
+        'write-tests',
+        'code-review',
+        'task-verify',
+        'visual-verify',
+      ]);
+      expect(out.agentConfigs?.['sprint-review']).toEqual({ model: 'fable', effort: 'medium' });
+    });
+  });
+});
+
+describe('pins-only built-ins (compound, launch, verify-setup)', () => {
+  const pinsOnly: CyboflowWorkflowName[] = ['compound', 'launch', 'verify-setup'];
+
+  it.each(pinsOnly)('%s is structurally identical at every level', (flow) => {
+    const structuralOnly = (def: WorkflowDefinition): string =>
+      serializeDefinition({ id: def.id, phases: def.phases });
     for (const level of TUNING_LEVELS) {
-      expect(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, level)).toEqual(
-        WORKFLOW_DEFINITIONS[flow],
-      );
+      expect(
+        structuralOnly(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, level)),
+        `${flow}/${level}`,
+      ).toBe(structuralOnly(WORKFLOW_DEFINITIONS[flow]));
     }
   });
 
-  it.each(uncalibrated)('%s only carries the eval lever at efficient', (flow) => {
+  it.each(pinsOnly)('%s pins every level and turns eval off only at efficient', (flow) => {
+    for (const level of ['efficient', 'standard', 'thorough'] as const) {
+      const preset = getTuningPreset(flow, level);
+      expect(Object.keys(preset?.agentConfigs ?? {}).length, `${flow}/${level}`).toBeGreaterThan(0);
+    }
     expect(getTuningPreset(flow, 'efficient')?.evalDefault).toBe(false);
     expect(getTuningPreset(flow, 'thorough')?.evalDefault).toBeUndefined();
   });
@@ -415,8 +482,10 @@ describe('mergeAgentConfigs precedence', () => {
     });
   });
 
-  it('leaves agentConfigs absent when the preset contributes nothing', () => {
-    const out = applyTuningPreset(WORKFLOW_DEFINITIONS.ship, 'ship', 'efficient');
+  it('leaves agentConfigs absent at the identity levels', () => {
+    // Every preset carries pins now, so only `custom` (the identity) exercises
+    // the nothing-contributed path on a built-in.
+    const out = applyTuningPreset(WORKFLOW_DEFINITIONS.ship, 'ship', 'custom');
     expect(out.agentConfigs).toBeUndefined();
   });
 });
@@ -480,17 +549,12 @@ describe('materializeForLevel', () => {
     ],
   });
 
-  it("standard is LITERALLY '{}' on an UNCALIBRATED flow — no revision fork for the untouched", () => {
-    // Not "a spec that parses to the built-in": the exact string, because it is
-    // hashed into spec_hash and any other text would fork the revision history
-    // of every flow nobody ever tuned. Only holds where standard has no
-    // aligned-defaults preset.
-    expect(materializeForLevel('ship', '{}', 'standard')).toBe('{}');
-    expect(materializeForLevel('ship', slotSpec, 'standard')).toBe('{}');
-    expect(materializeForLevel('launch', null, 'standard')).toBe('{}');
-  });
+  // NOTE: the "standard without a preset freezes literally '{}'" arm still
+  // exists in materializeForLevel but is unreachable through the public API —
+  // every current built-in carries a standard preset, so no test can exercise
+  // it. It guards a future uncalibrated flow.
 
-  it('standard on a CALIBRATED flow materializes the aligned pins (never the slot)', () => {
+  it('standard materializes the aligned pins (never the slot)', () => {
     const frozen = materializeForLevel('sprint', slotSpec, 'standard');
     expect(frozen).toBe(
       serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard')),
