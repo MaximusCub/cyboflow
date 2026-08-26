@@ -4,17 +4,18 @@
  * §4).
  *
  * One dial (Efficient / Standard / Thorough / Custom) over a strip showing what
- * that level actually runs, plus the two doors out: the advanced editor, and
- * deleting the custom definition when one exists.
+ * that level actually runs — diffed against Standard, so what a preset TAKES
+ * AWAY is as visible as what it keeps — plus the two doors out: the advanced
+ * editor, and deleting the custom definition when one exists.
  *
  * Deliberately presentational — the host modal owns every mutation, the busy
  * latch and the error surface, so this page has no tRPC import and stays
- * testable as a pure render of (level, definition, slot-filled).
+ * testable as a pure render of (level, definition, baseline, slot-filled).
  */
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { TuningLevelDial } from './TuningLevelDial';
-import { TuningPhaseStrip } from './TuningPhaseStrip';
+import { TuningModelLegend, TuningPhaseStrip } from './TuningPhaseStrip';
 
 export interface WorkflowTuningPageProps {
   /** The selected level (the workflow's stamped level until the user changes it). */
@@ -23,6 +24,8 @@ export interface WorkflowTuningPageProps {
   hasCustomDefinition: boolean;
   /** The SELECTED level's effective definition — what the strip renders. */
   definition: WorkflowDefinition | null;
+  /** The SAME flow at `'standard'` — what the strip diffs against. */
+  baselineDefinition: WorkflowDefinition | null;
   /** True while a level write / reset is in flight. */
   busy: boolean;
   onSelectLevel: (level: TuningLevel) => void;
@@ -36,6 +39,7 @@ export function WorkflowTuningPage({
   level,
   hasCustomDefinition,
   definition,
+  baselineDefinition,
   busy,
   onSelectLevel,
   onOpenAdvanced,
@@ -44,7 +48,8 @@ export function WorkflowTuningPage({
 }: WorkflowTuningPageProps): React.JSX.Element {
   return (
     <div
-      className="flex flex-1 flex-col gap-5 overflow-auto p-5"
+      className="flex flex-1 flex-col overflow-auto"
+      style={{ gap: 20, padding: '22px 22px 26px' }}
       data-testid="workflow-tuning-page"
     >
       <TuningLevelDial
@@ -58,24 +63,39 @@ export function WorkflowTuningPage({
         estimateLabels={estimateLabels}
       />
 
-      <div className="flex flex-col gap-2">
-        <span
-          className="text-[9px] font-semibold uppercase text-text-tertiary"
-          style={{ letterSpacing: '0.14em' }}
-        >
-          What runs at this level
-        </span>
-        <TuningPhaseStrip definition={definition} />
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-row items-baseline gap-3.5">
+          <span
+            className="text-[10px] font-bold uppercase text-text-tertiary"
+            style={{ letterSpacing: '0.18em' }}
+          >
+            What runs at this level
+          </span>
+          <span className="flex-1" />
+          <TuningModelLegend />
+        </div>
+        <TuningPhaseStrip definition={definition} baselineDefinition={baselineDefinition} />
       </div>
 
-      <div className="flex flex-row items-center gap-3">
+      <div className="flex flex-col items-start gap-2">
         <button
           type="button"
           onClick={onOpenAdvanced}
-          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-xs font-medium text-text-primary hover:bg-bg-hover"
+          className="flex w-full flex-row items-center gap-2.5 border border-border-primary bg-surface-primary text-left hover:bg-bg-hover"
+          style={{ padding: '10px 14px' }}
           data-testid="tuning-open-advanced"
         >
-          Open advanced editor →
+          <span
+            className="text-[10px] font-bold uppercase text-text-primary"
+            style={{ letterSpacing: '0.16em' }}
+          >
+            Open advanced editor
+          </span>
+          <span className="text-[9.5px] text-text-tertiary">
+            step graph · agents · MCPs · variants — the full editor, unchanged
+          </span>
+          <span className="flex-1" />
+          <span className="text-[11px] text-text-primary">→</span>
         </button>
 
         {hasCustomDefinition && (

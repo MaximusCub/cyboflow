@@ -11,30 +11,54 @@
  * `disabled`) deliberately: a native disabled button swallows the click, and
  * clicking the empty CUSTOM segment is how the user discovers where a custom
  * definition comes from — it opens the Advanced editor via
- * `onCustomUnavailable`.
+ * `onCustomUnavailable`. While the slot is empty that card's own description IS
+ * the hint, so the discovery text sits on the thing you click rather than in a
+ * detached paragraph below the row.
  *
  * The multiplier tags are STATIC copy calibrated on execution tokens. Real
  * per-level token estimates (`shared/tuning/workflowTuningEstimates`, backed
  * by `run_usage`) land through `estimateLabels` — an optional per-level string
- * rendered under the tag when present. Those numbers are EXECUTION tokens only
- * (eval-jury usage is unmetered — plan D8's "Scope caveat"), so whenever any
- * label is supplied this also renders a one-line "excl. eval" caption below
- * the strip, once per surface rather than once per segment.
+ * rendered under the description when present. Those numbers are EXECUTION
+ * tokens only (eval-jury usage is unmetered — plan D8's "Scope caveat"), so
+ * whenever any label is supplied this also renders a one-line "excl. eval"
+ * caption below the strip, once per surface rather than once per segment.
+ *
+ * Every card renders its "● ACTIVE" tick line whether or not it is selected —
+ * transparent when it is not — so selecting a card never changes any card's
+ * height and the row does not jump under the cursor.
  */
 import {
   TUNING_LEVELS,
   type TuningLevel,
 } from '../../../../shared/tuning/workflowTuning';
 
-/** Display copy per level: the segment label and its static cost tag. */
-const LEVEL_COPY: Readonly<Record<TuningLevel, { label: string; tag: string }>> = {
-  efficient: { label: 'Efficient', tag: '~0.5×' },
-  standard: { label: 'Standard', tag: '1.0× · as authored' },
-  thorough: { label: 'Thorough', tag: '~2.6×' },
-  custom: { label: 'Custom', tag: 'your definition' },
+/** Display copy per level: the card name, its static cost tag, its description. */
+const LEVEL_COPY: Readonly<
+  Record<TuningLevel, { label: string; tag: string; desc: string }>
+> = {
+  efficient: {
+    label: 'Efficient',
+    tag: '~0.5×',
+    desc: 'Preset — fewest steps, cheaper models, review once per sprint. Drafts, chores, low-risk changes.',
+  },
+  standard: {
+    label: 'Standard',
+    tag: '1.0×',
+    desc: "The flow exactly as authored — today's defaults, untouched.",
+  },
+  thorough: {
+    label: 'Thorough',
+    tag: '~2.6×',
+    desc: 'Preset — every check on, strongest models. Ship-critical or gnarly work.',
+  },
+  custom: {
+    label: 'Custom',
+    tag: '—',
+    desc: 'Your definition — edit it in Advanced.',
+  },
 };
 
-/** Hint shown under the strip while CUSTOM has nothing to select. */
+/** Description shown ON the CUSTOM card while its slot is empty. */
 export const CUSTOM_UNAVAILABLE_HINT =
   "No custom definition yet — edit in Advanced and choose 'Overwrite this flow'.";
 
@@ -51,7 +75,7 @@ export interface TuningLevelDialProps {
   busy?: boolean;
   /**
    * Optional per-level estimate line (a later phase's `run_usage` medians).
-   * Rendered under the static tag for whichever levels supply one.
+   * Rendered under the description for whichever levels supply one.
    */
   estimateLabels?: Partial<Record<TuningLevel, string>>;
 }
@@ -65,17 +89,33 @@ export function TuningLevelDial({
   estimateLabels,
 }: TuningLevelDialProps): React.JSX.Element {
   return (
-    <div className="flex flex-col gap-2" data-testid="tuning-level-selector">
-      <div className="flex flex-row" style={{ gap: 1 }}>
+    <div className="flex flex-col gap-2.5" data-testid="tuning-level-selector">
+      <div className="flex flex-row items-baseline gap-2.5">
+        <span
+          className="text-[10px] font-bold uppercase text-text-tertiary"
+          style={{ letterSpacing: '0.18em' }}
+        >
+          Tuning level
+        </span>
+        <span className="text-[9px] text-text-tertiary">
+          one dial — sets models, steps and checks across the whole flow
+        </span>
+      </div>
+
+      <div className="flex flex-row items-stretch" style={{ gap: 10 }}>
         {TUNING_LEVELS.map((candidate) => {
           const copy = LEVEL_COPY[candidate];
-          const unavailable = candidate === 'custom' && !hasCustomDefinition;
+          const isCustom = candidate === 'custom';
+          const unavailable = isCustom && !hasCustomDefinition;
           const selected = candidate === level;
           // CUSTOM carries the info accent so "your own definition" never reads
-          // as one more calibrated preset; the presets use the canvas's
-          // filled-dark selection language.
-          const accent =
-            candidate === 'custom' ? 'var(--color-status-info)' : 'var(--color-text-primary)';
+          // as one more calibrated preset; the presets carry the canvas accent.
+          const accent = isCustom
+            ? 'var(--color-status-info)'
+            : 'var(--color-interactive-primary)';
+          const emphasis = isCustom
+            ? 'var(--color-status-info)'
+            : 'var(--color-text-primary)';
           return (
             <button
               key={candidate}
@@ -90,53 +130,88 @@ export function TuningLevelDial({
                 }
                 onSelect(candidate);
               }}
-              className="flex flex-1 flex-col items-start gap-1 px-3 py-2 text-left"
+              className="flex-1 text-left"
               style={{
-                border: `1.4px solid ${selected ? accent : 'var(--color-border-primary)'}`,
-                background: selected ? accent : 'var(--color-surface-primary)',
-                color: selected ? 'var(--color-bg-primary)' : 'var(--color-text-primary)',
-                opacity: unavailable ? 0.5 : 1,
+                padding: '12px 14px',
+                // An empty CUSTOM slot is drawn as a vacancy — dashed and
+                // unfilled — rather than as one more selectable preset.
+                border: unavailable
+                  ? '1px dashed var(--color-border-primary)'
+                  : selected
+                    ? `1.4px solid ${emphasis}`
+                    : '1px solid var(--color-border-primary)',
+                background: unavailable
+                  ? 'transparent'
+                  : selected
+                    ? isCustom
+                      ? 'color-mix(in srgb, var(--color-status-info) 6%, transparent)'
+                      : 'var(--color-surface-primary)'
+                    : 'var(--color-surface-tertiary)',
+                boxShadow: !unavailable && selected ? `0 2px 0 ${emphasis}` : 'none',
+                opacity: unavailable ? 0.75 : 1,
                 cursor: busy ? 'not-allowed' : 'pointer',
               }}
               data-testid={`tuning-level-segment-${candidate}`}
             >
-              <span
-                className="text-[10px] font-semibold uppercase"
-                style={{ letterSpacing: '0.14em' }}
-              >
-                {copy.label}
+              <span className="flex flex-row items-center justify-between gap-2">
+                <span
+                  className="text-[12px] font-bold uppercase"
+                  style={{
+                    letterSpacing: '0.12em',
+                    color: isCustom
+                      ? unavailable
+                        ? 'var(--color-text-tertiary)'
+                        : 'var(--color-status-info)'
+                      : 'var(--color-text-primary)',
+                  }}
+                >
+                  {copy.label}
+                </span>
+                <span
+                  className="text-[9px] font-bold text-text-secondary"
+                  style={{
+                    padding: '2px 6px',
+                    border: '1px solid var(--color-border-primary)',
+                    background: 'var(--color-surface-tertiary)',
+                  }}
+                >
+                  {copy.tag}
+                </span>
               </span>
+
               <span
-                className="text-[9.5px]"
-                style={{
-                  color: selected ? 'var(--color-bg-primary)' : 'var(--color-text-tertiary)',
-                  opacity: selected ? 0.8 : 1,
-                }}
+                className="mt-1.5 block text-[10px] text-text-secondary"
+                style={{ lineHeight: 1.45 }}
+                data-testid={unavailable ? 'tuning-custom-hint' : undefined}
               >
-                {copy.tag}
+                {unavailable ? CUSTOM_UNAVAILABLE_HINT : copy.desc}
               </span>
+
               {estimateLabels?.[candidate] !== undefined && (
                 <span
-                  className="text-[9.5px]"
-                  style={{
-                    color: selected ? 'var(--color-bg-primary)' : 'var(--color-text-secondary)',
-                    opacity: selected ? 0.8 : 1,
-                  }}
+                  className="mt-1 block text-[9.5px] text-text-secondary"
                   data-testid={`tuning-level-estimate-${candidate}`}
                 >
                   {estimateLabels[candidate]}
                 </span>
               )}
+
+              {/* Always rendered — transparent when unselected — so selecting a
+                  card never changes the row's height. */}
+              <span
+                className="mt-2 block text-[8.5px] font-bold"
+                style={{
+                  letterSpacing: '0.14em',
+                  color: selected && !unavailable ? accent : 'transparent',
+                }}
+                aria-hidden={!selected || unavailable}
+              >
+                ● ACTIVE
+              </span>
             </button>
           );
         })}
       </div>
-
-      {!hasCustomDefinition && (
-        <p className="text-[10px] text-text-tertiary" data-testid="tuning-custom-hint">
-          {CUSTOM_UNAVAILABLE_HINT}
-        </p>
-      )}
 
       {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
         <p className="text-[10px] text-text-tertiary" data-testid="tuning-estimate-caption">
