@@ -44,7 +44,7 @@ const LEVEL_COPY: Readonly<
   standard: {
     label: 'Standard',
     tag: '1.0×',
-    desc: "The flow exactly as authored — today's defaults, untouched.",
+    desc: 'The aligned defaults — balanced models on every step, every check on.',
   },
   thorough: {
     label: 'Thorough',

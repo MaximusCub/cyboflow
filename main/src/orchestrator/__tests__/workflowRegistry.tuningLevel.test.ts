@@ -136,7 +136,9 @@ describe('WorkflowRegistry.updateSpec / resetSpec × the tuning stamp', () => {
     registry.resetSpec(WF_SPRINT);
     expect(specOf(WF_SPRINT)).toBe('{}');
     expect(levelOf(WF_SPRINT)).toBe('standard');
-    expect(registry.getEffectiveDefinition(WF_SPRINT)).toEqual(WORKFLOW_DEFINITIONS.sprint);
+    expect(registry.getEffectiveDefinition(WF_SPRINT)).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'),
+    );
   });
 
   it('resetSpec does NOT knock a flow off a preset level it was parked on', () => {
@@ -149,8 +151,14 @@ describe('WorkflowRegistry.updateSpec / resetSpec × the tuning stamp', () => {
 });
 
 describe('WorkflowRegistry.getEffectiveDefinition', () => {
-  it("'standard' is the identity — the as-authored built-in, byte for byte", () => {
-    expect(registry.getEffectiveDefinition(WF_SPRINT)).toEqual(WORKFLOW_DEFINITIONS.sprint);
+  it("'standard' on a calibrated flow is the built-in plus the aligned-defaults pins", () => {
+    const effective = registry.getEffectiveDefinition(WF_SPRINT);
+    expect(effective).toEqual(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'));
+    // Pins only: stripping agentConfigs recovers the as-authored graph.
+    expect({ ...effective, agentConfigs: undefined }).toEqual({
+      ...WORKFLOW_DEFINITIONS.sprint,
+      agentConfigs: undefined,
+    });
   });
 
   it("'efficient' returns the preset transform over the built-in, not the built-in", () => {
@@ -206,8 +214,10 @@ describe('WorkflowRegistry.createVariantFromCurrent × tuning levels', () => {
     );
   });
 
-  it("a 'standard' flow still snapshots the CONCRETE built-in graph, not '{}'", () => {
+  it("a 'standard' flow still snapshots the CONCRETE effective graph, not '{}'", () => {
     const variant = registry.createVariantFromCurrent(WF_SPRINT, 'from-standard');
-    expect(JSON.parse(variant.spec_json)).toEqual(WORKFLOW_DEFINITIONS.sprint);
+    expect(JSON.parse(variant.spec_json)).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'),
+    );
   });
 });

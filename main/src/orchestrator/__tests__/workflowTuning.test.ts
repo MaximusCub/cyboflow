@@ -39,7 +39,7 @@ import {
 } from '../../../../shared/types/workflows';
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
 
-const PRESET_LEVELS: readonly TuningPresetLevel[] = ['efficient', 'thorough'];
+const PRESET_LEVELS: readonly TuningPresetLevel[] = ['efficient', 'standard', 'thorough'];
 
 /** The sprint fan-out step's inner chain in the output of a level. */
 function sprintLaneIds(def: WorkflowDefinition): string[] {
@@ -56,20 +56,54 @@ describe('tuning level vocabulary', () => {
     }
   });
 
-  it('getTuningPreset has no preset for standard/custom or a non-built-in flow', () => {
-    expect(getTuningPreset('sprint', 'standard')).toBeUndefined();
+  it('getTuningPreset has no preset for custom or a non-built-in flow', () => {
     expect(getTuningPreset('sprint', 'custom')).toBeUndefined();
     expect(getTuningPreset('my-custom-flow', 'efficient')).toBeUndefined();
     expect(getTuningPreset('sprint', 'efficient')).toBeDefined();
   });
+
+  it('standard has an aligned-defaults preset on the calibrated flows only', () => {
+    // Calibrated (design-matrix Standard column): pins only — no structural
+    // edits, and NEVER evalDefault (the jury stays exactly as shipped).
+    for (const flow of ['sprint', 'planner'] as const) {
+      const preset = getTuningPreset(flow, 'standard');
+      expect(preset).toBeDefined();
+      expect(Object.keys(preset?.agentConfigs ?? {}).length).toBeGreaterThan(0);
+      expect(preset?.removeSteps).toBeUndefined();
+      expect(preset?.outerStepPatches).toBeUndefined();
+      expect(preset?.innerStepPatches).toBeUndefined();
+      expect(preset?.promptAddenda).toBeUndefined();
+      expect(preset?.evalDefault).toBeUndefined();
+    }
+    // Uncalibrated flows stay the as-authored identity at Standard.
+    for (const flow of ['launch', 'compound', 'ship', 'verify-setup'] as const) {
+      expect(getTuningPreset(flow, 'standard')).toBeUndefined();
+    }
+  });
 });
 
 describe('applyTuningPreset — identity levels', () => {
-  it.each(CYBOFLOW_WORKFLOW_NAMES)('standard is the identity for %s', (flow) => {
-    expect(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'standard')).toEqual(
-      WORKFLOW_DEFINITIONS[flow],
-    );
-  });
+  it.each(['launch', 'compound', 'ship', 'verify-setup'] as const)(
+    'standard is the identity for the uncalibrated %s',
+    (flow) => {
+      expect(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'standard')).toEqual(
+        WORKFLOW_DEFINITIONS[flow],
+      );
+    },
+  );
+
+  it.each(['sprint', 'planner'] as const)(
+    'standard on calibrated %s pins models but never touches the graph',
+    (flow) => {
+      const out = applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'standard');
+      expect(Object.keys(out.agentConfigs ?? {}).length).toBeGreaterThan(0);
+      // Structure untouched: only the agentConfigs overlay differs.
+      expect({ ...out, agentConfigs: undefined }).toEqual({
+        ...WORKFLOW_DEFINITIONS[flow],
+        agentConfigs: undefined,
+      });
+    },
+  );
 
   it.each(CYBOFLOW_WORKFLOW_NAMES)('custom is the identity for %s', (flow) => {
     expect(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, 'custom')).toEqual(
@@ -129,6 +163,8 @@ describe('preset tables resolve against the real built-in graphs', () => {
   for (const flow of CYBOFLOW_WORKFLOW_NAMES) {
     for (const level of PRESET_LEVELS) {
       const preset = TUNING_PRESETS[flow][level];
+      // Uncalibrated flows have no standard entry — nothing to validate.
+      if (preset === undefined) continue;
 
       it(`${flow} × ${level}: every removeSteps key is a real step`, () => {
         for (const key of preset.removeSteps ?? []) {
@@ -444,13 +480,23 @@ describe('materializeForLevel', () => {
     ],
   });
 
-  it("standard is LITERALLY '{}' — the invariant the whole zero-change promise rests on", () => {
+  it("standard is LITERALLY '{}' on an UNCALIBRATED flow — no revision fork for the untouched", () => {
     // Not "a spec that parses to the built-in": the exact string, because it is
     // hashed into spec_hash and any other text would fork the revision history
-    // of every flow nobody ever tuned.
-    expect(materializeForLevel('sprint', '{}', 'standard')).toBe('{}');
-    expect(materializeForLevel('sprint', slotSpec, 'standard')).toBe('{}');
-    expect(materializeForLevel('planner', null, 'standard')).toBe('{}');
+    // of every flow nobody ever tuned. Only holds where standard has no
+    // aligned-defaults preset.
+    expect(materializeForLevel('ship', '{}', 'standard')).toBe('{}');
+    expect(materializeForLevel('ship', slotSpec, 'standard')).toBe('{}');
+    expect(materializeForLevel('launch', null, 'standard')).toBe('{}');
+  });
+
+  it('standard on a CALIBRATED flow materializes the aligned pins (never the slot)', () => {
+    const frozen = materializeForLevel('sprint', slotSpec, 'standard');
+    expect(frozen).toBe(
+      serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard')),
+    );
+    // The custom slot is ignored at standard, exactly like the other preset levels.
+    expect(materializeForLevel('sprint', '{}', 'standard')).toBe(frozen);
   });
 
   it('custom is the slot verbatim', () => {

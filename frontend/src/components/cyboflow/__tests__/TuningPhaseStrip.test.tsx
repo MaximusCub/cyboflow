@@ -22,6 +22,13 @@ function sprintAt(level: 'standard' | 'efficient') {
   return definition;
 }
 
+/** The ship built-in — UNCALIBRATED, so its standard carries no pins at all. */
+function shipAt(level: 'standard') {
+  const definition = resolveEffectiveDefinition('ship', null, level);
+  if (definition === null) throw new Error(`ship did not resolve at ${level}`);
+  return definition;
+}
+
 /** The chip's name span (first child) — where the strike-through lives. */
 function nameOf(chip: HTMLElement): Element {
   const name = chip.firstElementChild;
@@ -92,40 +99,48 @@ describe('TuningPhaseStrip', () => {
   });
 
   it('falls back to the honest "run model" tag for a step nothing pins', () => {
-    const standard = sprintAt('standard');
+    // Ship is UNCALIBRATED: its standard is the as-authored identity, so its
+    // steps carry no level pin — and with no catalogue targets either, the
+    // model is only decided at launch.
+    const standard = shipAt('standard');
     render(<TuningPhaseStrip definition={standard} baselineDefinition={standard} />);
 
-    // Standard is the identity transform: it pins nothing, and with no
-    // catalogue targets the model is only decided at launch.
-    expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
-    expect(subOf(screen.getByTestId('tuning-lane-chip-implement'))).toHaveTextContent('run model');
+    expect(screen.queryByTestId('tuning-step-chip-context-pin')).toBeNull();
+    expect(subOf(screen.getByTestId('tuning-step-chip-context'))).toHaveTextContent('run model');
   });
 
   it('falls back to the agent catalogue run target when the level pins nothing', () => {
-    const standard = sprintAt('standard');
+    const standard = shipAt('standard');
     render(
       <TuningPhaseStrip
         definition={standard}
         baselineDefinition={standard}
         agentRunTargets={{
           // A Claude-model catalogue pin: alias tag, coloured like a level pin.
-          implement: { runtime: null, model: 'opus', providerModel: null },
+          context: { runtime: null, model: 'opus', providerModel: null },
           // A non-Claude provider: the provider-model id, uncoloured.
-          'code-review': { runtime: 'codex-sdk', model: null, providerModel: 'gpt-5.4-codex' },
+          'ui-prototype': { runtime: 'codex-sdk', model: null, providerModel: 'gpt-5.4-codex' },
         }}
       />,
     );
 
-    const claude = screen.getByTestId('tuning-lane-chip-implement');
+    const claude = screen.getByTestId('tuning-step-chip-context');
     expect(subOf(claude)).toHaveTextContent('opus');
     expect(subOf(claude)).toHaveStyle({ color: MODEL_COLORS.opus });
     expect(claude).toHaveStyle({ borderLeft: `3px solid ${MODEL_COLORS.opus}` });
     // Catalogue fallback is not a LEVEL pin — no pin testid.
-    expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
+    expect(screen.queryByTestId('tuning-step-chip-context-pin')).toBeNull();
 
-    expect(subOf(screen.getByTestId('tuning-lane-chip-code-review'))).toHaveTextContent(
+    expect(subOf(screen.getByTestId('tuning-step-chip-ui-prototype'))).toHaveTextContent(
       'gpt-5.4-codex',
     );
+  });
+
+  it('standard on the calibrated sprint shows the aligned-defaults pins', () => {
+    const standard = sprintAt('standard');
+    render(<TuningPhaseStrip definition={standard} baselineDefinition={standard} />);
+    expect(screen.getByTestId('tuning-lane-chip-implement-pin')).toHaveTextContent('sonnet · high');
+    expect(screen.getByTestId('tuning-lane-chip-code-review-pin')).toHaveTextContent('opus · high');
   });
 
   it('reads a human gate as "human" rather than as an agent', () => {

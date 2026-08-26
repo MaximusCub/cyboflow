@@ -379,7 +379,8 @@ export class WorkflowRegistry {
    *
    * Resolution is `resolveEffectiveDefinition(name, spec_json, tuning_level)`:
    * a preset level applies its transform to the built-in, `'custom'` resolves
-   * the spec slot, `'standard'` is the identity. Reading `row.spec_json`
+   * the spec slot, `'standard'` applies the flow's aligned-defaults pins where
+   * a matrix agreed them (identity elsewhere). Reading `row.spec_json`
    * directly instead silently runs Standard for an Efficient-stamped flow —
    * which is exactly the failure this accessor exists to make hard.
    *

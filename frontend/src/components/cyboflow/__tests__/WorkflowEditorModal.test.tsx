@@ -1294,14 +1294,14 @@ describe('WorkflowEditorModal — tuning phase strip', () => {
     return renderTuningPage();
   }
 
-  it('renders the full sprint lane chain at STANDARD (the identity transform)', async () => {
+  it('renders the full sprint lane chain at STANDARD with its aligned-defaults pins', async () => {
     await renderSprint('standard');
 
     for (const inner of ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify']) {
       expect(screen.getByTestId(`tuning-lane-chip-${inner}`)).toBeInTheDocument();
     }
-    // Standard pins nothing, so no chip carries a model · effort sub-label.
-    expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
+    // Standard on sprint pins the design matrix's aligned defaults.
+    expect(screen.getByTestId('tuning-lane-chip-implement-pin')).toHaveTextContent('sonnet · high');
   });
 
   it('derives the EFFICIENT strip from the shared transform — dropped lane steps + model·effort pins', async () => {
@@ -1327,9 +1327,8 @@ describe('WorkflowEditorModal — tuning phase strip', () => {
 
   it('switching the dial re-renders the strip for the newly selected level', async () => {
     await renderSprint('standard');
-    // At Standard the step runs — nothing pins it, so the model tag is the
-    // honest inherit sentinel, not "removed".
-    expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('run model');
+    // At Standard the step runs, with its aligned-defaults pin — not "removed".
+    expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('opus · high');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));

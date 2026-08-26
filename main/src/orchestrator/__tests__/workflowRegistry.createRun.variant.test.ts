@@ -12,6 +12,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
 import { WorkflowRegistry } from '../workflowRegistry';
 import { computeSpecHash } from '../specHash';
+import {
+  applyTuningPreset,
+  serializeDefinition,
+} from '../../../../shared/tuning/workflowTuning';
+import { WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
@@ -128,14 +133,18 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
     expect(row?.experiment_id ?? null).toBeNull();
     expect(row?.experiment_arm ?? null).toBeNull();
     // A baseline run freezes the spec its TUNING LEVEL materializes (migration
-    // 122 / plan D1), not the raw slot: this fixture's row is a built-in flow
-    // sitting at the default 'standard', and standard IS the as-authored
-    // built-in, so it freezes the '{}' fallback sentinel — the same hash every
-    // untouched flow has always stamped. (A row carrying an edited slot lands on
-    // 'custom' via the 122 backfill, which is what resolves that slot; see
+    // 122 / plan D1), not the raw slot: this fixture's row is the CALIBRATED
+    // planner built-in sitting at the default 'standard', which freezes the
+    // aligned-defaults pins applied to the built-in — never the slot's
+    // '{"live":1}'. (A row carrying an edited slot lands on 'custom' via the
+    // 122 backfill, which is what resolves that slot; see
     // workflowRegistry.createRun.tuning.test.ts for the full matrix.)
     const specRow = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as { spec_hash: string };
-    expect(specRow.spec_hash).toBe(computeSpecHash('{}'));
+    expect(specRow.spec_hash).toBe(
+      computeSpecHash(
+        serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS.planner, 'planner', 'standard')),
+      ),
+    );
   });
 
   it('model ladder: requestedModel wins over variantModel', () => {

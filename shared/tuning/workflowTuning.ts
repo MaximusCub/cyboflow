@@ -56,11 +56,15 @@ export function isTuningLevel(value: unknown): value is TuningLevel {
 }
 
 /**
- * The levels backed by a preset table. `standard` and `custom` are excluded by
- * construction: neither is a transform (one is the identity, the other reads a
- * stored definition), so neither can have a preset entry.
+ * The levels that MAY be backed by a preset table entry. `custom` is excluded
+ * by construction — it reads a stored definition, never a transform. `standard`
+ * is included since the aligned-defaults decision (2026-08-26): on the
+ * calibrated flows (sprint, planner) Standard pins the matrix's agreed default
+ * models per agent — model/effort pins ONLY, no structural edits, and never
+ * `evalDefault` (the jury stays exactly as shipped). Uncalibrated flows have no
+ * `standard` entry and stay the as-authored identity.
  */
-export type TuningPresetLevel = Exclude<TuningLevel, 'standard' | 'custom'>;
+export type TuningPresetLevel = Exclude<TuningLevel, 'custom'>;
 
 // ─── Preset shape ────────────────────────────────────────────────────────────
 
@@ -128,7 +132,7 @@ export interface TuningPreset {
  * execute/execute-tasks fan-out inner chain), `sprint-verify` /
  * `sprint-review` / `address-review` (the verify phase).
  */
-const SPRINT_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
+const SPRINT_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
   efficient: {
     agentConfigs: {
       'dependency-analyzer': { model: 'haiku', effort: 'low' },
@@ -151,6 +155,24 @@ const SPRINT_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
         'This tuning level runs a MERGED implementation lane — the separate write-tests and code-review lane steps are disabled. In the same turn as your diff you also author the unit tests covering it and run them TARGETED (only the test files that touch your change, never the full suite), and you self-review the diff for correctness and pattern compliance before you finish.',
     },
     evalDefault: false,
+  },
+  // The ALIGNED DEFAULTS (design matrix, Standard column) — model/effort pins
+  // only. No structural edits, and no `evalDefault`: the 3-slot jury runs
+  // exactly as shipped at Standard (overriding it is deliberately out of scope).
+  standard: {
+    agentConfigs: {
+      'dependency-analyzer': { model: 'sonnet', effort: 'medium' },
+      implement: { model: 'sonnet', effort: 'high' },
+      'write-tests': { model: 'sonnet', effort: 'medium' },
+      'code-review': { model: 'opus', effort: 'high' },
+      'task-verify': { model: 'opus', effort: 'medium' },
+      // Inert today (no subagent behind the visual-verify gate) — see the
+      // matching note on the thorough pin.
+      'visual-verify': { model: 'opus', effort: 'medium' },
+      'sprint-verify': { model: 'opus', effort: 'high' },
+      'sprint-review': { model: 'opus', effort: 'high' },
+      'address-review': { model: 'opus', effort: 'high' },
+    },
   },
   thorough: {
     agentConfigs: {
@@ -183,7 +205,7 @@ const SPRINT_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
  * research STEP (research is a subagent the `context` agent spins up on demand),
  * so there is no agent key to pin.
  */
-const PLANNER_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
+const PLANNER_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
   efficient: {
     agentConfigs: {
       context: { model: 'sonnet', effort: 'medium' },
@@ -213,6 +235,20 @@ const PLANNER_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
       },
     },
     evalDefault: false,
+  },
+  // The ALIGNED DEFAULTS (design matrix, Standard column) — pins only, jury
+  // untouched. The matrix splits `context` across its two steps (stub at
+  // medium, spec expansion at high); pins are per AGENT, so `high` — the
+  // spec-expansion value, the step that does the real work — wins for both.
+  standard: {
+    agentConfigs: {
+      context: { model: 'sonnet', effort: 'high' },
+      'ui-prototype': { model: 'sonnet', effort: 'medium' },
+      architecture: { model: 'opus', effort: 'medium' },
+      'adversarial-review': { model: 'opus', effort: 'high' },
+      epics: { model: 'sonnet', effort: 'medium' },
+      tasks: { model: 'sonnet', effort: 'medium' },
+    },
   },
   thorough: {
     agentConfigs: {
@@ -244,14 +280,16 @@ const PLANNER_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
  * eval-EXEMPT by name in `snapshotRunForEval`); it is kept uniform so the lever
  * means the same thing on every flow.
  */
-const UNCALIBRATED_PRESETS: Readonly<Record<TuningPresetLevel, TuningPreset>> = {
+const UNCALIBRATED_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
+  // No `standard` entry: uncalibrated flows stay the as-authored identity at
+  // Standard (a standard preset exists only where a matrix agreed the pins).
   efficient: { agentConfigs: {}, evalDefault: false },
   thorough: { agentConfigs: {} },
 };
 
 /** Every built-in flow's preset table, keyed by flow then level. */
 export const TUNING_PRESETS: Readonly<
-  Record<CyboflowWorkflowName, Readonly<Record<TuningPresetLevel, TuningPreset>>>
+  Record<CyboflowWorkflowName, Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>>>
 > = {
   planner: PLANNER_PRESETS,
   sprint: SPRINT_PRESETS,
@@ -263,13 +301,15 @@ export const TUNING_PRESETS: Readonly<
 
 /**
  * The preset for a flow × level, or `undefined` when there is none — a
- * non-built-in flow, or the two levels that are not transforms (`standard` is
- * the identity, `custom` reads the stored slot).
+ * non-built-in flow, `custom` (reads the stored slot, never a transform), or
+ * `standard` on a flow with no aligned-defaults entry (the identity).
  *
- * Main-side callers read `evalDefault` through this.
+ * Main-side callers read `evalDefault` through this. A `standard` preset never
+ * carries `evalDefault` (jury as shipped), so the eval lever still resolves to
+ * the enabled default there.
  */
 export function getTuningPreset(flow: string, level: TuningLevel): TuningPreset | undefined {
-  if (level === 'standard' || level === 'custom') return undefined;
+  if (level === 'custom') return undefined;
   if (!isCyboflowWorkflowName(flow)) return undefined;
   return TUNING_PRESETS[flow][level];
 }
@@ -498,11 +538,12 @@ function mergeAgentConfigs(def: WorkflowDefinition, preset: TuningPreset): void 
  * Apply a tuning level to a built-in definition. PURE — `builtin` is never
  * mutated; the result is always a fresh structure.
  *
- * `standard` and `custom` are the identity: the returned definition is a
- * structural clone that deep-equals the input. (`custom` never reaches a preset
- * — its definition comes from the workflow's own slot, see
- * {@link resolveEffectiveDefinition} — but returning the identity here keeps the
- * function total over the level union.)
+ * `custom` is the identity: the returned definition is a structural clone that
+ * deep-equals the input. (`custom` never reaches a preset — its definition comes
+ * from the workflow's own slot, see {@link resolveEffectiveDefinition} — but
+ * returning the identity here keeps the function total over the level union.)
+ * `standard` applies the flow's aligned-defaults pins where a matrix agreed
+ * them (sprint, planner) and is the identity everywhere else.
  */
 export function applyTuningPreset(
   builtin: WorkflowDefinition,
@@ -552,14 +593,16 @@ export function resolveEffectiveDefinition(
  * Two functions rather than one because the run side freezes a STRING, and which
  * string it freezes is load-bearing beyond the definition it parses to:
  *
- *   `standard` -> `'{}'` LITERALLY, never the workflow's slot. `'{}'` is the
- *     built-in-fallback sentinel every per-run reader already resolves through
- *     `resolveWorkflowDefinition`, so a standard run's `spec_hash` is
- *     byte-identical to what an untouched flow has always stamped — no revision
- *     fork, no stats re-bucketing, zero change for anyone who never touches the
- *     dial. (A flow whose slot holds a definition while the dial sits on
- *     `standard` deliberately freezes `'{}'` too: `standard` IS the as-authored
- *     built-in, which is exactly what the read path returns for it.)
+ *   `standard` on a flow WITHOUT an aligned-defaults preset -> `'{}'`
+ *     LITERALLY, never the workflow's slot. `'{}'` is the built-in-fallback
+ *     sentinel every per-run reader already resolves through
+ *     `resolveWorkflowDefinition`, so such a run's `spec_hash` is byte-identical
+ *     to what an untouched flow has always stamped — no revision fork, no stats
+ *     re-bucketing. (A flow whose slot holds a definition while the dial sits on
+ *     `standard` deliberately freezes `'{}'` too: `standard` never reads the
+ *     slot.) On a flow WITH one (sprint, planner) `standard` materializes like
+ *     any preset level — the aligned pins must reach the frozen spec or the run
+ *     would not honour them.
  *   `custom`   -> the workflow's own slot — today's exact path.
  *   otherwise  -> the preset applied to the built-in, through the canonical
  *     {@link serializeDefinition}, so the same level on the same flow always
@@ -576,6 +619,6 @@ export function materializeForLevel(
 ): string {
   if (!isCyboflowWorkflowName(name)) return specJson ?? '{}';
   if (level === 'custom') return specJson ?? '{}';
-  if (level === 'standard') return '{}';
+  if (level === 'standard' && getTuningPreset(name, 'standard') === undefined) return '{}';
   return serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS[name], name, level));
 }

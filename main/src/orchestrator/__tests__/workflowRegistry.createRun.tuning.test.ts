@@ -111,7 +111,7 @@ function setLevel(workflowId: string, level: TuningLevel): void {
 }
 
 /** The exact spec text a preset level materializes for a built-in flow. */
-function presetSpec(flow: 'sprint' | 'planner', level: 'efficient' | 'thorough'): string {
+function presetSpec(flow: 'sprint' | 'planner', level: 'efficient' | 'standard' | 'thorough'): string {
   return serializeDefinition(applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, level));
 }
 
@@ -120,21 +120,22 @@ function presetSpec(flow: 'sprint' | 'planner', level: 'efficient' | 'thorough')
 // ---------------------------------------------------------------------------
 
 describe('createRun — materialization by level', () => {
-  it("standard freezes '{}' — byte-identical to what every run stamped before the dial", () => {
+  it('standard on a calibrated flow freezes the aligned-defaults pins as a resolvable revision', () => {
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION);
     const frozen = frozenOf(runId);
-    expect(frozen.specHash).toBe(computeSpecHash('{}'));
+    const expected = presetSpec('sprint', 'standard');
+    expect(frozen.specHash).toBe(computeSpecHash(expected));
     expect(frozen.level).toBe('standard');
-    expect(revisionOf(WF_SPRINT, frozen.specHash)).toBe('{}');
+    expect(revisionOf(WF_SPRINT, frozen.specHash)).toBe(expected);
   });
 
-  it("standard freezes '{}' even when the flow's custom slot holds a definition", () => {
-    // The slot is the CUSTOM level's storage, not standard's. Standard IS the
-    // as-authored built-in, so a flow parked there ignores whatever the slot
-    // holds — exactly what the read path (getEffectiveDefinition) returns.
+  it("standard ignores the custom slot even when it holds a definition", () => {
+    // The slot is the CUSTOM level's storage, not standard's. Standard is the
+    // built-in plus the aligned pins, so a flow parked there ignores whatever
+    // the slot holds — exactly what the read path (getEffectiveDefinition) returns.
     db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?').run(SLOT_SPEC, WF_SPRINT);
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION);
-    expect(frozenOf(runId).specHash).toBe(computeSpecHash('{}'));
+    expect(frozenOf(runId).specHash).toBe(computeSpecHash(presetSpec('sprint', 'standard')));
   });
 
   it('efficient freezes the serialized preset AND records it as a resolvable revision', () => {
@@ -232,14 +233,14 @@ describe('createRun — per-run tuning override', () => {
     expect(frozenOf(overridden).specHash).toBe(frozenOf(persistent).specHash);
   });
 
-  it('an override to standard runs a preset-stamped flow at the built-in', () => {
+  it('an override to standard runs a preset-stamped flow at the aligned defaults', () => {
     setLevel(WF_SPRINT, 'efficient');
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
       tuningLevel: 'standard',
     });
     const frozen = frozenOf(runId);
     expect(frozen.level).toBe('standard');
-    expect(frozen.specHash).toBe(computeSpecHash('{}'));
+    expect(frozen.specHash).toBe(computeSpecHash(presetSpec('sprint', 'standard')));
   });
 
   it("rejects an override combined with an explicit variant pin", () => {
