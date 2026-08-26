@@ -13,8 +13,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { TypedEventNarrowing } from '../typedEventNarrowing';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
-import { assertNever } from '../../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent } from '../../types/claudeStream';
+import { assertNever } from '../../types/claudeStream';
 import {
   systemInit,
   systemCompactBoundary,

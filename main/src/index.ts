@@ -26,7 +26,7 @@ import { ModelAvailabilityService, isModelUsable } from './services/modelAvailab
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
-import { startPerfTracer } from './services/perfTracer';
+import { startPerfTracer, perfBump } from './services/perfTracer';
 import { ingestPtyTranscript } from './services/ptyTranscriptIngest';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
@@ -326,6 +326,12 @@ import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebug
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { runGitAsync } from './utils/runGit';
+import { setStreamParserPerfBump } from '../../shared/streamParser';
+
+// Wire the shared/streamParser module's perf-counter hook to the real perfTracer
+// (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
+// correct). shared/ must not import from main/src/services directly.
+setStreamParserPerfBump(perfBump);
 
 export let mainWindow: BrowserWindow | null = null;
 

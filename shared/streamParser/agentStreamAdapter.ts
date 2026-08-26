@@ -4,15 +4,15 @@ import type {
   AgentStreamEvent,
   AgentUserContentBlock,
   AgentUserMessageEvent,
-} from '../../../../shared/types/agentStream';
+} from '../types/agentStream';
 import type {
   ClaudeStreamEvent,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
   ToolUseBlock,
-} from '../../../../shared/types/claudeStream';
-import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
+} from '../types/claudeStream';
+import type { AgentProvider, AgentRuntime } from '../types/agentRuntime';
 
 export interface AgentStreamContext {
   provider?: AgentProvider;

@@ -15,7 +15,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseService } from '../../database/database';
-import { encodeCwd } from '../panels/claude/transcript/encodeCwd';
+import { encodeCwd } from '../../../../shared/utils/encodeCwd';
 import { ingestPtyTranscript } from '../ptyTranscriptIngest';
 
 let tmpDir: string;

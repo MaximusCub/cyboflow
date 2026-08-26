@@ -48,7 +48,7 @@ import type { StepReporter } from '../../programmatic/programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
 import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
 import { buildStepTransitionEvent } from '../../stepTransitionBridge';
-import { TypedEventNarrowing } from '../../../services/streamParser';
+import { TypedEventNarrowing } from '../../../../../shared/streamParser';
 import type {
   ClaudeSpawnerLike,
   ClaudeSpawnerOptions,

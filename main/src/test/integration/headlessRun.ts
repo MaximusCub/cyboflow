@@ -55,7 +55,7 @@ import { DatabaseService } from '../../database/database';
 import { dbAdapter } from '../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { selectRunUnifiedMessages } from '../../orchestrator/runUnifiedMessagesListing';
-import { TypedEventNarrowing } from '../../services/streamParser';
+import { TypedEventNarrowing } from '../../../../shared/streamParser';
 import type { DatabaseLike, LoggerLike } from '../../orchestrator/types';
 import type { CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';

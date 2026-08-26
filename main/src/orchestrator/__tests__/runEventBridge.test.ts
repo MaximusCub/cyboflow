@@ -23,7 +23,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import Database from 'better-sqlite3';
-import { EventRouter, RawEventsSink } from '../../services/streamParser';
+import { EventRouter, RawEventsSink } from '../../../../shared/streamParser';
 import { bridgeEvents } from '../runEventBridge';
 import type { StreamEventPublisher } from '../runLauncher';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';

@@ -52,7 +52,7 @@ import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
-import { TypedEventNarrowing } from '../../../services/streamParser';
+import { TypedEventNarrowing } from '../../../../../shared/streamParser';
 import {
   sdkSystemInit,
   sdkAssistantText,

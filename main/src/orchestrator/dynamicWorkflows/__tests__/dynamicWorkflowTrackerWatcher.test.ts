@@ -17,8 +17,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EventRouter } from '../../../services/streamParser/eventRouter';
-import { encodeCwd } from '../../../services/panels/claude/transcript/encodeCwd';
+import { EventRouter } from '../../../../../shared/streamParser/eventRouter';
+import { encodeCwd } from '../../../../../shared/utils/encodeCwd';
 import type { DatabaseLike } from '../../types';
 
 // Mock the watcher module so construction is observable and no fs polling starts.

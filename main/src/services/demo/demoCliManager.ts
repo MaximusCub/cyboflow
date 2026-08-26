@@ -22,7 +22,7 @@ import type { SessionManager } from '../sessionManager';
 import type { Logger } from '../../utils/logger';
 import type { ConfigManager } from '../configManager';
 import type { ConversationMessage } from '../../database/models';
-import { EventRouter, RawEventsSink } from '../streamParser';
+import { EventRouter, RawEventsSink } from '../../../../shared/streamParser';
 import { ApprovalRouter } from '../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../orchestrator/questionRouter';
 import { DemoScriptContext, DemoScriptAborted } from './demoScriptContext';

@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildUserTextEvent, buildAssistantTextEvent } from '../syntheticEvents';
-import { MessageProjection } from '../../../services/streamParser/messageProjection';
+import { MessageProjection } from '../../../../../shared/streamParser/messageProjection';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
 describe('syntheticEvents', () => {

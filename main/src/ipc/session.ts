@@ -26,7 +26,7 @@ import {
   agentStreamEventToClaudeStreamEvent,
   MessageProjection,
   TypedEventNarrowing,
-} from '../services/streamParser';
+} from '../../../shared/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { QuickSessionRow, QuickSessionGitSnapshot } from '../../../shared/types/quickSessions';
@@ -76,7 +76,7 @@ import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { AgentInvocationStore } from '../orchestrator/agentInvocationStore';
-import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
+import { encodeCwd } from '../../../shared/utils/encodeCwd';
 import { getCurrentBranch } from '../services/gitPlumbingCommands';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';

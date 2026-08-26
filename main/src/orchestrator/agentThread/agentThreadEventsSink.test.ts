@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { EventRouter } from '../../services/streamParser/eventRouter';
+import { EventRouter } from '../../../../shared/streamParser/eventRouter';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import { AgentThreadDbStore } from './agentThreadDbStore';
 import {

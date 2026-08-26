@@ -8,7 +8,7 @@ import type { SessionManager } from '../../sessionManager';
 import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
-import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../streamParser';
+import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../../../../shared/streamParser';
 import type {
   AgentInitEvent,
   AgentResultEvent,

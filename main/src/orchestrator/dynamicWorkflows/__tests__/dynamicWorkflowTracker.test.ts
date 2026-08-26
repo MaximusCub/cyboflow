@@ -15,7 +15,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFile
 import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { EventRouter } from '../../../services/streamParser/eventRouter';
+import { EventRouter } from '../../../../../shared/streamParser/eventRouter';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { DynamicWorkflowTracker, dynamicWorkflowEvents } from '../dynamicWorkflowTracker';

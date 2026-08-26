@@ -25,7 +25,7 @@ import type {
   UserEvent,
   ResultEvent,
   StreamEvent,
-} from '../../../../../shared/types/claudeStream';
+} from '../../types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // System variants

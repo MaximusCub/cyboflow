@@ -35,8 +35,8 @@ import type {
   ResultEvent,
   StreamEvent,
   UnknownStreamEvent,
-} from '../../../../../shared/types/claudeStream';
-import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
+} from '../../types/claudeStream';
+import type { UnifiedMessage } from '../../types/unifiedMessage';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers — typed ClaudeStreamEvent instances

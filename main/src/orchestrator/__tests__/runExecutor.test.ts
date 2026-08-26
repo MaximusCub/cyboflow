@@ -2432,7 +2432,7 @@ describe('RunExecutor.execute — rests in awaiting_review on drain', () => {
 // TASK-662 follow-up: source EventEmitter arg wires onFirstMessage → running()
 // ---------------------------------------------------------------------------
 
-import { EventRouter, RawEventsSink } from '../../services/streamParser';
+import { EventRouter, RawEventsSink } from '../../../../shared/streamParser';
 import { makeRawEventsDb, countRawEvents } from '../__test_fixtures__/rawEvents';
 
 /**
@@ -2510,7 +2510,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 
     // Wire CCM-style sink BEFORE the bridge so ordering matches production.
     // The CCM-side narrowing is done inline here (simulating runSdkQuery:341).
-    const { TypedEventNarrowing: TEN } = await import('../../services/streamParser');
+    const { TypedEventNarrowing: TEN } = await import('../../../../shared/streamParser');
     const ccmNarrowing = new TEN();
     ccmSink.attachToRouter(ccmRouter, run.id);
     source.on('output', (payload: unknown) => {

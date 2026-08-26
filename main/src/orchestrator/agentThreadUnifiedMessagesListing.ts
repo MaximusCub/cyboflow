@@ -19,7 +19,7 @@
  * string), so the `threadId` is passed directly as its correlation key.
  *
  * Import note: `MessageProjection`/`TypedEventNarrowing` come from the
- * `../services/streamParser` barrel — the SAME import `runUnifiedMessagesListing.ts`
+ * `../../../shared/streamParser` barrel — the SAME import `runUnifiedMessagesListing.ts`
  * uses. The barrel only re-exports classes whose own imports are limited to
  * `shared/types` + its local `./types`, so it does NOT pull in 'electron',
  * 'better-sqlite3', or a concrete service.
@@ -36,7 +36,7 @@ import {
   agentStreamEventToClaudeStreamEvent,
   MessageProjection,
   TypedEventNarrowing,
-} from '../services/streamParser';
+} from '../../../shared/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import type { DatabaseLike, LoggerLike } from './types';

@@ -24,7 +24,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { TranscriptTailSource } from '../transcriptTailSource';
-import { encodeCwd } from '../encodeCwd';
+import { encodeCwd } from '../../../../../../../shared/utils/encodeCwd';
 
 /**
  * F15: a controllable gate on `fs/promises`' `open()`, used by 'stop-during-read'

@@ -48,7 +48,7 @@ import {
   ClaudeCodeManager,
   type SpawnEventsSink,
 } from '../../../services/panels/claude/claudeCodeManager';
-import type { EventRouter } from '../../../services/streamParser';
+import type { EventRouter } from '../../../../../shared/streamParser';
 import type { SessionManager } from '../../../services/sessionManager';
 import type { ConfigManager } from '../../../services/configManager';
 import type { Logger } from '../../../utils/logger';

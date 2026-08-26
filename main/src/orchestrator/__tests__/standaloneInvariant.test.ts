@@ -62,10 +62,11 @@ const ORCH_ROOT = locateOrchestratorRoot();
  *
  * Only the first two entries actually pull `electron` into the subtree. The rest
  * are electron-free service modules — a layering violation rather than an
- * extraction blocker — and the durable fix for them is relocating the shared
- * module (streamParser, modelContext, encodeCwd, agentProviderGuard) under
- * shared/, which ripples through their many services-side callers and is out of
- * scope for the module that merely consumes them.
+ * extraction blocker. streamParser and encodeCwd have already been relocated to
+ * shared/ (clearing the entries that cited them); the remaining durable fix is
+ * relocating modelContext and agentProviderGuard under shared/ too, which
+ * ripples through their many services-side callers and is out of scope for the
+ * module that merely consumes them.
  *
  * Keep in sync with the exemption block in main/eslint.config.js.
  */
@@ -79,28 +80,8 @@ const FROZEN_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
     'Needs app.isPackaged, and unlike the SDK-query factories it is consumed BY services (claudeCodeManager, interactiveClaudeManager, mcpOrphanTripwire) at no-arg call sites, so the dependency runs the other way and injection would thread through five chains.',
   ],
   [
-    'runEventBridge.ts',
-    'Runtime use of the streamParser barrel (EventRouter, RawEventsSink, TypedEventNarrowing, deriveEventType). Electron-free; the fix is relocating streamParser under shared/.',
-  ],
-  [
-    'runRawEventsListing.ts',
-    'Runtime use of streamParser (TypedEventNarrowing, deriveEventType). Same relocation as runEventBridge.',
-  ],
-  [
-    'runUnifiedMessagesListing.ts',
-    'Runtime use of streamParser (MessageProjection, TypedEventNarrowing, agentStreamEventToClaudeStreamEvent). Same relocation as runEventBridge.',
-  ],
-  [
-    'agentThreadUnifiedMessagesListing.ts',
-    'Runtime use of streamParser, mirroring runUnifiedMessagesListing on the agent-thread path. Same relocation as runEventBridge.',
-  ],
-  [
     'verify/codexVerificationAgentQuery.ts',
     'Runtime use of the Codex app-server schema helper and the Codex usage observer — the Codex provider surface lives entirely under services/panels/codex.',
-  ],
-  [
-    'dynamicWorkflows/dynamicWorkflowTracker.ts',
-    'Runtime use of RawEventsSink and the transcript encodeCwd helper. Electron-free; same streamParser relocation.',
   ],
   [
     'eval/evalJury.ts',
@@ -113,10 +94,6 @@ const FROZEN_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
   [
     'eval/codexPairwiseJudge.ts',
     'Runtime use of AgentProviderDisabledError, the shared provider-guard error type. Electron-free.',
-  ],
-  [
-    'agentThread/agentThreadEventsSink.ts',
-    'Runtime use of derivePersistedEventType from streamParser. Same relocation as runEventBridge.',
   ],
 ]);
 

@@ -12,7 +12,7 @@
  * human-readable turn text at all.
  *
  * FOUR PERSISTED SHAPES reach this decoder (see
- * `services/streamParser/derivers.ts` for the event_type mapping that produces
+ * `shared/streamParser/derivers.ts` for the event_type mapping that produces
  * them, and `agentThreadEventsSink.ts` for the single writer):
  *
  *   'user'            ClaudeStreamEvent UserEvent — `message.content` is an

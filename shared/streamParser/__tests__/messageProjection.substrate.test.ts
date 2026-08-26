@@ -21,8 +21,8 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MessageProjection } from '../messageProjection';
-import type { AssistantEvent } from '../../../../../shared/types/claudeStream';
-import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
+import type { AssistantEvent } from '../../types/claudeStream';
+import type { UnifiedMessage } from '../../types/unifiedMessage';
 
 // ---------------------------------------------------------------------------
 // Fixtures — two full-content transcript `assistant` lines sharing one message.id

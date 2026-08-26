@@ -35,7 +35,7 @@ import {
   sdkResultSuccess,
   sdkResultError,
 } from '../fakeSdk';
-import { TypedEventNarrowing } from '../../../services/streamParser/typedEventNarrowing';
+import { TypedEventNarrowing } from '../../../../../shared/streamParser/typedEventNarrowing';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------

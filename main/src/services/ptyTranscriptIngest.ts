@@ -25,7 +25,7 @@ import path from 'node:path';
 import os from 'node:os';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { LoggerLike } from '../orchestrator/types';
-import { encodeCwd } from './panels/claude/transcript/encodeCwd';
+import { encodeCwd } from '../../../shared/utils/encodeCwd';
 
 /** Defensive cap: never read more than the last ~10MB of a transcript. */
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024;

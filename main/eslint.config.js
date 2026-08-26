@@ -64,16 +64,10 @@ module.exports = [
     files: [
       'src/orchestrator/trpc/ipcAdapter.ts',
       'src/orchestrator/mcpServer/scriptPath.ts',
-      'src/orchestrator/runEventBridge.ts',
-      'src/orchestrator/runRawEventsListing.ts',
-      'src/orchestrator/runUnifiedMessagesListing.ts',
-      'src/orchestrator/agentThreadUnifiedMessagesListing.ts',
       'src/orchestrator/verify/codexVerificationAgentQuery.ts',
-      'src/orchestrator/dynamicWorkflows/dynamicWorkflowTracker.ts',
       'src/orchestrator/eval/evalJury.ts',
       'src/orchestrator/eval/pairwiseJudge.ts',
-      'src/orchestrator/eval/codexPairwiseJudge.ts',
-      'src/orchestrator/agentThread/agentThreadEventsSink.ts'
+      'src/orchestrator/eval/codexPairwiseJudge.ts'
     ],
     rules: {
       '@typescript-eslint/no-restricted-imports': 'off'

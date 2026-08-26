@@ -51,7 +51,7 @@ import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewIt
 import { buildStepTransitionEvent } from '../../stepTransitionBridge';
 import { recoverActiveStateOrphans } from '../../runRecovery';
 import { RunQueueRegistry } from '../../RunQueueRegistry';
-import { TypedEventNarrowing } from '../../../services/streamParser';
+import { TypedEventNarrowing } from '../../../../../shared/streamParser';
 import type {
   ClaudeSpawnerLike,
   ClaudeSpawnerOptions,

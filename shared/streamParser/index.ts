@@ -5,12 +5,12 @@
  * Import individual classes from this file, not from their implementation modules.
  *
  * @example
- * import { EventRouter, RawEventsSink } from '../services/streamParser';
+ * import { EventRouter, RawEventsSink } from '../../shared/streamParser';
  */
 
 export { TypedEventNarrowing } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
-export { RawEventsSink } from './rawEventsSink';
+export { RawEventsSink, setStreamParserPerfBump } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
 export { deriveEventType, derivePersistedEventType } from './derivers';
 export {

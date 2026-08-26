@@ -15,8 +15,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { normalizeTranscriptLine } from '../transcriptNormalizer';
-import { TypedEventNarrowing } from '../../../../streamParser/typedEventNarrowing';
-import type { ILogger } from '../../../../streamParser/types';
+import { TypedEventNarrowing } from '../../../../../../../shared/streamParser/typedEventNarrowing';
+import type { ILogger } from '../../../../../../../shared/streamParser/types';
 
 // ---------------------------------------------------------------------------
 // Real Probe-E fixture lines (efde13c6, 2026-06-01)

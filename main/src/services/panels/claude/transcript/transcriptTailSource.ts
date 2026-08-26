@@ -22,7 +22,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import type { Logger } from '../../../../utils/logger';
-import { encodeCwd } from './encodeCwd';
+import { encodeCwd } from '../../../../../../shared/utils/encodeCwd';
 import { normalizeTranscriptLine } from './transcriptNormalizer';
 import type {
   TranscriptSource,

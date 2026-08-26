@@ -18,7 +18,7 @@
  */
 
 import { z } from 'zod';
-import type { ClaudeStreamEvent, SystemApiRetryEvent, SystemCompactEvent, UnknownStreamEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemApiRetryEvent, SystemCompactEvent, UnknownStreamEvent } from '../types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Block-level schemas

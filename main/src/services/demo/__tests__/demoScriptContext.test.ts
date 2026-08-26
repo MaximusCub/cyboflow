@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import type Database from 'better-sqlite3';
-import type { EventRouter } from '../../streamParser';
+import type { EventRouter } from '../../../../../shared/streamParser';
 import { DemoScriptContext, DemoScriptAborted } from '../demoScriptContext';
 import type { DemoScriptArgs } from '../demoScriptContext';
 

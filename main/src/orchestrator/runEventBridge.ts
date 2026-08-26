@@ -24,8 +24,8 @@
 
 import { EventEmitter } from 'node:events';
 import type Database from 'better-sqlite3';
-import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../services/streamParser';
-import { deriveEventType } from '../services/streamParser/derivers';
+import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../shared/streamParser';
+import { deriveEventType } from '../../../shared/streamParser/derivers';
 import type { ClaudeStreamEvent, StreamEnvelope, StreamEventType } from '../../../shared/types/claudeStream';
 import type { StreamEventPublisher } from './runLauncher';
 import type { LoggerLike } from './types';

@@ -7,8 +7,8 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
+import type { ClaudeStreamEvent } from '../types/claudeStream';
+import type { AgentStreamEvent } from '../types/agentStream';
 
 export type RoutableStreamEvent = ClaudeStreamEvent | AgentStreamEvent;
 

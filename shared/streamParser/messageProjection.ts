@@ -19,9 +19,9 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskUpdatedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
-import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
-import { isAgentDispatchToolName } from '../../../../shared/types/agentIdentity';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, SystemTaskStartedEvent, SystemTaskUpdatedEvent, SystemTaskNotificationEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../types/claudeStream';
+import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../types/unifiedMessage';
+import { isAgentDispatchToolName } from '../types/agentIdentity';
 import { isFailedTaskStatus } from './taskLifecycle';
 import type { ILogger } from './types';
 

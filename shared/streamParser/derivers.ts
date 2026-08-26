@@ -7,8 +7,8 @@
  * two sites from silently diverging on a future variant rename.
  */
 
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
-import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
+import type { ClaudeStreamEvent } from '../types/claudeStream';
+import type { AgentStreamEvent } from '../types/agentStream';
 
 export type PersistableStreamEvent = ClaudeStreamEvent | AgentStreamEvent;
 

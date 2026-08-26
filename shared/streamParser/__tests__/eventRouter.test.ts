@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventRouter } from '../eventRouter';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent } from '../../types/claudeStream';
 
 // ---------------------------------------------------------------------------
 // Fixture events — minimal inline variants

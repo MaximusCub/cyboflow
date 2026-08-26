@@ -22,7 +22,7 @@ import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
-import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
+import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../../../shared/streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
 import { InteractiveSettingsWriter, resolveInlineGatingHooks } from './interactiveSettingsWriter';

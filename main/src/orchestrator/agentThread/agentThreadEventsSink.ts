@@ -19,8 +19,8 @@
  * `derivePersistedEventType` deriver, and the {@link AgentThreadDbStore}
  * (DatabaseLike-backed). No electron / better-sqlite3 value import.
  */
-import type { EventRouter } from '../../services/streamParser/eventRouter';
-import { derivePersistedEventType } from '../../services/streamParser/derivers';
+import type { EventRouter } from '../../../../shared/streamParser/eventRouter';
+import { derivePersistedEventType } from '../../../../shared/streamParser/derivers';
 import type { SpawnEventsSink } from '../../services/panels/claude/claudeCodeManager';
 import type { ClaudeStreamEvent, UserEvent } from '../../../../shared/types/claudeStream';
 import { buildUserTextEvent } from '../programmatic/syntheticEvents';

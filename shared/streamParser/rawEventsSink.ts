@@ -35,11 +35,21 @@
 
 import type { EventRouter } from './eventRouter';
 import type { ILogger } from './types';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent } from '../types/claudeStream';
 
 import { derivePersistedEventType } from './derivers';
 import type { PersistableStreamEvent } from './derivers';
-import { perfBump } from '../perfTracer';
+
+/**
+ * Perf-counter hook, injected by the Electron main process at boot
+ * (main/src/index.ts) so this module stays free of main/src/services
+ * imports. A no-op when nothing is wired — perf tracing is opt-in
+ * (CYBOFLOW_PERF_TRACE=1) and shared/ must not depend on the tracer.
+ */
+let perfBump: (name: string, n?: number) => void = () => {};
+export function setStreamParserPerfBump(fn: (name: string, n?: number) => void): void {
+  perfBump = fn;
+}
 
 /** The prepared-statement surface the sink uses — run() only, no reads. */
 interface RawEventsSinkStatement {

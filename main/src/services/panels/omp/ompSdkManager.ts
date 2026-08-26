@@ -28,7 +28,7 @@ import { orchTokenEnv } from '../../../orchestrator/orchAuthToken';
 import type { ConfigManager } from '../../configManager';
 import { perfBump } from '../../perfTracer';
 import type { SessionManager } from '../../sessionManager';
-import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../streamParser';
+import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../../../../shared/streamParser';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveOmpGateExtensionPath } from './gate/ompGatePath';

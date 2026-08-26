@@ -22,7 +22,7 @@
  * the live `new Date()` timestamp so the backfilled log reflects run time.
  *
  * Import note: imports `TypedEventNarrowing` + `deriveEventType` from the
- * `../services/streamParser` barrel — the same safe barrel `runEventBridge.ts`
+ * `../../../shared/streamParser` barrel — the same safe barrel `runEventBridge.ts`
  * and `runUnifiedMessagesListing.ts` use (no 'electron' / 'better-sqlite3' /
  * concrete-service pull-in).
  *
@@ -30,7 +30,7 @@
  * `TypedEventNarrowing` (adapting `verbose` → `debug`, as `LoggerLike` has no
  * `verbose`) so its diagnostics are not silently dropped.
  */
-import { TypedEventNarrowing, deriveEventType } from '../services/streamParser';
+import { TypedEventNarrowing, deriveEventType } from '../../../shared/streamParser';
 import type { StreamEnvelope, StreamEventType } from '../../../shared/types/claudeStream';
 import type { DatabaseLike, LoggerLike } from './types';
 

@@ -1,4 +1,4 @@
-// @cyboflow-stub — parsing has moved to main/src/services/streamParser/messageProjection.ts.
+// @cyboflow-stub — parsing has moved to shared/streamParser/messageProjection.ts.
 // This file is retained as an IdentityMessageTransformer for compatibility with the
 // renderer's MessageTransformer prop contract. DO NOT add parsing logic here.
 //

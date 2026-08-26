@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentStreamEvent } from '../../../../../shared/types/agentStream';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../types/agentStream';
+import type { ClaudeStreamEvent } from '../../types/claudeStream';
 import {
   agentStreamEventToClaudeStreamEvent,
   claudeStreamEventToAgentStreamEvent,

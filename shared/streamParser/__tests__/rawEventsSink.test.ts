@@ -18,9 +18,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { EventRouter } from '../eventRouter';
 import { RawEventsSink } from '../rawEventsSink';
-import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
-import type { AgentStreamEvent } from '../../../../../shared/types/agentStream';
-import { makeRawEventsDb, countRawEvents } from '../../../orchestrator/__test_fixtures__/rawEvents';
+import type { ClaudeStreamEvent } from '../../types/claudeStream';
+import type { AgentStreamEvent } from '../../types/agentStream';
+import { makeRawEventsDb, countRawEvents } from '../../../main/src/orchestrator/__test_fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
 // Fixture events — one of each major variant

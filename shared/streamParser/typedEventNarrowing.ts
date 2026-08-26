@@ -7,7 +7,7 @@
  */
 
 import { claudeStreamEventSchemaByType } from './schemas';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent } from '../types/claudeStream';
 import type { ILogger } from './types';
 import type { ZodTypeAny } from 'zod';
 

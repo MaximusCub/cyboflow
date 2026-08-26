@@ -33,7 +33,7 @@ import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
 import { selectDailyModelUsage } from '../../insightsQueries';
 import { rollupRunUsage } from '../../runUsageRollup';
-import { TypedEventNarrowing } from '../../../services/streamParser';
+import { TypedEventNarrowing } from '../../../../../shared/streamParser';
 import { sdkAssistantText, sdkAssistantToolUse, sdkResultSuccess } from '../../../test/fakes/fakeSdk';
 
 /** The SDK `total_cost_usd` the CLI reported — an arbitrary, precise value. */

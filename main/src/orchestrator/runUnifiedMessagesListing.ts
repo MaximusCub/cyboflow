@@ -20,7 +20,7 @@
  * `runId` is used directly as its correlation key.
  *
  * Import note: this file imports `MessageProjection`/`TypedEventNarrowing` from
- * `../services/streamParser`. That is the SAME import the sibling orchestrator
+ * `../../../shared/streamParser`. That is the SAME import the sibling orchestrator
  * file `runEventBridge.ts` uses — the streamParser barrel only re-exports
  * classes whose own imports are limited to `shared/types` + the barrel's local
  * `./types`, so it does NOT pull in 'electron', 'better-sqlite3', or a concrete
@@ -40,7 +40,7 @@ import {
   agentStreamEventToClaudeStreamEvent,
   MessageProjection,
   TypedEventNarrowing,
-} from '../services/streamParser';
+} from '../../../shared/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import type { DatabaseLike, LoggerLike } from './types';
