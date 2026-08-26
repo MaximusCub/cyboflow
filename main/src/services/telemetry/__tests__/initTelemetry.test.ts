@@ -285,6 +285,8 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     captureSeamError('cli-availability', err, { cliTool: 'Claude Code (Interactive)' });
     expect(sentry.captureException).toHaveBeenCalledWith(err, {
       tags: { seam: 'cli-availability', cliTool: 'Claude Code (Interactive)' },
+      // No errorClass reported at this seam, so the seam name alone is the group.
+      fingerprint: ['cli-availability'],
     });
   });
 
@@ -298,7 +300,10 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     const [captured, hint] = sentry.captureException.mock.calls[0];
     expect(captured).toBeInstanceOf(Error);
     expect((captured as Error).message).toBe('no events after 30000ms');
-    expect(hint).toEqual({ tags: { seam: 'sdk-first-event-timeout' } });
+    expect(hint).toEqual({
+      tags: { seam: 'sdk-first-event-timeout' },
+      fingerprint: ['sdk-first-event-timeout'],
+    });
   });
 
   it('captureSeamError is a silent no-op when Sentry never initialized', async () => {
