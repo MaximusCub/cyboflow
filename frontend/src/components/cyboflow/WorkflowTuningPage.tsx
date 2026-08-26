@@ -12,6 +12,7 @@
  * latch and the error surface, so this page has no tRPC import and stays
  * testable as a pure render of (level, definition, baseline, slot-filled).
  */
+import type { AgentRunTarget } from '../../../../shared/types/agents';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { TuningLevelDial } from './TuningLevelDial';
@@ -26,6 +27,8 @@ export interface WorkflowTuningPageProps {
   definition: WorkflowDefinition | null;
   /** The SAME flow at `'standard'` — what the strip diffs against. */
   baselineDefinition: WorkflowDefinition | null;
+  /** Per-agent catalogue run targets — the strip's model-tag fallback. */
+  agentRunTargets?: Readonly<Record<string, AgentRunTarget>>;
   /** True while a level write / reset is in flight. */
   busy: boolean;
   onSelectLevel: (level: TuningLevel) => void;
@@ -40,6 +43,7 @@ export function WorkflowTuningPage({
   hasCustomDefinition,
   definition,
   baselineDefinition,
+  agentRunTargets,
   busy,
   onSelectLevel,
   onOpenAdvanced,
@@ -74,7 +78,11 @@ export function WorkflowTuningPage({
           <span className="flex-1" />
           <TuningModelLegend />
         </div>
-        <TuningPhaseStrip definition={definition} baselineDefinition={baselineDefinition} />
+        <TuningPhaseStrip
+          definition={definition}
+          baselineDefinition={baselineDefinition}
+          agentRunTargets={agentRunTargets}
+        />
       </div>
 
       <div className="flex flex-col items-start gap-2">

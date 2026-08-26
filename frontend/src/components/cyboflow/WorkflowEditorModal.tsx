@@ -980,6 +980,7 @@ export function WorkflowEditorModal({
             hasCustomDefinition={hasCustomDefinition}
             definition={effectiveDefinition}
             baselineDefinition={baselineDefinition}
+            agentRunTargets={agentRunTargets}
             busy={isBusy}
             onSelectLevel={(next) => void handleSelectLevel(next)}
             onOpenAdvanced={() => setView('advanced')}

@@ -91,13 +91,41 @@ describe('TuningPhaseStrip', () => {
     expect(chip).toHaveStyle({ borderLeft: `3px solid ${MODEL_COLORS.sonnet}` });
   });
 
-  it('shows the agent key (no pin testid) for a step the level leaves unpinned', () => {
+  it('falls back to the honest "run model" tag for a step nothing pins', () => {
     const standard = sprintAt('standard');
     render(<TuningPhaseStrip definition={standard} baselineDefinition={standard} />);
 
-    // Standard is the identity transform: it pins nothing.
+    // Standard is the identity transform: it pins nothing, and with no
+    // catalogue targets the model is only decided at launch.
     expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
-    expect(subOf(screen.getByTestId('tuning-lane-chip-implement'))).toHaveTextContent('implement');
+    expect(subOf(screen.getByTestId('tuning-lane-chip-implement'))).toHaveTextContent('run model');
+  });
+
+  it('falls back to the agent catalogue run target when the level pins nothing', () => {
+    const standard = sprintAt('standard');
+    render(
+      <TuningPhaseStrip
+        definition={standard}
+        baselineDefinition={standard}
+        agentRunTargets={{
+          // A Claude-model catalogue pin: alias tag, coloured like a level pin.
+          implement: { runtime: null, model: 'opus', providerModel: null },
+          // A non-Claude provider: the provider-model id, uncoloured.
+          'code-review': { runtime: 'codex-sdk', model: null, providerModel: 'gpt-5.4-codex' },
+        }}
+      />,
+    );
+
+    const claude = screen.getByTestId('tuning-lane-chip-implement');
+    expect(subOf(claude)).toHaveTextContent('opus');
+    expect(subOf(claude)).toHaveStyle({ color: MODEL_COLORS.opus });
+    expect(claude).toHaveStyle({ borderLeft: `3px solid ${MODEL_COLORS.opus}` });
+    // Catalogue fallback is not a LEVEL pin — no pin testid.
+    expect(screen.queryByTestId('tuning-lane-chip-implement-pin')).toBeNull();
+
+    expect(subOf(screen.getByTestId('tuning-lane-chip-code-review'))).toHaveTextContent(
+      'gpt-5.4-codex',
+    );
   });
 
   it('reads a human gate as "human" rather than as an agent', () => {

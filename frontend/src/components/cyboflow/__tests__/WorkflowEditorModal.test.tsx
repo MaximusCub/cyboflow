@@ -1288,8 +1288,9 @@ describe('WorkflowEditorModal — tuning phase strip', () => {
 
   it('switching the dial re-renders the strip for the newly selected level', async () => {
     await renderSprint('standard');
-    // At Standard the step runs, so its sub-label is its agent key, not "removed".
-    expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('code-review');
+    // At Standard the step runs — nothing pins it, so the model tag is the
+    // honest inherit sentinel, not "removed".
+    expect(screen.getByTestId('tuning-lane-chip-code-review')).toHaveTextContent('run model');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('tuning-level-segment-efficient'));

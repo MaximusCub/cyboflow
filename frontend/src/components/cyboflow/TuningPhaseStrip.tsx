@@ -22,15 +22,21 @@
  * "· per task ⇄". On sprint the lane chain IS the thing a level changes most,
  * and burying it under an `execute-tasks` chip hid the whole calibration.
  *
- * A chip's sub-label is `model · effort` from the definition's `agentConfigs`
- * entry for that step's canonical agent key — the same key resolution the editor
- * canvas uses, so a legacy step label and its canonical key agree on which pin
- * applies. A pinned chip also carries a 3px left border in that model's colour,
- * which is what the legend above the strip decodes. Steps with no pin show
- * their agent key instead (they inherit the run model); human gates carry no
- * model at all and get the hatched gate treatment.
+ * A chip's sub-label is a MODEL tag, resolved in the same precedence the run
+ * itself uses: the definition's `agentConfigs` pin for that step's canonical
+ * agent key (`model · effort`) wins; else the agent's own catalogue run target
+ * (`agentRunTargets` — a per-agent model pin or a non-Claude provider), which
+ * is what the advanced canvas's step cards show; else the honest "run model"
+ * (the agent inherits whatever model the launch picks, unknowable here). A
+ * Claude-model tag also colours the chip's 3px left border, which is what the
+ * legend above the strip decodes. Human gates carry no model at all and get the
+ * hatched gate treatment.
  */
-import type { AgentModelAlias } from '../../../../shared/types/agents';
+import type { AgentModelAlias, AgentRunTarget } from '../../../../shared/types/agents';
+import {
+  providerForRuntime,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+} from '../../../../shared/types/agentRuntime';
 import type {
   FanOutInnerStep,
   WorkflowAgentConfig,
@@ -102,6 +108,38 @@ export interface TuningPhaseStripProps {
    * rendering when the baseline itself could not be resolved.
    */
   baselineDefinition: WorkflowDefinition | null;
+  /**
+   * Per-agent catalogue run targets (the host modal already computes these for
+   * the advanced canvas) — the model-tag fallback for steps the level does not
+   * pin. Optional: without it an unpinned chip falls straight to "run model".
+   */
+  agentRunTargets?: Readonly<Record<string, AgentRunTarget>>;
+}
+
+/**
+ * The chip-scale model tag for an agent the LEVEL does not pin, from its
+ * catalogue run target. Mirrors `agentRunTargetLabel`'s arms at chip scale
+ * (lowercase aliases so the tag matches the legend): a non-Claude provider
+ * shows its provider-model id (or the runtime label) uncoloured; a Claude
+ * model pin shows the alias, coloured; no pin at all is the inherit sentinel
+ * "run model" — the launch picks it, so nothing more specific is honest here.
+ */
+function targetSub(target: AgentRunTarget | undefined): {
+  sub: string;
+  model: AgentModelAlias | null;
+} {
+  if (target === undefined) return { sub: 'run model', model: null };
+  if (target.runtime !== null && providerForRuntime(target.runtime) !== 'claude') {
+    return {
+      sub:
+        target.providerModel !== null && target.providerModel !== ''
+          ? target.providerModel
+          : WORKFLOW_AGENT_RUNTIME_LABELS[target.runtime],
+      model: null,
+    };
+  }
+  if (target.model !== null) return { sub: target.model, model: target.model };
+  return { sub: 'run model', model: null };
 }
 
 /**
@@ -276,6 +314,7 @@ function chipPropsFor(
   baselineStep: WorkflowStep | FanOutInnerStep | undefined,
   kind: ChipKind,
   definition: WorkflowDefinition,
+  targets: Readonly<Record<string, AgentRunTarget>> | undefined,
   testId: string,
 ): ChipProps {
   const source = step ?? baselineStep;
@@ -292,13 +331,15 @@ function chipPropsFor(
   const isHumanGate = source.agent === HUMAN_GATE_AGENT;
   const config = definition.agentConfigs?.[agentKey];
   const pin = isHumanGate ? null : pinLabel(config);
+  // The model tag: the level's pin wins, else the agent's catalogue target.
+  const fallback = targetSub(targets?.[agentKey]);
   const optional = source.optional === true ? ' · optional' : '';
   return {
     label,
-    sub: isHumanGate ? 'human' : `${pin ?? agentKey}${optional}`,
+    sub: isHumanGate ? 'human' : `${pin ?? fallback.sub}${optional}`,
     kind,
     isHumanGate,
-    model: isHumanGate ? null : (config?.model ?? null),
+    model: isHumanGate ? null : (config?.model ?? fallback.model),
     testId,
     pinTestId: pin === null ? undefined : `${testId}-pin`,
   };
@@ -309,6 +350,7 @@ function phaseChips(
   effectivePhase: WorkflowPhase | undefined,
   baselinePhase: WorkflowPhase | undefined,
   definition: WorkflowDefinition,
+  targets: Readonly<Record<string, AgentRunTarget>> | undefined,
   diffing: boolean,
 ): { chips: ChipProps[]; hasFanOut: boolean } {
   const effectiveSteps = effectivePhase?.steps ?? [];
@@ -329,7 +371,14 @@ function phaseChips(
     const innerBaseline = innerChainOf(baselineStep);
     if (innerEffective.length === 0 && innerBaseline.length === 0) {
       chips.push(
-        chipPropsFor(step, baselineStep, entry.kind, definition, `tuning-step-chip-${entry.id}`),
+        chipPropsFor(
+          step,
+          baselineStep,
+          entry.kind,
+          definition,
+          targets,
+          `tuning-step-chip-${entry.id}`,
+        ),
       );
       continue;
     }
@@ -349,6 +398,7 @@ function phaseChips(
           // A removed OUTER step takes its whole lane with it.
           entry.kind === 'skip' ? 'skip' : innerEntry.kind,
           definition,
+          targets,
           `tuning-lane-chip-${innerEntry.id}`,
         ),
       );
@@ -360,6 +410,7 @@ function phaseChips(
 export function TuningPhaseStrip({
   definition,
   baselineDefinition,
+  agentRunTargets,
 }: TuningPhaseStripProps): React.JSX.Element {
   if (definition === null) {
     return (
@@ -384,7 +435,13 @@ export function TuningPhaseStrip({
         const baselinePhase = baselinePhases?.get(entry.id);
         const phase = effectivePhase ?? baselinePhase;
         if (phase === undefined) return null;
-        const { chips, hasFanOut } = phaseChips(effectivePhase, baselinePhase, definition, diffing);
+        const { chips, hasFanOut } = phaseChips(
+          effectivePhase,
+          baselinePhase,
+          definition,
+          agentRunTargets,
+          diffing,
+        );
         return (
           <div
             key={entry.id}
