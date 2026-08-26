@@ -1,6 +1,6 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-5 absorbed (8 high + 2 medium) —
+Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-6 absorbed (10 high + 2 medium) —
 see "Review findings absorbed" at the end; not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
@@ -202,12 +202,18 @@ payload — no new column) and an **immutable database instance identifier as `w
 (replacing the prefix, which moves to `workspace_name` — committed config survives a reinit, an
 instance id does not). Phase 0 probes the best anchor: a `metadata.json` identifier if beads
 exposes one, else the Dolt database's root-commit hash via SQL (deterministic and immutable per
-init). **Both are validated at the top of every pass** — the `assertContainerExists` lesson,
-promoted from container-existence to database-identity — and a mismatch throws `TrackerAuthError`
-(paused, re-detect required); the sweep and reconciliation never run against an unverified
-database. Negative test: reinit at the same path, prove the pass pauses and zero local entities
-are archived. Note: keyless identity matching must skip `normalizeBaseUrl` URL parsing
-(`base_url` stays NULL for beads; the path is not a URL).
+init). **Validation is a sandwich, not a preflight** (Codex round-6 finding 1: a top-of-pass
+check leaves a TOCTOU window — `.beads` replaced mid-pass poisons the sweep's collected id set
+and the archive step then destroys local links): check identity at pass start, collect
+sweep/reconciliation results, then **re-check identity before applying any local archival or
+outbound mutation** — a mismatch or second-check failure discards the collected results and
+pauses via `TrackerAuthError`. The residual "replaced then restored between re-check and apply"
+case requires restoring the *same* instance id, i.e. the same database — harmless by
+construction. A full atomicity guarantee is impossible over a non-transactional CLI; the
+sandwich reduces the hazard to that harmless case. Negative tests: reinit at the same path
+(a) before a pass and (b) between the initial check and `listIssueIds`, proving zero local
+entities are archived in both. Note: keyless identity matching must skip `normalizeBaseUrl`
+URL parsing (`base_url` stays NULL for beads; the path is not a URL).
 
 **Error taxonomy: retry only the recognized-transient** (Codex round-5 finding 2). The
 retryable-by-default mapping would let a deterministic failure — unknown flag after a `bd`
@@ -215,9 +221,10 @@ downgrade, incompatible output after an upgrade, permission failure, corrupt wor
 forever at the release velocity this proposal itself documents. Inverted classification:
 - recognized transient (embedded-lock contention, timeout) → `TrackerApiError{status: null}`,
   the retry path;
-- deterministic configuration/compat failures (unrecognized-flag usage errors, envelope/schema
-  parse mismatch, `schema_version` ≠ 1, permission errors, workspace-integrity failures,
-  version-below-minimum) → `TrackerAuthError` — paused with the actionable stderr in the banner;
+- deterministic configuration/compat failures (`bd` missing from PATH, repo not a beads
+  workspace, unrecognized-flag usage errors, envelope/schema parse mismatch,
+  `schema_version` ≠ 1, permission errors, workspace-integrity failures, version-below-minimum)
+  → `TrackerAuthError` — paused with the actionable stderr in the banner; re-detect resumes;
 - unclassified non-zero exits → retryable, but with a consecutive-failure threshold per
   connection (N failed passes → escalate to the paused state with the last stderr) so unknown
   deterministic failures cannot loop silently.
@@ -236,15 +243,9 @@ large, else runs single-shot under an explicit raised cap (64MB); (c) a `maxBuff
 to a TERMINAL, actionable failure (pause + "workspace too large — see docs"), never the
 transient-retry path. Phase 0 includes a probe whose listing output exceeds the default 10MB.
 
-Error taxonomy mapping:
-
-- non-zero exit / JSON parse failure / timeout → `TrackerApiError{status: null}` — the existing
-  retryable path (backoff, never terminal).
-- "bd not found on PATH" and "not a beads workspace" → `TrackerAuthError` — buys the
-  pause-connection + reconnect-banner machinery for free; the paused copy reads "beads
-  unavailable", and re-detect resumes.
-- Embedded-lock contention ("database is locked" on stderr) → `TrackerApiError{status: null}`,
-  explicitly recognized so the message can say "beads database busy — will retry".
+Error taxonomy: ONE authoritative classification — see "Error taxonomy: retry only the
+recognized-transient" below (Codex round-6 finding 2 caught an earlier retryable-by-default
+mapping left standing here in contradiction; it is deleted, the inverted table below governs).
 
 Timeout: per-adapter constant, not the HTTP 30s verbatim — `bd` is local and usually ms-fast, but
 Dolt maintenance ops can take seconds; use `execFile`'s `timeout` (start at 30s, revisit at
@@ -452,3 +453,16 @@ CONFIRMED and absorbed:
    inverted taxonomy — recognized-transient retries only, deterministic failures pause via
    `TrackerAuthError`, unclassified failures get a consecutive-failure escalation threshold
    (see "Error taxonomy").
+
+Codex adversarial round 6 (2026-08-26), verdict needs-attention, 2 high — both CONFIRMED and
+absorbed:
+
+1. [high] Top-of-pass identity validation left a TOCTOU window: `.beads` replaced mid-pass
+   poisons the collected sweep id set and the apply step archives every link. Absorbed as
+   sandwich validation — re-check the instance id after collection, before any local archival
+   or outbound mutation; mismatch discards results and pauses. Mid-pass replacement negative
+   test added.
+2. [high] The round-3 retryable-by-default error mapping was left standing in contradiction to
+   round-5's inverted taxonomy. Absorbed: stale block deleted; the inverted classification is
+   the single authoritative table, with `bd`-missing/workspace-missing folded into the
+   deterministic-pause row.
