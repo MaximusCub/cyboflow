@@ -50,7 +50,15 @@ export function decideToolCall(mode: 'dontAsk' | 'gated', toolName: string): PiG
   }
   // Tools that only ever READ are safe under any mode; everything else —
   // including unknown/extension tools — is treated as write-tier (fail closed).
-  const READ_ONLY = new Set(['read', 'grep', 'glob', 'ls']);
+  //
+  // These are pi's OWN registered tool names, verified against the published
+  // package (dist/core/tools/*.js `name:` fields, 0.84.3). pi registers exactly
+  // eight: read, grep, ls, find, edit, write, bash, powershell. The first four
+  // are read-only and listed here; the last four are write-tier and fall
+  // through to the block below. Note 'find' — pi's glob tool is NOT called
+  // 'glob' (that is Claude Code's name for it), so an allow-list written from
+  // Claude habit silently blocks pattern search under every gated mode.
+  const READ_ONLY = new Set(['read', 'grep', 'ls', 'find']);
   if (READ_ONLY.has(toolName)) {
     return { block: false };
   }
