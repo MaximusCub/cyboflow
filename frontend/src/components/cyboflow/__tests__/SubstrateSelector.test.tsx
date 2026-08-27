@@ -42,10 +42,14 @@ import { useConfigStore } from '../../../stores/configStore';
 import type { AppConfig } from '../../../types/config';
 import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
 
-/** Drive the picker's provider gate through the real config store. */
-function setProviderAccess(access: AgentProviderAccess | undefined): void {
+/**
+ * Drive the picker's provider gate through the real config store. `ariaMode`
+ * matters because Aria-gated providers (pi) are forced off in
+ * `useAgentProviderAccess` regardless of their access key.
+ */
+function setProviderAccess(access: AgentProviderAccess | undefined, ariaMode = false): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+    config: { gitRepoPath: '/repo', agentProviderAccess: access, ariaMode } as AppConfig,
   });
 }
 
@@ -309,12 +313,43 @@ describe('SubstrateSelector — offers exactly the picker-selectable providers',
   beforeEach(() => mockUseForcedSubstrate.mockReturnValue(null));
 
   it('renders one provider segment per provider when all are on', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
+    // Aria mode too: pi is Aria-gated, so "all providers on" is not enough to
+    // surface its column.
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true }, true);
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     for (const provider of ['claude', 'codex', 'omp', 'pi']) {
       expect(screen.getByTestId(`substrate-select-provider-${provider}`)).toBeInTheDocument();
     }
+  });
+
+  /**
+   * The Aria gate at the picker. pi's lane is materially less complete than the
+   * others (no delegation tool, no cyboflow MCP surface), so a non-Aria install
+   * must not be offered it even with its access key switched on — a key a
+   * pre-gate config or an MCP-pinned agent config can carry.
+   */
+  it('hides the Pi column off Aria mode even when its access key is on', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true }, false);
+    const { unmount } = render(
+      <SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />,
+    );
+    expect(screen.queryByTestId('substrate-select-provider-pi')).not.toBeInTheDocument();
+    // Its siblings are untouched by the gate.
+    expect(screen.getByTestId('substrate-select-provider-claude')).toBeInTheDocument();
+    expect(screen.getByTestId('substrate-select-provider-omp')).toBeInTheDocument();
+    unmount();
+
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true }, true);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+    expect(screen.getByTestId('substrate-select-provider-pi')).toBeInTheDocument();
+  });
+
+  /** Aria mode surfaces pi; it does not switch it on. */
+  it('still hides the Pi column under Aria mode when its access key is off', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: false }, true);
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+    expect(screen.queryByTestId('substrate-select-provider-pi')).not.toBeInTheDocument();
   });
 
   it('hides the OMP column while the provider is off, and offers it once on', () => {

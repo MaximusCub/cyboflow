@@ -20,6 +20,9 @@ import { describe, it, expect } from 'vitest';
 import {
   AGENT_PROVIDER_DISABLED_CODE,
   enabledAgentProviders,
+  isAgentProviderUsable,
+  isProviderAriaGated,
+  isProviderSurfaced,
   enabledProvidersIn,
   firstEnabledRuntime,
   isAgentProviderAccess,
@@ -148,9 +151,9 @@ type TestProvider = 'claude' | 'codex' | 'newcomer';
 const TEST_PROVIDER_TABLE: AgentProviderTable<TestProvider> = {
   providers: ['claude', 'codex', 'newcomer'],
   definitions: {
-    claude: { runtimePrefix: 'claude-', defaultEnabled: true },
-    codex: { runtimePrefix: 'codex-', defaultEnabled: true },
-    newcomer: { runtimePrefix: 'newcomer-', defaultEnabled: false },
+    claude: { runtimePrefix: 'claude-', defaultEnabled: true, requiresAriaMode: false },
+    codex: { runtimePrefix: 'codex-', defaultEnabled: true, requiresAriaMode: false },
+    newcomer: { runtimePrefix: 'newcomer-', defaultEnabled: false, requiresAriaMode: false },
   },
   fallbackProvider: 'claude',
 };
@@ -210,8 +213,8 @@ describe('the never-all-disabled floor', () => {
     const allOptIn: AgentProviderTable<'first' | 'second'> = {
       providers: ['first', 'second'],
       definitions: {
-        first: { runtimePrefix: 'first-', defaultEnabled: false },
-        second: { runtimePrefix: 'second-', defaultEnabled: false },
+        first: { runtimePrefix: 'first-', defaultEnabled: false, requiresAriaMode: false },
+        second: { runtimePrefix: 'second-', defaultEnabled: false, requiresAriaMode: false },
       },
       fallbackProvider: 'first',
     };
@@ -246,5 +249,55 @@ describe('provider-disabled wire format', () => {
     expect(parseAgentProviderDisabled(null)).toBeNull();
     // Right code, malformed payload — must not be mistaken for a real refusal.
     expect(parseAgentProviderDisabled(`${AGENT_PROVIDER_DISABLED_CODE}[gemini]: nope`)).toBeNull();
+  });
+});
+
+/**
+ * The Aria gate — a SURFACING policy layered over the access map, not another
+ * default. `pi` carries it because its lane is materially less complete than
+ * the other three (no delegation tool, no cyboflow MCP surface), so it should
+ * not be offered to an install that has not opted into Aria mode.
+ */
+describe('Aria-mode provider gate', () => {
+  it('gates pi and nothing else', () => {
+    expect(isProviderAriaGated('pi')).toBe(true);
+    for (const provider of ['claude', 'codex', 'omp'] as const) {
+      expect(isProviderAriaGated(provider), provider).toBe(false);
+    }
+  });
+
+  it('surfaces an ungated provider regardless of Aria mode', () => {
+    for (const ariaMode of [false, true]) {
+      for (const provider of ['claude', 'codex', 'omp'] as const) {
+        expect(isProviderSurfaced(provider, ariaMode), `${provider}/${ariaMode}`).toBe(true);
+      }
+    }
+  });
+
+  it('surfaces pi ONLY under Aria mode', () => {
+    expect(isProviderSurfaced('pi', false)).toBe(false);
+    expect(isProviderSurfaced('pi', true)).toBe(true);
+  });
+
+  /**
+   * The load-bearing case: an access key that says pi is on must NOT get pi
+   * past the gate. Such a key is reachable from a config written before the
+   * gate existed, or from an MCP-pinned agent config that never passes through
+   * the Settings UI — which is exactly why the launch seams AND the gate.
+   */
+  it('refuses an Aria-gated provider even when its access key is on', () => {
+    expect(isAgentProviderUsable({ pi: true }, 'pi', false)).toBe(false);
+    expect(isAgentProviderUsable({ pi: true }, 'pi', true)).toBe(true);
+  });
+
+  it('still honours the access toggle for a surfaced provider', () => {
+    // Aria on does not switch a provider ON — it only stops hiding it.
+    expect(isAgentProviderUsable({ pi: false }, 'pi', true)).toBe(false);
+    expect(isAgentProviderUsable({ codex: false }, 'codex', true)).toBe(false);
+    expect(isAgentProviderUsable({ codex: true }, 'codex', false)).toBe(true);
+  });
+
+  it('leaves pi off by default under Aria mode (the gate is not an opt-in)', () => {
+    expect(isAgentProviderUsable(undefined, 'pi', true)).toBe(false);
   });
 });

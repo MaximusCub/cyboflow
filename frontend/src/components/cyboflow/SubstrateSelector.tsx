@@ -54,7 +54,7 @@ import {
   type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
 import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
-import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
+import { useAgentProviderAccess, useSurfacedProviderBaseline } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import {
@@ -293,6 +293,7 @@ export function SubstrateSelector({
   // Provider toggles (Settings → Integrations / onboarding). A switched-off
   // provider's column leaves the picker entirely and can never be submitted.
   const providerAccess = useAgentProviderAccess();
+  const surfacedBaseline = useSurfacedProviderBaseline();
   const omp = useOmpAvailability();
   const providers = visibleProviders(providerAccess, omp);
   const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
@@ -374,9 +375,11 @@ export function SubstrateSelector({
     );
   }
 
-  const hiddenProviders =
-    providers.length !==
-    visibleProviders({ claude: true, codex: true, omp: true, pi: true }, omp).length;
+  // Compared against what this install COULD surface, not a flat all-on map:
+  // an Aria-gated provider is not "turned off in Settings → Integrations" (it
+  // has no row there), so counting it would make the notice permanent and send
+  // the user looking for a toggle that is not rendered.
+  const hiddenProviders = providers.length !== visibleProviders(surfacedBaseline, omp).length;
   // The Aria-mode bridge gap for the SELECTED provider — rendered as a note so
   // the user learns what to configure instead of meeting an inert segment.
   const selectedChatReason = unavailableReason(selectedLanes.chat, omp);

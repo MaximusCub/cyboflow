@@ -101,3 +101,57 @@ describe('ConfigManager.agentProviderAccess', () => {
     expect(reloaded.isAgentProviderEnabled('codex')).toBe(true);
   });
 });
+
+/**
+ * The Aria gate at the AUTHORITY. `isAgentProviderEnabled` is what the launch
+ * seams read (WorkflowRegistry.createRun, the quick-session IPC handler, the
+ * per-step agent resolver), so the gate has to live here and not only in the
+ * pickers — an MCP-pinned agent config names a runtime without ever passing
+ * through the UI.
+ */
+describe('ConfigManager Aria-mode provider gate', () => {
+  it('refuses pi on a non-Aria install even with its access key switched on', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ gitRepoPath: '/some/repo', agentProviderAccess: { pi: true } }, null, 2),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    expect(mgr.getAriaMode()).toBe(false);
+    expect(mgr.isAgentProviderEnabled('pi')).toBe(false);
+    expect(mgr.isAgentProviderSurfaced('pi')).toBe(false);
+    // The gate is pi-specific: its siblings are untouched by it.
+    expect(mgr.isAgentProviderEnabled('claude')).toBe(true);
+    expect(mgr.isAgentProviderSurfaced('omp')).toBe(true);
+  });
+
+  it('allows pi once Aria mode is on AND its access key is on', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify(
+        { gitRepoPath: '/some/repo', ariaMode: true, agentProviderAccess: { pi: true } },
+        null,
+        2,
+      ),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    expect(mgr.isAgentProviderSurfaced('pi')).toBe(true);
+    expect(mgr.isAgentProviderEnabled('pi')).toBe(true);
+  });
+
+  it('keeps pi off under Aria mode when its access key is not set (gate is not an opt-in)', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ gitRepoPath: '/some/repo', ariaMode: true }, null, 2),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    // Surfaced (the card renders) but still switched off until the user says so.
+    expect(mgr.isAgentProviderSurfaced('pi')).toBe(true);
+    expect(mgr.isAgentProviderEnabled('pi')).toBe(false);
+  });
+});

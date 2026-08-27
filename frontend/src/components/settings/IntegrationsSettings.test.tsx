@@ -29,10 +29,13 @@ vi.mock('../../utils/api', () => ({
   },
 }));
 
-/** Seed the config store as the app's boot fetch would. */
-function setProviderAccess(access: AgentProviderAccess | undefined): void {
+/**
+ * Seed the config store as the app's boot fetch would. `ariaMode` gates whether
+ * an Aria-gated provider's card renders at all (pi).
+ */
+function setProviderAccess(access: AgentProviderAccess | undefined, ariaMode = false): void {
   useConfigStore.setState({
-    config: { gitRepoPath: '/repo', agentProviderAccess: access } as AppConfig,
+    config: { gitRepoPath: '/repo', agentProviderAccess: access, ariaMode } as AppConfig,
   });
 }
 
@@ -142,10 +145,10 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(await screen.findByRole('switch', { name: 'Use Codex in Cyboflow' }));
 
     // Full object, never a partial patch — the siblings must not be dropped.
-    // OMP rides along at its untouched default (absent ⇒ off).
+    // OMP and Pi ride along at their untouched defaults (absent ⇒ off).
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: false, omp: false },
+        agentProviderAccess: { claude: true, codex: false, omp: false, pi: false },
       }),
     );
   });
@@ -160,7 +163,7 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(codexSwitch);
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: false },
+        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false },
       }),
     );
   });
@@ -255,7 +258,7 @@ describe('IntegrationsSettings — OMP card', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: true },
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: false },
       }),
     );
   });
@@ -277,7 +280,7 @@ describe('IntegrationsSettings — OMP card', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: false },
+        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false },
       }),
     );
   });
@@ -337,5 +340,50 @@ describe('IntegrationsSettings — OMP row under Aria mode', () => {
     // rather than a unique match.
     expect((await screen.findAllByText('Detected')).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/Fleet (not )?detected/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Pi is Aria-gated: its lane is materially less complete than the other three
+ * (no delegation tool, no cyboflow MCP surface), so a non-Aria install gets no
+ * Pi card at all rather than a switched-off one inviting a user to turn it on.
+ */
+describe('IntegrationsSettings — the Aria gate on Pi', () => {
+  it('renders no Pi row off Aria mode, even with its access key on', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true }, false);
+
+    render(<IntegrationsSettings />);
+
+    await screen.findByTestId('provider-toggle-claude');
+    expect(screen.queryByTestId('provider-toggle-pi')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pi')).not.toBeInTheDocument();
+    // The siblings are untouched by the gate.
+    expect(screen.getByTestId('provider-toggle-omp')).toBeInTheDocument();
+  });
+
+  it('renders the Pi row under Aria mode', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true }, true);
+
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByTestId('provider-toggle-pi')).toBeInTheDocument();
+  });
+
+  /**
+   * The save handler built its access object from a literal that omitted `pi`,
+   * so toggling ANY provider dropped the key — and pi floors to disabled on an
+   * absent key, silently switching it off.
+   */
+  it('preserves pi when a sibling provider is toggled', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: false, pi: true }, true);
+
+    render(<IntegrationsSettings />);
+    fireEvent.click(await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' }));
+
+    await waitFor(() =>
+      expect(updateConfig).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true },
+      }),
+    );
   });
 });

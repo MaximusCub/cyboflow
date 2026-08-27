@@ -16,7 +16,8 @@ import {
   type AgentProvider,
   type AgentProviderAccess,
   type AgentRuntime,
-  isAgentProviderEnabled,
+  isAgentProviderUsable,
+  isProviderSurfaced,
   isAgentRuntime,
   resolveAgentProviderAccess,
 } from '../../../shared/types/agentRuntime';
@@ -541,9 +542,25 @@ export class ConfigManager extends EventEmitter {
    * handler, the per-step agent resolver) — the renderer's pickers mirror this
    * via useAgentProviderAccess, but never substitute for it (an agent runtime
    * can also be pinned through the MCP workflow-config tools, bypassing the UI).
+   *
+   * ANDs the access toggle with the Aria gate
+   * ({@link AgentProviderDefinition.requiresAriaMode}). Gating HERE rather than
+   * only in the pickers is the point: an Aria-gated provider must be refused
+   * even when an access key says otherwise — one written before the gate
+   * existed, or by an MCP-pinned agent config that never touches the UI.
    */
   isAgentProviderEnabled(provider: AgentProvider): boolean {
-    return isAgentProviderEnabled(this.getAgentProviderAccess(), provider);
+    return isAgentProviderUsable(this.getAgentProviderAccess(), provider, this.getAriaMode());
+  }
+
+  /**
+   * True when `provider` may be OFFERED on this install — the Aria gate alone,
+   * ignoring the access toggle. The renderer reads this to decide whether to
+   * render a provider's Settings card at all; a gated-out provider has no
+   * toggle to show, so there is nothing for the user to switch.
+   */
+  isAgentProviderSurfaced(provider: AgentProvider): boolean {
+    return isProviderSurfaced(provider, this.getAriaMode());
   }
 
   /**

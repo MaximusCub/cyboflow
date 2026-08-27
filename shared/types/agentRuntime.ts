@@ -223,6 +223,19 @@ export interface AgentProviderDefinition {
    * a brand-new vendor on for every existing install without anyone asking.
    */
   readonly defaultEnabled: boolean;
+  /**
+   * When true this provider is hidden unless the install is in ARIA MODE — it
+   * is not offered in any picker, its Settings card is not rendered, and the
+   * launch seams refuse it, regardless of what `AgentProviderAccess` says.
+   *
+   * This is a SURFACING gate, deliberately separate from `defaultEnabled`.
+   * `defaultEnabled: false` means "off until the user opts in", which still
+   * puts a card in front of every user; this means "not a thing most users
+   * should be choosing at all yet". Use it for a lane whose integration is
+   * genuinely partial, so an operator who turns Aria mode on has accepted the
+   * rough edges, and nobody else can stumble into them.
+   */
+  readonly requiresAriaMode: boolean;
 }
 
 /**
@@ -242,8 +255,8 @@ export interface AgentProviderTable<P extends string = AgentProvider> {
 }
 
 export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProviderDefinition>> = {
-  claude: { runtimePrefix: 'claude-', defaultEnabled: true },
-  codex: { runtimePrefix: 'codex-', defaultEnabled: true },
+  claude: { runtimePrefix: 'claude-', defaultEnabled: true, requiresAriaMode: false },
+  codex: { runtimePrefix: 'codex-', defaultEnabled: true, requiresAriaMode: false },
   // OMP (oh-my-pi) — the first provider introduced AFTER the access toggles, so
   // it takes the absent⇒DISABLED policy this field exists for: every install
   // that has never seen the OMP card in Settings → Integrations keeps OMP off,
@@ -252,12 +265,22 @@ export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProvid
   // supervisor (`omp-fleet`) — the fleet status-bar indicator and the
   // fleet-session launch both respect the same toggle. See
   // `AgentProviderDefinition.defaultEnabled`.
-  omp: { runtimePrefix: 'omp-', defaultEnabled: false },
+  omp: { runtimePrefix: 'omp-', defaultEnabled: false, requiresAriaMode: false },
   // Pi — the terminal coding agent OMP forked from, integrated natively
   // (spawned binary, no bridge). Post-toggle provider like omp: an absent
   // access key defaults DISABLED so installs that never touched Settings →
   // Integrations keep every `pi-` runtime off until an explicit opt-in.
-  pi: { runtimePrefix: 'pi-', defaultEnabled: false },
+  //
+  // ARIA-GATED because the pi lane is materially less complete than the other
+  // three, in ways a user cannot see from a picker: pi registers no delegation
+  // tool (so a workflow step cannot spawn a subagent and must do every role's
+  // work in-turn), nothing wires the cyboflow MCP server for it (so `cyboflow_*`
+  // is absent entirely — a pi workflow run cannot write cyboflow state or open a
+  // human gate), and it has no workflow-lane test the way omp does. Surfacing
+  // that to everyone offers a lane that silently under-delivers; behind Aria
+  // mode it stays available to an operator who knows what they are taking on.
+  // Remove this gate when pi has an MCP writer, not before.
+  pi: { runtimePrefix: 'pi-', defaultEnabled: false, requiresAriaMode: true },
 };
 
 /**
@@ -554,6 +577,46 @@ export function isRuntimeProviderEnabled(
 /** The providers currently usable, in AGENT_PROVIDERS order. */
 export function enabledAgentProviders(access: AgentProviderAccess | undefined): AgentProvider[] {
   return enabledProvidersIn(AGENT_PROVIDER_TABLE, access);
+}
+
+/**
+ * True when `provider` is hidden behind Aria mode — see
+ * {@link AgentProviderDefinition.requiresAriaMode}. Static policy: it does not
+ * read config, so a caller must AND it with the install's actual Aria state
+ * (or just call {@link isProviderSurfaced}).
+ */
+export function isProviderAriaGated(provider: AgentProvider): boolean {
+  return AGENT_PROVIDER_REGISTRY[provider].requiresAriaMode;
+}
+
+/**
+ * True when `provider` may be SURFACED on this install — the Aria gate alone,
+ * with no reference to `AgentProviderAccess`.
+ *
+ * Kept separate from {@link isAgentProviderEnabled} on purpose. Access answers
+ * "did the user switch this on"; this answers "may this install offer it at
+ * all". Both must hold, and they fail differently: a gated-out provider's card
+ * never renders, so there is no toggle to explain, whereas a switched-off
+ * provider explains itself in Settings.
+ */
+export function isProviderSurfaced(provider: AgentProvider, ariaMode: boolean): boolean {
+  return ariaMode || !isProviderAriaGated(provider);
+}
+
+/**
+ * True when `provider` may actually be used: surfaced on this install AND
+ * switched on. THE predicate for a launch seam or a picker — using
+ * `isAgentProviderEnabled` alone would offer an Aria-gated provider to an
+ * install that must not see it, on the strength of an access key that was
+ * written before the gate existed (or by an MCP-pinned agent config, which
+ * never passes through the Settings UI at all).
+ */
+export function isAgentProviderUsable(
+  access: AgentProviderAccess | undefined,
+  provider: AgentProvider,
+  ariaMode: boolean,
+): boolean {
+  return isProviderSurfaced(provider, ariaMode) && isAgentProviderEnabled(access, provider);
 }
 
 /**

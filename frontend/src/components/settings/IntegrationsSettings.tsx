@@ -4,7 +4,7 @@ import { Bot, Code2, ExternalLink, RefreshCw, Boxes, Terminal } from 'lucide-rea
 import type { AgentProvider, AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
-import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
+import { useAgentProviderAccess, useIsAgentProviderSurfaced } from '../../hooks/useAgentProviderAccess';
 import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import { useConfigStore } from '../../stores/configStore';
 import { API } from '../../utils/api';
@@ -440,6 +440,10 @@ export function IntegrationsSettings(): React.JSX.Element {
   // Pi floors to DISABLED on an absent key, same as omp — the registry's
   // defaultEnabled policy is applied inside isAgentProviderEnabled.
   const piEnabled = isAgentProviderEnabled(providerAccess, 'pi');
+  // Pi is Aria-gated (AGENT_PROVIDER_REGISTRY.requiresAriaMode): its lane is
+  // materially less complete than the others, so a non-Aria install gets no Pi
+  // card at all rather than a switched-off one that invites turning it on.
+  const piSurfaced = useIsAgentProviderSurfaced('pi');
   const enabledByProvider: Record<AgentProvider, boolean> = {
     claude: claudeEnabled,
     codex: codexEnabled,
@@ -459,6 +463,10 @@ export function IntegrationsSettings(): React.JSX.Element {
         claude: provider === 'claude' ? enabled : claudeEnabled,
         codex: provider === 'codex' ? enabled : codexEnabled,
         omp: provider === 'omp' ? enabled : ompEnabled,
+        // `pi` belongs here for the reason stated above — omitting it dropped
+        // the key on every save, silently switching Pi off whenever a sibling
+        // provider was toggled.
+        pi: provider === 'pi' ? enabled : piEnabled,
       };
       const ok = await useConfigStore.getState().updateConfig({ agentProviderAccess: next });
       if (!ok) {
@@ -542,16 +550,18 @@ export function IntegrationsSettings(): React.JSX.Element {
               </Button>
             ) : undefined}
           />
-          <ProviderRow
-            name="Pi"
-            description="The terminal coding agent OMP forked from — multi-provider models via its own accounts; Cyboflow only detects the binary."
-            icon={<Terminal className="h-4 w-4" />}
-            view={pi}
-            enabled={piEnabled}
-            onToggle={(next) => void setProviderEnabled('pi', next)}
-            toggleDisabledReason={toggleReason('pi', piEnabled)}
-            toggleTestId="provider-toggle-pi"
-          />
+          {piSurfaced && (
+            <ProviderRow
+              name="Pi"
+              description="The terminal coding agent OMP forked from — multi-provider models via its own accounts; Cyboflow only detects the binary. Workflow support is partial: no subagent delegation and no cyboflow MCP tools."
+              icon={<Terminal className="h-4 w-4" />}
+              view={pi}
+              enabled={piEnabled}
+              onToggle={(next) => void setProviderEnabled('pi', next)}
+              toggleDisabledReason={toggleReason('pi', piEnabled)}
+              toggleTestId="provider-toggle-pi"
+            />
+          )}
         </div>
 
         {saveError && (
