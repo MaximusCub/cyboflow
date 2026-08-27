@@ -49,8 +49,23 @@ export interface UseSaveRunTypeDefaultOptions {
   label: string;
 }
 
+/**
+ * An extra write that rides along with one save — a setting whose persistence
+ * target is NOT the run-type-defaults store (the wizard's tuning-level stamp,
+ * which lives on the workflow row). The companion writes FIRST: if it fails
+ * nothing else is attempted, so a save never lands half of itself. Its `undo`
+ * is captured into the same Undo record and replayed by the toast's Undo,
+ * after the run-type restore.
+ */
+export interface SaveCompanion {
+  /** Perform the companion write; resolve `false` to fail the whole save. */
+  write: () => Promise<boolean>;
+  /** Revert the companion write; replayed by Undo. Resolve `false` on failure. */
+  undo: () => Promise<boolean>;
+}
+
 export interface UseSaveRunTypeDefaultReturn {
-  save: (patch: RunTypeDefaultsPatch) => void;
+  save: (patch: RunTypeDefaultsPatch, companion?: SaveCompanion) => void;
   undo: () => void;
   /** True only after a write the store confirmed landed. */
   canUndo: boolean;
@@ -64,6 +79,8 @@ interface UndoRecord {
   label: string;
   /** `null` = the key held nothing before the (confirmed) write; Undo deletes it. */
   previous: RunTypeDefaults | null;
+  /** The companion's revert, when this save carried one. */
+  companionUndo?: () => Promise<boolean>;
 }
 
 export function useSaveRunTypeDefault({
@@ -77,7 +94,7 @@ export function useSaveRunTypeDefault({
   const [undoRecord, setUndoRecord] = useState<UndoRecord | null>(null);
 
   const save = useCallback(
-    (patch: RunTypeDefaultsPatch): void => {
+    (patch: RunTypeDefaultsPatch, companion?: SaveCompanion): void => {
       if (key === null || inFlightRef.current) return;
       inFlightRef.current = true;
       setIsSaving(true);
@@ -88,11 +105,26 @@ export function useSaveRunTypeDefault({
       const writeLabel = label;
       void (async () => {
         try {
+          // Companion first: a failed companion aborts before the run-type
+          // write, so the save is all-or-nothing from the user's viewpoint.
+          if (companion !== undefined && !(await companion.write())) {
+            setUndoRecord(null);
+            setToast({ message: `Couldn't save default for ${writeLabel}`, tone: 'error' });
+            return;
+          }
           const result = await applyRunTypeDefault(writeKey, { kind: 'merge', value: patch });
           if (result.ok) {
-            setUndoRecord({ key: writeKey, label: writeLabel, previous: result.previous });
+            setUndoRecord({
+              key: writeKey,
+              label: writeLabel,
+              previous: result.previous,
+              companionUndo: companion?.undo,
+            });
             setToast({ message: `Saved as default for ${writeLabel}`, tone: 'success' });
           } else {
+            // The companion landed but the run-type write did not — roll the
+            // companion back so the two never diverge silently.
+            if (companion !== undefined) void companion.undo();
             setUndoRecord(null);
             setToast({ message: `Couldn't save default for ${writeLabel}`, tone: 'error' });
           }
@@ -118,7 +150,8 @@ export function useSaveRunTypeDefault({
           kind: 'replace',
           value: record.previous,
         });
-        if (!result.ok) {
+        const companionOk = record.companionUndo === undefined || (await record.companionUndo());
+        if (!result.ok || !companionOk) {
           setToast({ message: `Couldn't undo default for ${record.label}`, tone: 'error' });
         }
       } finally {

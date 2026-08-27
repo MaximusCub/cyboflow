@@ -74,6 +74,8 @@ vi.mock('../../../../trpc/client', () => ({
             { id: 'wf-1', project_id: 1, name: 'sprint', spec_json: null, permission_mode: 'default', created_at: '' },
           ]),
         },
+        // The Save-as-default companion write for a pending tuning-level pick.
+        setTuningLevel: { mutate: vi.fn().mockResolvedValue(undefined) },
       },
       tasks: { list: { query: vi.fn().mockResolvedValue([]) } },
       events: {
@@ -3549,7 +3551,8 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await selectWorkflowAndConfigure();
 
     expect(screen.getByTestId('wizard-tuning-level-thorough')).toHaveAttribute('aria-checked', 'true');
-    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
+    // No divergent pick -> no Save-as-default CTA on its account.
+    expect(screen.queryByTestId('wizard-save-default')).not.toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
@@ -3567,13 +3570,40 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
     });
-    expect(screen.getByTestId('wizard-tuning-level-override-note')).toHaveTextContent(
-      'Override for this run only — the Compound workflow keeps Thorough.',
-    );
+    // A divergent pick surfaces the shared Save-as-default CTA (no caption).
+    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'efficient' }));
+  });
+
+  it('Save as default stamps the picked level on the workflow and clears the pending pick', async () => {
+    const mockSetTuningLevel = vi.mocked(trpc.cyboflow.workflows.setTuningLevel.mutate);
+    mockSetTuningLevel.mockClear();
+    const mockApply = vi.fn(async () => ({ ok: true as const, previous: null }));
+    act(() => {
+      useConfigStore.setState({ applyRunTypeDefault: mockApply });
+    });
+
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    // The companion stamped the WORKFLOW row (not the run-type store)…
+    expect(mockSetTuningLevel).toHaveBeenCalledWith({ workflowId: 'wf-compound', level: 'efficient' });
+    // …the run-type write still ran alongside it…
+    expect(mockApply).toHaveBeenCalled();
+    // …and the pending pick cleared, so the CTA self-hides.
+    expect(screen.queryByTestId('wizard-save-default')).not.toBeInTheDocument();
   });
 
   it('clears the override (omits tuningLevel) once picked back to the saved level', async () => {
@@ -3588,12 +3618,12 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
     });
-    expect(screen.getByTestId('wizard-tuning-level-override-note')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-tuning-level-thorough'));
     });
-    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wizard-save-default')).not.toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));

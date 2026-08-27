@@ -2,15 +2,13 @@
  * TuningLevelSelector — the launch wizard's per-run tuning-level control
  * (docs/plans/workflow-tuning-levels.md D4 + §4 "SessionStartWizard").
  *
- * Four segments — Efficient / Standard / Thorough / Custom — defaulting to the
- * selected workflow's STAMPED level (`savedLevel`; the selection itself shows
- * it — no extra tag). The component is a plain controlled radiogroup: `value`
- * is whatever the
- * caller currently wants shown as selected (the parent's per-run override when
- * one is active, else `savedLevel`), and `onChange` reports the segment the
- * user picked — the caller decides whether that pick IS an override (differs
- * from `savedLevel`) or clears one (matches it back). See
- * SessionStartWizard's `tuningLevelOverride` state for that logic.
+ * Four segments — Efficient / Standard / Thorough / Custom. The component is a
+ * plain controlled radiogroup: `value` is whatever the caller currently wants
+ * shown as selected (the parent's per-run override when one is active, else
+ * the workflow's stamped level), and `onChange` reports the segment the user
+ * picked — the caller decides whether that pick diverges from the stamp (and
+ * offers the shared "Save as default" CTA to persist it) or matches it back.
+ * See SessionStartWizard's `tuningLevelOverride` state for that logic.
  *
  * Custom is disabled-with-hint while the workflow's `spec_json` slot is empty
  * (`customSlotAvailable` — {@link hasCustomSpecSlot}); once selectable it gets
@@ -40,12 +38,8 @@ const TUNING_LEVEL_LABELS: Record<TuningLevel, string> = {
 };
 
 export interface TuningLevelSelectorProps {
-  /** The level currently shown as selected — the active override, else `savedLevel`. */
+  /** The level currently shown as selected — the active override, else the stamped level. */
   value: TuningLevel;
-  /** The workflow's stamped (persisted) level — the override baseline. */
-  savedLevel: TuningLevel;
-  /** Display title of the selected flow, threaded into the override caption. */
-  flowTitle: string;
   /** Whether the workflow's `spec_json` slot holds a real custom definition. */
   customSlotAvailable: boolean;
   /** Grey out every segment (a non-baseline variant is pinned — D4 mutual exclusion). */
@@ -58,16 +52,12 @@ export interface TuningLevelSelectorProps {
 
 export function TuningLevelSelector({
   value,
-  savedLevel,
-  flowTitle,
   customSlotAvailable,
   disabled = false,
   onChange,
   estimateLabels,
   id = 'wizard-tuning-level',
 }: TuningLevelSelectorProps): React.JSX.Element {
-  const isOverride = !disabled && value !== savedLevel;
-
   return (
     <div className="flex flex-col gap-1.5" data-testid="wizard-tuning-level">
       <span className="text-xs font-medium text-text-secondary">Tuning level</span>
@@ -110,15 +100,11 @@ export function TuningLevelSelector({
           );
         })}
       </div>
-      {disabled ? (
+      {disabled && (
         <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-variant-note">
           A pinned variant runs its own definition — tuning level is disabled for this run.
         </p>
-      ) : isOverride ? (
-        <p className="text-xs text-status-warning" data-testid="wizard-tuning-level-override-note">
-          Override for this run only — the {flowTitle} workflow keeps {TUNING_LEVEL_LABELS[savedLevel]}.
-        </p>
-      ) : null}
+      )}
 
       {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
         <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-estimate-caption">

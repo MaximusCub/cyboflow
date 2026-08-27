@@ -2,11 +2,13 @@
  * TuningLevelSelector — isolated component tests (no wizard/tRPC scaffolding).
  *
  * Verifies:
- *   (a) the saved level is tagged;
- *   (b) picking a non-saved segment reports it and shows the override caption;
+ *   (a) the selected segment is the only marker of the saved default (no tag,
+ *       no override caption — a divergent pick surfaces through the parent's
+ *       shared "Save as default" CTA instead);
+ *   (b) picking a segment reports it via onChange;
  *   (c) Custom is disabled with a hint while the slot is empty, selectable once filled;
- *   (d) `disabled` greys out every segment (incl. Custom) and swaps in the
- *       variant-pinned note instead of an override caption.
+ *   (d) `disabled` greys out every segment (incl. Custom) and shows the
+ *       variant-pinned note.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -18,8 +20,6 @@ describe('TuningLevelSelector', () => {
     render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={vi.fn()}
       />,
@@ -33,13 +33,11 @@ describe('TuningLevelSelector', () => {
     expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
   });
 
-  it('(b) clicking a non-saved segment reports it and renders the override caption', () => {
+  it('(b) clicking a segment reports it and renders NO override caption', () => {
     const onChange = vi.fn();
     render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={onChange}
       />,
@@ -47,18 +45,16 @@ describe('TuningLevelSelector', () => {
     fireEvent.click(screen.getByTestId('wizard-tuning-level-thorough'));
     expect(onChange).toHaveBeenCalledWith('thorough');
 
-    // Re-render as the parent would after applying the pick.
+    // Re-render as the parent would after applying the pick: the divergence
+    // surfaces through the parent's "Save as default" CTA, never a caption here.
     render(
       <TuningLevelSelector
         value="thorough"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={onChange}
       />,
     );
-    const note = screen.getAllByTestId('wizard-tuning-level-override-note')[0];
-    expect(note).toHaveTextContent('Override for this run only — the Sprint workflow keeps Standard.');
+    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
   });
 
   it('(c) Custom is disabled with a hint while the slot is empty, and clickable once filled', () => {
@@ -66,8 +62,6 @@ describe('TuningLevelSelector', () => {
     const { rerender } = render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={onChange}
       />,
@@ -80,8 +74,6 @@ describe('TuningLevelSelector', () => {
     rerender(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable
         onChange={onChange}
       />,
@@ -97,8 +89,6 @@ describe('TuningLevelSelector', () => {
     render(
       <TuningLevelSelector
         value="thorough"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable
         disabled
         onChange={onChange}
@@ -110,16 +100,12 @@ describe('TuningLevelSelector', () => {
     fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
     expect(onChange).not.toHaveBeenCalled();
     expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
-    // No override caption while disabled, even though value !== savedLevel.
-    expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
   });
 
   it('(e) renders no estimate lines and no caption when estimateLabels is omitted', () => {
     render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={vi.fn()}
       />,
@@ -131,8 +117,6 @@ describe('TuningLevelSelector', () => {
     render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={vi.fn()}
         estimateLabels={{ efficient: '~150k', standard: '~300k' }}
@@ -148,8 +132,6 @@ describe('TuningLevelSelector', () => {
     render(
       <TuningLevelSelector
         value="standard"
-        savedLevel="standard"
-        flowTitle="Sprint"
         customSlotAvailable={false}
         onChange={vi.fn()}
         estimateLabels={{}}

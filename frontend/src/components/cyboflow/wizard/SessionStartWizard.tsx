@@ -1544,6 +1544,38 @@ export default function SessionStartWizard(): React.JSX.Element {
   });
 
   const handleSaveDefault = useCallback(() => {
+    // A pending tuning-level pick persists as the workflow's STAMPED level via
+    // the same Save-as-default gesture as every other Configure knob — it rides
+    // along as a companion write (its target is the workflow row, not the
+    // run-type-defaults store). On success the override state clears and the
+    // card metadata refreshes, so the selector re-seeds to the level just
+    // saved; the toast's Undo re-stamps the prior level.
+    const tuningCompanion =
+      selection?.kind === 'workflow' && tuningLevelOverride !== null && selectedMeta !== undefined
+        ? (() => {
+            const workflowId = selection.workflowId;
+            const nextLevel = tuningLevelOverride;
+            const prevLevel = selectedMeta.tuningLevel;
+            const stamp = async (level: TuningLevel): Promise<boolean> => {
+              try {
+                await trpc.cyboflow.workflows.setTuningLevel.mutate({ workflowId, level });
+              } catch {
+                return false;
+              }
+              await loadWorkflows(workflowId);
+              return true;
+            };
+            return {
+              write: async () => {
+                if (!(await stamp(nextLevel))) return false;
+                setTuningLevelOverride(null);
+                return true;
+              },
+              undo: () => stamp(prevLevel),
+            };
+          })()
+        : undefined;
+
     saveDefault({
       model,
       permissionMode,
@@ -1563,8 +1595,8 @@ export default function SessionStartWizard(): React.JSX.Element {
       // user never chose. A workflow's per-agent effort lives in the step
       // inspector. Variant and quick worktree mode are out of scope for v1.
       ...(selection?.kind === 'quick' ? { reasoningEffort: reasoningEffort ?? null } : {}),
-    });
-  }, [saveDefault, selection?.kind, model, permissionMode, effectiveRuntime, reasoningEffort]);
+    }, tuningCompanion);
+  }, [saveDefault, selection, selectedMeta, tuningLevelOverride, loadWorkflows, model, permissionMode, effectiveRuntime, reasoningEffort]);
 
   /**
    * The value the reasoning-effort control was SEEDED with, restated exactly as
@@ -1607,7 +1639,13 @@ export default function SessionStartWizard(): React.JSX.Element {
     model !== modelSeed ||
     permissionMode !== permissionModeSeed ||
     agentRuntime !== runtimeSeed ||
-    (selection?.kind === 'quick' && reasoningEffort !== reasoningEffortSeed);
+    (selection?.kind === 'quick' && reasoningEffort !== reasoningEffortSeed) ||
+    // A pending tuning-level pick counts too: the CTA is its save affordance
+    // (there is no separate "override" caption). Non-null only while the pick
+    // genuinely diverges from the workflow's stamped level — the selector's
+    // onChange clears it when the user picks the stamp back, and a successful
+    // save clears it after re-stamping, so the CTA self-hides both ways.
+    tuningLevelOverride !== null;
 
   const combinedError = launchError ?? quickError ?? designLaunchError;
 
@@ -1940,8 +1978,6 @@ export default function SessionStartWizard(): React.JSX.Element {
             {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
               <TuningLevelSelector
                 value={tuningLevelOverride ?? selectedMeta.tuningLevel}
-                savedLevel={selectedMeta.tuningLevel}
-                flowTitle={selectedMeta.title}
                 customSlotAvailable={selectedMeta.hasCustomSlot}
                 disabled={variantSelection.mode === 'variant'}
                 onChange={(level) => {
