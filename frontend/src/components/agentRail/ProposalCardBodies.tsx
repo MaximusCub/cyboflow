@@ -14,6 +14,8 @@
  */
 import type {
   AgentProposalKind,
+  CreateBacklogItem,
+  CreateBacklogItemsProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogItem,
   ReprioritizeBacklogProposalPayload,
@@ -23,7 +25,11 @@ import type {
 import type { CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { Priority } from '../../../../shared/types/tasks';
 import { useLandingStore } from '../../stores/landingStore';
-import { parseWorkflowDefinitionSummary, type ReprioritizeResultJson } from './proposalResultTypes';
+import {
+  parseWorkflowDefinitionSummary,
+  type CreateBacklogResultJson,
+  type ReprioritizeResultJson,
+} from './proposalResultTypes';
 
 // ---------------------------------------------------------------------------
 // Label maps — keyed on the shared-type discriminant so a new kind/workflow
@@ -36,6 +42,13 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
   'reprioritize-backlog': 'reprioritize backlog',
   'edit-workflow': 'edit workflow',
   'open-session': 'open session',
+  'create-backlog-items': 'add to backlog',
+};
+
+const ENTITY_TYPE_LABEL: Record<CreateBacklogItem['taskType'], string> = {
+  idea: 'Idea',
+  epic: 'Epic',
+  task: 'Task',
 };
 
 const WORKFLOW_LABEL: Record<CyboflowWorkflowName, string> = {
@@ -232,6 +245,95 @@ export function OpenSessionBody({ payload }: { payload: OpenSessionProposalPaylo
       </div>
       <Row label={nav.target === 'run' ? 'run' : 'session'} value={nav.target === 'run' ? nav.runId : nav.sessionId} />
       <p className="text-text-tertiary">Read-only navigation — no state changes on confirm.</p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// create-backlog-items
+// ---------------------------------------------------------------------------
+
+function createdItemResult(
+  result: CreateBacklogResultJson | null,
+  index: number,
+): { ok: boolean; ref?: string; error?: string } | null {
+  if (result === null) return null;
+  const found = result.items.find((i) => i.index === index);
+  return found ? { ok: found.ok, ref: found.ref, error: found.error } : null;
+}
+
+/**
+ * Shared by the OPEN (pre-confirm) and RESOLVED (post-confirm) paths, mirroring
+ * {@link ReprioritizeBacklogRows}: a resolved create keeps every proposed row
+ * visible with a ✓/✕ (and the minted ref on success) rather than collapsing to
+ * one opaque line — a partially-applied batch is exactly the case the human
+ * needs itemized.
+ */
+export function CreateBacklogRows({
+  items,
+  result,
+}: {
+  items: CreateBacklogItem[];
+  result: CreateBacklogResultJson | null;
+}): React.ReactElement {
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-create-backlog">
+      {items.map((item, index) => {
+        const outcome = createdItemResult(result, index);
+        return (
+          <div
+            key={`${index}-${item.title}`}
+            className="flex items-baseline gap-2"
+            data-testid="create-backlog-row"
+            data-task-type={item.taskType}
+          >
+            <span className="w-8 shrink-0 text-[9px] uppercase tracking-[0.1em] text-text-tertiary">
+              {ENTITY_TYPE_LABEL[item.taskType]}
+            </span>
+            <span className="flex-1 truncate text-text-primary" title={item.title}>
+              {item.title}
+            </span>
+            {item.priority != null && (
+              <span className="shrink-0 text-text-tertiary" data-testid="create-backlog-priority">
+                {item.priority}
+              </span>
+            )}
+            {outcome?.ref != null && (
+              <span className="shrink-0 font-bold text-text-secondary" data-testid="create-backlog-ref">
+                {outcome.ref}
+              </span>
+            )}
+            {outcome !== null && (
+              <span
+                className={`shrink-0 font-bold ${outcome.ok ? 'text-status-success' : 'text-status-error'}`}
+                data-testid="create-backlog-outcome"
+                data-ok={String(outcome.ok)}
+                title={outcome.error}
+              >
+                {outcome.ok ? '✓' : '✕'}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function CreateBacklogItemsBody({
+  payload,
+}: {
+  payload: CreateBacklogItemsProposalPayload;
+}): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  const total = payload.items.length;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[13px] font-bold text-text-primary">
+        Add {total} item{total === 1 ? '' : 's'} to the backlog
+      </div>
+      <div className="text-[10px] text-text-tertiary">{projectName}</div>
+      <CreateBacklogRows items={payload.items} result={null} />
     </div>
   );
 }

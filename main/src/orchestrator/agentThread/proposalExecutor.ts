@@ -13,8 +13,9 @@
  *      { ok:false, reason:'claimed' }. A missing row ⇒ { ok:false, reason:'not-found' }.
  *   2. PRECONDITION CHECK (edit-workflow only — spec-hash CAS): a mismatch supersedes
  *      the proposal with a refreshed-diff loopback turn, never a blind overwrite.
- *      (launch-run carries no precondition; reprioritize's per-task expectedVersions
- *      are consumed PER ITEM by the chokepoint, not as a whole-proposal gate.)
+ *      (launch-run and create-backlog-items carry no precondition; reprioritize's
+ *      per-task expectedVersions are consumed PER ITEM by the chokepoint, not as a
+ *      whole-proposal gate.)
  *   3. SIDE EFFECTS through the chokepoints, carrying the idempotency key / expected
  *      versions where the target supports them. launch-run runs a COMPENSATION SAGA:
  *      created resources are tracked and unwound in reverse on any post-session
@@ -47,6 +48,8 @@ import type {
   AgentProposal,
   AgentProposalKind,
   AgentProposalStatus,
+  CreateBacklogItem,
+  CreateBacklogItemsProposalPayload,
   EditWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogProposalPayload,
@@ -131,6 +134,18 @@ export interface ProposalExecutorDeps {
   /** Reconciliation: the task's current priority/stage (null when the task is gone). */
   readTaskFields: (projectId: number, taskId: string) => TaskFieldsSnapshot | null;
 
+  // --- create-backlog-items: sequential per-item create, partial-failure tolerant ---
+  /**
+   * One TaskChangeRouter.applyChange CREATE (actor 'user'); resolves to the new
+   * entity's opaque id + display ref, and throws (TaskChangeError) on rejection —
+   * `idea_needs_epic` / `invalid_parent` / `invalid_lineage` all surface here as a
+   * per-item error rather than aborting the batch.
+   */
+  createBacklogItem: (
+    projectId: number,
+    item: CreateBacklogItem,
+  ) => Promise<{ taskId: string; ref?: string }>;
+
   // --- edit-workflow: spec-hash CAS + safeParse + updateSpec, all inside one transaction ---
   /** better-sqlite3 transaction wrapper — the read-hash-compare-apply core runs atomically inside it. */
   runInTransaction: <T>(fn: () => T) => T;
@@ -191,7 +206,30 @@ export interface EditWorkflowResultJson {
   reconciled?: boolean;
 }
 
-export type ProposalResultJson = LaunchRunResultJson | ReprioritizeResultJson | EditWorkflowResultJson;
+export interface CreateBacklogItemResultJson {
+  /** Position in the proposed batch — the only stable identity a not-yet-created entity has. */
+  index: number;
+  title: string;
+  taskType: 'idea' | 'epic' | 'task';
+  ok: boolean;
+  /** Present on success: the minted entity's opaque id + display ref. */
+  taskId?: string;
+  ref?: string;
+  error?: string;
+}
+
+export interface CreateBacklogResultJson {
+  kind: 'create-backlog-items';
+  status: 'executed' | 'failed';
+  items: CreateBacklogItemResultJson[];
+  reconciled?: boolean;
+}
+
+export type ProposalResultJson =
+  | LaunchRunResultJson
+  | ReprioritizeResultJson
+  | EditWorkflowResultJson
+  | CreateBacklogResultJson;
 
 // ---------------------------------------------------------------------------
 // Result
@@ -292,6 +330,13 @@ export async function executeProposal(
       return runReprioritize(deps, proposal, proposal.payload as ReprioritizeBacklogProposalPayload, proposalId);
     case 'edit-workflow':
       return runEditWorkflow(deps, proposal, proposal.payload as EditWorkflowProposalPayload, proposalId);
+    case 'create-backlog-items':
+      return runCreateBacklogItems(
+        deps,
+        proposal,
+        proposal.payload as CreateBacklogItemsProposalPayload,
+        proposalId,
+      );
     default:
       // Unreachable: open-session is handled above, and the union is closed. Finalize
       // failed defensively so a future kind never strands the claimed row.
@@ -429,6 +474,46 @@ async function runReprioritize(
 
   const status: 'executed' | 'failed' = anyFailed ? 'failed' : 'executed';
   const result: ReprioritizeResultJson = { kind: 'reprioritize-backlog', status, items };
+  deps.store.finalizeProposal(proposalId, status, JSON.stringify(result));
+  return { ok: true, proposalId, kind: proposal.kind, status, result };
+}
+
+// ---------------------------------------------------------------------------
+// create-backlog-items — sequential per-item create, partial-failure tolerant
+// ---------------------------------------------------------------------------
+
+async function runCreateBacklogItems(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: CreateBacklogItemsProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  const items: CreateBacklogItemResultJson[] = [];
+  let anyFailed = false;
+  // Same posture as runReprioritize: TaskChangeRouter.applyChange is one entity per
+  // call, so each item is its own call and a rejection (idea_needs_epic /
+  // invalid_parent / a vanished parent) does NOT abort the rest — the card renders
+  // per-row ✓/✕. Order is preserved so an epic listed before its children is created
+  // first; that ordering is the assistant's to get right, not something enforced here.
+  for (const [index, item] of payload.items.entries()) {
+    try {
+      const created = await deps.createBacklogItem(payload.projectId, item);
+      items.push({
+        index,
+        title: item.title,
+        taskType: item.taskType,
+        ok: true,
+        taskId: created.taskId,
+        ...(created.ref !== undefined ? { ref: created.ref } : {}),
+      });
+    } catch (err) {
+      anyFailed = true;
+      items.push({ index, title: item.title, taskType: item.taskType, ok: false, error: errMsg(err) });
+    }
+  }
+
+  const status: 'executed' | 'failed' = anyFailed ? 'failed' : 'executed';
+  const result: CreateBacklogResultJson = { kind: 'create-backlog-items', status, items };
   deps.store.finalizeProposal(proposalId, status, JSON.stringify(result));
   return { ok: true, proposalId, kind: proposal.kind, status, result };
 }
@@ -572,6 +657,8 @@ export interface ReconcileSummary {
  *     executed; otherwise 'crashed-mid-execution' with the per-item verified state.
  *   - edit-workflow: the workflow's current spec hash equals the proposed definition's
  *     hash ⇒ the edit landed ⇒ executed; otherwise 'crashed-mid-execution'.
+ *   - create-backlog-items: NOT verifiable (a created entity carries no back-link to
+ *     the proposal) ⇒ always 'crashed-mid-execution', never a re-run.
  */
 export async function reconcileOrphanedExecutingProposals(deps: ProposalExecutorDeps): Promise<ReconcileSummary> {
   const orphans = deps.store.listProposalsByStatus('executing');
@@ -665,6 +752,36 @@ async function reconcileOne(deps: ProposalExecutorDeps, proposal: AgentProposal)
         kind: proposal.kind,
         finalizedTo: status,
         note: applied ? 'spec hash matches proposed edit' : 'crashed-mid-execution: spec hash does not match',
+      };
+    }
+
+    case 'create-backlog-items': {
+      // A create has NO verifiable natural key: the entities this proposal would have
+      // minted carry no marker tying them back to the row, so an orphan cannot be told
+      // apart from a batch that never ran. Fail conservatively — exactly the posture
+      // launch-run takes for a run whose id was never persisted — and say so in the
+      // note; re-running would risk duplicate entities, which is strictly worse than a
+      // human re-proposing.
+      const payload = proposal.payload as CreateBacklogItemsProposalPayload;
+      const items: CreateBacklogItemResultJson[] = payload.items.map((item, index) => ({
+        index,
+        title: item.title,
+        taskType: item.taskType,
+        ok: false,
+        error: 'crashed-mid-execution',
+      }));
+      const result: CreateBacklogResultJson = {
+        kind: 'create-backlog-items',
+        status: 'failed',
+        items,
+        reconciled: true,
+      };
+      deps.store.finalizeProposal(proposal.id, 'failed', JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: 'failed',
+        note: 'crashed-mid-execution: entity creation is not verifiable — check the board for partially created items',
       };
     }
 

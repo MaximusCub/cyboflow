@@ -6026,6 +6026,35 @@ app.whenReady().then(async () => {
       applyTaskChange: async (projectId, change) => {
         await TaskChangeRouter.getInstance().applyChange(projectId, change);
       },
+      createBacklogItem: async (projectId, item) => {
+        // The SAME chokepoint every other entity create goes through, stamped
+        // actor:'user' (the human's Confirm click is the authorship). Field mapping
+        // is one-to-one with CreateBacklogItem; parentEpicId/originatingIdeaId were
+        // already resolved to opaque ids + existence-checked at propose time
+        // (mcpQueryHandler's create-backlog-items branch).
+        const { taskId } = await TaskChangeRouter.getInstance().applyChange(projectId, {
+          actor: 'user',
+          entityType: item.taskType,
+          title: item.title,
+          summary: item.summary,
+          body: item.body,
+          priority: item.priority,
+          category: item.category,
+          scope: item.scope,
+          parentEpicId: item.parentEpicId ?? null,
+          originatingIdeaId: item.originatingIdeaId ?? null,
+        });
+        const row = experimentsDb
+          .prepare(
+            `SELECT ref FROM (
+               SELECT id, ref FROM ideas
+               UNION ALL SELECT id, ref FROM epics
+               UNION ALL SELECT id, ref FROM tasks
+             ) WHERE id = ?`,
+          )
+          .get(taskId) as { ref?: unknown } | undefined;
+        return { taskId, ...(typeof row?.ref === 'string' ? { ref: row.ref } : {}) };
+      },
       readTaskFields: (projectId, taskId) => {
         // The item may be an idea/epic/task (all share priority + stage_id) — resolve
         // it across the three tables the same way TaskChangeRouter's locateEntity does.

@@ -14,7 +14,7 @@
 
 import type { CyboflowWorkflowName } from './workflows';
 import type { CliSubstrate } from './substrate';
-import type { Priority } from './tasks';
+import type { EntityCategory, IdeaScope, Priority, TaskType } from './tasks';
 
 // ---------------------------------------------------------------------------
 // Proposal kind / status enums
@@ -25,6 +25,7 @@ export const AGENT_PROPOSAL_KINDS = [
   'reprioritize-backlog',
   'edit-workflow',
   'open-session',
+  'create-backlog-items',
 ] as const;
 
 export type AgentProposalKind = (typeof AGENT_PROPOSAL_KINDS)[number];
@@ -190,11 +191,52 @@ export interface OpenSessionProposalPayload {
   navigation: AgentNavigationTarget;
 }
 
+/**
+ * One backlog entity the assistant proposes CREATING (idea / epic / task).
+ * Field names mirror the TaskChangeRouter create-path fields (main/src/
+ * orchestrator/taskChangeRouter.ts `TaskChange`) so the executor's mapping onto
+ * that chokepoint is one-to-one.
+ *
+ * `parentEpicId` / `originatingIdeaId` may only reference entities that ALREADY
+ * exist — a batch cannot link one of its own members to another, because the
+ * ids of the entities this proposal creates do not exist until the human
+ * confirms it. The propose handler resolves both from a display ref
+ * (`EPIC-002` / `IDEA-009`) to an opaque id server-side and rejects the
+ * proposal outright when one does not resolve, so a confirmed card never dies
+ * on a typo'd parent.
+ */
+export interface CreateBacklogItem {
+  /** Which entity table to create in. Required — the assistant must be explicit. */
+  taskType: TaskType;
+  title: string;
+  /** Short one-line board caption. */
+  summary?: string;
+  /** Full markdown body — the spec / description + acceptance criteria. */
+  body?: string;
+  /** Defaults to 'P2' at the chokepoint when omitted. */
+  priority?: Priority;
+  /** Defaults to 'feature' at the chokepoint when omitted. */
+  category?: EntityCategory;
+  /** Ideas only; ignored by the chokepoint for epics/tasks. */
+  scope?: IdeaScope;
+  /** Tasks only — an EXISTING epic (opaque id or ref, resolved server-side). */
+  parentEpicId?: string;
+  /** Epics/tasks only — an EXISTING idea (opaque id or ref, resolved server-side). */
+  originatingIdeaId?: string;
+}
+
+export interface CreateBacklogItemsProposalPayload {
+  kind: 'create-backlog-items';
+  projectId: number;
+  items: CreateBacklogItem[];
+}
+
 export type AgentProposalPayload =
   | LaunchRunProposalPayload
   | ReprioritizeBacklogProposalPayload
   | EditWorkflowProposalPayload
-  | OpenSessionProposalPayload;
+  | OpenSessionProposalPayload
+  | CreateBacklogItemsProposalPayload;
 
 // ---------------------------------------------------------------------------
 // Per-kind proposal preconditions
@@ -212,7 +254,11 @@ export interface ReprioritizeBacklogPreconditions {
   expectedVersions: Record<string, number>;
 }
 
-/** launch-run and open-session carry no preconditions — nothing to CAS-check. */
+/**
+ * launch-run, open-session, and create-backlog-items carry no preconditions —
+ * nothing to CAS-check (a create has no prior version to race against; the
+ * parent/lineage links it references are validated at propose time instead).
+ */
 export type AgentProposalPreconditions = EditWorkflowPreconditions | ReprioritizeBacklogPreconditions;
 
 // ---------------------------------------------------------------------------

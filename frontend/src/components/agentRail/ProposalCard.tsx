@@ -7,10 +7,10 @@
  * body (delegated to {@link ProposalCardBodies}) with a rust-primary Confirm
  * + ghost Dismiss footer, while `status === 'proposed'`. On any terminal
  * status the head bar/footer disappear and the card collapses to a compact
- * resolved row — a status circle + a bold verb + muted detail — EXCEPT
- * reprioritize-backlog, which keeps its ranked rows visible with a per-item
- * ✓/✕ overlay (the brief's explicit ask for partial-failure visibility, not a
- * one-line opaque summary).
+ * resolved row — a status circle + a bold verb + muted detail — EXCEPT the two
+ * per-item kinds (reprioritize-backlog and create-backlog-items), which keep
+ * their rows visible with a per-item ✓/✕ overlay (the brief's explicit ask for
+ * partial-failure visibility, not a one-line opaque summary).
  *
  * Confirm/dismiss wiring:
  *   - Confirm sets a LOCAL optimistic 'executing' flag immediately (spinner +
@@ -47,11 +47,14 @@ import {
   ReprioritizeBacklogRows,
   EditWorkflowBody,
   OpenSessionBody,
+  CreateBacklogItemsBody,
+  CreateBacklogRows,
 } from './ProposalCardBodies';
 import {
   parseLaunchRunResult,
   parseReprioritizeResult,
   parseEditWorkflowResult,
+  parseCreateBacklogResult,
 } from './proposalResultTypes';
 import { navigateToProposalTarget } from './proposalNavigation';
 
@@ -198,6 +201,30 @@ function EditWorkflowResolved({ proposal }: { proposal: AgentProposal }): React.
   return <ResolvedLine tone="error" glyph="✕" verb="Edit failed." detail={r.reason} />;
 }
 
+function CreateBacklogResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  const payload = proposal.payload.kind === 'create-backlog-items' ? proposal.payload : null;
+  const result = parseCreateBacklogResult(proposal.result);
+  if (payload === null) {
+    return <ResolvedLine tone="error" glyph="✕" verb="Resolved." />;
+  }
+  const okCount = result?.items.filter((i) => i.ok).length ?? 0;
+  const total = payload.items.length;
+  return (
+    <div className="flex flex-col gap-2 p-2.5">
+      <div className="flex items-center gap-2.5">
+        <StatusCircle tone={result?.status === 'failed' ? 'warning' : 'success'} glyph={result?.status === 'failed' ? '!' : '✓'} />
+        <span className="text-[11px] font-bold text-text-primary">
+          Created {okCount} of {total} item{total === 1 ? '' : 's'}.
+        </span>
+      </div>
+      <CreateBacklogRows items={payload.items} result={result} />
+    </div>
+  );
+}
+
 function OpenSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
@@ -294,6 +321,9 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'open-session' && proposal.payload.kind === 'open-session' && (
             <OpenSessionBody payload={proposal.payload} />
           )}
+          {proposal.kind === 'create-backlog-items' && proposal.payload.kind === 'create-backlog-items' && (
+            <CreateBacklogItemsBody payload={proposal.payload} />
+          )}
         </div>
       )}
 
@@ -326,6 +356,7 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'reprioritize-backlog' && <ReprioritizeResolved proposal={proposal} />}
           {proposal.kind === 'edit-workflow' && <EditWorkflowResolved proposal={proposal} />}
           {proposal.kind === 'open-session' && <OpenSessionResolved proposal={proposal} />}
+          {proposal.kind === 'create-backlog-items' && <CreateBacklogResolved proposal={proposal} />}
         </>
       )}
 

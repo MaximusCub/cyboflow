@@ -3,6 +3,7 @@ import {
   parseLaunchRunResult,
   parseReprioritizeResult,
   parseEditWorkflowResult,
+  parseCreateBacklogResult,
   parseWorkflowDefinitionSummary,
 } from './proposalResultTypes';
 
@@ -196,5 +197,58 @@ describe('parseWorkflowDefinitionSummary', () => {
   it('treats a phase with no steps as zero steps', () => {
     const definitionJson = JSON.stringify({ phases: [{ id: 'plan' }] });
     expect(parseWorkflowDefinitionSummary(definitionJson)).toEqual({ phaseCount: 1, stepCount: 0 });
+  });
+});
+
+describe('parseCreateBacklogResult', () => {
+  it('parses a mixed executed/failed batch, keeping index / ref / error', () => {
+    expect(
+      parseCreateBacklogResult({
+        kind: 'create-backlog-items',
+        status: 'failed',
+        items: [
+          { index: 0, title: 'An idea', taskType: 'idea', ok: true, taskId: 'idea_1', ref: 'IDEA-012' },
+          { index: 1, title: 'A task', taskType: 'task', ok: false, error: 'idea_needs_epic' },
+        ],
+      }),
+    ).toEqual({
+      kind: 'create-backlog-items',
+      status: 'failed',
+      items: [
+        { index: 0, title: 'An idea', taskType: 'idea', ok: true, taskId: 'idea_1', ref: 'IDEA-012' },
+        { index: 1, title: 'A task', taskType: 'task', ok: false, error: 'idea_needs_epic' },
+      ],
+      reconciled: undefined,
+    });
+  });
+
+  it('returns null for another kind, a bad status, or a non-array items', () => {
+    expect(parseCreateBacklogResult({ kind: 'launch-run', status: 'executed', items: [] })).toBeNull();
+    expect(parseCreateBacklogResult({ kind: 'create-backlog-items', status: 'superseded', items: [] })).toBeNull();
+    expect(parseCreateBacklogResult({ kind: 'create-backlog-items', status: 'executed', items: 'nope' })).toBeNull();
+    expect(parseCreateBacklogResult(null)).toBeNull();
+  });
+
+  it('drops malformed item entries rather than throwing', () => {
+    const parsed = parseCreateBacklogResult({
+      kind: 'create-backlog-items',
+      status: 'executed',
+      items: [
+        { index: 0, title: 'Good', taskType: 'task', ok: true },
+        { index: 1, title: 'No type', ok: true },
+        'nonsense',
+      ],
+    });
+    expect(parsed?.items).toEqual([{ index: 0, title: 'Good', taskType: 'task', ok: true }]);
+  });
+
+  it('carries the reconciled flag through', () => {
+    const parsed = parseCreateBacklogResult({
+      kind: 'create-backlog-items',
+      status: 'failed',
+      items: [],
+      reconciled: true,
+    });
+    expect(parsed?.reconciled).toBe(true);
   });
 });

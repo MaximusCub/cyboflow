@@ -35,6 +35,7 @@ import { computeSpecHash } from '../../agentThread/specHash';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type {
   AgentProposal,
+  CreateBacklogItemsProposalPayload,
   EditWorkflowPreconditions,
   ReprioritizeBacklogPreconditions,
 } from '../../../../../shared/types/agentThread';
@@ -105,6 +106,8 @@ function buildDb(): Database.Database {
   apply('057_entity_sort_order.sql');
   apply('059_entity_category.sql');
   apply('074_agent_threads.sql');
+  // ...and 125, which widens agent_proposals.kind to admit 'create-backlog-items'.
+  apply('125_agent_proposal_create_backlog_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
   // ...and workflows.tuning_level, which also decides WHICH definition
@@ -940,6 +943,162 @@ describe('McpQueryHandler global-agent tool family', () => {
         socket,
       );
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'task_not_found:tsk_does_not_exist' });
+    });
+
+    it('create-backlog-items: stores the batch with null preconditions', async () => {
+      const payload = {
+        kind: 'create-backlog-items',
+        projectId: 1,
+        items: [
+          { taskType: 'idea', title: 'A fresh idea', body: 'Some spec', priority: 'P1' },
+          { taskType: 'task', title: 'A fresh task' },
+        ],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('create-backlog-items');
+      expect(proposal.preconditions).toBeNull();
+      expect(proposal.payload).toEqual(payload);
+    });
+
+    it('create-backlog-items: NORMALIZES an originatingIdeaId display ref to its opaque id', async () => {
+      seedRunFor(db, 'run-create-1', 1);
+      const idea = await createEntity(handler, 'run-create-1', 'Parent idea', 'idea');
+
+      const payload = {
+        kind: 'create-backlog-items',
+        projectId: 1,
+        // Passed as the DISPLAY REF — the handler must resolve it, so the
+        // executor's chokepoint call never sees a ref it cannot link.
+        items: [{ taskType: 'task', title: 'Child task', originatingIdeaId: idea.ref }],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      const stored = proposal.payload as CreateBacklogItemsProposalPayload;
+      expect(stored.items[0].originatingIdeaId).toBe(idea.id);
+      expect(stored.items[0].originatingIdeaId).not.toBe(idea.ref);
+    });
+
+    it('create-backlog-items: rejects an originatingIdeaId that does not resolve', async () => {
+      const payload = {
+        kind: 'create-backlog-items',
+        projectId: 1,
+        items: [{ taskType: 'task', title: 'Orphan', originatingIdeaId: 'IDEA-999' }],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({
+        ok: false,
+        error: 'originating_idea_not_found:IDEA-999',
+      });
+    });
+
+    it('create-backlog-items: rejects a parentEpicId that resolves to a NON-epic entity', async () => {
+      seedRunFor(db, 'run-create-2', 1);
+      const idea = await createEntity(handler, 'run-create-2', 'Not an epic', 'idea');
+
+      const payload = {
+        kind: 'create-backlog-items',
+        projectId: 1,
+        items: [{ taskType: 'task', title: 'Mis-parented', parentEpicId: idea.id }],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: `parent_epic_not_found:${idea.id}` });
+    });
+
+    it('create-backlog-items: rejects an unknown projectId with project_not_found', async () => {
+      const payload = {
+        kind: 'create-backlog-items',
+        projectId: 4242,
+        items: [{ taskType: 'task', title: 'Nowhere' }],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'project_not_found' });
+    });
+
+    it('create-backlog-items: rejects an unknown taskType / empty title / empty batch with invalid_payload', async () => {
+      for (const items of [
+        [{ taskType: 'epicc', title: 'Typo type' }],
+        [{ taskType: 'task', title: '   ' }],
+        [],
+      ]) {
+        const { socket, writes } = makeSocketDouble();
+        await handler.handleMessage(
+          {
+            type: 'mcp-propose-action',
+            requestId: 'r1',
+            runId: 'agent:thread-1',
+            payloadJson: JSON.stringify({ kind: 'create-backlog-items', projectId: 1, items }),
+          },
+          socket,
+        );
+        expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'invalid_payload' });
+      }
+    });
+
+    it('create-backlog-items: rejects a batch over the 20-item ceiling with invalid_payload', async () => {
+      const items = Array.from({ length: 21 }, (_, i) => ({ taskType: 'task', title: `T${i}` }));
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify({ kind: 'create-backlog-items', projectId: 1, items }),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'invalid_payload' });
     });
 
     it('rejects malformed JSON with invalid_json', async () => {

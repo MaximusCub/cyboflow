@@ -152,6 +152,8 @@ import {
   type AgentProposalKind,
   type AgentProposalPayload,
   type AgentProposalPreconditions,
+  type CreateBacklogItem,
+  type CreateBacklogItemsProposalPayload,
   type EditWorkflowProposalPayload,
   type LaunchRunProposalPayload,
   type OpenSessionProposalPayload,
@@ -1240,6 +1242,79 @@ function isAgentPriority(v: unknown): v is Priority {
   return v === 'P0' || v === 'P1' || v === 'P2' || v === 'P3' || v === 'P4' || v === 'P5' || v === 'P6';
 }
 
+function isAgentTaskType(v: unknown): v is TaskType {
+  return v === 'idea' || v === 'epic' || v === 'task';
+}
+
+function isAgentCategory(v: unknown): v is EntityCategory {
+  return v === 'feature' || v === 'bug' || v === 'chore';
+}
+
+function isAgentIdeaScope(v: unknown): v is IdeaScope {
+  return v === 'small' || v === 'large';
+}
+
+/**
+ * Ceiling on one create-backlog-items proposal. A proposal card is a single
+ * human decision — a 50-entity dump is not reviewable, and the executor writes
+ * them one chokepoint call at a time on the confirm path.
+ */
+const CREATE_BACKLOG_MAX_ITEMS = 20;
+
+/**
+ * Narrow one create-backlog-items entry. Every optional field is validated
+ * strictly (a malformed member REJECTS the whole payload rather than being
+ * dropped) — unlike the finding-extras parsers below, a create is a durable
+ * entity write the human is being asked to approve, so a silently dropped
+ * body/priority would have the card describe something other than what
+ * Confirm would produce.
+ */
+function parseCreateBacklogItem(raw: unknown): CreateBacklogItem | null {
+  if (!isRecord(raw)) return null;
+  const taskType = raw.taskType;
+  const title = raw.title;
+  if (!isAgentTaskType(taskType)) return null;
+  if (typeof title !== 'string' || title.trim().length === 0) return null;
+  const item: CreateBacklogItem = { taskType, title };
+
+  const summary = raw.summary;
+  if (summary !== undefined) {
+    if (typeof summary !== 'string') return null;
+    item.summary = summary;
+  }
+  const body = raw.body;
+  if (body !== undefined) {
+    if (typeof body !== 'string') return null;
+    item.body = body;
+  }
+  const priority = raw.priority;
+  if (priority !== undefined) {
+    if (!isAgentPriority(priority)) return null;
+    item.priority = priority;
+  }
+  const category = raw.category;
+  if (category !== undefined) {
+    if (!isAgentCategory(category)) return null;
+    item.category = category;
+  }
+  const scope = raw.scope;
+  if (scope !== undefined) {
+    if (!isAgentIdeaScope(scope)) return null;
+    item.scope = scope;
+  }
+  const parentEpicId = raw.parentEpicId;
+  if (parentEpicId !== undefined) {
+    if (typeof parentEpicId !== 'string' || parentEpicId.length === 0) return null;
+    item.parentEpicId = parentEpicId;
+  }
+  const originatingIdeaId = raw.originatingIdeaId;
+  if (originatingIdeaId !== undefined) {
+    if (typeof originatingIdeaId !== 'string' || originatingIdeaId.length === 0) return null;
+    item.originatingIdeaId = originatingIdeaId;
+  }
+  return item;
+}
+
 function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
   if (!isRecord(raw)) return null;
   const target = raw.target;
@@ -1349,8 +1424,24 @@ function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | null {
       const payload: OpenSessionProposalPayload = { kind: 'open-session', navigation };
       return payload;
     }
+    case 'create-backlog-items': {
+      const projectId = raw.projectId;
+      const itemsRaw = raw.items;
+      if (typeof projectId !== 'number') return null;
+      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
+      if (itemsRaw.length > CREATE_BACKLOG_MAX_ITEMS) return null;
+      const items: CreateBacklogItem[] = [];
+      for (const entryRaw of itemsRaw) {
+        const item = parseCreateBacklogItem(entryRaw);
+        if (!item) return null;
+        items.push(item);
+      }
+      const payload: CreateBacklogItemsProposalPayload = { kind: 'create-backlog-items', projectId, items };
+      return payload;
+    }
   }
 }
+
 
 // ---------------------------------------------------------------------------
 // Structured finding-extras mapping (snake_case wire -> camelCase payload).
@@ -2531,6 +2622,24 @@ export class McpQueryHandler {
       };
     }
     return undefined;
+  }
+
+  /**
+   * Resolve a ref-or-id into the OPAQUE id of an existing entity of `type`
+   * within `projectId`, or null when it does not exist / is the wrong type /
+   * belongs to another project. Used by the global agent's
+   * create-backlog-items propose path to validate + normalize the
+   * parentEpicId / originatingIdeaId links a proposed batch points at
+   * (resolveBacklogRef round-trips an opaque id unchanged, so one call covers
+   * both input forms).
+   */
+  private resolveExistingEntity(projectId: number, refOrId: string, type: TaskType): string | null {
+    const id = resolveBacklogRef(this.db, projectId, refOrId) ?? refOrId;
+    const table = type === 'idea' ? 'ideas' : type === 'epic' ? 'epics' : 'tasks';
+    const row = this.db
+      .prepare(`SELECT 1 FROM ${table} WHERE id = ? AND project_id = ?`)
+      .get(id, projectId);
+    return row !== undefined ? id : null;
   }
 
   private async handleCreateTask(
@@ -7443,6 +7552,47 @@ export class McpQueryHandler {
           nav.runId !== undefined
             ? { target: 'quick-session', sessionId: nav.sessionId, runId: nav.runId, projectId: row.project_id }
             : { target: 'quick-session', sessionId: nav.sessionId, projectId: row.project_id };
+      }
+    } else if (payload.kind === 'create-backlog-items') {
+      // No preconditions (a create has no prior version to race against), but the
+      // project and every EXISTING entity the batch links to are validated here —
+      // and each link is normalized from a display ref to an opaque id, the same
+      // resolveBacklogRef pass handleCreateTask makes. Rejecting now, at propose
+      // time, is what keeps a confirmed card from dying on a typo'd parent long
+      // after the human approved it.
+      const projectExists =
+        this.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
+      if (!projectExists) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'project_not_found' });
+        return;
+      }
+      for (const item of payload.items) {
+        if (item.parentEpicId !== undefined) {
+          const resolved = this.resolveExistingEntity(payload.projectId, item.parentEpicId, 'epic');
+          if (!resolved) {
+            this.writeResponse(client, {
+              type: 'mcp-query-response',
+              requestId: msg.requestId,
+              ok: false,
+              error: `parent_epic_not_found:${item.parentEpicId}`,
+            });
+            return;
+          }
+          item.parentEpicId = resolved;
+        }
+        if (item.originatingIdeaId !== undefined) {
+          const resolved = this.resolveExistingEntity(payload.projectId, item.originatingIdeaId, 'idea');
+          if (!resolved) {
+            this.writeResponse(client, {
+              type: 'mcp-query-response',
+              requestId: msg.requestId,
+              ok: false,
+              error: `originating_idea_not_found:${item.originatingIdeaId}`,
+            });
+            return;
+          }
+          item.originatingIdeaId = resolved;
+        }
       }
     }
     // launch-run carries no preconditions (shared type contract).

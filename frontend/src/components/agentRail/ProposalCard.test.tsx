@@ -26,6 +26,7 @@ import type {
   ReprioritizeBacklogProposalPayload,
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
+  CreateBacklogItemsProposalPayload,
   AgentProposalStatus,
 } from '../../../../shared/types/agentThread';
 
@@ -107,6 +108,27 @@ function makeReprioritizeProposal(overrides: {
   };
   return baseProposal({
     kind: 'reprioritize-backlog',
+    payload,
+    status: overrides.status ?? 'proposed',
+    result: overrides.result ?? null,
+  });
+}
+
+function makeCreateBacklogProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  items?: CreateBacklogItemsProposalPayload['items'];
+} = {}): AgentProposal {
+  const payload: CreateBacklogItemsProposalPayload = {
+    kind: 'create-backlog-items',
+    projectId: 1,
+    items: overrides.items ?? [
+      { taskType: 'idea', title: 'Rework the rail' },
+      { taskType: 'task', title: 'Add the toggle', priority: 'P1' },
+    ],
+  };
+  return baseProposal({
+    kind: 'create-backlog-items',
     payload,
     status: overrides.status ?? 'proposed',
     result: overrides.result ?? null,
@@ -336,6 +358,54 @@ describe('ProposalCard — reprioritize-backlog resolved', () => {
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'true');
     expect(within(rows[1]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// create-backlog-items — open rows + per-row ✓/✕ + minted refs
+// ---------------------------------------------------------------------------
+
+describe('ProposalCard — create-backlog-items', () => {
+  it('open state: one row per proposed entity, typed, with no outcome markers yet', () => {
+    render(<ProposalCard proposal={makeCreateBacklogProposal()} />);
+
+    expect(screen.getByText('Add 2 items to the backlog')).toBeInTheDocument();
+    const rows = screen.getAllByTestId('create-backlog-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveAttribute('data-task-type', 'idea');
+    expect(rows[1]).toHaveAttribute('data-task-type', 'task');
+    expect(within(rows[1]).getByTestId('create-backlog-priority')).toHaveTextContent('P1');
+    expect(screen.queryByTestId('create-backlog-outcome')).not.toBeInTheDocument();
+  });
+
+  it('resolved: per-row ✓/✕ keyed by index, the minted ref, and a partial-success summary', () => {
+    const proposal = makeCreateBacklogProposal({
+      status: 'failed',
+      result: {
+        kind: 'create-backlog-items',
+        status: 'failed',
+        items: [
+          { index: 0, title: 'Rework the rail', taskType: 'idea', ok: true, taskId: 'idea_1', ref: 'IDEA-012' },
+          { index: 1, title: 'Add the toggle', taskType: 'task', ok: false, error: 'idea_needs_epic' },
+        ],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByText('Created 1 of 2 items.')).toBeInTheDocument();
+    const rows = screen.getAllByTestId('create-backlog-row');
+    expect(within(rows[0]).getByTestId('create-backlog-outcome')).toHaveAttribute('data-ok', 'true');
+    expect(within(rows[0]).getByTestId('create-backlog-ref')).toHaveTextContent('IDEA-012');
+    expect(within(rows[1]).getByTestId('create-backlog-outcome')).toHaveAttribute('data-ok', 'false');
+    // A failed row mints nothing, so it carries no ref.
+    expect(within(rows[1]).queryByTestId('create-backlog-ref')).not.toBeInTheDocument();
+  });
+
+  it('dismissed collapses to the neutral resolved line without rows', () => {
+    render(<ProposalCard proposal={makeCreateBacklogProposal({ status: 'dismissed' })} />);
+
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
+    expect(screen.queryByTestId('create-backlog-row')).not.toBeInTheDocument();
   });
 });
 

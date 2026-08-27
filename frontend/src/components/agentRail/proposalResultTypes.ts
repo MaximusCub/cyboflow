@@ -184,3 +184,47 @@ export function parseWorkflowDefinitionSummary(definitionJson: string): Workflow
   }
   return { phaseCount: phases.length, stepCount };
 }
+
+// ---------------------------------------------------------------------------
+// create-backlog-items
+// ---------------------------------------------------------------------------
+
+export interface CreateBacklogItemResultJson {
+  index: number;
+  title: string;
+  taskType: 'idea' | 'epic' | 'task';
+  ok: boolean;
+  taskId?: string;
+  ref?: string;
+  error?: string;
+}
+
+export interface CreateBacklogResultJson {
+  kind: 'create-backlog-items';
+  status: 'executed' | 'failed';
+  items: CreateBacklogItemResultJson[];
+  reconciled?: boolean;
+}
+
+function isCreateBacklogItemResult(v: unknown): v is CreateBacklogItemResultJson {
+  if (!isRecord(v)) return false;
+  return (
+    typeof v.index === 'number' &&
+    typeof v.title === 'string' &&
+    (v.taskType === 'idea' || v.taskType === 'epic' || v.taskType === 'task') &&
+    typeof v.ok === 'boolean'
+  );
+}
+
+/** Parse a proposal's `result` as a create-backlog-items result, or null if it doesn't match. */
+export function parseCreateBacklogResult(result: unknown): CreateBacklogResultJson | null {
+  if (!isRecord(result) || result.kind !== 'create-backlog-items') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  if (!Array.isArray(result.items)) return null;
+  return {
+    kind: 'create-backlog-items',
+    status: result.status,
+    items: result.items.filter(isCreateBacklogItemResult),
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}

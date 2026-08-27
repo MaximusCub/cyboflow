@@ -8,6 +8,7 @@ import {
   type LaunchRunResultJson,
   type ReprioritizeResultJson,
   type EditWorkflowResultJson,
+  type CreateBacklogResultJson,
 } from './proposalExecutor';
 import { computeSpecHash } from './specHash';
 import type {
@@ -15,6 +16,7 @@ import type {
   AgentProposalPayload,
   AgentProposalPreconditions,
   AgentProposalStatus,
+  CreateBacklogItem,
 } from '../../../../shared/types/agentThread';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 
@@ -111,6 +113,7 @@ function baseDeps(store: FakeStore, over: Partial<ProposalExecutorDeps> = {}): P
     runExists: () => true,
     applyTaskChange: async () => {},
     readTaskFields: () => null,
+    createBacklogItem: async () => ({ taskId: 'tsk_new', ref: 'TASK-001' }),
     runInTransaction: <T>(fn: () => T): T => fn(),
     readEffectiveWorkflowSpec: () => CURRENT_SPEC,
     applyWorkflowSpec: () => {},
@@ -434,6 +437,97 @@ describe('executeProposal — edit-workflow', () => {
 });
 
 // ---------------------------------------------------------------------------
+// create-backlog-items
+// ---------------------------------------------------------------------------
+
+describe('executeProposal — create-backlog-items', () => {
+  it('creates every item in order through the chokepoint, finalizing executed', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'create-backlog-items',
+        projectId: 7,
+        items: [
+          { taskType: 'epic', title: 'An epic' },
+          { taskType: 'task', title: 'A task', body: 'Do the thing', priority: 'P1', parentEpicId: 'epc_existing' },
+        ],
+      }),
+    );
+
+    const calls: Array<{ projectId: number; item: CreateBacklogItem }> = [];
+    const createBacklogItem = vi.fn(async (projectId: number, item: CreateBacklogItem) => {
+      calls.push({ projectId, item });
+      return { taskId: `id-${calls.length}`, ref: `REF-${calls.length}` };
+    });
+
+    const result = await executeProposal(baseDeps(store, { createBacklogItem }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('executed');
+    // Order is preserved — a parent epic listed first must be created first.
+    expect(calls.map((c) => c.item.title)).toEqual(['An epic', 'A task']);
+    expect(calls.every((c) => c.projectId === 7)).toBe(true);
+
+    const rj = store.proposals.get('p1')?.result as CreateBacklogResultJson;
+    expect(rj.items).toEqual([
+      { index: 0, title: 'An epic', taskType: 'epic', ok: true, taskId: 'id-1', ref: 'REF-1' },
+      { index: 1, title: 'A task', taskType: 'task', ok: true, taskId: 'id-2', ref: 'REF-2' },
+    ]);
+  });
+
+  it('partial failure: item 2 of 3 rejected → items 1 & 3 still created, overall failed', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({
+        kind: 'create-backlog-items',
+        projectId: 7,
+        items: [
+          { taskType: 'task', title: 'One' },
+          { taskType: 'task', title: 'Two' },
+          { taskType: 'task', title: 'Three' },
+        ],
+      }),
+    );
+
+    const created: string[] = [];
+    const createBacklogItem = vi.fn(async (_projectId: number, item: CreateBacklogItem) => {
+      if (item.title === 'Two') throw new Error('idea_needs_epic');
+      created.push(item.title);
+      return { taskId: `id-${item.title}` };
+    });
+
+    const result = await executeProposal(baseDeps(store, { createBacklogItem }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('failed');
+    // A rejection does NOT abort the batch — item 3 is still attempted.
+    expect(created).toEqual(['One', 'Three']);
+
+    const rj = store.proposals.get('p1')?.result as CreateBacklogResultJson;
+    expect(rj.items.map((i) => i.ok)).toEqual([true, false, true]);
+    expect(rj.items[1].error).toBe('idea_needs_epic');
+    // No `ref` key is fabricated when the chokepoint returned none.
+    expect(rj.items[0]).toEqual({ index: 0, title: 'One', taskType: 'task', ok: true, taskId: 'id-One' });
+  });
+
+  it('rejects a double-confirm: the loser never re-runs the creates', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal({ kind: 'create-backlog-items', projectId: 7, items: [{ taskType: 'task', title: 'Once' }] }),
+    );
+    const createBacklogItem = vi.fn(async () => ({ taskId: 'id-1' }));
+    const deps = baseDeps(store, { createBacklogItem });
+
+    const first = await executeProposal(deps, 'p1');
+    const second = await executeProposal(deps, 'p1');
+
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({ ok: false, reason: 'claimed' });
+    expect(createBacklogItem).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Boot reconciliation of orphaned 'executing' rows
 // ---------------------------------------------------------------------------
 
@@ -530,5 +624,37 @@ describe('reconcileOrphanedExecutingProposals', () => {
     );
     const summaryStale = await reconcileOrphanedExecutingProposals(baseDeps(notApplied, { readEffectiveWorkflowSpec: () => CURRENT_SPEC }));
     expect(summaryStale.outcomes[0].finalizedTo).toBe('failed');
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — create-backlog-items', () => {
+  it('always fails a stranded create as crashed-mid-execution, never re-running the creates', async () => {
+    const store = new FakeStore();
+    store.add(
+      makeProposal(
+        {
+          kind: 'create-backlog-items',
+          projectId: 7,
+          items: [
+            { taskType: 'idea', title: 'Idea one' },
+            { taskType: 'task', title: 'Task two' },
+          ],
+        },
+        { status: 'executing' },
+      ),
+    );
+    const createBacklogItem = vi.fn(async () => ({ taskId: 'id-x' }));
+
+    const summary = await reconcileOrphanedExecutingProposals(baseDeps(store, { createBacklogItem }));
+
+    expect(summary.total).toBe(1);
+    expect(summary.outcomes[0].finalizedTo).toBe('failed');
+    expect(summary.outcomes[0].note).toMatch(/crashed-mid-execution/);
+    // Reconciliation VERIFIES; it must never perform the side effect itself.
+    expect(createBacklogItem).not.toHaveBeenCalled();
+    expect(store.proposals.get('p1')?.status).toBe('failed');
+    const rj = store.proposals.get('p1')?.result as CreateBacklogResultJson;
+    expect(rj.reconciled).toBe(true);
+    expect(rj.items.map((i) => i.ok)).toEqual([false, false]);
   });
 });

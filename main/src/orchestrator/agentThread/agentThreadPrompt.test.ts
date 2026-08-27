@@ -43,20 +43,30 @@ describe('agentThreadPrompt', () => {
     }
   });
 
-  it('is dense but not padded — within the ~60-230 line target', () => {
+  it('is dense but not padded — within the ~60-260 line target', () => {
     // Ceiling widened from 130 → 160 when the "What cyboflow is" product
     // overview + the cyboflow_reference tool bullet were added, then 160 → 230
     // when the "Recommending the right flow" section (decision map + compound
     // pressure), the cyboflow_history tool bullet, and the launch-run seed
     // semantics were added; the prompt now carries proactive flow-recommendation
-    // guidance on top of the tool/contract/recap guidance.
+    // guidance on top of the tool/contract/recap guidance. Widened again 230 →
+    // 260 for the create-backlog-items payload shape + its quality-bar bullet.
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(230);
+    expect(lines).toBeLessThanOrEqual(260);
   });
 
   it('mentions recommending the right flow', () => {
     expect(getAgentSystemPrompt()).toMatch(/recommending the right flow/i);
+  });
+
+  it('documents the create-backlog-items proposal kind (the assistant CAN add backlog items)', () => {
+    // The whole point of the kind: the assistant used to have no create path at
+    // all, so anchor on both the payload discriminant and the never-refuse rule.
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/create-backlog-items/);
+    // \s+ spans the prompt's own hard wrap between "a" and "task".
+    expect(prompt).toMatch(/never say you cannot add a\s+task/i);
   });
 
   it('states the compound-pressure suggestion (findingIds seeding a Compound run)', () => {
