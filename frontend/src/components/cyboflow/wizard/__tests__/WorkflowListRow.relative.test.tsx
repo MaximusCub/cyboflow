@@ -33,6 +33,9 @@ function meta(lastUsedAt: string | null): WorkflowCardMeta {
     stepCount: 6,
     phaseCount: 2,
     lastUsedAt,
+    tuningLevel: 'standard',
+    hasCustomSlot: false,
+    isBuiltIn: true,
   };
 }
 

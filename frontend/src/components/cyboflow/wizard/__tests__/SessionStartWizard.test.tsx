@@ -678,10 +678,10 @@ describe('SessionStartWizard — OMP Fleet runtime controls', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
+    // Aria mode: the OMP provider column holds the single fleet lane, so
+    // clicking the provider segment selects omp-fleet directly (no Mode row).
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'omp-fleet' },
-      });
+      fireEvent.click(screen.getByTestId('wizard-substrate-provider-omp'));
     });
 
     // The Claude model + reasoning-effort controls are Claude/Codex-scoped and
