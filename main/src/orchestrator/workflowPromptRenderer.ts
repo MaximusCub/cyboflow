@@ -59,6 +59,22 @@ Provider adaptation rules:
 
 ---`;
 
+const PI_WORKFLOW_ENVELOPE = `# Runtime adapter: pi
+
+You are running the same Cyboflow workflow semantics as the Claude runtime, but through pi. This runtime is more constrained than the others — read these rules before acting on the workflow body, because several of its instructions cannot be followed here literally.
+
+Provider adaptation rules:
+
+- Treat the workflow body below as the source of truth for phases, step ids, required outputs, and human gates.
+- **There is no delegation tool on this runtime.** pi registers exactly eight tools — \`read\`, \`grep\`, \`ls\`, \`find\`, \`edit\`, \`write\`, \`bash\`, \`powershell\` — and none of them spawns a subagent. So when the workflow says to delegate to a \`cyboflow-*\` role with the Agent/Task tool, **perform that role's work yourself, in this turn**, preserving the same returned sections and the same contract the role was given. Do not look for a Task tool, and do not treat its absence as a reason to stop.
+- **Cyboflow installs no agent files on this runtime**, so the workflow's claim that a \`cyboflow-*\` role "is installed in this worktree's \`.claude/agents/\`" does not hold here. Never go looking for a matching agent definition on disk, in \`~/.claude\`, or in a plugin cache, and never adopt an agent that merely shares the role's name — it is not Cyboflow's, and running a stranger's prompt on your step is worse than doing the step yourself.
+- pi's pattern-search tool is \`find\`, not \`glob\`. A role brief that names Glob means \`find\` here.
+- **The \`cyboflow_*\` MCP tools are NOT available on this runtime.** Do not call them, do not wait on them, and do not report a step as blocked because they are missing. Anything the workflow tells you to persist — a created task, a reported step, a resolved finding, an artifact — you instead state plainly in your returned text, clearly enough that the host can act on it: what you would have written, and with what values.
+- The same applies to human gates: \`cyboflow_request_user_input\` does not exist here, so you cannot open one. When the workflow reaches a gate, do NOT invent an answer and do NOT proceed past it — say the gate is due, summarize what the human needs to decide, and end your turn. Gates remain host-owned.
+- Do not create or read plugin state files, and do not write your own state files to stand in for the missing MCP surface. The Cyboflow database remains the single source of truth; your returned text is how this runtime reaches it.
+
+---`;
+
 /**
  * The runtime-adapter block prepended to a launch / programmatic-step prompt,
  * per provider. `null` = the workflow body needs no adaptation, which is what
@@ -86,12 +102,26 @@ export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   // instruction, a same-named agent from the environment is never ours, and OMP
   // delegates through its own bundled agents or does the work in-turn.
   omp: OMP_WORKFLOW_ENVELOPE,
-  // Same rule as OMP: pi has not been taught the T2 orchestrator contract
-  // (AskUserQuestion redirection, subagent role mapping), so a pi step prompt
-  // renders IDENTITY only. Author an envelope in the phase that teaches it —
-  // never inherit Codex's, which would describe a contract pi does not
-  // implement.
-  pi: null,
+  // pi's envelope carries MORE than OMP's, because pi is missing more. Three of
+  // the step prompt's standing instructions are unfollowable here:
+  //   1. Delegation — pi registers exactly eight tools (read/grep/ls/find/
+  //      edit/write/bash/powershell, verified against the published package in
+  //      `piGateExtension.ts`) and NONE spawns a subagent, so "delegate to the
+  //      `cyboflow-<agent>` role with the Task tool" has no tool behind it.
+  //   2. The agent bundle — `installWorkflowBundle` is wired into the Claude
+  //      managers only, so the "installed in this worktree's `.claude/agents/`"
+  //      claim is false here exactly as it is on OMP.
+  //   3. The MCP surface — unlike claude (in-process), codex (`runConfig.ts`)
+  //      and omp (`ompMcpConfigWriter`), NOTHING wires the cyboflow MCP server
+  //      for the pi lane, so `cyboflow_*` — including the human-gate redirect
+  //      `cyboflow_request_user_input` — is simply absent.
+  // Left unaddressed, a pi step burns its turn hunting for a tool and a file
+  // that do not exist, then improvises against a state surface it cannot reach.
+  // The envelope tells it to do the role's work in-turn, never to adopt a
+  // same-named agent from the host, and to return in TEXT what it cannot
+  // persist. That last rule is a mitigation, not a fix: pi workflow runs still
+  // have no way to write cyboflow state, and closing THAT needs a pi MCP writer.
+  pi: PI_WORKFLOW_ENVELOPE,
 };
 
 export function renderWorkflowPromptForRuntime(

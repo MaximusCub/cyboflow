@@ -107,4 +107,71 @@ describe('renderWorkflowPromptForRuntime', () => {
       })).toBe(BASE_PROMPT);
     }
   });
+
+  /**
+   * pi gets an envelope for OMP's reason and two more of its own: it has no
+   * delegation tool at all (eight registered tools, none of which spawns a
+   * subagent) and NOTHING wires the cyboflow MCP server for the pi lane.
+   */
+  it('prepends the pi envelope to a programmatic-step prompt', () => {
+    const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
+      provider: 'pi',
+      runtime: 'pi-sdk',
+      executionModel: 'programmatic',
+      turnKind: 'programmatic-step',
+    });
+
+    expect(rendered.prompt).toContain('# Runtime adapter: pi');
+    expect(rendered.prompt.endsWith(BASE_PROMPT.prompt)).toBe(true);
+    expect(rendered.systemPromptAppend).toBe(BASE_PROMPT.systemPromptAppend);
+  });
+
+  it('tells pi to do the role in-turn and never adopt a same-named agent', () => {
+    const envelope = PROVIDER_PROMPT_ENVELOPES.pi;
+
+    expect(envelope).not.toBeNull();
+    expect(envelope, 'no delegation tool exists on pi').toContain(
+      'There is no delegation tool on this runtime',
+    );
+    expect(envelope, 'the role is performed in-turn instead').toContain(
+      "perform that role's work yourself, in this turn",
+    );
+    expect(envelope, 'never resolve a role against the host roster').toContain(
+      'never adopt an agent that merely shares the role',
+    );
+    expect(envelope, 'pi has no cyboflow MCP surface').toContain(
+      'The `cyboflow_*` MCP tools are NOT available on this runtime',
+    );
+    expect(envelope, 'a gate is reported, never answered or skipped').toContain(
+      'do NOT invent an answer and do NOT proceed past it',
+    );
+    // pi's glob tool is named `find`; a brief written from Claude habit would
+    // otherwise send it looking for a tool that does not exist.
+    expect(envelope, "pi's pattern-search tool is find, not glob").toContain(
+      "pi's pattern-search tool is `find`, not `glob`",
+    );
+  });
+
+  /** Same nudge/resume rule as Codex and OMP. */
+  it('leaves a pi nudge or resume turn unenveloped', () => {
+    for (const turnKind of ['nudge', 'resume'] as const) {
+      expect(renderWorkflowPromptForRuntime(BASE_PROMPT, {
+        provider: 'pi',
+        runtime: 'pi-sdk',
+        turnKind,
+      })).toBe(BASE_PROMPT);
+    }
+  });
+
+  /**
+   * Every provider now carries an envelope except claude, whose bodies are
+   * written for it. A new provider defaulting to `null` by copy-paste is the
+   * failure this asserts against.
+   */
+  it('only claude renders identity', () => {
+    expect(PROVIDER_PROMPT_ENVELOPES.claude).toBeNull();
+    for (const provider of ['codex', 'omp', 'pi'] as const) {
+      expect(PROVIDER_PROMPT_ENVELOPES[provider], provider).not.toBeNull();
+    }
+  });
 });
