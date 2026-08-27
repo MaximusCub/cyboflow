@@ -13,6 +13,8 @@
  *   conflict rulings -> cyboflow.tracker.resolveConflict
  *   Disconnect       -> cyboflow.tracker.disconnect (inline confirm first)
  *   Reconnect        -> cyboflow.tracker.updateCredentials (paused connections only)
+ *   Remap links      -> cyboflow.tracker.remapRenamedPrefix (paused keyless, prefix renamed)
+ *   Adopt workspace  -> cyboflow.tracker.adoptNewWorkspace (paused keyless, database replaced)
  *   Make push target -> cyboflow.tracker.setPushTarget (arms a mapping row, demotes its siblings)
  *   Remove mapping   -> cyboflow.tracker.disconnect (same procedure as header Disconnect, per row)
  *
@@ -47,6 +49,7 @@ import type {
   TrackerContentSyncMode,
   TrackerDirectionMode,
   TrackerMappingTarget,
+  TrackerRecoveryProbe,
   TrackerSyncLogEntry,
 } from '../../../../../shared/types/trackerSync';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
@@ -201,6 +204,70 @@ export function TrackerConnectedView({
   useEffect(() => {
     loadConflicts();
   }, [loadConflicts, connection.openConflictCount]);
+
+  /**
+   * WHICH recovery a paused KEYLESS connection needs. Fetched only under exactly
+   * that condition, because the answer costs a live `bd` probe in main and there
+   * is nothing to classify for a keyed provider (which rejects the call) or for
+   * a connection that is not paused.
+   *
+   * `null` is "not asked yet, or the probe itself failed" — and the banner
+   * degrades to its pre-Phase-4b Re-detect shape for it, which is always a safe
+   * action: the two typed recoveries are additive affordances, never a
+   * precondition for reconnecting.
+   */
+  const [recovery, setRecovery] = useState<TrackerRecoveryProbe | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  const [confirmingAdopt, setConfirmingAdopt] = useState(false);
+  const needsRecoveryProbe = connection.status === 'paused' && !meta.needsApiKey;
+
+  useEffect(() => {
+    if (!needsRecoveryProbe) {
+      setRecovery(null);
+      return;
+    }
+    let live = true;
+    void trpc.cyboflow.tracker.probeRecovery
+      .query({ connectionId: connection.id })
+      .then((probe) => {
+        if (live) setRecovery(probe);
+      })
+      .catch(() => {
+        // Deliberately silent: a failed classification is not a failed
+        // connection, and surfacing it in the card's error slot would bury the
+        // pause the user actually came here for.
+        if (live) setRecovery(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [needsRecoveryProbe, connection.id, connection.status]);
+
+  /**
+   * Run one recovery action and let the parent's re-read reconcile the card.
+   *
+   * `closeAfter` is the ADOPTION's, not a style choice: adoption retires this
+   * connection and mints a different one, so the summary this modal is rendering
+   * stops describing anything live the moment it succeeds. A remap leaves the
+   * same row in place, so the view stays open and simply re-reads.
+   */
+  const runRecovery = async (
+    action: () => Promise<unknown>,
+    opts: { closeAfter: boolean },
+  ): Promise<void> => {
+    setReconnectError(null);
+    setRecovering(true);
+    try {
+      await action();
+      setConfirmingAdopt(false);
+      onChanged();
+      if (opts.closeAfter) onClose();
+    } catch (err) {
+      setReconnectError(errorMessage(err));
+    } finally {
+      setRecovering(false);
+    }
+  };
 
   // Project mappings card: every live sibling of this connection's workspace
   // identity, across cyboflow projects.
@@ -455,6 +522,21 @@ export function TrackerConnectedView({
                       {meta.name} rejected the stored key on the last sync, so syncing is paused.
                       Paste a new {meta.apiKeyLabel.toLowerCase()} to reconnect.
                     </>
+                  ) : recovery?.recovery === 'renamed' ? (
+                    <>
+                      This workspace&apos;s issue prefix was renamed from{' '}
+                      <code>{recovery.boundWorkspaceName}</code> to{' '}
+                      <code>{recovery.currentWorkspaceName}</code>, which rewrote every issue id. It
+                      is the same database, so cyboflow can remap this connection&apos;s links onto
+                      the new ids and carry on.
+                    </>
+                  ) : recovery?.recovery === 'replaced' ? (
+                    <>
+                      This workspace was replaced — the <code>.beads</code> directory at this path
+                      holds a different database now, so every linked issue belongs to one that no
+                      longer exists. Adopting the new workspace retires this connection and starts a
+                      fresh one against it.
+                    </>
                   ) : (
                     <>
                       The {meta.name} workspace could not be read on the last sync, so syncing is
@@ -462,6 +544,92 @@ export function TrackerConnectedView({
                     </>
                   )}
                 </p>
+                {/*
+                  The two typed recoveries REPLACE the Re-detect button rather
+                  than sitting beside it: re-detecting a renamed or replaced
+                  workspace is exactly the action that cannot work, so offering
+                  it would send the user round the loop that brought them here.
+                */}
+                {recovery?.recovery === 'renamed' ? (
+                  <div className="mt-3 flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="sm"
+                      className="flex-shrink-0 rounded-none"
+                      disabled={recovering}
+                      loading={recovering}
+                      loadingText="Remapping…"
+                      onClick={() =>
+                        void runRecovery(
+                          () =>
+                            trpc.cyboflow.tracker.remapRenamedPrefix.mutate({
+                              connectionId: connection.id,
+                            }),
+                          { closeAfter: false },
+                        )
+                      }
+                    >
+                      Remap links
+                    </Button>
+                  </div>
+                ) : recovery?.recovery === 'replaced' ? (
+                  <div className="mt-3">
+                    {confirmingAdopt ? (
+                      <div className="space-y-2">
+                        <p className="text-xs leading-relaxed text-status-warning">
+                          Adopting retires this connection and cancels every write still queued for
+                          it — each one is filed for you to check, because a queued write may
+                          already exist in the workspace that was replaced. Your ideas, epics and
+                          tasks are never archived: items cyboflow can prove are the same are
+                          re-linked, and anything it cannot prove is filed for you to confirm.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="sm"
+                            className="flex-shrink-0 rounded-none"
+                            disabled={recovering}
+                            loading={recovering}
+                            loadingText="Adopting…"
+                            onClick={() =>
+                              void runRecovery(
+                                () =>
+                                  trpc.cyboflow.tracker.adoptNewWorkspace.mutate({
+                                    connectionId: connection.id,
+                                  }),
+                                { closeAfter: true },
+                              )
+                            }
+                          >
+                            Adopt new workspace
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="flex-shrink-0 rounded-none"
+                            disabled={recovering}
+                            onClick={() => setConfirmingAdopt(false)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        className="flex-shrink-0 rounded-none"
+                        onClick={() => setConfirmingAdopt(true)}
+                      >
+                        Adopt new workspace…
+                      </Button>
+                    )}
+                  </div>
+                ) : (
                 <div className="mt-3 flex items-center gap-2">
                   {meta.needsApiKey && (
                     <input
@@ -490,6 +658,7 @@ export function TrackerConnectedView({
                     {meta.needsApiKey ? 'Reconnect' : 'Re-detect'}
                   </Button>
                 </div>
+                )}
                 {reconnectError !== null && (
                   <p role="alert" className="mt-2 text-xs text-status-error">
                     {reconnectError}

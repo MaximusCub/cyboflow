@@ -448,6 +448,14 @@ export interface InboundSweepReport {
    * a concurrent restore brought back reports it here on the very next pass.
    */
   resurrected: number;
+  /**
+   * Archival decisions this sweep DID NOT apply because the workspace changed
+   * under it (`TrackerAdapter.workspaceHead` moved between the sweep's start and
+   * the first archive). Nothing was written for them; the next sweep decides
+   * again from a fresh listing. See the HEAD-guard note in
+   * {@link runDeletionSweep}.
+   */
+  archivalDeferred: number;
 }
 
 /** The connection is not configured well enough to sync (bad/absent source_json). */
@@ -540,8 +548,15 @@ function computeSince(connection: TrackerConnectionRow): string | undefined {
 // Connection JSON blobs
 // ---------------------------------------------------------------------------
 
-/** Parse `source_json` into the adapter's source selection. */
-function parseSourceSelection(connection: TrackerConnectionRow): TrackerSourceSelection {
+/**
+ * Parse `source_json` into the adapter's source selection.
+ *
+ * Exported for the ADOPTION path, whose pre-import reconciliation lists the
+ * newly adopted workspace itself, ahead of any pass: it needs the same selection
+ * a pass would use, and re-deriving one at that call site would be a second
+ * parser of the same blob with its own defaults.
+ */
+export function parseSourceSelection(connection: TrackerConnectionRow): TrackerSourceSelection {
   if (connection.source_json === null || connection.source_json.length === 0) {
     throw new TrackerSyncConfigError(`connection ${connection.id} has no source selected`);
   }
@@ -667,6 +682,23 @@ function snapshotOf(issue: TrackerIssue): TrackerBaseline {
   // would be silent.)
   if (issue.revision !== undefined) snapshot.revision = issue.revision;
   return snapshot;
+}
+
+/**
+ * A FRESH `baseline_json` for a link being bound to `issue` for the first time,
+ * with NOTHING carried over from whatever the link held before.
+ *
+ * The adoption path's re-link is the caller (docs/proposals/
+ * tracker-beads-provider.md, round 18's pre-import reconciliation): it repoints
+ * an orphaned link at an issue in a DIFFERENT DATABASE, so every key the old
+ * blob carried — the previous remote snapshot, the write-back dedupe stamps, the
+ * sweep's archival marker — describes a workspace that no longer exists.
+ * Overlaying onto it, the way {@link composeBaselineJson} deliberately does for
+ * an ongoing link, would leave the first pass diffing the new issue against the
+ * old one's fields.
+ */
+export function freshBaselineJson(issue: TrackerIssue): string {
+  return JSON.stringify(snapshotOf(issue));
 }
 
 /**
@@ -819,6 +851,23 @@ interface SyncContext {
    * wrong reason string). Reporting from the branch itself cannot drift.
    */
   onPermanentSkip?: (reason: ReconciliationSkipReason) => void;
+  /**
+   * Remote ids an ADOPTION put ON HOLD — the `'awaiting-adoption'` ledger rows
+   * its pre-import reconciliation wrote for issues that plausibly, but not
+   * provably, belong to an entity the replaced workspace orphaned
+   * (docs/proposals/tracker-beads-provider.md, round 18).
+   *
+   * READ BY BOTH DETECTION PATHS, which is the whole reason it lives on the
+   * context rather than in the sweep. The ledger alone holds only the SWEEP
+   * back; the ordinary incremental pass has its own route to the import, and a
+   * fresh connection's first pass fetches from a null cursor — so without this
+   * the held issue would be imported as a new idea within seconds of the
+   * finding being filed, which is exactly what the hold exists to prevent.
+   *
+   * Empty for every connection that has never been adopted, which is all of them
+   * on the three HTTP providers.
+   */
+  heldExternalIds: ReadonlySet<string>;
   report: InboundSyncReport;
 }
 
@@ -832,12 +881,22 @@ interface SyncContext {
  * UNLINKED gates can produce a ledger row, because every other skip either has
  * a link already (which is its own record) or is a DEFERRAL, which must be
  * re-offered rather than remembered.
+ *
+ * `'awaiting-adoption'` is the one reason NO gate in {@link applyIssue}
+ * produces: the ADOPTION path writes it directly (see
+ * TrackerSyncService.adoptNewWorkspace) for an issue in a newly adopted
+ * workspace that plausibly — but not conclusively — belongs to an entity whose
+ * link was orphaned by the replacement. It is a HOLD, not a verdict: the issue
+ * must not be imported as new behind the user's back while the confirmation
+ * finding is still open, and the ledger is what makes that hold survive the
+ * sweep that would otherwise import it minutes later.
  */
 export type ReconciliationSkipReason =
   | 'archived'
   | 'unmapped-state'
   | 'out-of-selection'
-  | 'sibling-owned';
+  | 'sibling-owned'
+  | 'awaiting-adoption';
 
 /**
  * The mapping target for an issue's state; an unmapped state never imports.
@@ -1020,8 +1079,32 @@ async function buildSyncContext(
     categorySync: providerSupportsCategorySync(connection.provider),
     applyLinkedStage: deps.applyLinkedStage !== false,
     importNewIssues: deps.importNewIssues !== false,
+    heldExternalIds: readAdoptionHolds(db, connection),
     report,
   };
+}
+
+/**
+ * The `'awaiting-adoption'` ledger rows still in force for a connection — see
+ * {@link SyncContext.heldExternalIds}.
+ *
+ * ONE QUERY PER PASS, over a table already scoped to the connection, and empty
+ * for anything that was never adopted. A row from an older `config_generation`
+ * is treated as absent exactly like every other ledger read: a mapping change is
+ * the user re-deciding what this connection syncs, and a hold must not outlive
+ * that decision silently.
+ */
+function readAdoptionHolds(
+  db: Database.Database,
+  connection: TrackerConnectionRow,
+): ReadonlySet<string> {
+  const held = new Set<string>();
+  for (const [externalId, row] of listLedgerEntries(db, connection.id)) {
+    if (row.reason === 'awaiting-adoption' && row.config_generation === connection.config_generation) {
+      held.add(externalId);
+    }
+  }
+  return held;
 }
 
 /**
@@ -1190,6 +1273,18 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
     );
     if (adoptable !== null) {
       await repairHalfImport(ctx, issue, adoptable);
+      return 'applied';
+    }
+
+    // AHEAD OF EVERY OTHER PERMANENT GATE, because it is the only one that
+    // represents a decision a HUMAN still owes: an adoption found this issue
+    // plausibly-but-not-provably the same as an item whose link the replacement
+    // orphaned, and filed it for confirmation. Relabelling it as 'archived' or
+    // 'unmapped-state' would record the wrong reason in the ledger and, worse,
+    // let a later mapping change turn the open question into an import.
+    if (ctx.heldExternalIds.has(issue.externalId)) {
+      report.skipped++;
+      ctx.onPermanentSkip?.('awaiting-adoption');
       return 'applied';
     }
 
@@ -2238,6 +2333,26 @@ function wasSweptArchived(link: EntityExternalLinkRow): boolean {
  * "wrongly archived" to "archived for at most one sweep interval, then
  * self-healed".
  *
+ * ═══ THE HEAD GUARD ═══ (round 16, BEST-EFFORT). Identity catches a REPLACED
+ * database; it says nothing about a concurrent `bd dolt pull` RESTORING an issue
+ * inside the same one, between its absent-id lookup and the local archive. So
+ * when the adapter can hand back a whole-workspace token
+ * ({@link TrackerAdapter.workspaceHead}), it is captured at the top of the sweep
+ * and re-read before the FIRST archival decision is applied. A moved token
+ * defers the ARCHIVAL SUBSET ONLY — imports, merges and resurrections apply
+ * regardless, each individually safe under ordinary merge semantics, and
+ * scoping the guard this way keeps a busy workspace from starving the whole
+ * sweep.
+ *
+ * Two deliberate limits. It is skipped entirely with no linked id to address the
+ * read with, or when the token cannot be read: a guard that cannot run must
+ * degrade to no guard, never to a failed sweep — the reversible-archival rule
+ * above is the primary defense and was designed to suffice alone. And the
+ * re-read happens LAZILY, at the first link that would actually be archived, so
+ * a sweep with nothing to archive (the steady state) spends no extra call, and
+ * the token is compared as late as it can be — after the absent-id point
+ * lookups, which is strictly narrower than re-reading before them.
+ *
  * Providers without the flag take the byte-for-byte path they always did: one
  * `listIssueIds`, no ledger, no fingerprints, no extra adapter calls.
  */
@@ -2256,9 +2371,13 @@ export async function runDeletionSweep(
     reconcileLedgered: 0,
     reconcileSkipped: 0,
     resurrected: 0,
+    archivalDeferred: 0,
   };
 
   const selection = parseSourceSelection(connection);
+  // BEFORE the listing, so the window the guard covers spans everything the
+  // archival decisions were derived from.
+  const guard = await openHeadGuard(deps, connection);
   const revisions = await sweepListing(adapter, selection);
   const remoteIds = new Set(revisions.map((entry) => entry.id));
 
@@ -2275,6 +2394,13 @@ export async function runDeletionSweep(
     const remote = await adapter.getIssue(link.external_id);
     if (remote !== null && remote.archivedAt === null) {
       sweep.outOfScope++;
+      continue;
+    }
+
+    // The last thing before the first WRITE of the archival subset: the
+    // workspace may have moved under everything above (see the HEAD-guard note).
+    if (!(await guard.stillCurrent())) {
+      sweep.archivalDeferred++;
       continue;
     }
 
@@ -2334,6 +2460,58 @@ export async function runDeletionSweep(
   }
 
   return sweep;
+}
+
+/**
+ * One sweep's archival HEAD guard: the token captured at the start, plus the
+ * lazy, memoized re-read that decides whether the archival subset may still be
+ * applied. See {@link runDeletionSweep}'s HEAD-guard note for why the guard is
+ * scoped to archival, best-effort, and evaluated late.
+ */
+interface HeadGuard {
+  /**
+   * True while archival may proceed. The FIRST call re-reads the token and
+   * caches the verdict for the rest of the sweep — the question is "did the
+   * workspace change under THIS sweep", which has one answer per sweep, and
+   * re-reading per link would spend a spawn per archived issue to keep asking it.
+   */
+  stillCurrent(): Promise<boolean>;
+}
+
+/** A guard that always allows — the shape every skip condition degrades to. */
+const OPEN_HEAD_GUARD: HeadGuard = { stillCurrent: async () => true };
+
+async function openHeadGuard(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+): Promise<HeadGuard> {
+  const { db, adapter } = deps;
+  if (!adapter.capabilities.requiresIdReconciliation) return OPEN_HEAD_GUARD;
+  const readHead = adapter.workspaceHead;
+  if (typeof readHead !== 'function') return OPEN_HEAD_GUARD;
+
+  // Any ACTIVE link answers: the token describes the workspace, and the id is
+  // only what the read is addressed with. A connection with none has nothing to
+  // archive either, so the guard is moot as well as unavailable.
+  const anchor = listLinks(db, connection.id, { activeOnly: true })[0];
+  if (anchor === undefined) return OPEN_HEAD_GUARD;
+
+  const captured = await readHead.call(adapter, anchor.external_id);
+  if (captured === null) return OPEN_HEAD_GUARD;
+
+  let verdict: boolean | null = null;
+  return {
+    stillCurrent: async (): Promise<boolean> => {
+      if (verdict === null) {
+        const current = await readHead.call(adapter, anchor.external_id);
+        // An unreadable token now is NOT a moved one: the guard is best-effort,
+        // and refusing every archive because a read failed would let one flaky
+        // spawn suppress deletion handling indefinitely.
+        verdict = current === null || current === captured;
+      }
+      return verdict;
+    },
+  };
 }
 
 /**

@@ -270,6 +270,26 @@ export interface TrackerAdapter {
     selection: TrackerSourceSelection,
   ): Promise<Array<{ id: string; revision: string }>>;
 
+  /**
+   * OPTIONAL. An opaque token for the workspace's CURRENT state as a whole —
+   * beads' Dolt HEAD (docs/proposals/tracker-beads-provider.md, round 16). Only
+   * compared for equality, never parsed.
+   *
+   * The reconciliation sweep captures it at the start and re-reads it before
+   * applying ARCHIVAL decisions: identity catches a REPLACED database, but not a
+   * concurrent write inside the same one restoring an issue between its
+   * absent-id lookup and the local archive. A moved token defers the archival
+   * subset for that sweep; imports and merges apply regardless.
+   *
+   * `anyLinkedExternalId` is a lever, not a filter — the token describes the
+   * workspace, and the id only gives the provider something to address the read
+   * with. BEST-EFFORT by contract: null means "no token available" (an
+   * unresolvable id, no history), and every caller must degrade to running
+   * without the guard rather than failing. Implemented only by beads; the three
+   * HTTP providers omit it and the guard never engages.
+   */
+  workspaceHead?(anyLinkedExternalId: string): Promise<string | null>;
+
   /** Point lookup; null when the issue does not exist (or is hard-deleted). */
   getIssue(externalId: string): Promise<TrackerIssue | null>;
 

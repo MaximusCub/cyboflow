@@ -26,11 +26,12 @@
  *     storeSecret / readSecret / clearSecret.
  *   - Links: upsertLink / getLinkByEntity / getLinkById / getLinkByExternal /
  *     findSiblingLinkForExternal / listLinks / updateBaseline / markOrphaned /
- *     listLinksByParentExternal / listActiveLinksWithoutEntity /
- *     hasActiveLinkedDescendant.
+ *     clearOrphaned / repointLinkExternal / listLinksByParentExternal /
+ *     listActiveLinksWithoutEntity / hasActiveLinkedDescendant.
  *   - Outbox: enqueueOutbox / supersedeQueuedStateWrites / claimNextPending /
  *     resolveOutbox / listUnresolvedOutbox / findOutboxByClientKey /
- *     requeueInFlightAsAmbiguous.
+ *     requeueInFlightAsAmbiguous / repointOutboxExternal /
+ *     cancelUnresolvedOutbox.
  *   - Conflicts: insertConflict / getConflict / listOpenConflicts /
  *     resolveConflict / hasOpenConflictForLink.
  *   - Reconciliation ledger (migration 123): listLedgerEntries /
@@ -841,6 +842,95 @@ export function clearOrphaned(db: Database.Database, linkId: number): void {
   db.prepare(
     `UPDATE entity_external_links SET orphaned_at = NULL, updated_at = datetime('now') WHERE id = ?`,
   ).run(linkId);
+}
+
+/**
+ * Rewrite ONE link's external addressing in place — the `bd rename-prefix`
+ * remap (docs/proposals/tracker-beads-provider.md, "Keyless connect": a rename
+ * rewrites every issue id suffix-preserved, `chk-2lz` -> `newpfx-2lz`, and
+ * leaves the database instance id untouched).
+ *
+ * NOT {@link upsertLink}, which would clear `orphaned_at` as a side effect and
+ * demand a whole input row. This touches exactly the two id columns and nothing
+ * else: the entity, the connection, the baseline and the orphan state all
+ * survive, because the issue this link points at is the SAME issue under a new
+ * name. It is also what the ADOPTION path repoints an orphaned link with, where
+ * the caller un-orphans separately and deliberately.
+ */
+export function repointLinkExternal(
+  db: Database.Database,
+  linkId: number,
+  externalId: string,
+  externalIdentifier: string | null,
+): void {
+  db.prepare(
+    `UPDATE entity_external_links
+        SET external_id = ?, external_identifier = ?, updated_at = datetime('now')
+      WHERE id = ?`,
+  ).run(externalId, externalIdentifier, linkId);
+}
+
+/**
+ * Rewrite an UNRESOLVED outbox row's external addressing — the outbox half of
+ * the prefix remap.
+ *
+ * ONLY unresolved rows (`pending` / `in_flight` / `ambiguous`), because only
+ * those still name an issue a drain will address. A settled row is the record
+ * of a write that already happened, under the id the workspace had at the time;
+ * rewriting it would falsify history and, worse, break the CREATE rows
+ * {@link findCreateClientKey} reads back as recovery-marker provenance.
+ *
+ * `parent_external_id` has no column of its own — a `create_sub_issue` row
+ * carries it inside `payload_json` — so the caller passes the rewritten blob it
+ * composed, or null to leave the payload alone.
+ */
+export function repointOutboxExternal(
+  db: Database.Database,
+  outboxId: number,
+  externalId: string | null,
+  payloadJson: string | null,
+): void {
+  db.prepare(
+    `UPDATE tracker_outbox
+        SET external_id = ?,
+            payload_json = COALESCE(?, payload_json),
+            updated_at = datetime('now')
+      WHERE id = ? AND state IN ('pending', 'in_flight', 'ambiguous')`,
+  ).run(externalId, payloadJson, outboxId);
+}
+
+/**
+ * Settle EVERY unresolved outbox row for a connection as cancelled, returning
+ * the rows as they were before the write.
+ *
+ * The adoption path's step 2 (docs/proposals/tracker-beads-provider.md, round
+ * 17): the workspace these writes were composed against no longer exists, so
+ * nothing may ever replay against the replacement — including the `ambiguous`
+ * rows, whose create MAY have landed in the database that was deleted. The
+ * PRE-write rows come back so each can be surfaced as its own review finding;
+ * a settled row alone would be a silent drop of a write the user asked for.
+ *
+ * `'done'` with the reason in `last_error` is the cancellation convention
+ * {@link cancelPendingKinds} already established — the schema has no
+ * 'cancelled' state, and 'failed' would invite the retry machinery to look at
+ * it again.
+ */
+export function cancelUnresolvedOutbox(
+  db: Database.Database,
+  connectionId: string,
+  reason: string,
+): TrackerOutboxRow[] {
+  const rows = listUnresolvedOutbox(db, connectionId);
+  if (rows.length === 0) return [];
+  db.prepare(
+    `UPDATE tracker_outbox
+        SET state = 'done',
+            last_error = ?,
+            next_attempt_at = NULL,
+            updated_at = datetime('now')
+      WHERE connection_id = ? AND state IN ('pending', 'in_flight', 'ambiguous')`,
+  ).run(reason, connectionId);
+  return rows;
 }
 
 /**

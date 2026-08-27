@@ -10,6 +10,9 @@
  *   reconcilePreview              : mutation     -> TrackerReconcileItem[] (wizard Step 4)
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
  *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
+ *   probeRecovery                 : query        -> TrackerRecoveryProbe (WHICH recovery a paused keyless connection needs)
+ *   remapRenamedPrefix            : mutation     -> TrackerRemapResult (rewrite links after `bd rename-prefix`)
+ *   adoptNewWorkspace             : mutation     -> TrackerAdoptionResult (retire + re-bind after a REPLACED workspace)
  *   connections                   : query        -> TrackerConnectionSummary[]
  *   mappings                      : query        -> TrackerConnectionSummary[] (one identity's siblings, ACROSS projects)
  *   setPushTarget                 : mutation     -> { ok } (arm this mapping as its pair's pusher)
@@ -59,6 +62,7 @@ import {
   providerNeedsSecret,
 } from '../../../../../shared/types/trackerSync';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictSummary,
   TrackerConnectionSummary,
   TrackerEntityLinkRef,
@@ -66,6 +70,8 @@ import type {
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSourceNarrow,
   TrackerSourceTree,
   TrackerState,
@@ -169,6 +175,26 @@ function rethrowAsTRPCError(err: unknown): never {
       // "check the key".
       code: 'PRECONDITION_FAILED',
       message: err instanceof Error ? err.message : 'this connection cannot be built',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerRecoveryUnavailableError')) {
+    throw new TRPCError({
+      // Not a failure of the connection — the question does not apply to it.
+      // Verbatim, because it names the provider and the reconnect that DOES
+      // apply.
+      code: 'PRECONDITION_FAILED',
+      message: err instanceof Error ? err.message : 'this provider has no workspace recovery',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerRecoveryStateError')) {
+    throw new TRPCError({
+      // The user acted on a classification that has since moved on. CONFLICT is
+      // the honest code (a state mismatch, not a bad request), and the message
+      // is verbatim because it names both the expected and the actual state.
+      code: 'CONFLICT',
+      message: err instanceof Error ? err.message : 'this workspace is in a different state now',
       cause: err,
     });
   }
@@ -619,6 +645,62 @@ export const trackerRouter = router({
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().updateCredentials(input.connectionId, input.apiKey);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * WHICH recovery a paused KEYLESS connection needs — 'healthy' | 'redetect' |
+   * 'renamed' | 'replaced' — decided by re-probing the workspace and comparing
+   * the ids, never by reading an error message.
+   *
+   * A QUERY, and a genuinely cheap one to re-run: it persists nothing, resumes
+   * nothing, and is what the connected view's banner branches on to choose
+   * between "Re-detect", "Remap links" and "Adopt new workspace". PRECONDITION_
+   * FAILED for a keyed provider (which has no such classification);
+   * NOT_FOUND for an unknown id.
+   */
+  probeRecovery: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .query(async ({ input }): Promise<TrackerRecoveryProbe> => {
+      try {
+        return await getTrackerSyncFacade().probeRecovery(input.connectionId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * 'renamed': rewrite every link and unresolved outbox row from the old issue
+   * prefix to the new one, then resume and kick a pass. `bd rename-prefix`
+   * preserves the id suffix, so this is a deterministic rewrite rather than a
+   * re-match — but it is still a bulk write over every link, so the service
+   * re-probes first and rejects CONFLICT when the workspace no longer reads as
+   * renamed.
+   */
+  remapRenamedPrefix: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<TrackerRemapResult> => {
+      try {
+        return await getTrackerSyncFacade().remapRenamedPrefix(input.connectionId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * 'replaced': retire this connection, cancel its queued writes, and bind a
+   * fresh one to the database now at the same path — the destructive recovery,
+   * which is why the renderer confirms explicitly before calling it and why no
+   * timer may ever reach it. Same re-probe guard as the remap (CONFLICT when the
+   * state has moved on).
+   */
+  adoptNewWorkspace: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<TrackerAdoptionResult> => {
+      try {
+        return await getTrackerSyncFacade().adoptNewWorkspace(input.connectionId);
       } catch (err) {
         rethrowAsTRPCError(err);
       }

@@ -18,6 +18,7 @@
  */
 import { EventEmitter } from 'node:events';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictChoice,
   TrackerConflictSummary,
   TrackerConnectPayload,
@@ -29,6 +30,8 @@ import type {
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -120,6 +123,46 @@ export interface TrackerSyncFacade {
    * connection is bound to. The returned identity carries no key material.
    */
   updateCredentials(connectionId: string, apiKey?: string): Promise<TrackerWorkspaceIdentity>;
+
+  /**
+   * WHICH recovery a paused KEYLESS connection needs, classified by re-probing
+   * the workspace and comparing ids — see {@link TrackerRecoveryClass}. Purely
+   * a read: nothing is persisted and nothing resumes, so the connected view can
+   * ask on every render.
+   *
+   * KEYLESS-ONLY. A keyed provider rejects PRECONDITION_FAILED-shaped: its
+   * reconnect story is a pasted key, and none of the three keyless failure
+   * shapes (moved path, renamed prefix, replaced instance) has an analogue on an
+   * HTTP tracker. Unknown id rejects NOT_FOUND-shaped.
+   */
+  probeRecovery(connectionId: string): Promise<TrackerRecoveryProbe>;
+
+  /**
+   * `'renamed'`'s repair: rewrite every link (and every unresolved outbox row)
+   * of this connection from the old issue prefix to the new one — suffix
+   * preserved, which is exactly what `bd rename-prefix` did to the ids — then
+   * resume and kick a pass.
+   *
+   * Re-probes first and rejects CONFLICT-shaped unless the workspace still reads
+   * as renamed: the classification the UI acted on can be minutes old, and a
+   * rewrite applied to a state that has moved on would repoint every link at
+   * nothing.
+   */
+  remapRenamedPrefix(connectionId: string): Promise<TrackerRemapResult>;
+
+  /**
+   * `'replaced'`'s repair, and the destructive one: retire this connection and
+   * orphan its links, cancel every unresolved write as a review finding, mint a
+   * fresh connection bound to the database that is there now, re-link whatever
+   * can be PROVEN to be the same item, and kick the first pass.
+   *
+   * Local entities are never archived and never duplicated; a match that cannot
+   * be proven becomes a finding for the user rather than a guessed re-link.
+   * Re-probes first and rejects CONFLICT-shaped unless the workspace still reads
+   * as replaced. Declining is simply not calling it — the pair stays paused,
+   * which is safe.
+   */
+  adoptNewWorkspace(connectionId: string): Promise<TrackerAdoptionResult>;
 
   /** The project's connected-view cards. */
   connections(projectId: number): Promise<TrackerConnectionSummary[]>;

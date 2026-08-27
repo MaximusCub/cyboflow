@@ -341,6 +341,7 @@ function sweepReport(overrides: Partial<InboundSweepReport>): InboundSweepReport
     reconcileLedgered: 0,
     reconcileSkipped: 0,
     resurrected: 0,
+    archivalDeferred: 0,
     ...overrides,
   };
 }

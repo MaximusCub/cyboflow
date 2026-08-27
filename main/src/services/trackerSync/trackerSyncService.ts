@@ -97,6 +97,10 @@ import type {
   TrackerNarrowKind,
   TrackerProvider,
   TrackerReconcileItem,
+  TrackerAdoptionResult,
+  TrackerRecoveryClass,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -122,6 +126,8 @@ import {
   TrackerConnectionNotFoundError,
   TrackerConnectionPausedError,
   TrackerIdentityMismatchError,
+  TrackerRecoveryStateError,
+  TrackerRecoveryUnavailableError,
 } from './errors';
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
@@ -132,10 +138,12 @@ import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
   bumpConfigGeneration,
   cancelPendingKinds,
+  cancelUnresolvedOutbox,
   clearSecret,
   connectionMatchesIdentity,
   enqueueOutbox,
   findDisconnectedConnection,
+  findOutboxByClientKey,
   getConflict,
   getConnection,
   getLinkByEntity,
@@ -151,6 +159,8 @@ import {
   markOrphaned,
   reactivateConnection,
   readSecret,
+  repointLinkExternal,
+  repointOutboxExternal,
   requeueInFlightAsAmbiguous,
   resolveConflict,
   storeSecret,
@@ -162,11 +172,14 @@ import {
   supersedeQueuedStateWrites,
   updateBaseline,
   updateConnectionSettings,
+  upsertLedgerEntry,
   upsertLink,
   type NewConnectionRow,
 } from './store';
 import {
+  freshBaselineJson,
   joinBody,
+  parseSourceSelection,
   readConflictRemoteLocal,
   readConflictRemoteState,
   runDeletionSweep,
@@ -177,6 +190,7 @@ import {
   type InboundSyncReport,
   type ReviewFindingRouter,
 } from './inboundSync';
+import { provenanceMarker } from './provenance';
 import { isPriority, resolveEffectivePriorityMapping, seedDefaultPriorityMapping } from './priorityMapping';
 import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping } from './categoryMapping';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
@@ -2190,6 +2204,632 @@ export class TrackerSyncService implements TrackerSyncFacade {
     return identity;
   }
 
+  // -------------------------------------------------------------------------
+  // Keyless workspace recovery
+  //
+  // docs/proposals/tracker-beads-provider.md, "Replacement recovery is an
+  // explicit state machine, not a resume" (rounds 17/18) + the prefix-rename
+  // remap under "1. Keyless connect".
+  //
+  // A paused KEYED connection has one story — the key is bad, paste another. A
+  // paused keyless one has FOUR, and they need opposite repairs: a workspace
+  // that moved wants re-detect, a renamed prefix wants a deterministic link
+  // rewrite, a REPLACED database wants a retire-and-adopt, and a transient lock
+  // wants nothing but a resume. Guessing between them is not possible from the
+  // pause alone; {@link TrackerSyncService.probeRecovery} decides by comparing
+  // ids, and the two actions below re-probe before touching anything.
+  // -------------------------------------------------------------------------
+
+  /**
+   * WHICH recovery this paused keyless connection needs — the classification the
+   * connected view's banner branches on.
+   *
+   * DECIDED BY IDS, NEVER BY MESSAGES. The pause that brings a user here arrives
+   * as a `TrackerAuthError` whose text depends on which sandwich checkpoint
+   * caught it, and the three failure modes read almost alike; parsing that text
+   * to pick a repair would make the wording of an error message load-bearing.
+   * So this re-probes with an EXPECTATION-FREE adapter — one built from the row
+   * with both identity columns nulled, so `assertIdentity` compares nothing and
+   * REPORTS the workspace as it actually is now — and compares the two halves
+   * itself:
+   *
+   *   the probe throws            -> 'redetect' (nothing readable at the stored
+   *                                  path; the message is carried through)
+   *   instance same, prefix moved -> 'renamed'
+   *   instance moved              -> 'replaced'
+   *   both match                  -> 'healthy'
+   *
+   * THE STORED PATH, NOT THE PROJECT'S. The scratch row keeps the connection's
+   * own `source_json`, so the probe spawns `bd` exactly where a PASS would —
+   * which is what makes 'redetect' mean "the thing that pauses this connection
+   * is still true" rather than "the project directory happens to be fine".
+   *
+   * Read-only: it persists nothing and resumes nothing, so the banner can ask on
+   * every render.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   */
+  async probeRecovery(connectionId: string): Promise<TrackerRecoveryProbe> {
+    const connection = this.requireKeylessConnection(connectionId);
+    const bound = {
+      connectionId,
+      boundWorkspaceId: connection.workspace_id,
+      boundWorkspaceName: connection.workspace_name,
+    };
+
+    let identity: TrackerWorkspaceIdentity;
+    try {
+      identity = await this.probeAdapter(connection).validateCredentials();
+    } catch (err) {
+      return {
+        ...bound,
+        recovery: 'redetect',
+        currentWorkspaceId: null,
+        currentWorkspaceName: null,
+        // Verbatim: "`bd` is not installed", "this project has no resolvable
+        // beads workspace" and "the workspace now resolves to <other path>" are
+        // three different fixes, and a generic line would erase all three.
+        probeError: describeError(err),
+      };
+    }
+
+    const current = {
+      currentWorkspaceId: identity.workspaceId,
+      currentWorkspaceName: identity.workspaceName,
+      probeError: null,
+    };
+
+    // A ROW WITH NO RECORDED IDENTITY IS NOT A CHANGED ONE. Every keyless
+    // connect stamps both columns, so a NULL here is a corrupt or hand-edited
+    // row — and store.ts's own doctrine applies: an identity we never learned
+    // cannot be claimed BY identity. Reading a NULL instance id as a mismatch
+    // would offer to RETIRE the connection and cancel its writes over missing
+    // metadata, which is the most destructive possible answer to the least
+    // informative input.
+    if (connection.workspace_id === null) {
+      return {
+        ...bound,
+        ...current,
+        recovery: 'redetect',
+        probeError:
+          'this connection has no recorded workspace identity, so there is nothing to compare ' +
+          'the workspace against.',
+      };
+    }
+    // The instance id is checked FIRST because it dominates: a replaced database
+    // usually carries the same committed prefix, so a prefix-first test would
+    // read a replacement as healthy and a re-detect would resume onto ids that
+    // no longer exist.
+    if (connection.workspace_id !== identity.workspaceId) {
+      return { ...bound, ...current, recovery: 'replaced' };
+    }
+    // Same reasoning one column down, and the consequence is concrete: with no
+    // old prefix there is nothing for the remap to rewrite FROM, so it would
+    // report every link as un-remappable. Re-detect stamps the prefix, which is
+    // the whole repair a row missing only its display metadata needs.
+    if (connection.workspace_name !== null && connection.workspace_name !== identity.workspaceName) {
+      return { ...bound, ...current, recovery: 'renamed' };
+    }
+    return { ...bound, ...current, recovery: 'healthy' };
+  }
+
+  /**
+   * Rewrite every link (and every unresolved outbox row) of a connection whose
+   * workspace prefix was renamed, then resume it.
+   *
+   * WHY A REWRITE IS SOUND AND A RESUME IS NOT. `bd rename-prefix` rewrites the
+   * ids of existing issues SUFFIX-PRESERVED (`chk-2lz` -> `newpfx-2lz`, proven
+   * in Phase 2) inside the SAME database, and the old id stops resolving
+   * entirely. So the mapping from old link to new issue is not a guess, it is
+   * arithmetic — while the two alternatives are both destructive: a silent
+   * continue would address every write to an id bd no longer knows, and letting
+   * the sweep run would read the whole workspace as deleted and archive every
+   * linked entity.
+   *
+   * ONE TRANSACTION over the links, the outbox and the connection's
+   * `workspace_name`, because a half-applied remap is the one state nothing can
+   * recover from: the identity invariant would pass on the new prefix while some
+   * links still named the old one, so the sweep WOULD run, and it would archive
+   * exactly the links that had not been rewritten yet.
+   *
+   * IDS THAT DO NOT CARRY THE OLD PREFIX ARE LEFT ALONE and reported as a
+   * finding. A rename covers the whole workspace, so there should be none;
+   * whatever produced one is something this remap cannot explain, and rewriting
+   * it on a guess would point a link at an unrelated issue.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   * @throws {TrackerRecoveryStateError} re-probing no longer reports 'renamed'.
+   */
+  async remapRenamedPrefix(connectionId: string): Promise<TrackerRemapResult> {
+    const connection = this.requireKeylessConnection(connectionId);
+    const probe = await this.requireRecoveryClass(connectionId, 'renamed');
+    // Both are non-null by construction — 'renamed' is only reachable when the
+    // row HAS a prefix and the probe reported a different one — but the columns
+    // are nullable, so the narrowing is spelled out rather than asserted.
+    const oldPrefix = connection.workspace_name ?? '';
+    const newPrefix = probe.currentWorkspaceName ?? '';
+
+    const result: TrackerRemapResult = {
+      remappedLinks: 0,
+      remappedOutboxRows: 0,
+      workspaceName: newPrefix,
+      unmatchedExternalIds: [],
+    };
+
+    this.db.transaction(() => {
+      // ALL links, orphaned ones included: an orphaned link's id has to stay
+      // addressable or the sweep's resurrection rule could never recognize the
+      // issue coming back under its new name.
+      for (const link of listLinks(this.db, connectionId)) {
+        const rewritten = renamePrefix(link.external_id, oldPrefix, newPrefix);
+        if (rewritten === null) {
+          result.unmatchedExternalIds.push(link.external_id);
+          continue;
+        }
+        repointLinkExternal(
+          this.db,
+          link.id,
+          rewritten,
+          // beads mints no second human ref — the id IS the identifier — but the
+          // column is provider-general, so only a value that actually carries
+          // the old prefix is rewritten.
+          renamePrefix(link.external_identifier, oldPrefix, newPrefix) ?? link.external_identifier,
+        );
+        result.remappedLinks++;
+      }
+
+      // THE OUTBOX TOO, because the database is the same one: these writes are
+      // still wanted, they just name ids that no longer resolve. Only the
+      // UNRESOLVED rows — a settled row records what was written at the time,
+      // under the name it had.
+      for (const row of listUnresolvedOutbox(this.db, connectionId)) {
+        const externalId = renamePrefix(row.external_id, oldPrefix, newPrefix);
+        const payloadJson = renameParentInPayload(row, oldPrefix, newPrefix);
+        if (externalId === null && payloadJson === null) continue;
+        repointOutboxExternal(this.db, row.id, externalId ?? row.external_id, payloadJson);
+        result.remappedOutboxRows++;
+      }
+
+      updateConnectionSettings(this.db, connectionId, {
+        workspace_name: newPrefix,
+        status: 'active',
+      });
+    })();
+
+    if (result.unmatchedExternalIds.length > 0) {
+      await this.fileRecoveryFinding(connection.project_id, {
+        title: `Tracker sync left ${plural(result.unmatchedExternalIds.length, 'link')} un-remapped`,
+        body: [
+          `This beads workspace's issue prefix was renamed from \`${oldPrefix}\` to`,
+          `\`${newPrefix}\`, and cyboflow rewrote every link that carried the old prefix. These`,
+          'did not carry it, so they were left exactly as they are rather than guessed at:',
+          '',
+          ...result.unmatchedExternalIds.map((id) => `- \`${id}\``),
+          '',
+          'They will not resolve against the workspace. Unlink them, or re-run the wizard to',
+          'reconcile them against the issues they belong to.',
+        ].join('\n'),
+        severity: 'warning',
+        provider: connection.provider,
+      });
+    }
+
+    this.emitTrackerChange(connection.project_id, connectionId, 'connection');
+    void this.syncNow(connectionId).catch((err: unknown) => {
+      this.logger?.error('[trackerSync] sync after a prefix remap failed', {
+        connectionId,
+        error: describeError(err),
+      });
+    });
+    return result;
+  }
+
+  /**
+   * Retire a connection whose workspace was REPLACED and bind a fresh one to the
+   * database that is there now — the proposal's "Adopt new workspace", in its
+   * exact order.
+   *
+   * WHY THIS CANNOT BE A RESUME (round 17). Re-detect on a replaced workspace
+   * necessarily reports a NEW instance id. Resuming the old connection onto it
+   * would keep every retained link while the ids they name now address unrelated
+   * issues in an unrelated database; refusing forever instead strands the paused
+   * connection and any ambiguous outbox row. So the recovery is a state machine
+   * with a hard boundary between the two identities:
+   *
+   *   1. RETIRE + ORPHAN. The old row goes `disconnected` (the ordinary
+   *      disconnect path, so the drain timer, the cleared secret and the
+   *      push-target promotion all behave identically) and its ACTIVE links are
+   *      orphaned. Entities are NEVER archived — their remote halves are simply
+   *      gone, which is not the user deciding the work is done.
+   *   2. CANCEL EVERY UNRESOLVED WRITE, each as its own review finding. Nothing
+   *      may replay against the new instance — including the `ambiguous` create,
+   *      whose issue may exist in the database that was deleted. It is surfaced
+   *      for manual adoption, never auto-recovered across identities.
+   *   3. MINT A FRESH CONNECTION on the new instance id, same project, same
+   *      source scope and settings, same workspace path, generation 0, NULL
+   *      secret, NULL cursor.
+   *   4. PRE-IMPORT RECONCILIATION (round 18) — see
+   *      {@link TrackerSyncService.reconcileAdoptedWorkspace}. It runs BEFORE
+   *      the first ordinary import because the ordinary import path structurally
+   *      cannot re-link a retained entity: `findAdoptableIdea` rejects an idea
+   *      that already has a provider link, so a plain fresh import would mint
+   *      duplicates while the originals sat orphaned.
+   *   5. Kick the first pass.
+   *
+   * DECLINING IS SIMPLY NOT CALLING THIS. A paused pair stays paused
+   * indefinitely, which is safe — and no timer may ever adopt on the user's
+   * behalf, because adoption retires a connection and cancels queued writes.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   * @throws {TrackerRecoveryStateError} re-probing no longer reports 'replaced'.
+   */
+  async adoptNewWorkspace(connectionId: string): Promise<TrackerAdoptionResult> {
+    const old = this.requireKeylessConnection(connectionId);
+    const probe = await this.requireRecoveryClass(connectionId, 'replaced');
+    const projectId = old.project_id;
+
+    // ── 1 · retire + orphan ────────────────────────────────────────────────
+    // Captured BEFORE the disconnect, which zeroes the column and promotes a
+    // surviving sibling; the new row re-claims the role below if the old one
+    // held it, so the pair never sits without a pusher and never gets two.
+    const wasPushTarget = old.push_target === 1;
+    // The links this adoption is responsible for. PREVIOUSLY-orphaned links are
+    // deliberately excluded from the re-link pass below: they were orphaned by
+    // the sweep or by the user's own removal ruling, and re-linking one would
+    // resurrect something that was already decided about.
+    const orphaning = listLinks(this.db, connectionId, { activeOnly: true });
+    await this.disconnect(connectionId);
+    for (const link of orphaning) markOrphaned(this.db, link.id);
+
+    // ── 2 · cancel every unresolved write ──────────────────────────────────
+    const cancelled = cancelUnresolvedOutbox(
+      this.db,
+      connectionId,
+      'cancelled — the beads workspace this write was composed against was replaced',
+    );
+    for (const row of cancelled) {
+      await this.fileCancelledWriteFinding(projectId, old, row);
+    }
+
+    // ── 3 · mint the fresh connection ──────────────────────────────────────
+    // COMPOSED DIRECTLY rather than through connect(): connect() re-runs the
+    // live probe, applies reconcile decisions, and consults the idempotent
+    // re-submit matcher — none of which has anything to answer here (the probe
+    // just ran, there are no wizard decisions, and the matcher would be looking
+    // for a row that by definition does not exist yet at the NEW instance id).
+    const newConnectionId = `trk_${randomUUID()}`;
+    const created = insertConnection(this.db, {
+      ...adoptedConnectionRow(old, probe),
+      id: newConnectionId,
+      push_target: wasPushTarget ? 1 : 0,
+    });
+    if (wasPushTarget) claimPushTarget(this.db, projectId, old.provider, newConnectionId);
+
+    // ── 4 · pre-import reconciliation ──────────────────────────────────────
+    const reconciled = await this.reconcileAdoptedWorkspace(created, old, orphaning);
+
+    // ── 5 · first pass ─────────────────────────────────────────────────────
+    this.emitTrackerChange(projectId, connectionId, 'connection');
+    this.emitTrackerChange(projectId, newConnectionId, 'connection');
+    void this.syncNow(newConnectionId).catch((err: unknown) => {
+      this.logger?.error('[trackerSync] first pass after adopting a new workspace failed', {
+        connectionId: newConnectionId,
+        error: describeError(err),
+      });
+    });
+
+    return {
+      newConnectionId,
+      orphanedLinks: orphaning.length,
+      cancelledWrites: cancelled.length,
+      ...reconciled,
+    };
+  }
+
+  /**
+   * Match the ADOPTED workspace's issues against the entities the replacement
+   * orphaned, and re-point the links that can be proven — before any ordinary
+   * import runs (round 18).
+   *
+   * ONLY CONCLUSIVE EVIDENCE RE-LINKS, and there are exactly two kinds:
+   *
+   *   CLIENT KEY (pushed-origin). Every create this app makes stamps a UUID into
+   *     the issue's `cyboflow_client_key` metadata, and the outbox row that
+   *     minted it names the entity. An issue in the new workspace carrying a key
+   *     the OLD connection's outbox recorded is that entity's issue — a UUID
+   *     match cannot be a coincidence.
+   *   PROVENANCE MARKER (imported-origin). An imported entity's body carries
+   *     `<!-- cyboflow:tracker beads:<id> -->`. An issue whose id is exactly the
+   *     one an orphaned link named AND whose entity's body names that same id
+   *     was imported from an issue with that id — which a re-init from an export
+   *     (the ordinary way a replacement ends up holding the same content)
+   *     reproduces id-for-id.
+   *
+   * EVERYTHING ELSE IS AMBIGUOUS, and ambiguity is a question, not a default. An
+   * issue whose id merely coincides with an orphaned link's, with no marker and
+   * no key to back it, gets a review finding and — critically — a ledger row at
+   * reason `'awaiting-adoption'`, so the reconciliation sweep does not import it
+   * as a new idea minutes later while the user is still deciding. An issue that
+   * matches nothing at all is left entirely alone: the ordinary import path owns
+   * it, and it will arrive as a new idea on the first pass, which is correct.
+   */
+  private async reconcileAdoptedWorkspace(
+    created: TrackerConnectionRow,
+    old: TrackerConnectionRow,
+    orphaned: readonly EntityExternalLinkRow[],
+  ): Promise<{ relinked: number; ambiguous: number }> {
+    const byExternalId = new Map(orphaned.map((link) => [link.external_id, link]));
+    const byEntity = new Map(orphaned.map((link) => [`${link.entity_type}:${link.entity_id}`, link]));
+
+    let issues: TrackerIssue[];
+    try {
+      issues = await this.buildAdapter(created).listIssues(parseSourceSelection(created));
+    } catch (err) {
+      // The adoption itself has already landed — the old row is retired, the new
+      // one exists — so a listing failure is a DELAYED reconciliation, not a
+      // failed adoption. The first pass would import the whole workspace as new
+      // ideas, which is exactly what the re-link exists to prevent, so the
+      // connection is left PAUSED for the user to re-detect rather than allowed
+      // to run blind.
+      updateConnectionSettings(this.db, created.id, { status: 'paused' });
+      this.logger?.error('[trackerSync] adopted workspace could not be listed for re-linking', {
+        connectionId: created.id,
+        error: describeError(err),
+      });
+      return { relinked: 0, ambiguous: 0 };
+    }
+
+    let relinked = 0;
+    let ambiguous = 0;
+    for (const issue of issues) {
+      const match = this.matchAdoptedIssue(issue, old, byExternalId, byEntity);
+      if (match === null) continue;
+
+      if (match.conclusive) {
+        // upsertLink's conflict target is (entity_type, entity_id, provider), so
+        // this rewrites the SAME row onto the new connection and clears
+        // `orphaned_at` in one statement — the link never exists twice and is
+        // never absent.
+        upsertLink(this.db, {
+          connection_id: created.id,
+          entity_type: match.link.entity_type,
+          entity_id: match.link.entity_id,
+          provider: created.provider,
+          external_id: issue.externalId,
+          external_identifier: issue.identifier,
+          external_url: issue.url || null,
+          external_parent_id: issue.parentExternalId,
+          baseline_json: freshBaselineJson(issue),
+        });
+        relinked++;
+        await this.fileAdoptionRelinkFinding(created, issue, match.link);
+        continue;
+      }
+
+      upsertLedgerEntry(this.db, {
+        connection_id: created.id,
+        external_id: issue.externalId,
+        reason: 'awaiting-adoption',
+        last_seen_revision: issue.revision ?? null,
+        config_generation: created.config_generation,
+      });
+      ambiguous++;
+      await this.fileAdoptionAmbiguityFinding(created, issue, match.link);
+    }
+    return { relinked, ambiguous };
+  }
+
+  /**
+   * One adopted issue's verdict: the orphaned link it belongs to and whether the
+   * evidence is conclusive, or null when nothing points at it.
+   *
+   * The two conclusive channels are tried in order of strength — a UUID the app
+   * itself minted beats an id coincidence backed by a body marker — and the
+   * fallback is deliberately NOT a third channel: it is the same id coincidence
+   * with the corroboration missing, which is exactly what "ambiguous" means.
+   */
+  private matchAdoptedIssue(
+    issue: TrackerIssue,
+    old: TrackerConnectionRow,
+    byExternalId: ReadonlyMap<string, EntityExternalLinkRow>,
+    byEntity: ReadonlyMap<string, EntityExternalLinkRow>,
+  ): { link: EntityExternalLinkRow; conclusive: boolean } | null {
+    if (issue.recoveryClientKey !== null) {
+      const row = findOutboxByClientKey(this.db, old.id, issue.recoveryClientKey);
+      const link =
+        row === null || row.entity_type === null || row.entity_id === null
+          ? undefined
+          : byEntity.get(`${row.entity_type}:${row.entity_id}`);
+      if (link !== undefined) return { link, conclusive: true };
+    }
+
+    const byId = byExternalId.get(issue.externalId);
+    if (byId === undefined) return null;
+    const body = readEntityIdentity(this.db, byId.entity_type, byId.entity_id)?.body ?? null;
+    const conclusive = body !== null && body.includes(provenanceMarker(old.provider, issue.externalId));
+    return { link: byId, conclusive };
+  }
+
+  /**
+   * The connection, or the typed refusal. Recovery classification is
+   * KEYLESS-ONLY: a keyed provider's reconnect is a pasted key, and none of the
+   * three shapes this machinery distinguishes has an HTTP-provider analogue.
+   */
+  private requireKeylessConnection(connectionId: string): TrackerConnectionRow {
+    const connection = getConnection(this.db, connectionId);
+    if (connection === null) throw new TrackerConnectionNotFoundError(connectionId);
+    if (providerNeedsSecret(connection.provider)) {
+      throw new TrackerRecoveryUnavailableError(connection.provider);
+    }
+    return connection;
+  }
+
+  /**
+   * Re-probe and insist on one classification — the guard every recovery ACTION
+   * opens with. The UI's verdict can be minutes old, and both actions are
+   * destructive enough that acting on a stale one is worse than refusing.
+   */
+  private async requireRecoveryClass(
+    connectionId: string,
+    expected: TrackerRecoveryClass,
+  ): Promise<TrackerRecoveryProbe> {
+    const probe = await this.probeRecovery(connectionId);
+    if (probe.recovery !== expected) {
+      throw new TrackerRecoveryStateError(expected, probe.recovery, describeRecovery(probe));
+    }
+    return probe;
+  }
+
+  /**
+   * An EXPECTATION-FREE adapter for a keyless connection: the row's own
+   * `source_json` (and therefore its stored workspace path), with both identity
+   * columns nulled so `assertIdentity` compares nothing and the probe REPORTS
+   * the workspace rather than refusing it.
+   *
+   * That nulling is the whole method. Every other construction path deliberately
+   * carries the expectation — it is the identity invariant — and would answer a
+   * replaced or renamed workspace with the same `TrackerAuthError` the pause
+   * already produced, which is precisely the answer this cannot use.
+   */
+  private probeAdapter(connection: TrackerConnectionRow): TrackerAdapter {
+    return this.adapterFactory({ ...connection, workspace_id: null, workspace_name: null }, '');
+  }
+
+  /**
+   * File one recovery audit record into the review inbox.
+   *
+   * FAIL-SOFT, like {@link runDeletionSweep}'s own findings: every caller has
+   * ALREADY applied the repair it is describing, so a review-inbox failure must
+   * not turn a completed adoption into a thrown error the UI reports as "nothing
+   * happened". An unwired `reviewRouter` is the same case — the repair stands,
+   * only the audit trail is thinner.
+   */
+  private async fileRecoveryFinding(
+    projectId: number,
+    finding: {
+      title: string;
+      body: string;
+      severity: 'info' | 'warning';
+      provider: TrackerProvider;
+      entityType?: TrackerEntityType;
+      entityId?: string;
+    },
+  ): Promise<void> {
+    if (this.reviewRouter === undefined) return;
+    try {
+      await this.reviewRouter.applyReviewItem(projectId, {
+        op: 'create',
+        actor: finding.provider,
+        kind: 'finding',
+        title: finding.title,
+        body: finding.body,
+        blocking: false,
+        severity: finding.severity,
+        source: `tracker:${finding.provider}`,
+        ...(finding.entityType !== undefined && finding.entityId !== undefined
+          ? { entityType: finding.entityType, entityId: finding.entityId }
+          : {}),
+        payload: { kind: 'finding', category: 'tracker-sync' },
+      });
+    } catch (err) {
+      this.logger?.error('[trackerSync] recovery finding could not be filed', {
+        projectId,
+        title: finding.title,
+        error: describeError(err),
+      });
+    }
+  }
+
+  /**
+   * One cancelled outbox row, surfaced for manual verification.
+   *
+   * A WARNING, not info: an `in_flight` or `ambiguous` row's write may well have
+   * LANDED in the database that was replaced, and cyboflow can no longer tell —
+   * the only honest thing to do is say so and name the issue, so the user can
+   * look. Even a plain `pending` row is a change they asked for that will now
+   * never be sent.
+   */
+  private async fileCancelledWriteFinding(
+    projectId: number,
+    connection: TrackerConnectionRow,
+    row: TrackerOutboxRow,
+  ): Promise<void> {
+    const target = row.external_id ?? '(a new issue)';
+    await this.fileRecoveryFinding(projectId, {
+      title: `Tracker write cancelled — ${row.kind} on ${target}`,
+      body: [
+        `The ${connection.provider} workspace this write was queued against was REPLACED (a new`,
+        'database at the same path), so it was cancelled rather than replayed: replaying it would',
+        'have addressed an unrelated issue in the new database.',
+        '',
+        `- kind: \`${row.kind}\``,
+        `- issue: \`${target}\``,
+        `- state when cancelled: \`${row.state}\``,
+        '',
+        row.state === 'pending'
+          ? 'It was still queued, so nothing was sent. Re-do the change if you still want it.'
+          : 'It was already in flight, so it MAY exist in the workspace that was replaced. Verify manually.',
+      ].join('\n'),
+      severity: 'warning',
+      provider: connection.provider,
+      ...(row.entity_type !== null && isTrackerEntityType(row.entity_type) && row.entity_id !== null
+        ? { entityType: row.entity_type, entityId: row.entity_id }
+        : {}),
+    });
+  }
+
+  /** A conclusive re-link, recorded so an adoption is never silent about what it moved. */
+  private async fileAdoptionRelinkFinding(
+    created: TrackerConnectionRow,
+    issue: TrackerIssue,
+    link: EntityExternalLinkRow,
+  ): Promise<void> {
+    await this.fileRecoveryFinding(created.project_id, {
+      title: `Tracker sync re-linked ${issue.identifier} in the adopted workspace`,
+      body: [
+        `This item's ${created.provider} workspace was replaced, and the new one contains an issue`,
+        'that is provably the same one — matched on the client key cyboflow stamped when it created',
+        'the issue, or on the import marker in the local body. Its link now points at the new',
+        'workspace and the entity was never duplicated.',
+        '',
+        `- was: \`${link.external_id}\``,
+        `- now: \`${issue.externalId}\``,
+      ].join('\n'),
+      severity: 'info',
+      provider: created.provider,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+    });
+  }
+
+  /** A plausible-but-unproven match — the one case that needs a human. */
+  private async fileAdoptionAmbiguityFinding(
+    created: TrackerConnectionRow,
+    issue: TrackerIssue,
+    link: EntityExternalLinkRow,
+  ): Promise<void> {
+    await this.fileRecoveryFinding(created.project_id, {
+      title: `Confirm whether ${issue.identifier} is still this item's issue`,
+      body: [
+        `This item's ${created.provider} workspace was replaced, and the new one holds an issue with`,
+        `the SAME id (\`${issue.externalId}\`) the item was linked to. That is suggestive, but it is`,
+        'not proof: the id carries no client key cyboflow minted and the local body carries no import',
+        'marker naming it, so the two could be unrelated issues that happen to share an id.',
+        '',
+        'Nothing was linked and nothing was imported — the issue is held back from the import path',
+        'until you decide. Re-run the tracker wizard to link them, or unlink the item to let the',
+        'issue import as new.',
+      ].join('\n'),
+      severity: 'warning',
+      provider: created.provider,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+    });
+  }
+
   /** The project's connected-view cards (disconnected connections are not listed). */
   async connections(projectId: number): Promise<TrackerConnectionSummary[]> {
     return listConnections(this.db, projectId).map((row) => this.summarizeConnection(row));
@@ -3226,6 +3866,135 @@ function abandonedResult(
 }
 
 // ---------------------------------------------------------------------------
+// Keyless workspace recovery — pure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * `<old>-<suffix>` rewritten to `<new>-<suffix>`, or null when `value` does not
+ * carry the old prefix (including a null value).
+ *
+ * NULL IS THE "LEAVE IT ALONE" ANSWER, not a failure. Every caller has to be
+ * able to tell "rewritten" from "not ours to rewrite": the link loop reports the
+ * latter as a finding, and the outbox loop skips the row entirely. Returning the
+ * input unchanged would collapse those two into one.
+ *
+ * The separator is part of the match so a prefix `chk` cannot claim an id
+ * belonging to a prefix `chkout`.
+ */
+function renamePrefix(value: string | null, oldPrefix: string, newPrefix: string): string | null {
+  if (value === null) return null;
+  const head = `${oldPrefix}-`;
+  return value.startsWith(head) ? `${newPrefix}-${value.slice(head.length)}` : null;
+}
+
+/**
+ * A `create_sub_issue` row's payload with its `parentExternalId` re-prefixed, or
+ * null when there is nothing to rewrite.
+ *
+ * THE ONLY PAYLOAD KEY THAT HOLDS AN EXTERNAL ID — `create_issue`,
+ * `update_content` and `archive_issue` carry empty payloads, and
+ * `update_state`/`close_parent` carry a group name. Rewriting BY KEY rather than
+ * by scanning the blob for id-shaped strings is deliberate: a create row also
+ * carries the entity's title and description, and a title that happens to begin
+ * with the old prefix would otherwise be mangled into the tracker.
+ */
+function renameParentInPayload(
+  row: TrackerOutboxRow,
+  oldPrefix: string,
+  newPrefix: string,
+): string | null {
+  if (row.kind !== 'create_sub_issue') return null;
+  const payload = parseJsonObject(row.payload_json);
+  const parent = payload.parentExternalId;
+  if (typeof parent !== 'string') return null;
+  const rewritten = renamePrefix(parent, oldPrefix, newPrefix);
+  if (rewritten === null) return null;
+  return JSON.stringify({ ...payload, parentExternalId: rewritten });
+}
+
+/**
+ * The fresh connection an adoption mints: the retired row's whole configuration,
+ * re-bound to the new database instance.
+ *
+ * SPELLED OUT COLUMN BY COLUMN rather than spread from `old`, for the same
+ * reason `connect` composes its row once: the three columns that MUST change
+ * (both identity halves, and the generation/cursor reset) are invisible in a
+ * spread-plus-overrides, and a column added to the table later would be carried
+ * over silently by one and caught by the other.
+ *
+ * `source_json` IS carried verbatim, and that is the point: it holds the wizard
+ * scope, the display label and the resolved workspace PATH — and the path is
+ * unchanged, since a replacement is a new database at the same location.
+ */
+function adoptedConnectionRow(
+  old: TrackerConnectionRow,
+  probe: TrackerRecoveryProbe,
+): Omit<NewConnectionRow, 'id'> {
+  return {
+    project_id: old.project_id,
+    provider: old.provider,
+    status: 'active',
+    workspace_id: probe.currentWorkspaceId,
+    workspace_name: probe.currentWorkspaceName,
+    actor_label: old.actor_label,
+    base_url: old.base_url,
+    // Keyless, permanently — the same NULL the row it replaces carried.
+    secret_ciphertext: null,
+    source_json: old.source_json,
+    selection_mode: old.selection_mode,
+    selection_json: old.selection_json,
+    state_mapping_json: old.state_mapping_json,
+    status_sync_mode: old.status_sync_mode,
+    pull_mode: old.pull_mode,
+    push_mode: old.push_mode,
+    // Set by the caller, which knows whether the retired row held the role.
+    push_target: 0,
+    content_sync_mode: old.content_sync_mode,
+    archive_sync_mode: old.archive_sync_mode,
+    priority_mapping_json: old.priority_mapping_json,
+    category_mapping_json: old.category_mapping_json,
+    // A NEW connection starts at generation 0: it has no ledger to invalidate,
+    // and inheriting the old row's counter would make the pre-import
+    // reconciliation's own 'awaiting-adoption' rows read as stale on sight.
+    config_generation: 0,
+    mirror_subissues: old.mirror_subissues,
+    conflict_mode: old.conflict_mode,
+    // NULL so the first pass fetches from the beginning — the new workspace has
+    // never been read, and the old row's cursor describes a different database.
+    cursor_updated_at: null,
+    cursor_external_id: null,
+    last_sync_at: null,
+    last_sync_log_json: null,
+  };
+}
+
+/**
+ * Narrow an outbox row's `entity_type` — a bare `string | null` column, since a
+ * row can name no entity at all — to the union a review-item entity link needs.
+ */
+function isTrackerEntityType(value: string): value is TrackerEntityType {
+  return value === 'idea' || value === 'epic' || value === 'task';
+}
+
+/** One line of prose for a recovery verdict — the detail a refusal carries. */
+function describeRecovery(probe: TrackerRecoveryProbe): string {
+  switch (probe.recovery) {
+    case 'healthy':
+      return 'the workspace matches what this connection is bound to.';
+    case 'redetect':
+      return `the workspace could not be read (${probe.probeError ?? 'no detail'}).`;
+    case 'renamed':
+      return `the issue prefix is now ${probe.currentWorkspaceName ?? 'unknown'}, not ${
+        probe.boundWorkspaceName ?? 'unknown'
+      }.`;
+    case 'replaced':
+      return `the database instance id is now ${probe.currentWorkspaceId ?? 'unknown'}, not ${
+        probe.boundWorkspaceId ?? 'unknown'
+      }.`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Log composition
 // ---------------------------------------------------------------------------
 
@@ -3479,6 +4248,15 @@ function appendSweepLines(entries: TrackerSyncLogEntry[], sweep: InboundSweepRep
     entries.push({
       marker: '·',
       line: `${plural(sweep.resurrected, 'issue')} came back · un-archived`,
+    });
+  }
+  if (sweep.archivalDeferred > 0) {
+    // The HEAD guard held the destructive subset back. Imports and merges in
+    // the same sweep still applied, so this is a partial deferral rather than a
+    // failed pass — and it self-clears on the next sweep over a quiet workspace.
+    entries.push({
+      marker: '·',
+      line: `${plural(sweep.archivalDeferred, 'deletion')} deferred — workspace changed mid-sweep`,
     });
   }
   // The cost line, and only when a reconciliation actually spent lookups: it is

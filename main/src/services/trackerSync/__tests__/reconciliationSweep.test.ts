@@ -28,6 +28,13 @@
  *   - a provider WITHOUT the flag still takes the bare `listIssueIds` path.
  *   - an adapter that declares the flag but implements no `listIssueRevisions`
  *     fails loudly instead of silently degrading.
+ *   - the BEST-EFFORT HEAD guard: a workspace token that moved between the
+ *     sweep's start and its first archive defers ONLY the archival subset (the
+ *     imports in the same sweep still land), a stable token archives normally
+ *     and costs exactly one re-read however many links it archives, and every
+ *     way the token can be unavailable — no linked id to address the read with,
+ *     a null capture, a null re-read, an adapter with no `workspaceHead` at all
+ *     — degrades to NO guard rather than to a blocked sweep.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
@@ -158,6 +165,20 @@ class FakeBeadsAdapter implements TrackerAdapter {
     this.getIssueCalls.push(externalId);
     return this.remote.get(externalId) ?? null;
   }
+  /**
+   * Scripted Dolt HEADs, consumed one per call with the last value repeating —
+   * so `['h1', 'h2']` is exactly "the workspace changed between the sweep's
+   * capture and its archival re-read". A PROPERTY for the same reason
+   * `listIssueRevisions` is one: {@link HeadlessAdapter} nulls it out, and the
+   * interface declares it optional.
+   */
+  headSequence: Array<string | null> = ['head-1'];
+  readonly workspaceHeadCalls: string[] = [];
+  workspaceHead?: (anyLinkedExternalId: string) => Promise<string | null> = async (id) => {
+    this.workspaceHeadCalls.push(id);
+    const index = Math.min(this.workspaceHeadCalls.length - 1, this.headSequence.length - 1);
+    return this.headSequence[index];
+  };
   async createSubIssue(): Promise<TrackerIssue> {
     throw new Error('not used');
   }
@@ -205,6 +226,15 @@ class NonReconcilingAdapter extends FakeBeadsAdapter {
  */
 class UnreconcilableAdapter extends FakeBeadsAdapter {
   override readonly listIssueRevisions: undefined = undefined;
+}
+
+/**
+ * A reconciling adapter that cannot report a workspace token — the shape every
+ * provider had before the HEAD guard existed. The guard must degrade to nothing
+ * for it, not to a skipped archival.
+ */
+class HeadlessAdapter extends FakeBeadsAdapter {
+  override readonly workspaceHead: undefined = undefined;
 }
 
 class FakeReviewRouter implements ReviewFindingRouter {
@@ -653,6 +683,136 @@ describe('reconciliation sweep — reversible archival', () => {
     expect(sweep.resurrected).toBe(0);
     expect(getLinkByExternal(raw, 'conn-1', 'bd-1')?.orphaned_at).not.toBeNull();
     expect(reviewRouter.created).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The best-effort HEAD guard on archival
+// ---------------------------------------------------------------------------
+
+describe('reconciliation sweep — the archival HEAD guard', () => {
+  /**
+   * One linked issue that has VANISHED (so the sweep wants to archive it) plus
+   * one unlinked issue that is new (so the same sweep wants to import
+   * something). The two halves are what make "only the archival subset is
+   * deferred" observable at all.
+   */
+  async function archivalAndImportPending(): Promise<EntityExternalLinkRow> {
+    makeConnection();
+    const link = await importIssue(makeIssue('bd-1'));
+    adapter.remote.delete('bd-1');
+    adapter.remote.set('bd-2', makeIssue('bd-2'));
+    return link;
+  }
+
+  it('defers ONLY the archival subset when the head moved, and still applies the import', async () => {
+    const link = await archivalAndImportPending();
+    adapter.headSequence = ['head-1', 'head-2'];
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep.archivalDeferred).toBe(1);
+    expect(sweep.sweepArchived).toBe(0);
+    // Nothing at all was written for the deferred link: not the archive, not
+    // the orphaning, not a conflict row.
+    expect(ideaArchivedAt(link.entity_id)).toBeNull();
+    expect(getLinkByExternal(raw, 'conn-1', 'bd-1')?.orphaned_at).toBeNull();
+    // ...while the import in the SAME sweep landed, which is the whole point of
+    // scoping the guard to archival.
+    expect(sweep.reconcileImported).toBe(1);
+    expect(getLinkByExternal(raw, 'conn-1', 'bd-2')).not.toBeNull();
+  });
+
+  it('archives normally when the head is unchanged, and re-reads it exactly twice', async () => {
+    const link = await archivalAndImportPending();
+    adapter.workspaceHeadCalls.length = 0;
+    adapter.headSequence = ['head-1'];
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep.sweepArchived).toBe(1);
+    expect(sweep.archivalDeferred).toBe(0);
+    expect(ideaArchivedAt(link.entity_id)).not.toBeNull();
+    // Capture + ONE lazy re-read. The verdict is per-sweep, so a second archived
+    // link must not cost a second spawn.
+    expect(adapter.workspaceHeadCalls).toEqual(['bd-1', 'bd-1']);
+  });
+
+  it('re-reads the head only ONCE for a sweep archiving several links', async () => {
+    makeConnection();
+    await importIssue(makeIssue('bd-1'));
+    await importIssue(makeIssue('bd-2'));
+    adapter.remote.clear();
+    adapter.workspaceHeadCalls.length = 0;
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep.sweepArchived).toBe(2);
+    expect(adapter.workspaceHeadCalls).toHaveLength(2);
+  });
+
+  it('deferral is transient — the next sweep over a quiet workspace archives', async () => {
+    const link = await archivalAndImportPending();
+    adapter.headSequence = ['head-1', 'head-2'];
+    expect((await runDeletionSweep(deps, reload())).archivalDeferred).toBe(1);
+
+    adapter.headSequence = ['head-2'];
+    const second = await runDeletionSweep(deps, reload());
+
+    expect(second.archivalDeferred).toBe(0);
+    expect(second.sweepArchived).toBe(1);
+    expect(ideaArchivedAt(link.entity_id)).not.toBeNull();
+  });
+
+  it('skips the guard entirely when there is no linked id to address the read with', async () => {
+    makeConnection();
+    adapter.remote.set('bd-1', makeIssue('bd-1'));
+
+    await runDeletionSweep(deps, reload());
+
+    // A connection with no active link has nothing to archive either, so the
+    // guard is moot as well as unavailable — and must cost no spawn.
+    expect(adapter.workspaceHeadCalls).toEqual([]);
+  });
+
+  it('archives anyway when the head cannot be read — best-effort, never a blocked sweep', async () => {
+    const link = await archivalAndImportPending();
+    // Captured null (no history to anchor on): the guard never arms.
+    adapter.headSequence = [null];
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    expect(sweep.sweepArchived).toBe(1);
+    expect(sweep.archivalDeferred).toBe(0);
+    expect(ideaArchivedAt(link.entity_id)).not.toBeNull();
+  });
+
+  it('reads an unreadable head at the RE-CHECK as "not moved", not as moved', async () => {
+    const link = await archivalAndImportPending();
+    adapter.headSequence = ['head-1', null];
+
+    const sweep = await runDeletionSweep(deps, reload());
+
+    // One flaky spawn must not be able to suppress deletion handling forever.
+    expect(sweep.sweepArchived).toBe(1);
+    expect(sweep.archivalDeferred).toBe(0);
+    expect(ideaArchivedAt(link.entity_id)).not.toBeNull();
+  });
+
+  it('archives normally for a reconciling adapter that reports no head at all', async () => {
+    const headless = new HeadlessAdapter();
+    const headlessDeps: InboundSyncDeps = { ...deps, adapter: headless };
+    makeConnection();
+    headless.remote.set('bd-1', makeIssue('bd-1'));
+    headless.incremental = [makeIssue('bd-1')];
+    await runInboundSync(headlessDeps, reload());
+    headless.incremental = [];
+    headless.remote.delete('bd-1');
+
+    const sweep = await runDeletionSweep(headlessDeps, reload());
+
+    expect(sweep.sweepArchived).toBe(1);
+    expect(sweep.archivalDeferred).toBe(0);
   });
 });
 

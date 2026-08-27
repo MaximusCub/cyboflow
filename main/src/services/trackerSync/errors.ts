@@ -79,6 +79,51 @@ export class TrackerIdentityMismatchError extends Error {
 }
 
 /**
+ * Recovery classification was asked of a connection that has none — a KEYED
+ * provider. Their reconnect story is a pasted key, and the three shapes
+ * {@link TrackerRecoveryClass} distinguishes (moved path, renamed prefix,
+ * replaced instance) are all beads-workspace facts with no HTTP-provider
+ * analogue, so answering with a guess would put a "Remap links" button in front
+ * of a Linear connection. The tRPC router maps this to PRECONDITION_FAILED by
+ * NAME (it may not import this module).
+ */
+export class TrackerRecoveryUnavailableError extends Error {
+  constructor(readonly provider: TrackerProvider) {
+    super(
+      `${provider} connections have no workspace-recovery classification — reconnect them by ` +
+        'pasting a fresh API key instead.',
+    );
+    this.name = 'TrackerRecoveryUnavailableError';
+  }
+}
+
+/**
+ * A recovery ACTION was asked for a state the workspace is not actually in.
+ *
+ * Every recovery action re-probes before it does anything, because the UI's
+ * classification can be arbitrarily stale — the user may have renamed the
+ * prefix back, or re-initialized the workspace again, in the seconds between
+ * seeing the banner and clicking it. Both actions are destructive in their own
+ * way (a remap rewrites every link's external id; an adoption retires a
+ * connection and cancels its pending writes), so a state that no longer matches
+ * refuses rather than applying a repair for a problem that is not there.
+ * Mapped to CONFLICT by NAME.
+ */
+export class TrackerRecoveryStateError extends Error {
+  constructor(
+    readonly expected: string,
+    readonly actual: string,
+    detail: string,
+  ) {
+    super(
+      `this recovery applies to a ${expected} workspace, and re-probing now reports ${actual}: ` +
+        `${detail} Re-open the connection to see what it needs.`,
+    );
+    this.name = 'TrackerRecoveryStateError';
+  }
+}
+
+/**
  * Thrown by a GUARDED update (`capabilities.guardedUpdates === true`,
  * beads today — docs/proposals/tracker-beads-provider.md, "Dual writers on
  * one issue") when a post-write verification finds an interleaved remote

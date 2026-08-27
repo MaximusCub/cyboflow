@@ -7,7 +7,11 @@
  * validation, and the mapping of the engine's typed failures onto TRPCError
  * codes the renderer branches on. That mapping is by ERROR NAME rather than by
  * `instanceof`, because router files may not import main/src/services/* — which
- * is precisely the kind of coupling a test should pin down.
+ * is precisely the kind of coupling a test should pin down. The keyless
+ * workspace-recovery trio (probeRecovery / remapRenamedPrefix /
+ * adoptNewWorkspace) adds two more of those names — the keyed-provider refusal
+ * and the stale-classification refusal — and both are load-bearing for what the
+ * banner does next.
  *
  * Wiring mirrors health.test.ts: `vi.resetModules()` + dynamic import per case,
  * so the bridge's module-level facade singleton cannot leak between tests.
@@ -15,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TRPCError } from '@trpc/server';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictChoice,
   TrackerConflictSummary,
   TrackerConnectPayload,
@@ -25,6 +30,8 @@ import type {
   TrackerFieldOptions,
   TrackerIssue,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -86,6 +93,15 @@ class UnusedFacade implements TrackerSyncFacade {
     throw new Error('not used');
   }
   updateCredentials(_id: string, _key: string): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  probeRecovery(_id: string): Promise<TrackerRecoveryProbe> {
+    throw new Error('not used');
+  }
+  remapRenamedPrefix(_id: string): Promise<TrackerRemapResult> {
+    throw new Error('not used');
+  }
+  adoptNewWorkspace(_id: string): Promise<TrackerAdoptionResult> {
     throw new Error('not used');
   }
   connections(_p: number): Promise<TrackerConnectionSummary[]> {
@@ -425,6 +441,106 @@ describe('cyboflow.tracker.updateCredentials', () => {
     expect(await codeOf(caller.updateCredentials({ connectionId: 'trk_1', apiKey: 'k' }))).toBe(
       'UNAUTHORIZED',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless workspace recovery
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.tracker — keyless recovery', () => {
+  const PROBE: TrackerRecoveryProbe = {
+    connectionId: 'trk_1',
+    recovery: 'renamed',
+    boundWorkspaceId: 'inst-1',
+    boundWorkspaceName: 'cf',
+    currentWorkspaceId: 'inst-1',
+    currentWorkspaceName: 'newpfx',
+    probeError: null,
+  };
+
+  it('passes the classification through verbatim', async () => {
+    const facade = new UnusedFacade();
+    const seen: string[] = [];
+    facade.probeRecovery = async (id) => {
+      seen.push(id);
+      return PROBE;
+    };
+    const caller = await callerWith(facade);
+
+    await expect(caller.probeRecovery({ connectionId: 'trk_1' })).resolves.toEqual(PROBE);
+    expect(seen).toEqual(['trk_1']);
+  });
+
+  it('maps a keyed-provider refusal to PRECONDITION_FAILED, message intact', async () => {
+    // Another by-NAME mapping the router cannot express with `instanceof`.
+    const unavailable = new Error(
+      'linear connections have no workspace-recovery classification — reconnect them by pasting a fresh API key instead.',
+    );
+    unavailable.name = 'TrackerRecoveryUnavailableError';
+    const facade = new UnusedFacade();
+    facade.probeRecovery = async () => {
+      throw unavailable;
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.probeRecovery({ connectionId: 'trk_1' }))).toBe(
+      'PRECONDITION_FAILED',
+    );
+    // The message names the reconnect that DOES apply, which is the whole
+    // actionable content — so it is passed through rather than genericized.
+    await expect(caller.probeRecovery({ connectionId: 'trk_1' })).rejects.toThrow(
+      /pasting a fresh API key/,
+    );
+  });
+
+  it('maps a stale-state refusal on either recovery action to CONFLICT', async () => {
+    const stale = new Error(
+      'this recovery applies to a renamed workspace, and re-probing now reports replaced: …',
+    );
+    stale.name = 'TrackerRecoveryStateError';
+    const facade = new UnusedFacade();
+    facade.remapRenamedPrefix = async () => {
+      throw stale;
+    };
+    facade.adoptNewWorkspace = async () => {
+      throw stale;
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.remapRenamedPrefix({ connectionId: 'trk_1' }))).toBe('CONFLICT');
+    expect(await codeOf(caller.adoptNewWorkspace({ connectionId: 'trk_1' }))).toBe('CONFLICT');
+  });
+
+  it('returns each action result unchanged', async () => {
+    const remap: TrackerRemapResult = {
+      remappedLinks: 2,
+      remappedOutboxRows: 1,
+      workspaceName: 'newpfx',
+      unmatchedExternalIds: [],
+    };
+    const adoption: TrackerAdoptionResult = {
+      newConnectionId: 'trk_2',
+      orphanedLinks: 3,
+      cancelledWrites: 1,
+      relinked: 2,
+      ambiguous: 1,
+    };
+    const facade = new UnusedFacade();
+    facade.remapRenamedPrefix = async () => remap;
+    facade.adoptNewWorkspace = async () => adoption;
+    const caller = await callerWith(facade);
+
+    await expect(caller.remapRenamedPrefix({ connectionId: 'trk_1' })).resolves.toEqual(remap);
+    await expect(caller.adoptNewWorkspace({ connectionId: 'trk_1' })).resolves.toEqual(adoption);
+  });
+
+  it('rejects an empty connection id on all three, before the facade is reached', async () => {
+    const caller = await callerWith(new UnusedFacade());
+
+    expect(await codeOf(caller.probeRecovery({ connectionId: '' }))).toBe('BAD_REQUEST');
+    expect(await codeOf(caller.remapRenamedPrefix({ connectionId: '' }))).toBe('BAD_REQUEST');
+    expect(await codeOf(caller.adoptNewWorkspace({ connectionId: '' }))).toBe('BAD_REQUEST');
   });
 });
 

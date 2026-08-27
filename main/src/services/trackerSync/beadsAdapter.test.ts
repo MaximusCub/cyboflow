@@ -465,6 +465,68 @@ describe('beadsIssueFingerprint', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 4b. workspaceHead — the sweep's archival guard anchor
+// ---------------------------------------------------------------------------
+
+describe('BeadsAdapter — workspaceHead', () => {
+  it('reads the NEWEST CommitHash with a bounded history spawn', async () => {
+    const { adapter, calls } = makeAdapter([
+      whereRoute(),
+      historyRoute([
+        historyEntry('headhash', issueRow()),
+        historyEntry('olderhash', issueRow({ title: 'before' })),
+      ]),
+    ]);
+
+    await expect(adapter.workspaceHead('proj-a1b')).resolves.toBe('headhash');
+    // `--limit 1` is what makes this O(1): bd's history is unfiltered, so the
+    // newest entry for ANY id is the database head, and an unbounded call would
+    // stream a full issue snapshot per commit in the whole database.
+    const history = calls.filter((call) => bdVerb(call) === 'history');
+    expect(history).toHaveLength(1);
+    expect(bdArgs(history[0])).toEqual(['history', 'proj-a1b', '--limit', '1', '--json']);
+  });
+
+  it('re-checks identity AFTER the read, so a head from a replaced database never escapes', async () => {
+    // The workspace was replaced while the history spawn was in flight, so the
+    // only metadata read this method makes — the one AFTER the read — sees the
+    // new instance.
+    const { adapter } = makeAdapter([whereRoute(), historyRoute([historyEntry('h1', issueRow())])], {
+      readFileImpl: metadataFile('a-different-instance'),
+    });
+
+    await expect(adapter.workspaceHead('proj-a1b')).rejects.toThrow(TrackerAuthError);
+  });
+
+  it('answers null for an unresolvable id rather than throwing', async () => {
+    const { adapter } = makeAdapter([
+      whereRoute(),
+      on('history', () =>
+        Promise.reject(
+          execFailure({
+            code: 1,
+            stdout: '',
+            stderr: 'Error fetching proj-gone: no issue found matching "proj-gone"',
+          }),
+        ),
+      ),
+    ]);
+
+    // BEST-EFFORT is the contract: the sweep must degrade to no guard, never to
+    // a failed sweep, so an id that no longer resolves is an absent token.
+    await expect(adapter.workspaceHead('proj-gone')).resolves.toBeNull();
+  });
+
+  it('answers null for the exit-0 unavailable-history shape and for an empty window', async () => {
+    const { adapter: unavailable } = makeAdapter([whereRoute(), on('history', () => ok(''))]);
+    await expect(unavailable.workspaceHead('proj-a1b')).resolves.toBeNull();
+
+    const { adapter: empty } = makeAdapter([whereRoute(), historyRoute([])]);
+    await expect(empty.workspaceHead('proj-a1b')).resolves.toBeNull();
+  });
+});
+
 describe('BeadsAdapter — revision', () => {
   it('is populated on listed, fetched and update-echo issues alike', async () => {
     const row = issueRow();

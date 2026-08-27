@@ -67,7 +67,7 @@
  *    tolerate non-JSON stdout on a known no-op path, and confirm a state
  *    change by RE-FETCH, never by success text.
  *
- * Two contract additions beads is the only user of:
+ * Three contract additions beads is the only user of:
  *   - `listIssueRevisions` + `TrackerIssue.revision` — a content FINGERPRINT
  *     the adapter derives itself ({@link beadsIssueFingerprint}), because no
  *     revision field exists in any bd output and `--format` go-templates
@@ -84,6 +84,12 @@
  *     {@link BeadsAdapter.verifyGuardedWrite} diffs adjacent `bd history`
  *     snapshots back to the caller's token to attribute exactly which fields an
  *     interleaved commit changed.
+ *   - {@link BeadsAdapter.workspaceHead} — the whole-workspace Dolt HEAD the
+ *     sweep's archival guard compares. Identity catches a REPLACED database;
+ *     this catches a concurrent write inside the same one, which is beads'
+ *     expected mode of use. `bd history` is unfiltered, so the newest
+ *     `CommitHash` for ANY linked id is the database head; BEST-EFFORT by
+ *     contract, hence null rather than a throw whenever it cannot be read.
  *
  * `externalId` is the bare beads id (`bd-a1b2`, or a dotted child id like
  * `pfx-88w.1`), which doubles as `identifier` — beads mints nothing more
@@ -1235,6 +1241,37 @@ export class BeadsAdapter implements TrackerAdapter {
         'ever calling this.',
       null,
     );
+  }
+
+  /**
+   * The workspace's current Dolt HEAD — the newest `CommitHash` in any linked
+   * issue's history — or null when it cannot be read.
+   *
+   * WHY ANY ID ANSWERS FOR THE WHOLE DATABASE: `bd history` is UNFILTERED. It
+   * reports one entry per DB commit (each carrying that commit's snapshot of the
+   * issue asked about), so `--limit 1` on ANY resolvable id yields the newest
+   * commit in the database, which IS the head. Phase 0 demoted this to
+   * best-effort precisely because no cheaper anchor exists — there is no
+   * `bd dolt log` — and Phase 2 then proved `--limit` real, which is what makes
+   * the read O(1) instead of O(all commits).
+   *
+   * The sweep's archival guard is its only caller
+   * (docs/proposals/tracker-beads-provider.md, round 16): identity catches a
+   * REPLACED database, not a concurrent `bd dolt pull` restoring an issue inside
+   * the same one. Null on an unresolvable id or an unavailable history rather
+   * than a throw — a guard that cannot read the head must degrade to "no guard",
+   * never to a failed sweep, since reversible archival is the primary defense.
+   *
+   * Identity-sandwiched like every other read here: the history is collected
+   * first, then the identity is re-checked before the value is handed back, so a
+   * head read off a replaced database can never be compared against one read off
+   * the original.
+   */
+  async workspaceHead(anyLinkedExternalId: string): Promise<string | null> {
+    const history = await this.readHistory(anyLinkedExternalId, 1);
+    if (history === null || history.length === 0) return null;
+    await this.assertIdentity();
+    return readString(history[0], 'CommitHash') ?? null;
   }
 
   // -------------------------------------------------------------------------

@@ -88,6 +88,74 @@ export interface TrackerWorkspaceIdentity {
 }
 
 /**
+ * WHICH recovery a paused KEYLESS connection needs
+ * (docs/proposals/tracker-beads-provider.md, "Replacement recovery is an
+ * explicit state machine"). Derived by COMPARING a live expectation-free probe
+ * against the row's two identity columns — never by reading an error message,
+ * because the same pause reaches the user through several wordings and only the
+ * ids can say which of these three shapes it actually is.
+ *
+ *   'healthy'  — both halves still match. The pause was transient (`bd` lock
+ *                contention, a spawn that timed out); a plain resume is enough.
+ *   'redetect' — the probe itself failed: no workspace resolves at the stored
+ *                path any more (the repo moved, `.beads` is gone, `bd` is not
+ *                installed). Re-detect re-anchors it.
+ *   'renamed'  — same database instance, DIFFERENT issue prefix: `bd
+ *                rename-prefix` rewrote every issue id suffix-preserved, so the
+ *                links can be remapped deterministically.
+ *   'replaced' — a DIFFERENT database instance at the same path (`rm -rf .beads
+ *                && bd init`). Every linked issue belongs to a database that no
+ *                longer exists; only "adopt the new workspace" can recover, and
+ *                it is destructive enough to need an explicit confirmation.
+ */
+export type TrackerRecoveryClass = 'healthy' | 'redetect' | 'renamed' | 'replaced';
+
+/** {@link TrackerRecoveryClass} plus the ids the UI needs to explain the verdict. */
+export interface TrackerRecoveryProbe {
+  connectionId: string;
+  recovery: TrackerRecoveryClass;
+  /** The row's `workspace_id` / `workspace_name` — what the connection is bound to. */
+  boundWorkspaceId: string | null;
+  boundWorkspaceName: string | null;
+  /** What the live probe reported; both null when the probe failed ('redetect'). */
+  currentWorkspaceId: string | null;
+  currentWorkspaceName: string | null;
+  /** The probe's own failure message, verbatim; null unless `recovery` is 'redetect'. */
+  probeError: string | null;
+}
+
+/** {@link TrackerRecoveryClass} `'renamed'`'s repair — what the remap rewrote. */
+export interface TrackerRemapResult {
+  /** Links rewritten from `<old>-<suffix>` to `<new>-<suffix>`. */
+  remappedLinks: number;
+  /** Unresolved outbox rows whose external id (or mirrored parent) was rewritten. */
+  remappedOutboxRows: number;
+  /** The new prefix, now the connection's `workspace_name`. */
+  workspaceName: string;
+  /**
+   * External ids that did NOT carry the old prefix, left exactly as they are and
+   * surfaced as a review finding. Should always be empty — a rename rewrites the
+   * whole workspace — so a non-empty list means something this remap cannot
+   * explain, and guessing at it would repoint a link at an unrelated issue.
+   */
+  unmatchedExternalIds: string[];
+}
+
+/** {@link TrackerRecoveryClass} `'replaced'`'s repair — what the adoption did. */
+export interface TrackerAdoptionResult {
+  /** The fresh connection bound to the new database instance. */
+  newConnectionId: string;
+  /** Links of the retired connection that were orphaned (entities are never archived). */
+  orphanedLinks: number;
+  /** Unresolved outbox rows settled as cancelled, each one a review finding. */
+  cancelledWrites: number;
+  /** Orphaned links CONCLUSIVELY re-pointed onto an issue in the new workspace. */
+  relinked: number;
+  /** Plausible-but-inconclusive matches filed for the user to confirm; nothing was imported for them. */
+  ambiguous: number;
+}
+
+/**
  * Wizard Step 1 hierarchy. The top level is provider-defined (Linear team,
  * Plane project); the second level narrows it (Linear project/view/cycle,
  * Plane cycle/module). `'all'` is the whole-container narrow.
