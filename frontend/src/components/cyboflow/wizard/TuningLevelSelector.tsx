@@ -82,14 +82,16 @@ export function TuningLevelSelector({
                   : undefined
               }
               className={cn(
-                'flex flex-1 flex-col items-center justify-center gap-0.5 border px-2 py-1.5 text-xs font-medium transition-colors',
+                // Matched to AgentPermissionModeSelector's row styling so the
+                // Configure step's button controls read as one family.
+                'flex flex-1 flex-col items-center justify-center gap-0.5 rounded-button border px-3 py-2 text-sm font-medium transition-colors',
                 segmentDisabled
-                  ? 'cursor-not-allowed border-border-secondary bg-bg-primary text-text-tertiary opacity-50'
+                  ? 'cursor-not-allowed border-border-secondary bg-surface-secondary text-text-tertiary opacity-50'
                   : selected
                     ? isCustom
                       ? 'border-status-info bg-status-info/10 text-status-info'
                       : 'border-interactive bg-interactive-surface text-text-primary'
-                    : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                    : 'border-border-secondary bg-surface-secondary text-text-primary hover:bg-surface-hover',
               )}
             >
               <span>{TUNING_LEVEL_LABELS[level]}</span>
