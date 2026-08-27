@@ -6,15 +6,17 @@
  * The tailer's ticks/drains run async fs/promises IO through a serialized queue,
  * and fake timers do NOT advance the libuv poll phase — so after firing the fake
  * interval we must turn the real event loop to let that IO settle. `advance()`
- * bundles the fake-timer advance with a bounded real-fs `flushIo()`; direct
- * `await tailer.drainToEof()` naturally awaits its own queued IO.
+ * bundles the fake-timer advance with `settleTailerIo()`, which turns the loop
+ * until that queue goes quiet (see settleIo.ts — a fixed turn count here used to
+ * under-drain under parallel load); direct `await tailer.drainToEof()` naturally
+ * awaits its own queued IO.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JournalTailer, readCompletionRecord } from '../journalTailer';
+import { settleTailerIo } from './settleIo';
 import type { DynamicWorkflowAgent } from '../../../../../shared/types/dynamicWorkflows';
 
 const POLL_MS = 50;
@@ -34,9 +36,9 @@ describe('JournalTailer', () => {
   let recordPath: string;
   let tailer: JournalTailer | null;
 
-  /** Turn the real event loop so queued async-IO tasks settle under fake timers. */
+  /** Turn the real event loop until the tailer's queued async IO has settled. */
   async function flushIo(): Promise<void> {
-    for (let i = 0; i < 40; i++) await stat(dir);
+    await settleTailerIo(dir, () => (tailer ? [tailer] : []));
   }
 
   /** Advance the fake interval, then drain the real fs IO the ticks kicked off. */

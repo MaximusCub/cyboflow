@@ -12,7 +12,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventRouter } from '../../../../../shared/streamParser/eventRouter';
@@ -20,6 +19,7 @@ import { ReviewItemRouter } from '../../reviewItemRouter';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { DynamicWorkflowTracker, dynamicWorkflowEvents } from '../dynamicWorkflowTracker';
 import { JournalTailer } from '../journalTailer';
+import { settleTailerIo } from './settleIo';
 import {
   DYNAMIC_WORKFLOW_REVIEW_SOURCE,
 } from '../../../../../shared/types/dynamicWorkflows';
@@ -176,13 +176,25 @@ describe('DynamicWorkflowTracker', () => {
   /**
    * The tailer's async fs/promises ticks/drains and the tracker's async
    * finalize/stall cascade run through serialized promise queues; fake timers do
-   * NOT advance the libuv poll phase, so we turn the real event loop via bounded
-   * real-fs `stat()` calls to let that IO settle. Use after advancing the fake
-   * interval, and after a terminal `<task-notification>` (which kicks off an
-   * un-awaited async finalize).
+   * NOT advance the libuv poll phase, so we turn the real event loop to let that
+   * IO settle. Use after advancing the fake interval, and after a terminal
+   * `<task-notification>` (which kicks off an un-awaited async finalize — that
+   * cascade reaches the tailer queue via its own drainToEof, which is what
+   * settleTailerIo waits on). A FIXED turn count here used to under-drain under
+   * vitest's parallel pool; see settleIo.ts.
    */
   async function flushIo(): Promise<void> {
-    for (let i = 0; i < 40; i++) await stat(base);
+    await settleTailerIo(base, liveTailers);
+  }
+
+  /**
+   * The tracker's live tailers, one per detected workflow. Read white-box and
+   * re-read every settle turn: the set grows on detection and shrinks on
+   * dismiss/cap-eviction.
+   */
+  function liveTailers(): readonly JournalTailer[] {
+    const internals = tracker as unknown as { tailers: Map<string, JournalTailer> };
+    return [...internals.tailers.values()];
   }
 
   /** Advance the fake interval, then drain the real fs IO the ticks kicked off. */
