@@ -1,0 +1,100 @@
+=== create fresh issue for delete probe ===
+$ bd create 'c6 delete probe' --json
+{
+  "data": {
+    "id": "c-crud-metadata-nlb",
+    "title": "c6 delete probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:33:40.656343Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:40.656343Z"
+  },
+  "schema_version": 1
+}
+exit=0
+
+=== delete WITHOUT --force (should be dry preview per help text) ===
+$ bd delete c-crud-metadata-nlb --json
+
+⚠️  DELETE PREVIEW
+
+Issue to delete:
+  c-crud-metadata-nlb: c6 delete probe
+
+This operation cannot be undone!
+To proceed, run: bd delete c-crud-metadata-nlb --force
+
+exit=0
+
+=== actual delete WITH --force --json ===
+$ bd delete c-crud-metadata-nlb --force --json
+{
+  "data": {
+    "deleted": "c-crud-metadata-nlb",
+    "dependencies_removed": 0,
+    "references_updated": 0
+  },
+  "schema_version": 1
+}
+exit=0
+
+=== bd show DELETED id --json (error shape?) ===
+$ bd show c-crud-metadata-nlb --json
+Error fetching c-crud-metadata-nlb: no issue found matching "c-crud-metadata-nlb"
+{
+  "data": {
+    "error": "no issues found matching the provided IDs"
+  },
+  "schema_version": 1
+}
+exit=1
+
+$ bd show c-crud-metadata-nlb  (no json)
+Error fetching c-crud-metadata-nlb: no issue found matching "c-crud-metadata-nlb"
+exit=1
+
+=== bd list --all --json --limit 0 --id DELETEDID (should be absent) ===
+$ bd list --all --json --limit 0 --id c-crud-metadata-nlb
+{
+  "data": [],
+  "schema_version": 1
+}
+exit=0
+
+=== bd list --all --format id projection over full list, grep for deleted id ===
+$ bd list --all --format id | grep -F c-crud-metadata-nlb
+grep_exit=1
+
+=== stdout/stderr SEPARATED for deleted-id show --json ===
+$ BD_JSON_ENVELOPE=1 bd show c-crud-metadata-nlb --json 1>/tmp/c6_stdout.txt 2>/tmp/c6_stderr.txt; echo exit=$?
+exit=1
+--- STDOUT ---
+{
+  "data": {
+    "error": "no issues found matching the provided IDs"
+  },
+  "schema_version": 1
+}
+--- STDERR ---
+Error fetching c-crud-metadata-nlb: no issue found matching "c-crud-metadata-nlb"
+
+=== recreate an issue with the SAME id as the deleted one, via --id ===
+$ bd create 'c6 recreated with same id' --id c-crud-metadata-nlb --json
+{
+  "data": {
+    "id": "c-crud-metadata-nlb",
+    "title": "c6 recreated with same id",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:16.382583Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:16.382583Z"
+  },
+  "schema_version": 1
+}
+exit=0

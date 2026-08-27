@@ -1,0 +1,244 @@
+$ bd show bct-wit --json (baseline before any mutation)
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:42Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd update --title
+$ bd update bct-wit --title B3 target issue RENAMED
+✓ Updated issue: bct-wit — B3 target issue RENAMED
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:53Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd update --set-metadata k=v
+$ bd update bct-wit --set-metadata foo=bar
+✓ Updated issue: bct-wit — B3 target issue RENAMED
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:56Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd close
+$ bd close bct-wit --reason testing close bump
+✓ Closed bct-wit — B3 target issue RENAMED: testing close bump
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:00Z",
+    "closed_at": "2026-08-27T04:36:00Z",
+    "close_reason": "testing close bump",
+    "metadata": {
+      "foo": "bar"
+    },
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd reopen
+$ bd reopen bct-wit --reason testing reopen bump
+↻ Reopened bct-wit: testing reopen bump
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:03Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd label add
+$ bd label add bct-wit testlabel
+✓ Added label 'testlabel' to bct-wit
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:03Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "labels": [
+      "testlabel"
+    ],
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### STEP: bd comment
+$ bd comment bct-wit a test comment
+✓ Comment added to bct-wit — B3 target issue RENAMED
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:03Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "labels": [
+      "testlabel"
+    ],
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 1
+  }
+]
+
+### STEP: bd note
+$ bd note bct-wit a test note
+✓ Note added to bct-wit — B3 target issue RENAMED
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "notes": "a test note",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:14Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "labels": [
+      "testlabel"
+    ],
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 1
+  }
+]
+
+### STEP: bd dep/link add
+$ bd link bct-wit bct-ob6 --type related
+✓ Linked: bct-wit (B3 target issue RENAMED) depends on bct-ob6 (B3 helper issue for dep/link) (related)
+exit=0
+$ bd show bct-wit --json
+[
+  {
+    "id": "bct-wit",
+    "title": "B3 target issue RENAMED",
+    "notes": "a test note",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:42Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:14Z",
+    "metadata": {
+      "foo": "bar"
+    },
+    "labels": [
+      "testlabel"
+    ],
+    "dependencies": [
+      {
+        "id": "bct-ob6",
+        "title": "B3 helper issue for dep/link",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:35:43Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:35:43Z",
+        "dependency_type": "related"
+      }
+    ],
+    "dependent_count": 0,
+    "dependency_count": 1,
+    "comment_count": 1
+  }
+]

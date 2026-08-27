@@ -1,0 +1,76 @@
+=== F5 setup: bd init in main repo ===
+  Repository ID: f91ff87e
+  Clone ID: a952b305425e1470
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f5_worktree_main
+  Issue prefix: f5-worktree-main
+  Issues will be named: f5-worktree-main-<hash> (e.g., f5-worktree-main-a3f2dd)
+
+Run bd quickstart to get started.
+
+=== F5 setup: create sentinel issue in MAIN ===
+✓ Created issue: f5-worktree-main-qin — SENTINEL-MAIN visible from worktree?
+  Priority: P2
+  Status: open
+=== F5: git worktree add ../wt1 (need a branch) ===
+Preparing worktree (checking out 'wt1-branch')
+HEAD is now at b6b625d bd init: initialize beads issue tracking
+exit=0
+=== F5: ls -la in worktree (does .beads exist here as a checked-out dir?) ===
+total 16
+drwxr-xr-x@  5 raimundoesteva  wheel  160 Aug 26 21:37 .
+drwxr-xr-x@ 15 raimundoesteva  wheel  480 Aug 26 21:37 ..
+drwxr-xr-x@  7 raimundoesteva  wheel  224 Aug 26 21:37 .beads
+-rw-r--r--@  1 raimundoesteva  wheel  212 Aug 26 21:37 .git
+-rw-r--r--@  1 raimundoesteva  wheel   93 Aug 26 21:37 .gitignore
+=== F5: find .beads -maxdepth 1 in worktree ===
+.beads
+.beads/metadata.json
+.beads/config.yaml
+.beads/README.md
+.beads/.gitignore
+.beads/interactions.jsonl
+=== F5: env sanity (no BEADS_DIR) ===
+PWD=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f5-worktree-wt1
+=== F5: bd where from worktree, clean env ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f5-worktree-main/.beads
+  prefix: f5-worktree-main
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f5-worktree-main/.beads/embeddeddolt
+exit=0
+=== F5: bd list from worktree, clean env ===
+○ f5-worktree-main-qin ● P2 SENTINEL-MAIN visible from worktree?
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0
+=== F5: worktree-local .beads/metadata.json (checked out, no embeddeddolt) ===
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f5_worktree_main",
+  "project_id": "d2e4daad-aa80-4ea2-a252-fa66feb53b45"
+}
+=== F5: main repo .beads/metadata.json (for comparison, same committed content expected) ===
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f5_worktree_main",
+  "project_id": "d2e4daad-aa80-4ea2-a252-fa66feb53b45"
+}
+=== F5: confirm no embeddeddolt dir was checked out in worktree ===
+(none found = confirms gitignored, worktree could not have served from local copy)

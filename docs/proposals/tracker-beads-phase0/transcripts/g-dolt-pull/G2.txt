@@ -1,0 +1,406 @@
+$ (repo1) bd init --stealth --non-interactive -p repo1
+Configured git exclude for stealth mode: .git/info/exclude
+
+✓ Stealth mode configured successfully!
+
+  Git exclude: .git/info/exclude configured
+
+Your beads setup is now invisible - other repo collaborators won't see any beads-related files.
+To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
+
+Configured git exclude for Dolt files: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/repo1/.git/info/exclude
+  Repository ID: a6fcc40f
+  Clone ID: 7438fb55e7834111
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: repo1
+  Issue prefix: repo1
+  Issues will be named: repo1-<hash> (e.g., repo1-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+$ bd create 'Issue A' -d 'first issue' --json
+{
+  "data": {
+    "id": "repo1-54u",
+    "title": "Issue A",
+    "description": "first issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:24.344589Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:24.344589Z"
+  },
+  "schema_version": 1
+}
+exit=0
+$ bd create 'Issue B' -d 'second issue' --json
+{
+  "data": {
+    "id": "repo1-q1v",
+    "title": "Issue B",
+    "description": "second issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:25.044367Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:25.044367Z"
+  },
+  "schema_version": 1
+}
+exit=0
+$ bd list --json
+{
+  "data": [
+    {
+      "id": "repo1-q1v",
+      "title": "Issue B",
+      "description": "second issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:25Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:25Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "repo1-54u",
+      "title": "Issue A",
+      "description": "first issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:24Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:24Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+$ bd show repo1-54u --json
+{
+  "data": [
+    {
+      "id": "repo1-54u",
+      "title": "Issue A",
+      "description": "first issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:24Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:24Z",
+      "dependent_count": 0,
+      "dependency_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+$ bd dolt remote add origin file:///private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/dolt-remote
+Added remote "origin" → file:///private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/dolt-remote
+exit=0
+$ bd dolt remote list
+origin               file:///private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/dolt-remote
+exit=0
+$ bd dolt push --help (already captured) -- now bd dolt push
+(eval):7: command not found: timeout
+exit=127
+$ bd dolt push (60s watchdog)
+Pushing to Dolt remote...
+Push complete.
+exit=0
+$ (repo2) bd init --stealth --non-interactive -p repo2 --remote file://$BASE/dolt-remote
+Configured git exclude for stealth mode: .git/info/exclude
+
+✓ Stealth mode configured successfully!
+
+  Git exclude: .git/info/exclude configured
+
+Your beads setup is now invisible - other repo collaborators won't see any beads-related files.
+To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
+
+Configured git exclude for Dolt files: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/repo2/.git/info/exclude
+Retrieving remote information.
+[1A[J0 of 118 chunks complete. 0 chunks being downloaded currently.
+[1A[J0 of 118 chunks complete. 2 chunks being downloaded currently.
+[1A[J0 of 118 chunks complete. 118 chunks being downloaded currently.
+[1A[J2 of 118 chunks complete. 116 chunks being downloaded currently.
+[1A[J118 of 118 chunks complete. 0 chunks being downloaded currently.
+[1A[J118 of 118 chunks complete.
+Synced database from file:///private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/dolt-remote
+  ✓ Bootstrapped from remote: file:///private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/dolt-remote
+  Repository ID: 6b18ac11
+  Clone ID: 45c0ae82a13f9af8
+  ✓ Adopted project identity from existing database
+
+✓ bd initialized from git remote!
+
+  Backend: dolt
+  Mode: embedded
+  Database: repo2
+  Issue prefix: repo2
+  Issues will be named: repo2-<hash> (e.g., repo2-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+$ (repo2) bd list --json
+{
+  "data": [
+    {
+      "id": "repo1-q1v",
+      "title": "Issue B",
+      "description": "second issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:25Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:25Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "repo1-54u",
+      "title": "Issue A",
+      "description": "first issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:24Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:24Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+$ date -u (wall clock right after bootstrap, for comparison against preserved updated_at)
+2026-08-27T04:32:07Z
+=== G2(c) cursor-evasion end-to-end control ===
+$ (repo1) bd create 'Issue X (created before cursor)' --json  [NOT pushed yet]
+{
+  "data": {
+    "id": "repo1-jy2",
+    "title": "Issue X (created before cursor)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:32:22.256839Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:32:22.256839Z"
+  },
+  "schema_version": 1
+}
+exit=0
+$ (repo2) cursor = now()
+2026-08-27T04:32:25.3NZ
+$ (repo1) bd dolt push  [pushing issue X, which was CREATED BEFORE the repo2 cursor, but PUSHED AFTER it]
+Pushing to Dolt remote...
+Push complete.
+exit=0
+$ (repo2) bd dolt pull
+Pulling from Dolt remote...
+Pull complete.
+exit=0
+$ (repo2) bd show repo1-jy2 --json
+{
+  "data": [
+    {
+      "id": "repo1-jy2",
+      "title": "Issue X (created before cursor)",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:32:22Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:22Z",
+      "dependent_count": 0,
+      "dependency_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+=== ordering sub-probe: X already created+pulled above (repo1-jy2). Now create+push Y, pull once in repo2, confirm distinct origin stamps survive a single pull ===
+$ (repo1) bd create 'Issue Y (after X)' --json
+{
+  "data": {
+    "id": "repo1-3lu",
+    "title": "Issue Y (after X)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:32:50.572329Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:32:50.572329Z"
+  },
+  "schema_version": 1
+}
+exit=0
+$ (repo1) bd dolt push
+Pushing to Dolt remote...
+Push complete.
+exit=0
+$ (repo2) bd dolt pull
+Pulling from Dolt remote...
+Pull complete.
+exit=0
+$ (repo2) bd list --json (post-pull: confirm X and Y both present with DISTINCT origin updated_at, not collapsed to pull time)
+{
+  "data": [
+    {
+      "id": "repo1-3lu",
+      "title": "Issue Y (after X)",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:32:51Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:51Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "repo1-jy2",
+      "title": "Issue X (created before cursor)",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:32:22Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:22Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "repo1-q1v",
+      "title": "Issue B",
+      "description": "second issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:25Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:25Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "repo1-54u",
+      "title": "Issue A",
+      "description": "first issue",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:24Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:24Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+=== negative control: unpushed issue must NOT appear in repo2 after pull ===
+$ (repo1) bd create 'Issue NEVER-PUSHED' --json  [deliberately NOT pushed]
+{
+  "data": {
+    "id": "repo1-qva",
+    "title": "Issue NEVER-PUSHED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:07.525797Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:07.525797Z"
+  },
+  "schema_version": 1
+}
+exit=0
+$ (repo2) bd dolt pull  [pull WITHOUT repo1 having pushed the new issue]
+Pulling from Dolt remote...
+Pull complete.
+exit=0
+$ (repo2) bd list --json | grep -c NEVER-PUSHED  (expect 0 — negative control)
+0
+grep_exit=1
+$ (repo2) bd list --json | wc -l issue count check via jq-less grep of ids
+      "id": "repo1-3lu",
+      "id": "repo1-jy2",
+      "id": "repo1-q1v",
+      "id": "repo1-54u",
+=== DEFINITIVE cursor-evasion proof using bd's OWN --updated-after incremental filter ===
+$ (repo2) bd list --updated-after 2026-08-27T04:32:25Z --json  [cursor noted BEFORE issue X's pull; expect X (repo1-jy2, updated_at 04:32:22Z) EXCLUDED even though it just arrived]
+{
+  "data": [
+    {
+      "id": "repo1-3lu",
+      "title": "Issue Y (after X)",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:32:51Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:51Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+$ POSITIVE CONTROL: bd list --updated-after 2020-01-01T00:00:00Z --json  [expect ALL issues incl. repo1-jy2]
+      "id": "repo1-3lu",
+      "id": "repo1-jy2",
+      "id": "repo1-q1v",
+      "id": "repo1-54u",
+exit=0
+$ NEGATIVE CONTROL: bd list --updated-after 2099-01-01T00:00:00Z --json  [expect EMPTY data array — proves filter is not silently ignored]
+{
+  "data": [],
+  "schema_version": 1
+}
+exit=0

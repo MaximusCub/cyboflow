@@ -1,0 +1,3 @@
+$ bd list --mol-type swarm --all --json | jq -c '.[] | {id,title,issue_type,mol_type}'
+{"id":"bp-fgk","title":"Swarm: swarm epic probe","issue_type":"molecule","mol_type":"swarm"}
+{"id":"bp-8lr","title":"mol-type swarm probe","issue_type":"task","mol_type":"swarm"}

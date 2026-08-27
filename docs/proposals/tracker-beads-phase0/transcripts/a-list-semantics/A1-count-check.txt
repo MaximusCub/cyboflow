@@ -1,0 +1,19 @@
+$ bd count
+55
+exit=0
+---
+$ bd count --json
+{
+  "count": 55,
+  "schema_version": 1
+}
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd list --json | jq -c '.data[0]'
+{"id":"bp-u88","title":"bulk 55","status":"open","priority":2,"issue_type":"task","owner":"13578267+kesteva@users.noreply.github.com","created_at":"2026-08-27T04:31:55Z","created_by":"Krishna","updated_at":"2026-08-27T04:31:55Z","dependency_count":0,"dependent_count":0,"comment_count":0}
+---
+$ BD_JSON_ENVELOPE=1 bd list --json | jq '.data | map(.children // empty) | length'
+0
+---
+$ BD_JSON_ENVELOPE=1 bd list --json | jq '.data | length' (recheck)
+55

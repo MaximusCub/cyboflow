@@ -1,0 +1,14 @@
+$ bd show bp-8zk --json | jq '.[0] | {id,status,priority}'
+{
+  "id": "bp-8zk",
+  "status": "pinned",
+  "priority": 2
+}
+
+$ bd list --json | jq '[.[] | select(.id=="bp-8zk")]'  (direct recheck, default)
+[]
+
+$ bd list --status pinned --json | jq length   (negative-control-style: explicit filter without --all)
+1
+$ bd list --status pinned --json | jq '.[].id'
+"bp-8zk"

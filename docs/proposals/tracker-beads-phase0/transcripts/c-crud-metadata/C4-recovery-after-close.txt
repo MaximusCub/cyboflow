@@ -1,0 +1,61 @@
+Target issue: c-crud-metadata-30n (has cyboflow_client_key=probe-uuid-1-11111111-2222-3333-4444-555555555555)
+
+$ bd close c-crud-metadata-30n --reason 'c4 recovery probe' --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-30n",
+      "title": "c3 metadata-at-create",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:57Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:50Z",
+      "closed_at": "2026-08-27T04:32:50Z",
+      "close_reason": "c4 recovery probe",
+      "metadata": {
+        "cyboflow_client_key": "probe-uuid-1-11111111-2222-3333-4444-555555555555"
+      }
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+=== WITH --all: should still find the closed issue ===
+$ bd list --all --json --limit 0 --metadata-field cyboflow_client_key=probe-uuid-1-11111111-2222-3333-4444-555555555555
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-30n",
+      "title": "c3 metadata-at-create",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:57Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:50Z",
+      "closed_at": "2026-08-27T04:32:50Z",
+      "close_reason": "c4 recovery probe",
+      "metadata": {
+        "cyboflow_client_key": "probe-uuid-1-11111111-2222-3333-4444-555555555555"
+      },
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+=== WITHOUT --all: default filter should EXCLUDE closed issue ===
+$ bd list --json --limit 0 --metadata-field cyboflow_client_key=probe-uuid-1-11111111-2222-3333-4444-555555555555
+{
+  "data": [],
+  "schema_version": 1
+}
+exit=0

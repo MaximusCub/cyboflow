@@ -1,0 +1,25 @@
+=== update a NONEXISTENT id, with --json, stdout/stderr separated ===
+$ BD_JSON_ENVELOPE=1 bd update c-crud-metadata-doesnotexist999 --priority 0 --json 1>stdout 2>stderr
+exit=1
+--- STDOUT ---
+--- STDERR ---
+Error resolving c-crud-metadata-doesnotexist999: no issue found matching "c-crud-metadata-doesnotexist999"
+
+=== update nonexistent id, WITHOUT --json ===
+$ bd update c-crud-metadata-doesnotexist999 --priority 0 1>stdout 2>stderr
+exit=1
+--- STDOUT ---
+--- STDERR ---
+Error resolving c-crud-metadata-doesnotexist999: no issue found matching "c-crud-metadata-doesnotexist999"
+
+=== close nonexistent id, --json, for comparison ===
+$ BD_JSON_ENVELOPE=1 bd close c-crud-metadata-doesnotexist999 --json 1>stdout 2>stderr
+exit=1
+--- STDOUT ---
+{
+  "data": {
+    "error": "resolving ID c-crud-metadata-doesnotexist999: no issue found matching \"c-crud-metadata-doesnotexist999\""
+  },
+  "schema_version": 1
+}
+--- STDERR ---

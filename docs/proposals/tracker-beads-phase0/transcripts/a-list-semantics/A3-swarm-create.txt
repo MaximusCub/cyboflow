@@ -1,0 +1,25 @@
+$ epic=$(bd create --type epic --title 'swarm epic probe' --silent)
+epic=bp-qjd
+
+$ bd swarm create bp-qjd --json
+{
+  "analysis": {
+    "closed_issues": 0,
+    "epic_id": "bp-qjd",
+    "epic_title": "swarm epic probe",
+    "errors": null,
+    "estimated_sessions": 0,
+    "max_parallelism": 0,
+    "ready_fronts": null,
+    "swarmable": true,
+    "total_issues": 0,
+    "warnings": [
+      "Epic has no children"
+    ]
+  },
+  "coordinator": "",
+  "epic_id": "bp-qjd",
+  "schema_version": 1,
+  "swarm_id": "bp-fgk"
+}
+exit=0

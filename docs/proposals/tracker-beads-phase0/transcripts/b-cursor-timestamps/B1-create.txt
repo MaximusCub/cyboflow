@@ -1,0 +1,31 @@
+$ bd create 'B1 target issue' --json
+{
+  "created_at": "2026-08-27T04:31:25.965256Z",
+  "created_by": "Krishna",
+  "id": "bct-kji",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "B1 target issue",
+  "updated_at": "2026-08-27T04:31:25.965256Z"
+}
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd create 'B1 sentinel issue (untouched)' --json
+{
+  "data": {
+    "id": "bct-8tv",
+    "title": "B1 sentinel issue (untouched)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26.936162Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26.936162Z"
+  },
+  "schema_version": 1
+}
+exit=0

@@ -1,0 +1,18 @@
+$ bd create --type agent --title 'infra probe agent' --silent
+Error: validation failed for issue : invalid issue type: agent (exit=1)
+
+$ bd create --type role --title 'infra probe role' --silent
+Error: validation failed for issue : invalid issue type: role (exit=1)
+
+$ bd create --type message --title 'infra probe message' --silent
+bp-wisp-2pi (exit=0)
+
+$ bd create --type wisp --title 'infra probe wisp' --silent
+Error: validation failed for issue : invalid issue type: wisp (exit=1)
+
+$ bd create --type template --title 'infra probe template' --silent
+Error: validation failed for issue : invalid issue type: template (exit=1)
+
+$ bd create --type infra --title 'infra probe infra' --silent
+Error: validation failed for issue : invalid issue type: infra (exit=1)
+

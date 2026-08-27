@@ -1,0 +1,22 @@
+$ bd init --non-interactive --skip-agents --skip-hooks -p bct
+  Repository ID: 27a10f59
+  Clone ID: a65b6e5048f40499
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: bct
+  Issue prefix: bct
+  Issues will be named: bct-<hash> (e.g., bct-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0

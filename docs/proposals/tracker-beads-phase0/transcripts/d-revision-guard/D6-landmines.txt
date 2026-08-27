@@ -1,0 +1,282 @@
+=== LANDMINES: commands that DESTROY the history-based revision token ===
+--- bd compact ---
+Squash Dolt commits older than N days into a single commit.
+
+Recent commits (within the retention window) are preserved via cherry-pick.
+This reduces Dolt storage overhead from auto-commit history while keeping
+recent change tracking intact.
+
+For semantic issue compaction (summarizing closed issues), use 'bd admin compact'.
+For full history squash, use 'bd flatten'.
+
+How it works:
+  1. Identifies commits older than --days threshold
+  2. Creates a squashed base commit from all old history
+--- bd flatten ---
+Nuclear option: squash ALL Dolt commit history into a single commit.
+
+This uses the Tim Sehn recipe:
+  1. Create a new branch from the current state
+  2. Soft-reset to the initial commit (preserving all data)
+  3. Commit everything as a single snapshot
+  4. Swap main branch to the new flattened branch
+  5. Run Dolt GC to reclaim space from old history
+
+This is irreversible — all commit history is lost. The resulting database
+has exactly one commit containing all current data.
+
+--- bd gc ---
+Full lifecycle garbage collection for standalone Beads databases.
+
+Runs three phases in sequence:
+  1. DECAY   — Delete closed issues older than N days (default 90)
+  2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
+  3. GC      — Run Dolt garbage collection to reclaim disk space
+
+Each phase can be skipped individually. Use --dry-run to preview all phases
+without making changes.
+
+Examples:
+  bd gc                              # Full GC with defaults (90 day decay)
+--- bd prune ---
+Permanently delete closed non-ephemeral beads and their associated data.
+
+Use this to trim closed regular beads (tasks, features, bugs, chores, etc.)
+that are no longer useful. The common case is a long-lived repo where
+closed work has piled up and is bloating auto-export or slowing queries.
+
+Requires --older-than or --pattern. The flag is a safety gate — without
+it, a muscle-memory `--force` could wipe every closed bead in the repo.
+Use `--pattern '*'` if you really do want to sweep everything closed.
+
+Deletes: issues, dependencies, labels, events, and comments for matching beads.
+Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
+
+=== --no-history flag: issues that produce NO history at all ===
+issue=dg-b3e
+marked no-history exit=0
+updated exit=0
+$ bd history dg-b3e  (does the change appear?)
+
+📜 History for dg-b3e (3 entries)
+
+a3ks25i0 2026-08-26 21:41:38
+  Author: root
+  ○ dg-b3e: NOHIST CHANGED [P2 - open]
+
+m27i37qg 2026-08-26 21:41:38
+  Author: root
+  ○ dg-b3e: NOHIST probe [P2 - open]
+
+ppq2eghp 2026-08-26 21:41:38
+  Author: root
+  ○ dg-b3e: NOHIST probe [P2 - open]
+
+exit=0
+$ bd show dg-b3e --json | grep title
+    "title": "NOHIST CHANGED",
+exit=0
+=== TOKEN RESOLVABILITY: bd show --as-of <CommitHash> (3-way-merge base) ===
+oldest token for dg-ayz = mcu4m4gkbbboekd1p3sam5foei31bndm
+$ bd show dg-ayz --as-of mcu4m4gkbbboekd1p3sam5foei31bndm --json
+[
+  {
+    "id": "dg-ayz",
+    "title": "D4D detect probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:15Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:15Z"
+  }
+]
+exit=0
+$ bd show dg-ayz --json | grep title   (current)
+    "title": "ENGINE TITLE",
+exit=0
+--- NEGATIVE CONTROL: bogus commit hash ---
+$ bd show dg-ayz --as-of deadbeefdeadbeefdeadbeefdeadbeef --json
+Error fetching dg-ayz as of deadbeefdeadbeefdeadbeefdeadbeef: get issue as of deadbeefdeadbeefdeadbeefdeadbeef: Error 1105: target commit not found
+exit=0
+=== EXIT-CODE FIDELITY: does bd exit non-zero on these errors? ===
+--- as-of bogus hash: separate stdout/stderr + exit ---
+exit=0
+STDOUT:[]
+STDERR:[Error fetching dg-ayz as of deadbeefdeadbeefdeadbeefdeadbeef: get issue as of deadbeefdeadbeefdeadbeefdeadbeef: Error 1105: target commit not found]
+--- CONTROL: unknown issue id (does THAT exit non-zero?) ---
+exit=1
+STDOUT:[{
+  "error": "no issues found matching the provided IDs",
+  "schema_version": 1
+}]
+STDERR:[Error fetching dg-NOSUCH: no issue found matching "dg-NOSUCH"]
+--- CONTROL: a genuinely bad command (proves bd CAN exit non-zero) ---
+bd sql exit=1  STDERR:[Error: 'bd sql' is not yet supported in embedded mode]
+contended claim exit=1  STDERR:[Error claiming dg-38u: issue already claimed by agentB]
+--- template execution error exit code ---
+exit=1
+STDOUT:[]
+STDERR:[Error: template execution error: template: format:1:13: executing "format" at <.ID>: can't evaluate field ID in type interface {}]
+=== raw-SQL writes: do they get swept into an unrelated bd commit? ===
+$ dolt status  (after many bd writes since the raw SQL edits)
+On branch main
+nothing to commit, working tree clean
+exit=0
+$ dolt log --oneline -n 6
+[33ma3ks25i0tpikjac9ujhot599ed6ds4f7 [0mbd: update (auto-commit) by Krishna [dg-b3e]
+[33mm27i37qg1d6v68i88f10muls8i76unfo [0mbd: update (auto-commit) by Krishna [dg-b3e]
+[33mppq2eghpqtfujkh0rke3a4hnvft9vuep [0mbd: create dg-b3e
+[33m2nfokdri2tsa7vo70k4h4grjmlte91rd [0mbd: dep add (auto-commit) by Krishna [dg-sa7, dg-v42]
+[33m2mvtf2rv8qj511hqqmk1upi53067j1ir [0mbd: update (auto-commit) by agentA [dg-38u]
+[33moj0rrj11vu4g0bqan2ch1a1ob1r92dkt [0mbd: update (auto-commit) by agentB [dg-38u]
+exit=0
+$ bd history dg-sa7   (the raw-SQL-edited issue: does its SQL change ever appear?)
+
+📜 History for dg-sa7 (33 entries)
+
+a3ks25i0 2026-08-26 21:41:38
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+m27i37qg 2026-08-26 21:41:38
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+ppq2eghp 2026-08-26 21:41:38
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+2nfokdri 2026-08-26 21:40:10
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+2mvtf2rv 2026-08-26 21:39:13
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+oj0rrj11 2026-08-26 21:39:13
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+hqs5uglq 2026-08-26 21:39:12
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+picl8udp 2026-08-26 21:38:57
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+4lqkknt7 2026-08-26 21:38:57
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+32ht07f6 2026-08-26 21:38:47
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+ohe9m2g7 2026-08-26 21:38:46
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+be5aid7p 2026-08-26 21:38:44
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+gsqhh11t 2026-08-26 21:38:26
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+sl5900f4 2026-08-26 21:38:25
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+mcu4m4gk 2026-08-26 21:38:15
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+nvat3hup 2026-08-26 21:38:00
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+vs0nube1 2026-08-26 21:37:59
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+18s8adl0 2026-08-26 21:37:58
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+sr8rodrh 2026-08-26 21:37:58
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+32t6ut4h 2026-08-26 21:37:57
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+8ocfp9lg 2026-08-26 21:37:57
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+ftao4nv3 2026-08-26 21:37:41
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+psven1ta 2026-08-26 21:37:41
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+m9bn92q4 2026-08-26 21:37:40
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+ltjm2su0 2026-08-26 21:37:40
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+anb438hh 2026-08-26 21:37:39
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+2e5s8nhh 2026-08-26 21:37:39
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+dubqm4db 2026-08-26 21:37:23
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+7rogjo3r 2026-08-26 21:37:03
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+m4les4it 2026-08-26 21:37:03
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+9qiqqpdp 2026-08-26 21:37:02
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+7a0b0vj6 2026-08-26 21:36:50
+  Author: root
+  ○ dg-sa7: GUARD-ARM-B-LANDED [P2 - open]
+
+10o5do1r 2026-08-26 21:34:56
+  Author: root
+  ○ dg-sa7: FRESH hash probe [P2 - open]
+
+exit=0
+=== bd history is UNFILTERED: entries != actual changes to that issue ===
+  dg-sa7: history_entries=33  commits_that_actually_changed_it=1
+  dg-ayz: history_entries=15  commits_that_actually_changed_it=2
+  dg-qip: history_entries=39  commits_that_actually_changed_it=5
+total commits in DB: 47
+
+=== raw-SQL edit was ABSORBED into an UNRELATED issue's bd commit ===
+dg-sa7 title flipped to GUARD-ARM-B-LANDED at commit 7a0b0vj6 (21:36:50),
+which dolt log attributes to:
+[33m7a0b0vj65q7k9ac03ih67v3inusbehcl [0mbd: create dg-v42
+exit=0

@@ -1,0 +1,23 @@
+=== E10: 16-way mixed stress on ONE workspace (engine worst case). NOTE: a 200s flock hold is ALSO in flight, so every worker must queue behind it — this doubles as a starvation test. ===
+wall=197.690s
+UPDATE w1 rc=0 elapsed=194.645s errbytes=0
+LIST w2 rc=0 elapsed=197.268s errbytes=0
+UPDATE w3 rc=0 elapsed=189.187s errbytes=0
+LIST w4 rc=0 elapsed=188.876s errbytes=0
+UPDATE w5 rc=0 elapsed=196.641s errbytes=0
+LIST w6 rc=0 elapsed=189.666s errbytes=0
+UPDATE w7 rc=0 elapsed=194.307s errbytes=0
+LIST w8 rc=0 elapsed=193.182s errbytes=0
+UPDATE w9 rc=0 elapsed=191.004s errbytes=0
+LIST w10 rc=0 elapsed=190.391s errbytes=0
+UPDATE w11 rc=0 elapsed=192.344s errbytes=0
+LIST w12 rc=0 elapsed=190.630s errbytes=0
+UPDATE w13 rc=0 elapsed=191.588s errbytes=0
+LIST w14 rc=0 elapsed=191.893s errbytes=0
+UPDATE w15 rc=0 elapsed=197.562s errbytes=0
+LIST w16 rc=0 elapsed=192.019s errbytes=0
+--- exit histogram:
+  16 rc=0
+--- non-empty stderr:
+nonempty=0
+---

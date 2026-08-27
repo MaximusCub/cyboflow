@@ -1,0 +1,250 @@
+=== E5a: SIGSTOP a lock holder, then measure waiter behaviour (timeout discovery) ===
+LOCK file: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+SIGSTOPped holder pid=33920
+$ ps -o pid,stat,command -p 33920
+  PID STAT COMMAND
+$ lsof -w -p 33920 | grep LOCK   (does the frozen proc still hold it?)
+---
+=== E5b: is the noms LOCK an flock(2)? Hold LOCK_EX for 20s from python, then run bd ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=34125 holding 20.0s
+$ time bd list --all --json   (while python holds flock LOCK_EX)
+HOLDER: released
+rc=0 elapsed=22.445s stdout_bytes=1501
+STDERR>>>
+<<<
+---
+=== E5c: hold flock LOCK_EX for 90s; does bd update time out or wait? ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=34376 holding 90.0s
+HOLDER: released
+bd update rc=0 elapsed=95.284s
+STDOUT>>>
+✓ Updated issue: elock-0y1 — E4 target X
+<<<
+STDERR>>>
+<<<
+---
+=== E5d: is .beads/embeddeddolt/.lock also an flock bd respects? (NEGATIVE CONTROL for lock location) ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/.lock pid=35210 holding 15.0s
+bd list rc=0 elapsed=0.395s  (if ~0.4s => bd does NOT respect embeddeddolt/.lock; if ~15s => it does)
+STDERR>>>
+<<<
+HOLDER: released
+---
+=== E5e: search bd binary for lock-timeout knobs ===
+$ strings /opt/homebrew/bin/bd | grep -iE 'lock.*(timeout|wait|retry)|(timeout|retry).*lock' | sort -u | head -30
+[TRUNCATED-BY-PROBE: chroma syntax-highlight rule blobs embedded in the bd binary, no lock-timeout knob among them]
+---
+$ bd config list 2>&1 | head -40
+
+Configuration:
+  auto_compact_enabled = false
+  compact_batch_size = 50
+  compact_parallel_workers = 5
+  compact_tier1_days = 30
+  compact_tier1_dep_levels = 2
+  compact_tier2_commits = 100
+  compact_tier2_days = 90
+  compact_tier2_dep_levels = 5
+  compaction_enabled = false
+  issue_prefix = elock
+
+Also set in config.yaml (not shown above):
+  metrics.disabled = false
+  metrics.endpoint = https://gastownhall-eventsapi.com/mp/collect
+  metrics.notice_shown = true
+  no-git-ops = true
+
+Tip: Run 'bd config show' for all effective config with provenance.
+---
+$ bd config list (full)
+
+Configuration:
+  auto_compact_enabled = false
+  compact_batch_size = 50
+  compact_parallel_workers = 5
+  compact_tier1_days = 30
+  compact_tier1_dep_levels = 2
+  compact_tier2_commits = 100
+  compact_tier2_days = 90
+  compact_tier2_dep_levels = 5
+  compaction_enabled = false
+  issue_prefix = elock
+
+Also set in config.yaml (not shown above):
+  metrics.disabled = false
+  metrics.endpoint = https://gastownhall-eventsapi.com/mp/collect
+  metrics.notice_shown = true
+  no-git-ops = true
+
+Tip: Run 'bd config show' for all effective config with provenance.
+exit=0
+---
+$ targeted: strings bd | grep -E 'BD_[A-Z_]*(LOCK|TIMEOUT|WAIT|RETRY)[A-Z_]*' | sort -u
+---
+$ targeted: strings bd | grep -oE 'BEADS_[A-Z0-9_]+' | sort -u | head -40
+BEADS_ACTOR
+BEADS_CREDENTIALS_FILE
+BEADS_DB
+BEADS_DIR
+BEADS_DOLT_
+BEADS_DOLT_AUTO_START
+BEADS_DOLT_DATA_DIR
+BEADS_DOLT_DEBUG
+BEADS_DOLT_LOG_MAX_BYTESCALL
+BEADS_DOLT_MAX_CONNSBEADS_CENTRAL_CONFIG
+BEADS_DOLT_PASSWORD
+BEADS_DOLT_PORTA
+BEADS_DOLT_PROXIED_SERVERT
+BEADS_DOLT_READY_TIMEOUT
+BEADS_DOLT_REMOTESAPI_PORT
+BEADS_DOLT_SERVER_DATABASE
+BEADS_DOLT_SERVER_HOST
+BEADS_DOLT_SERVER_MODEBEADS_DOLT_SERVER_HOSTBEADS_DOLT_SERVER_PORTC
+BEADS_DOLT_SERVER_PORT
+BEADS_DOLT_SERVER_SOCKET
+BEADS_DOLT_SERVER_TLS
+BEADS_DOLT_SERVER_USERA
+BEADS_DOLT_SHARED_SERVER
+BEADS_HOOK_TIMEOUT
+BEADS_IDENTITYBD_IS_FLUSHER
+BEADS_MAIL_DELEGATE
+BEADS_METRICS_ENDPOINT
+BEADS_PRIME_TIMEOUT
+BEADS_PROXIED_SERVER_CONFIGS
+BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD
+BEADS_PROXIED_SERVER_EXTERNAL_PASSWORDE
+BEADS_PROXIED_SERVER_LOG
+BEADS_PROXIED_SERVER_ROOT_PATHT
+BEADS_SHARED_SERVER_DIR
+BEADS_SKIP_IDENTITY_CHECK
+BEADS_TEST_IGNORE_REPO_CONFIG
+BEADS_TEST_MODE
+BEADS_TIP_SEED
+---
+$ targeted: strings bd | grep -oE '"?dolt\.[a-z-]+"?' | sort -u | head -20
+dolt.all
+dolt.apply
+dolt.auto
+dolt.auto-commit
+dolt.auto-commitgrpc
+dolt.auto-push
+dolt.auto-push-interval
+dolt.auto-push-timeoutfai
+dolt.auto-start
+dolt.auto-startbd
+dolt.bootstrap
+dolt.branchwisp
+dolt.build
+dolt.cache
+dolt.checkoutpriority
+dolt.child
+dolt.circuit
+dolt.clean
+dolt.close
+dolt.commitdolt
+dolt.conflictscreated
+dolt.corrupt
+dolt.create
+dolt.database
+dolt.databasedolt
+---
+=== E5f: SIGKILL(-9) bd processes WHILE they hold the noms LOCK; 10 kills ===
+kill -9 pid=35625  (1/10)
+kill -9 pid=35638  (2/10)
+kill -9 pid=35655  (3/10)
+kill -9 pid=35684  (4/10)
+kill -9 pid=35696  (5/10)
+kill -9 pid=35709  (6/10)
+kill -9 pid=35722  (7/10)
+kill -9 pid=35735  (8/10)
+kill -9 pid=35749  (9/10)
+kill -9 pid=35762  (10/10)
+killed_total=10
+--- leftover bd/beads processes:
+(none listed = clean)
+---
+=== E5g: post-SIGKILL recovery — does the workspace still work? ===
+$ ls -la .beads/embeddeddolt/elock/.dolt/ and noms/
+.beads/embeddeddolt/elock/.dolt/:
+total 16
+drwxr-xr-x@  6 raimundoesteva  wheel  192 Aug 26 21:31 .
+drwxr-xr-x@  3 raimundoesteva  wheel   96 Aug 26 21:31 ..
+-rwxrwxrwx@  1 raimundoesteva  wheel    2 Aug 26 21:31 config.json
+drwxr-xr-x@ 10 raimundoesteva  wheel  320 Aug 26 21:42 noms
+-rwxrwxrwx@  1 raimundoesteva  wheel   83 Aug 26 21:31 repo_state.json
+drwxr-xr-x@  3 raimundoesteva  wheel   96 Aug 26 21:31 temptf
+
+.beads/embeddeddolt/elock/.dolt/noms/:
+total 19320
+drwxr-xr-x@ 10 raimundoesteva  wheel      320 Aug 26 21:42 .
+drwxr-xr-x@  6 raimundoesteva  wheel      192 Aug 26 21:31 ..
+-rw-------@  1 raimundoesteva  wheel        0 Aug 26 21:31 LOCK
+-rw-r--r--@  1 raimundoesteva  wheel   365168 Aug 26 21:42 journal.idx
+-rw-------@  1 raimundoesteva  wheel      148 Aug 26 21:42 manifest
+-rw-------@  1 raimundoesteva  wheel        0 Aug 26 21:42 nbs_manifest_1905942939
+-rw-------@  1 raimundoesteva  wheel      148 Aug 26 21:42 nbs_manifest_3044211911
+-rw-------@  1 raimundoesteva  wheel      148 Aug 26 21:42 nbs_manifest_4029814345
+drwxr-xr-x@  2 raimundoesteva  wheel       64 Aug 26 21:31 oldgen
+-rw-r--r--@  1 raimundoesteva  wheel  9209817 Aug 26 21:42 vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+
+.beads/embeddeddolt/elock/.dolt/temptf/:
+total 0
+drwxr-xr-x@ 3 raimundoesteva  wheel   96 Aug 26 21:31 .
+drwxr-xr-x@ 6 raimundoesteva  wheel  192 Aug 26 21:31 ..
+-rw-r--r--@ 1 raimundoesteva  wheel    0 Aug 26 21:31 dolt_embedded_metrics
+---
+$ BD_JSON_ENVELOPE=1 bd list --all --json | head -6
+rc=0 elapsed=0.398s
+{
+  "data": [
+    {
+      "id": "elock-l0n",
+      "title": "lock probe B",
+      "status": "open",
+STDERR>>>
+<<<
+---
+$ bd update elock-6gt -p 3
+rc=0 elapsed=0.436s
+✓ Updated issue: elock-6gt — E4 target Y
+STDERR>>>
+<<<
+---
+$ bd create 'post-kill sanity' --json (envelope off)
+{
+  "created_at": "2026-08-27T04:42:46.04645Z",
+  "created_by": "Krishna",
+  "id": "elock-wf4",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+exit=0
+---
+=== E5h: leaked artifacts + growth after 10 SIGKILLs / ~500 writes ===
+$ ls .beads/embeddeddolt/elock/.dolt/noms/ | grep -c nbs_manifest
+3
+$ ls -la .beads/embeddeddolt/elock/.dolt/noms/nbs_manifest_* | head -20
+-rw-------@ 1 raimundoesteva  wheel    0 Aug 26 21:42 .beads/embeddeddolt/elock/.dolt/noms/nbs_manifest_1905942939
+-rw-------@ 1 raimundoesteva  wheel  148 Aug 26 21:42 .beads/embeddeddolt/elock/.dolt/noms/nbs_manifest_3044211911
+-rw-------@ 1 raimundoesteva  wheel  148 Aug 26 21:42 .beads/embeddeddolt/elock/.dolt/noms/nbs_manifest_4029814345
+$ du -sh .beads/  (store size after ~500 writes)
+9.6M	.beads/
+$ du -sh .beads/embeddeddolt/elock/.dolt/noms/
+9.4M	.beads/embeddeddolt/elock/.dolt/noms/
+$ bd list --all --json | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))'  (row count sane?)
+issue_count= 5
+$ bd show elock-6gt --json  (issue killed mid-write intact?)
+[
+  {
+    "id": "elock-6gt",
+    "title": "E4 target Y",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:31Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:42:45Z",
+    "dependent_count": 0,
+---

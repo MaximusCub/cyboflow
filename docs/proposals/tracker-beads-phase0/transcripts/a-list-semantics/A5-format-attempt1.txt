@@ -1,0 +1,8 @@
+$ bd list --format '{{.ID}} {{.Revision}}' --limit 3
+exit=0
+
+$ bd list --format '{{.ID}} {{.revision}}' --limit 3
+exit=0
+
+$ bd list --format '{{printf "%+v" .}}' --limit 1
+exit=0

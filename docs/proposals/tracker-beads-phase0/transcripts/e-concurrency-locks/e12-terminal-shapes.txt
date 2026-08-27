@@ -1,0 +1,63 @@
+=== E12: TERMINAL (non-retryable) error shapes, in throwaway ctl/ws4 ===
+$ (baseline) bd list --all --json
+[
+  {
+    "id": "ctl4-tva",
+exit=0
+--- corrupt the noms manifest:
+$ printf 'GARBAGE' > .beads/embeddeddolt/ctl4/.dolt/noms/manifest
+exit=0
+$ bd list --all --json
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: EOF
+exit=0
+$ bd update anything -p 1
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: EOF
+exit=0
+---
+--- delete the whole noms dir (hard corruption):
+$ rm -rf .beads/embeddeddolt/ctl3/.dolt/noms
+exit=0
+$ bd list --all --json
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: switching to database: Error 1049: database not found: ctl3
+exit=0
+---
+--- remove .beads entirely, run from a NON-beads dir with no parent workspace:
+$ (cwd=/tmp/bd-nowhere-39698, no .beads anywhere up-tree) bd list --all --json
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=0
+$ bd update foo-1 -p 1
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=0
+---
+=== E12b: SAME commands, exit codes captured WITHOUT a pipe (the '| head' above made $? = head's status = 0) ===
+$ bd list --all --json  (corrupt manifest)
+exit=1
+stdout:
+stderr:
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: EOF
+$ bd update anything -p 1  (corrupt manifest)
+exit=1
+stderr:
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: EOF
+$ bd list --all --json  (noms dir deleted)
+exit=1
+stderr:
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: switching to database: Error 1049: database not found: ctl3
+$ bd list --all --json  (no workspace anywhere)
+exit=1
+stderr:
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+$ BD_JSON_ENVELOPE=1 bd list --all --json  (no workspace, envelope on)
+exit=1
+stdout:
+stderr:
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+---

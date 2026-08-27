@@ -1,0 +1,106 @@
+$ bd show --help (looking for revision/version field)
+Show issue details
+
+Usage:
+  bd show [id...] [--id=<id>...] [--current] [flags]
+
+Aliases:
+  show, view
+
+Flags:
+      --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt)
+      --children             Show only the children of this issue
+      --current              Show the currently active issue (in-progress, hooked, or last touched)
+  -h, --help                 help for show
+      --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
+      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)
+      --include-dependents   Stream full dependent issues in JSON output (--json only; may be slow on hub beads)
+      --local-time           Show timestamps in local time instead of UTC
+      --long                 Show all available fields (extended metadata, agent identity, gate fields, etc.)
+      --refs                 Show issues that reference this issue (reverse lookup)
+      --short                Show compact one-line output per issue
+      --thread               Show full conversation thread (for messages)
+  -w, --watch                Watch for changes and auto-refresh display
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+$ bd --help | grep -i log
+$ (repo2) bd list --json saved to pre_noop_pull_repo2.json
+$ (repo2) bd dolt pull (NO-OP: nothing new pushed since last pull)
+Pulling from Dolt remote...
+Pull complete.
+exit=0
+$ (repo2) bd list --json saved to post_noop_pull_repo2.json
+$ diff pre/post:
+diff exit=0
+$ (repo2) bd show repo1-jy2 --long --json
+{
+  "data": [
+    {
+      "id": "repo1-jy2",
+      "title": "Issue X (created before cursor)",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:32:22Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:32:22Z",
+      "dependent_count": 0,
+      "dependency_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+$ (repo2) bd dolt status
+Dolt engine: embedded (in-process, no server)
+  Data: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/repo2/.beads/embeddeddolt
+exit=0
+$ (repo2) bd dolt show --help
+Show current Dolt configuration with connection status
+
+Usage:
+  bd dolt show [flags]
+
+Flags:
+  -h, --help   help for show
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+$ (repo2) bd dolt show --json
+{
+  "data": {
+    "backend": "dolt",
+    "data_dir": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/g-dolt-pull/repo2/.beads/embeddeddolt",
+    "database": "repo2",
+    "embedded": true
+  },
+  "schema_version": 1
+}
+exit=0

@@ -1,0 +1,98 @@
+=== F6 setup: bd init ===
+  Repository ID: 83a348c8
+  Clone ID: a45782e731ea7b4f
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f6_scale
+  Issue prefix: f6-scale
+  Issues will be named: f6-scale-<hash> (e.g., f6-scale-a3f2dd)
+
+Run bd quickstart to get started.
+
+=== F6: bd import --dry-run bulk.jsonl (first 5 lines shown, but full run) ===
+Would import 80 issues and 0 memories from bulk.jsonl
+bd import bulk.jsonl --dry-run 2>&1  0.20s user 0.08s system 90% cpu 0.300 total
+tail -20  0.00s user 0.00s system 0% cpu 0.300 total
+=== F6: bd import bulk.jsonl (real) ===
+Imported 80 issues from bulk.jsonl
+bd import bulk.jsonl 2>&1  0.65s user 0.14s system 107% cpu 0.733 total
+tail -20  0.00s user 0.00s system 0% cpu 0.733 total
+=== F6: bd list --all --limit 0 (sanity count) ===
+
+--------------------------------------------------------------------------------
+Total: 80 issues (80 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+=== F6a: bd list --all --json --limit 0 : wall time + byte count ===
+real 0.58
+user 0.26
+sys 0.16
+--- stdout bytes ---
+ 12314323
+--- first 300 bytes ---
+[
+  {
+    "id": "f6-scale-03e",
+    "title": "BULK-0066 scale probe issue",
+    "description": "f0d60be73c6bfa67cd3f9989cac1e9f4d2241fe4f9ee77464de908b728c85ce07cf2e6c468ed295dc857ffbda53c2b387301c4aba4a8545abd93a6d5f4faf68d7d18d3178d060a1a967a145a635203571efa92ebe54de76e65bdeee3ac6ff29e1d19381158a5
+--- BD_JSON_ENVELOPE=1 variant, wall time + bytes ---
+real 0.81
+user 0.29
+sys 0.21
+ 12316442
+=== F6c: node execFile with maxBuffer=10MB against 12.3MB stdout ===
+=== execFile callback fired ===
+elapsed_ms: 470
+ERROR present. err.code: ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+err.message: stdout maxBuffer length exceeded
+err.signal: undefined
+err.killed: undefined
+stdout_partial_length: 10485760
+stdout_partial_first200: "[\n  {\n    \"id\": \"f6-scale-03e\",\n    \"title\": \"BULK-0066 scale probe issue\",\n    \"description\": \"f0d60be73c6bfa67cd3f9989cac1e9f4d2241fe4f9ee77464de908b728c85ce07cf2e6c468ed295dc857ffbda53c2b387301c4ab"
+stdout_partial_last200: "078cca646df2d73cae5a023b4d94bd3bbfd6df6c1f436293b782d55acb9896b56af687f83cfd7ad7286c002d584db3cf0ad579ae07358d5e1f0ec0179ac4baad868bf1b9958481b97bd3e90baba16d2a5c4eaee5f2a2368ea21bc9e5d715c511359063c5"
+stderr_length: (stderr undefined)
+=== F6d: bd list --all --limit 0 --format digraph ===
+real 0.41
+user 0.18
+sys 0.11
+       0
+
+=== F6d: bd list --all --limit 0 --format '{{.ID}}' ===
+real 0.40
+user 0.17
+sys 0.11
+       0
+
+=== F6d (corrected): --format is a DEPENDENCY-GRAPH exporter, not an id-only issue projection ===
+Evidence: with 0 deps in f6-scale, --format digraph/{{.ID}} both silently emit 0 bytes, exit 0, no stderr.
+Evidence (from BASE workspace, 1 dep added): digraph emits edge pairs 'child parent'; Go template {{.ID}} on an edge emits literal '<no value>' (edges have no .ID field).
+
+=== Actual smallest available projection: plain (non-JSON) bd list --all --limit 0 ===
+real 0.41
+user 0.17
+sys 0.11
+    4358
+○ f6-scale-03e ● P2 BULK-0066 scale probe issue
+○ f6-scale-0vo ● P2 BULK-0079 scale probe issue
+○ f6-scale-10k ● P2 BULK-0034 scale probe issue
+○ f6-scale-18h ● P2 BULK-0019 scale probe issue
+○ f6-scale-1ox ● P2 BULK-0020 scale probe issue
+○ f6-scale-2b8 ● P2 BULK-0014 scale 
+
+--------------------------------------------------------------------------------
+Total: 80 issues (80 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+=== F6e: TTFB test (progressive streaming vs full buffering) ===
+first byte at 428ms (chunk size 8192)
+close: code=0 total_ms=468 bytes=12314323 chunks=1504 ttfb_ms=428 ttfb_fraction=0.915

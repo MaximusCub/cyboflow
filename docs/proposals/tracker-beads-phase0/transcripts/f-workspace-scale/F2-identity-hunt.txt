@@ -1,0 +1,448 @@
+$ bd info --help
+Display information about the current database.
+
+This command helps debug issues where bd is using an unexpected database. It shows:
+  - The absolute path to the database file
+  - Database statistics (issue count)
+  - Schema information (with --schema flag)
+  - What's new in recent versions (with --whats-new flag)
+
+Examples:
+  bd info
+  bd info --json
+  bd info --schema --json
+  bd info --whats-new
+  bd info --whats-new --json
+  bd info --thanks
+
+Usage:
+  bd info [flags]
+
+Flags:
+  -h, --help        help for info
+      --json        Output in JSON format
+      --schema      Include schema information in output
+      --thanks      Show thank you page for contributors
+      --whats-new   Show agent-relevant changes from recent versions
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+=== bd info ===
+
+Beads Database Information
+===========================
+Database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+Mode: direct
+
+Issue Count: 0
+
+⚠️  Git hooks not installed (5 missing)
+   Run: bd hooks install
+
+=== BD_JSON_ENVELOPE=1 bd info --json ===
+
+Beads Database Information
+===========================
+Database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+Mode: direct
+
+Issue Count: 0
+
+⚠️  Git hooks not installed (5 missing)
+   Run: bd hooks install
+
+=== bd info --json (no envelope) ===
+
+Beads Database Information
+===========================
+Database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+Mode: direct
+
+Issue Count: 0
+
+⚠️  Git hooks not installed (5 missing)
+   Run: bd hooks install
+
+=== exit code check: bd info --json ===
+exit=0
+--- stdout bytes ---
+     360
+$ bd where --help
+Show the active beads database location, including redirect information.
+
+	This command is useful for debugging when using redirects, to understand
+	which beads workspace is actually being used.
+
+Examples:
+  bd where           # Show active beads location
+  bd where --json    # Output in JSON format
+
+
+Usage:
+  bd where [flags]
+
+Flags:
+  -h, --help   help for where
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+=== bd where ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+=== bd where --json (no envelope) ===
+{
+  "database_path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt",
+  "path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads",
+  "prefix": "f-workspace-scale",
+  "schema_version": 1
+}
+=== BD_JSON_ENVELOPE=1 bd where --json ===
+{
+  "data": {
+    "path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads",
+    "prefix": "f-workspace-scale",
+    "database_path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt"
+  },
+  "schema_version": 1
+}
+$ bd context --help
+Show the effective backend identity information including repository paths,
+backend configuration, and sync settings.
+
+This command reads directly from config files and does not require the
+database to be open, making it useful for diagnostics in degraded states.
+
+Examples:
+  bd context           # Show context information
+  bd context --json    # Output in JSON format
+
+
+Usage:
+  bd context [flags]
+
+Flags:
+  -h, --help   help for context
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+=== bd context ===
+Error: cannot resolve repo context: BEADS_DIR points to unsafe location: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+=== BD_JSON_ENVELOPE=1 bd context --json ===
+{
+  "data": {
+    "error": "cannot resolve repo context: BEADS_DIR points to unsafe location: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads"
+  },
+  "schema_version": 1
+}
+=== bd context in f1-vanilla (non-stealth) ===
+Error: cannot resolve repo context: BEADS_DIR points to unsafe location: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/.beads
+exit=1
+=== bd -C f1-vanilla context (from BASE) ===
+Error: cannot resolve repo context: BEADS_DIR points to unsafe location: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/.beads
+exit=1
+=== bd context --help full (search unsafe) ===
+Show the effective backend identity information including repository paths,
+backend configuration, and sync settings.
+
+This command reads directly from config files and does not require the
+database to be open, making it useful for diagnostics in degraded states.
+
+Examples:
+  bd context           # Show context information
+  bd context --json    # Output in JSON format
+
+
+Usage:
+  bd context [flags]
+
+Flags:
+  -h, --help   help for context
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+=== bd help | grep -i unsafe ===
+=== bd --help global flags search allow ===
+=== exit codes ===
+bd context exit=1
+BD_JSON_ENVELOPE bd context --json exit=1
+=== bd config list --help ===
+List all configuration
+
+Usage:
+  bd config list [flags]
+
+Flags:
+  -h, --help   help for list
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+=== bd config list ===
+
+Configuration:
+  auto_compact_enabled = false
+  compact_batch_size = 50
+  compact_parallel_workers = 5
+  compact_tier1_days = 30
+  compact_tier1_dep_levels = 2
+  compact_tier2_commits = 100
+  compact_tier2_days = 90
+  compact_tier2_dep_levels = 5
+  compaction_enabled = false
+  issue_prefix = f-workspace-scale
+
+Also set in config.yaml (not shown above):
+  metrics.disabled = false
+  metrics.endpoint = https://gastownhall-eventsapi.com/mp/collect
+  metrics.notice_shown = true
+  no-git-ops = true
+
+Tip: Run 'bd config show' for all effective config with provenance.
+=== BD_JSON_ENVELOPE=1 bd config list --json ===
+{
+  "data": {
+    "auto_compact_enabled": "false",
+    "compact_batch_size": "50",
+    "compact_parallel_workers": "5",
+    "compact_tier1_days": "30",
+    "compact_tier1_dep_levels": "2",
+    "compact_tier2_commits": "100",
+    "compact_tier2_days": "90",
+    "compact_tier2_dep_levels": "5",
+    "compaction_enabled": "false",
+    "issue_prefix": "f-workspace-scale"
+  },
+  "schema_version": 1
+}
+=== bd init --non-interactive --skip-agents --skip-hooks (f2-identity) ===
+  Repository ID: eb0cedb4
+  Clone ID: 0dab13c64d16fc51
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f2_identity
+  Issue prefix: f2-identity
+  Issues will be named: f2-identity-<hash> (e.g., f2-identity-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+--- project_id BEFORE rename ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "0aace3f2-6a34-48b9-a35e-b82e301a9bdf"
+}
+--- repository_id/clone_id search: any file? ---
+=== bd rename-prefix f2- ===
+Error: unknown flag: --non-interactive
+exit=1
+--- project_id AFTER rename ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "0aace3f2-6a34-48b9-a35e-b82e301a9bdf"
+}
+--- bd where after rename ---
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads
+  prefix: f2-identity
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads/embeddeddolt
+=== bd rename-prefix f2- (no flag, non-tty stdin, timeout 20s) ===
+(eval):6: command not found: timeout
+exit=127
+--- project_id AFTER rename attempt 2 ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "0aace3f2-6a34-48b9-a35e-b82e301a9bdf"
+}
+--- bd where ---
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads
+  prefix: f2-identity
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads/embeddeddolt
+--- CI=true bd rename-prefix f2- ---
+(eval):12: command not found: timeout
+exit=127
+--- project_id AFTER rename attempt 3 (CI=true) ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "0aace3f2-6a34-48b9-a35e-b82e301a9bdf"
+}
+--- bd where ---
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads
+  prefix: f2-identity
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads/embeddeddolt
+=== bd rename-prefix f2- (perl alarm 20s, non-tty stdin) ===
+No issues to rename. Updating prefix to f2
+exit=0
+--- project_id AFTER rename attempt ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "0aace3f2-6a34-48b9-a35e-b82e301a9bdf"
+}
+--- bd where ---
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads
+  prefix: f2
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity/.beads/embeddeddolt
+=== rm -rf .beads && bd init (re-init) ===
+  Repository ID: eb0cedb4
+  Clone ID: 0dab13c64d16fc51
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f2_identity
+  Issue prefix: f2-identity
+  Issues will be named: f2-identity-<hash> (e.g., f2-identity-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+--- project_id AFTER re-init ---
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f2_identity",
+  "project_id": "b728121b-6548-4610-ac61-9310d3c96af9"
+}
+--- compare: OLD=0aace3f2-6a34-48b9-a35e-b82e301a9bdf ---
+=== git log (f2-identity) ===
+db887cf bd init: initialize beads issue tracking
+9b59181 bd init: initialize beads issue tracking
+a16175e init
+a16175e8b5f7bea8ff0ec35875cbe96b7c502994
+--- git config --get remote.origin.url ---
+--- pwd ---
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f2-identity
+=== grep for repo/clone id hex values across .beads and .git (excluding binary noms blobs) ===
+--- search config.yaml for id keys ---
+# or overridden with command-line flags
+# 0 = hide titles, N > 0 = truncate to N characters
+# Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
+# - linear.team_id
+# Secret keys (stored in this file but prefer env vars to avoid git exposure):
+--- .dolt config.json content (embeddeddolt) ---
+-- .beads/embeddeddolt/f2_identity/.dolt/config.json --
+{}
+-- .beads/embeddeddolt/f2_identity/.dolt/repo_state.json --
+{
+  "head": "refs/heads/main",
+  "remotes": {},
+  "backups": {},
+  "branches": {}
+}
+--- dolt sql: SELECT @@GLOBAL.server_uuid or similar via bd dolt sql? ---
+Configure and manage Dolt database settings and server lifecycle.
+
+Beads uses a dolt sql-server for all database operations. The server is
+auto-started transparently when needed. Use these commands for explicit
+control or diagnostics.
+
+Server lifecycle:
+  bd dolt start        Start the Dolt server for this project
+  bd dolt stop         Stop the Dolt server for this project
+  bd dolt status       Show Dolt server status
+
+Configuration:
+  bd dolt show         Show current Dolt configuration with connection test
+  bd dolt set <k> <v>  Set a configuration value
+  bd dolt test         Test server connection
+
+Version control:
+  bd dolt commit       Commit pending changes
+  bd dolt push         Push commits to Dolt remote
+  bd dolt pull         Pull commits from Dolt remote
+
+Remote management:
+  bd dolt remote add <name> <url>   Add a Dolt remote
+  bd dolt remote list                List configured remotes
+  bd dolt remote remove <name>       Remove a Dolt remote
+
+Configuration keys for 'bd dolt set':
+  database  Database name (default: issue prefix or "beads")
+  host      Server host (default: 127.0.0.1)
+  port      Server port (auto-detected; override with bd dolt set port <N>)

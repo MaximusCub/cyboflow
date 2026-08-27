@@ -1,0 +1,73 @@
+### Baseline reminder: bct-kji actual updated_at (full precision, from create) = 2026-08-27T04:31:25.965256Z
+### local machine TZ = PDT (UTC-7); date -> Wed Aug 26 21:33:45 PDT 2026
+
+### OFFSET TEST 1: cursor='2026-08-27T06:31:25+02:00' == 04:31:25Z (SAME instant as floor(kji)) -> expect INCLUDE if offset honored
+bct-kji present? -> 1
+[
+  {
+    "id": "bct-8tv",
+    "title": "B1 sentinel issue (untouched)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bct-kji",
+    "title": "B1 target issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+### OFFSET TEST 2 (the real proof): cursor='2026-08-27T04:31:26+02:00' -- SAME digits that excluded kji when given as Z, but with +02:00 this is actually 02:31:26 UTC (2h earlier, well before kji).
+### If offset honored -> INCLUDE (02:31:26 UTC < kji's 04:31:25 UTC). If offset ignored (treated as UTC digits) -> EXCLUDE (matches the '26Z' behavior already proven above).
+bct-kji present? -> 1
+[
+  {
+    "id": "bct-8tv",
+    "title": "B1 sentinel issue (untouched)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bct-kji",
+    "title": "B1 target issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+### DATE-ONLY TEST: cursor='2026-08-27' (date only). UTC-midnight would be 2026-08-27T00:00:00Z (before kji's 04:31 -> INCLUDE). Local-midnight (PDT, UTC-7) would be 2026-08-27T07:00:00Z (after kji's 04:31 -> EXCLUDE).
+bct-kji present? -> 0
+[]
