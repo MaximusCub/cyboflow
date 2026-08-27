@@ -1477,3 +1477,79 @@ describe('TrackerWizardModal — add-mapping mode · submit', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Keyless Step 0 (beads) — Detect instead of Authorize
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider with `needsApiKey: false` has no key to paste, so Step 0 becomes a
+ * DETECT of the local workspace. What these pin down is everything a wrong
+ * answer here would cost: a key field that must not render, a probe that must
+ * carry the active project (main resolves the repo path from it — a renderer
+ * may not send a path), and the two failures needing DIFFERENT copy, only one
+ * of which warrants the `bd init` disclosure.
+ */
+describe('TrackerWizardModal — keyless connect', () => {
+  function renderKeyless(): void {
+    render(
+      <TrackerWizardModal
+        isOpen
+        provider="beads"
+        projectId={7}
+        onClose={onClose}
+        onConnected={onConnected}
+      />,
+    );
+  }
+
+  it('renders Detect with no key input, and probes with the active project id', async () => {
+    mockValidate.mockResolvedValue({
+      workspaceId: 'inst-1',
+      workspaceName: 'cf',
+      actorLabel: 'J. Kesteva',
+    });
+    renderKeyless();
+
+    expect(screen.queryByLabelText(/api key|token|workspace/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Authorize' })).not.toBeInTheDocument();
+    const detect = screen.getByRole('button', { name: 'Detect' });
+    // Nothing to type, so it must be usable from the first frame — an
+    // "empty key" gate here would make the step impossible to leave.
+    expect(detect).toBeEnabled();
+
+    fireEvent.click(detect);
+    await screen.findByTestId('tracker-authorized-card');
+
+    expect(mockValidate).toHaveBeenCalledWith({
+      credentials: { provider: 'beads', projectId: 7 },
+    });
+  });
+
+  it('offers the init disclosure when the repo has no workspace, and not when `bd` is missing', async () => {
+    mockValidate.mockRejectedValue(
+      new Error('[beads] no beads database found — run `bd init` in this repo'),
+    );
+    renderKeyless();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('no beads database found');
+    // The disclosure is load-bearing, not decoration: plain `bd init` commits
+    // to the user's repo without asking, and telemetry is on by default.
+    expect(alert).toHaveTextContent('bd init --stealth');
+    expect(alert).toHaveTextContent('commits 18 files');
+    expect(alert).toHaveTextContent('bd metrics off');
+
+    // A MISSING BINARY is a different fix, and telling the user what `bd init`
+    // commits does not help them install `bd`.
+    mockValidate.mockRejectedValue(
+      new Error('[beads] `bd` was not found on PATH — install beads and re-detect this connection.'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('was not found on PATH'),
+    );
+    expect(screen.getByRole('alert')).not.toHaveTextContent('bd init --stealth');
+  });
+});

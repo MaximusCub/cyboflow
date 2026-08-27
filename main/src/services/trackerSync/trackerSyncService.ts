@@ -126,6 +126,8 @@ import {
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
 import { DartAdapter } from './dartAdapter';
+import { BeadsAdapter } from './beadsAdapter';
+import { providerNeedsSecret } from './providerCapabilities';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
   cancelPendingKinds,
@@ -406,6 +408,18 @@ export interface TrackerSyncServiceDeps {
   nowIso?: () => string;
   /** Injected provider-client construction. Defaults to {@link defaultAdapterFactory}. */
   adapterFactory?: TrackerAdapterFactory;
+  /**
+   * A cyboflow project's on-disk repo path, or null when it is unknown. Only
+   * the KEYLESS providers need it (beads anchors its `bd` workspace to the
+   * project's repo), which is why it is optional: a test that never connects
+   * one omits it, and the wizard probe fails with an actionable message rather
+   * than a crash if the wiring is missing.
+   *
+   * Injected — the service must not reach into SessionManager — and resolved
+   * MAIN-SIDE on purpose: the renderer sends a project id, never a path, so
+   * nothing it composes can decide which directory a CLI is spawned in.
+   */
+  resolveProjectPath?: (projectId: number) => string | null;
   /** Optional structured logger for loop-level failures. */
   logger?: LoggerLike;
 }
@@ -415,15 +429,63 @@ export interface TrackerSyncServiceDeps {
 // ---------------------------------------------------------------------------
 
 /**
+ * The key a KEYED provider's credentials must carry, or a typed refusal.
+ *
+ * `TrackerCredentialsInput.apiKey` is optional on the wire so beads can omit
+ * it, which makes "linear with no key" expressible in the type system. The
+ * router's schema rejects it first; this is the service-side half of the same
+ * rule, so a caller that reaches `connect` another way (a test, a future IPC
+ * seam) cannot store a connection whose adapter would 401 on every pass.
+ */
+function requireApiKey(credentials: TrackerCredentialsInput): string {
+  const apiKey = credentials.apiKey ?? '';
+  if (apiKey.length === 0) {
+    throw new TrackerCredentialsError(
+      `${credentials.provider} connections require an API key, and none was supplied`,
+    );
+  }
+  return apiKey;
+}
+
+/**
+ * The `bd` workspace root a keyless (beads) connection is anchored to, read
+ * off `source_json`.
+ *
+ * It rides on the same blob as the wizard's Step-1 source choice rather than
+ * taking a column of its own, exactly like the source LABEL does: both
+ * `storedSourceScope` and `parseSourceSelection` read their keys BY NAME and
+ * ignore everything else, so the extra key changes no equality or revival
+ * semantics. Null for a row that never recorded one — a pre-Phase-3 beads row
+ * cannot exist, but a hand-edited or truncated blob can, and the callers turn
+ * that into "re-detect" rather than into a spawn in whatever directory the
+ * process happens to be in.
+ */
+export function beadsWorkspacePath(connection: TrackerConnectionRow): string | null {
+  if (connection.source_json === null) return null;
+  try {
+    const parsed = JSON.parse(connection.source_json) as { workspacePath?: unknown };
+    return typeof parsed.workspacePath === 'string' && parsed.workspacePath.length > 0
+      ? parsed.workspacePath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Provider client from a connection row + its decrypted key.
  *
  * PLANE'S WORKSPACE SLUG comes from `workspace_id`, not `source_json`.
  * `source_json` holds the wizard's Step-1 source choice (container/narrow ids)
- * and nothing else; the slug is workspace IDENTITY, and PlaneAdapter's own
+ * plus the two display/anchor extras {@link beadsWorkspacePath} and the source
+ * label; the slug is workspace IDENTITY, and PlaneAdapter's own
  * `validateCredentials` returns `workspaceId: <slug>` — so the connect flow
  * that persists the validated identity necessarily writes the slug into
  * `workspace_id`. A Plane connection without one cannot address any REST path,
  * hence the hard error rather than a guess.
+ *
+ * `secret` is EMPTY for a keyless provider (beads), which never reads it —
+ * see {@link providerNeedsSecret} and the guards in `buildAdapter`.
  */
 export function defaultAdapterFactory(
   connection: TrackerConnectionRow,
@@ -437,15 +499,27 @@ export function defaultAdapterFactory(
       // neither a base URL nor a workspace slug — the key alone addresses
       // everything.
       return new DartAdapter({ apiKey: secret });
-    case 'beads':
-      // Phase 2 wires the real CLI transport (docs/proposals/
-      // tracker-beads-provider.md "2. CLI transport" — needs the connection's
-      // project path threaded through this factory, which it does not have
-      // today). Every pass that reaches here for a beads connection pauses
-      // rather than silently adopting some other adapter.
-      throw new TrackerCredentialsError(
-        `connection ${connection.id}: beads adapter is not wired into the default factory yet (Phase 4)`,
-      );
+    case 'beads': {
+      // The workspace root comes off the ROW, not off the project table: it is
+      // resolved once at connect/probe time (from the project id the renderer
+      // named) and stamped into `source_json`, so a pass can never be steered
+      // somewhere else by a project whose path was edited underneath it — a
+      // moved repo re-detects rather than silently syncing a new workspace.
+      const workspacePath = beadsWorkspacePath(connection);
+      if (workspacePath === null) {
+        throw new TrackerCredentialsError(
+          `connection ${connection.id}: no beads workspace path recorded — re-detect this connection to bind it to a project repo`,
+        );
+      }
+      // A scratch wizard row has neither identity column yet (the probe is
+      // where they come FROM), so the first probe carries no expectation and
+      // every later pass carries both halves of the identity invariant.
+      return new BeadsAdapter({
+        workspacePath,
+        expectedInstanceId: connection.workspace_id ?? undefined,
+        expectedPrefix: connection.workspace_name ?? undefined,
+      });
+    }
     case 'plane': {
       const workspaceSlug = (connection.workspace_id ?? '').trim();
       if (workspaceSlug.length === 0) {
@@ -500,6 +574,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
   private readonly reviewRouter?: ReviewFindingRouter;
   private readonly nowIso: () => string;
   private readonly adapterFactory: TrackerAdapterFactory;
+  /** See {@link TrackerSyncServiceDeps.resolveProjectPath} — keyless providers only. */
+  private readonly resolveProjectPath?: (projectId: number) => string | null;
   private readonly logger?: LoggerLike;
 
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -561,6 +637,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     this.reviewRouter = deps.reviewRouter;
     this.nowIso = deps.nowIso ?? (() => new Date().toISOString());
     this.adapterFactory = deps.adapterFactory ?? defaultAdapterFactory;
+    this.resolveProjectPath = deps.resolveProjectPath;
     this.logger = deps.logger;
   }
 
@@ -1234,8 +1311,17 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * identifier lookup) that a per-phase rebuild would throw away, and building
    * fresh each pass keeps a re-connected key from being pinned by a stale
    * instance.
+   *
+   * A KEYLESS provider (beads) skips the cipher read and decrypt entirely and
+   * is handed an empty secret it never reads. The guard below stays FATAL for
+   * the three keyed providers rather than being loosened globally: for them a
+   * NULL ciphertext is a row that cannot authenticate, and letting it through
+   * would turn a fixable "reconnect" into a 401 on every pass forever.
    */
   private buildAdapter(connection: TrackerConnectionRow): TrackerAdapter {
+    if (!providerNeedsSecret(connection.provider)) {
+      return this.adapterFactory(connection, '');
+    }
     const cipher = readSecret(this.db, connection.id);
     if (cipher === null || cipher.length === 0) {
       throw new TrackerCredentialsError(`connection ${connection.id} has no stored API key`);
@@ -1299,7 +1385,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * persists one, and it encrypts first.
    *
    * `workspace_id` carries Plane's workspace SLUG (what defaultAdapterFactory
-   * addresses every REST path with); Linear ignores it.
+   * addresses every REST path with); Linear ignores it. For a KEYLESS provider
+   * the scratch row instead carries the resolved workspace PATH in
+   * `source_json` — the same key {@link beadsWorkspacePath} reads off a real
+   * row, so the probe spawns `bd` exactly where a later pass will.
+   *
+   * Both identity columns stay null on the scratch row, deliberately: the
+   * probe is where the instance id and prefix come FROM, so it must not carry
+   * an expectation for the adapter to compare against.
    */
   private adapterForCredentials(credentials: TrackerCredentialsInput): TrackerAdapter {
     const scratch: TrackerConnectionRow = {
@@ -1312,7 +1405,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       actor_label: null,
       base_url: credentials.baseUrl ?? null,
       secret_ciphertext: null,
-      source_json: null,
+      source_json: providerNeedsSecret(credentials.provider)
+        ? null
+        : JSON.stringify({ workspacePath: this.workspacePathForCredentials(credentials) }),
       selection_mode: 'all',
       selection_json: null,
       state_mapping_json: '{}',
@@ -1338,7 +1433,45 @@ export class TrackerSyncService implements TrackerSyncFacade {
       created_at: '',
       updated_at: '',
     };
-    return this.adapterFactory(scratch, credentials.apiKey);
+    // Empty for a keyless provider, which never reads it — the credential is
+    // the workspace itself, already stamped into the scratch row above. A
+    // KEYED one is refused here rather than probed with an empty string, which
+    // every provider answers with a 401 the wizard would report as a bad key.
+    return this.adapterFactory(
+      scratch,
+      providerNeedsSecret(credentials.provider) ? requireApiKey(credentials) : '',
+    );
+  }
+
+  /**
+   * The repo path a keyless connect/probe anchors its workspace to, resolved
+   * from the project id the renderer named.
+   *
+   * MAIN-SIDE RESOLUTION IS THE POINT. The wire carries an id; this is the
+   * only place it becomes a directory, so a renderer cannot name a path and
+   * have a CLI spawned in it. All three failures are the same class —
+   * TrackerCredentialsError, which the wizard surfaces as an actionable
+   * message — because none of them is a provider rejection: the app is
+   * mis-wired, the caller omitted the project, or the project is gone.
+   */
+  private workspacePathForCredentials(credentials: TrackerCredentialsInput): string {
+    if (this.resolveProjectPath === undefined) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections need a project repo path, and this service was built without a project-path resolver`,
+      );
+    }
+    if (credentials.projectId === undefined) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections must name the project whose repo holds the workspace`,
+      );
+    }
+    const path = this.resolveProjectPath(credentials.projectId);
+    if (path === null || path.length === 0) {
+      throw new TrackerCredentialsError(
+        `project ${credentials.projectId} has no repo path on disk, so there is no ${credentials.provider} workspace to detect`,
+      );
+    }
+    return path;
   }
 
   /**
@@ -1357,6 +1490,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * ciphertext, so there is no key to reuse and "not found" is the honest answer
    * rather than an auth failure the user cannot act on.
    *
+   * A KEYLESS connection has no key to resolve and must not be asked for one:
+   * it answers with its own project id, which is the whole of its credential
+   * (main re-resolves the repo path from it, exactly as the first Detect did).
+   * Reading the ciphertext for such a row and finding it NULL — as it always
+   * is — would dead-end mapping management on an auth error the user could
+   * never satisfy.
+   *
    * @throws {TrackerConnectionNotFoundError} unknown or retired connection id.
    * @throws {TrackerAuthError} the stored key is missing or undecryptable
    *   (mapped to UNAUTHORIZED — the actionable fix is pasting a fresh key).
@@ -1365,6 +1505,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const row = getConnection(this.db, connectionId);
     if (row === null || row.status === 'disconnected') {
       throw new TrackerConnectionNotFoundError(connectionId);
+    }
+    if (!providerNeedsSecret(row.provider)) {
+      return { provider: row.provider, projectId: row.project_id };
     }
     const cipher = readSecret(this.db, connectionId);
     if (cipher === null || cipher.length === 0) {
@@ -1597,7 +1740,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // it and kick a pass), and the push-target choice (the wizard recomputes it
     // from the live radio, so a retry after re-picking must land the new
     // choice; the early return used to drop it, leaving two armed siblings).
-    const cipher = encryptTrackerSecret(credentials.apiKey);
+    // KEYLESS PROVIDERS STORE NOTHING. `null` here is not "encrypt it later" —
+    // it is the row's permanent state, and every store call below skips rather
+    // than writing a cipher for a key that does not exist. Encrypting `''`
+    // instead would look identical on the surface and defeat the NULL-secret
+    // guards that tell a keyless row apart from a keyed one whose key is gone.
+    const cipher = providerNeedsSecret(credentials.provider)
+      ? encryptTrackerSecret(requireApiKey(credentials))
+      : null;
     const incomingScope: StoredSourceScope = {
       containerId: payload.source.containerId,
       narrowId: payload.source.narrowId,
@@ -1614,7 +1764,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
         sourceScopeEquals(storedSourceScope(row), incomingScope),
     );
     if (existing !== undefined) {
-      storeSecret(this.db, existing.id, cipher);
+      if (cipher !== null) storeSecret(this.db, existing.id, cipher);
       if (payload.pushTarget === false) {
         updateConnectionSettings(this.db, existing.id, { push_target: 0 });
       } else {
@@ -1650,11 +1800,20 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // Written by storeSecret below, never inline — the plaintext-never-touches
       // -sqlite invariant lives in exactly one call site.
       secret_ciphertext: null,
-      // The Step-1 choice PLUS its display label. The label is an extra key on
-      // the same blob rather than a column of its own: parseSourceSelection
-      // reads containerId/narrowId/narrowKind by name and ignores everything
-      // else, so the two coexist without a migration.
-      source_json: JSON.stringify({ ...payload.source, label: payload.sourceLabel }),
+      // The Step-1 choice PLUS its display label — and, for a keyless
+      // provider, the RESOLVED workspace path this connection is anchored to
+      // ({@link beadsWorkspacePath}). All of them are extra keys on the same
+      // blob rather than columns of their own: parseSourceSelection and
+      // storedSourceScope both read containerId/narrowId/narrowKind by name
+      // and ignore everything else, so they coexist without a migration and
+      // without touching scope equality or revival.
+      source_json: JSON.stringify({
+        ...payload.source,
+        label: payload.sourceLabel,
+        ...(providerNeedsSecret(credentials.provider)
+          ? {}
+          : { workspacePath: this.workspacePathForCredentials(credentials) }),
+      }),
       selection_mode: payload.selectionMode,
       selection_json:
         payload.selectionJson === null ? null : JSON.stringify(payload.selectionJson),
@@ -1722,7 +1881,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
     if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
     else reactivateConnection(this.db, connectionId, row);
-    storeSecret(this.db, connectionId, cipher);
+    if (cipher !== null) storeSecret(this.db, connectionId, cipher);
     // Enforce the one-pusher-per-(project, provider) invariant across WIZARD
     // RUNS: a later run mapping a second group into an already-mapped project
     // arrives here with pushTarget true (its own run's cluster default) while
@@ -1862,7 +2021,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      thing one layer down.)
    *   3. STORE encrypted, exactly as connect does; the plaintext never reaches
    *      sqlite and never returns to the renderer (the result is the identity,
-   *      which carries no key material).
+   *      which carries no key material). Skipped entirely when there is no key
+   *      — see the keyless note below.
    *   4. RESUME: status back to 'active', which is what un-gates the poll loop
    *      and the drain — including every row an auth failure HELD unsettled
    *      (outboxWorker.pauseConnection), which now replays in order.
@@ -1872,16 +2032,39 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * instance) — the sibling mappings a multi-project connect minted — so one
    * paste resumes all of them; see the fan-out note at the store call.
    *
+   * KEYLESS PROVIDERS TAKE THE SAME PATH WITH NOTHING TO PASTE — `apiKey` is
+   * omitted and the call means RE-DETECT. Steps 1 and 2 are unchanged and are
+   * the entire point: the workspace is probed again and its instance id
+   * checked against the row's, so a `.beads` directory that was deleted and
+   * re-initialized (a NEW database wearing the old path) is refused instead of
+   * resuming onto issue ids that no longer exist. Only step 3 differs: there
+   * is no cipher, so the row's NULL secret is left exactly as it is.
+   *
    * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerCredentialsError} a key was supplied for a keyless
+   *   provider, or omitted for a keyed one.
    * @throws {TrackerIdentityMismatchError} the key authorizes another workspace.
    */
-  async updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity> {
+  async updateCredentials(connectionId: string, apiKey?: string): Promise<TrackerWorkspaceIdentity> {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) throw new TrackerConnectionNotFoundError(connectionId);
 
+    const needsSecret = providerNeedsSecret(connection.provider);
+    // A key offered to a keyless connection is refused rather than ignored:
+    // silently dropping it would leave the user believing a credential is
+    // stored and rotating, when nothing of the sort happened.
+    if (!needsSecret && apiKey !== undefined) {
+      throw new TrackerCredentialsError(
+        `${connection.provider} connections store no API key — reconnect by re-detecting the workspace`,
+      );
+    }
+    // The keyed half of the same rule. Resolved ONCE, up front, so the probe
+    // and the cipher below cannot disagree about what is being stored.
+    const key = needsSecret ? requireApiKey({ provider: connection.provider, apiKey }) : null;
+
     const identity = await this.adapterForCredentials({
       provider: connection.provider,
-      apiKey,
+      ...(key !== null ? { apiKey: key } : { projectId: connection.project_id }),
       // The connection's OWN addressing, not the renderer's: this call rotates a
       // key, it does not re-point a connection at a different instance.
       baseUrl: connection.base_url ?? undefined,
@@ -1892,7 +2075,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
     }
 
-    const cipher = encryptTrackerSecret(apiKey);
+    const cipher = key === null ? null : encryptTrackerSecret(key);
     // FAN OUT ACROSS THE SIBLING MAPPINGS. Multi-project mapping mints one row
     // per (tracker group -> cyboflow project) pair, each holding its OWN copy of
     // the same encrypted key — so a rotation applied to the named row alone
@@ -1914,7 +2097,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     );
     const rotating = [connection, ...siblings.filter((row) => row.id !== connection.id)];
     for (const sibling of rotating) {
-      storeSecret(this.db, sibling.id, cipher);
+      if (cipher !== null) storeSecret(this.db, sibling.id, cipher);
       updateConnectionSettings(this.db, sibling.id, {
         status: 'active',
         // The authorizing user can legitimately change with the key; the

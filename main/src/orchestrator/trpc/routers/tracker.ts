@@ -54,6 +54,10 @@ import {
   TrackerSyncNotInitializedError,
   type TrackerChangedEvent,
 } from '../../trackerSyncBridge';
+import {
+  PROVIDER_NEEDS_SECRET,
+  providerNeedsSecret,
+} from '../../../../../shared/types/trackerSync';
 import type {
   TrackerConflictSummary,
   TrackerConnectionSummary,
@@ -83,6 +87,24 @@ import { eventToAsyncIterable } from './events';
  */
 function isErrorNamed(err: unknown, name: string): boolean {
   return err instanceof Error && err.name === name;
+}
+
+/**
+ * Does this error come from a KEYLESS provider's adapter?
+ *
+ * Read STRUCTURALLY (`provider` is a public readonly field on TrackerApiError)
+ * for the same reason the checks above read `name`: this file may not import
+ * the error classes. The own-property test is what keeps an unrelated error
+ * carrying a `provider`-shaped field from smuggling an adapter message into
+ * the wizard — an unknown string is not a keyless provider, it is not a
+ * provider at all.
+ */
+function isKeylessProviderError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const provider = (err as { provider?: unknown }).provider;
+  if (typeof provider !== 'string') return false;
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_NEEDS_SECRET, provider)) return false;
+  return !PROVIDER_NEEDS_SECRET[provider as keyof typeof PROVIDER_NEEDS_SECRET];
 }
 
 /**
@@ -126,9 +148,27 @@ function rethrowAsTRPCError(err: unknown): never {
   if (isErrorNamed(err, 'TrackerAuthError')) {
     throw new TRPCError({
       code: 'UNAUTHORIZED',
-      // Deliberately generic: the provider's own 401 body is not something to
-      // paste into the wizard, and the actionable part is always the same.
-      message: 'The tracker rejected these credentials. Check the API key and try again.',
+      // KEYLESS providers pass the message through VERBATIM. For a keyed one
+      // the generic line is right — the provider's own 401 body is not
+      // something to paste into a wizard, and "check the key" is always the
+      // fix. A keyless provider has no key to check: its auth failures are
+      // "`bd` is not installed" and "this repo has no beads workspace", two
+      // different fixes that the generic line would erase, and it would send
+      // the user hunting for an API key that does not exist.
+      message: isKeylessProviderError(err)
+        ? (err instanceof Error ? err.message : 'the tracker workspace could not be detected')
+        : 'The tracker rejected these credentials. Check the API key and try again.',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerCredentialsError')) {
+    throw new TRPCError({
+      // Not an auth failure: the connection is not wired to a workspace it can
+      // reach (no project named, no repo path on disk, no recorded workspace).
+      // Verbatim, because each of those has its own fix and none of them is
+      // "check the key".
+      code: 'PRECONDITION_FAILED',
+      message: err instanceof Error ? err.message : 'this connection cannot be built',
       cause: err,
     });
   }
@@ -172,15 +212,47 @@ function rethrowAsTRPCError(err: unknown): never {
 
 const providerSchema = z.enum(['linear', 'plane', 'dart', 'beads']);
 
-/** Renderer -> main, wizard/connect only. This is the ONLY inbound key path. */
-const credentialsSchema = z.object({
-  provider: providerSchema,
-  apiKey: z.string().min(1),
-  /** Plane self-hosted origin; omitted = the provider's cloud default. */
-  baseUrl: z.string().min(1).optional(),
-  /** Plane only: the workspace slug all API paths are scoped under. */
-  workspaceSlug: z.string().min(1).optional(),
-});
+/**
+ * Renderer -> main, wizard/connect only. This is the ONLY inbound key path.
+ *
+ * `apiKey` is optional on the WIRE and required per PROVIDER: the refinement
+ * below is what keeps a keyed provider from arriving keyless (which would
+ * reach its adapter as an empty string and come back as a 401 the user cannot
+ * act on) while letting beads — whose credential is that the project has a
+ * `bd` workspace at all — connect with no key. `projectId` is beads' anchor,
+ * and it is an ID rather than a path on purpose: main resolves the path it
+ * spawns `bd` in, so nothing a renderer composed can point the CLI elsewhere.
+ */
+const credentialsSchema = z
+  .object({
+    provider: providerSchema,
+    apiKey: z.string().min(1).optional(),
+    /** Plane self-hosted origin; omitted = the provider's cloud default. */
+    baseUrl: z.string().min(1).optional(),
+    /** Plane only: the workspace slug all API paths are scoped under. */
+    workspaceSlug: z.string().min(1).optional(),
+    /** beads only: the project whose repo path anchors the workspace probe. */
+    projectId: z.number().int().positive().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (providerNeedsSecret(value.provider)) {
+      if (value.apiKey === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['apiKey'],
+          message: `${value.provider} connections require an API key`,
+        });
+      }
+      return;
+    }
+    if (value.projectId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['projectId'],
+        message: `${value.provider} connections require the project whose repo holds the workspace`,
+      });
+    }
+  });
 
 /**
  * A wizard probe's CREDENTIAL SOURCE (TrackerWizardSourceInput): a pasted key, or
@@ -534,9 +606,16 @@ export const trackerRouter = router({
    * The key travels in, exactly like the wizard calls, and nothing comes back
    * out: the result is the validated workspace identity. Rejects NOT_FOUND for
    * an unknown id and CONFLICT when the key belongs to a different workspace.
+   *
+   * `apiKey` is OPTIONAL because a keyless connection (beads) reconnects by
+   * RE-DETECTING — there is no key to paste, and the same procedure re-probes
+   * the workspace and resumes on an identity match. Which providers may omit
+   * it is the SERVICE's call, not this schema's: the row names the provider,
+   * and the renderer's connection summary is not a trustworthy place to decide
+   * whether a key was required.
    */
   updateCredentials: protectedProcedure
-    .input(z.object({ connectionId: z.string().min(1), apiKey: z.string().min(1) }))
+    .input(z.object({ connectionId: z.string().min(1), apiKey: z.string().min(1).optional() }))
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().updateCredentials(input.connectionId, input.apiKey);

@@ -15,14 +15,54 @@ import type { EntityCategory, Priority } from './tasks';
 
 export type TrackerProvider = 'linear' | 'plane' | 'dart' | 'beads';
 
+/**
+ * Does this provider need a stored credential at all? False only for beads
+ * (docs/proposals/tracker-beads-provider.md "1. Keyless connect"): its
+ * transport is a local `bd` CLI probe of the project's own workspace, not an
+ * API key, and its `secret_ciphertext` stays NULL for the connection's whole
+ * life.
+ *
+ * THE single definition, and it lives in shared/ rather than beside the other
+ * provider tables in main/src/services/trackerSync/providerCapabilities.ts for
+ * one reason: the tRPC router validates the credential shape and may not
+ * import main/src/services/* (the standalone-typecheck invariant). A second
+ * copy there would be a boolean whose two halves can disagree about whether a
+ * keyless connect is legal — which is the guard, not a cosmetic fact.
+ */
+export const PROVIDER_NEEDS_SECRET: Record<TrackerProvider, boolean> = {
+  linear: true,
+  plane: true,
+  dart: true,
+  beads: false,
+};
+
+/** Convenience wrapper over {@link PROVIDER_NEEDS_SECRET}. */
+export function providerNeedsSecret(provider: TrackerProvider): boolean {
+  return PROVIDER_NEEDS_SECRET[provider];
+}
+
 /** Renderer→main, connect-time only. */
 export interface TrackerCredentialsInput {
   provider: TrackerProvider;
-  apiKey: string;
+  /**
+   * Absent ONLY for a provider {@link providerNeedsSecret} answers false for
+   * (beads). Every keyed provider still requires it, enforced at the router's
+   * zod schema and again in the service — an absent key must never reach an
+   * adapter as an empty string that the remote answers with a 401 the user
+   * cannot act on.
+   */
+  apiKey?: string;
   /** Plane self-hosted instance origin; omitted = the provider's cloud default. */
   baseUrl?: string;
   /** Plane only: the workspace slug all API paths are scoped under. */
   workspaceSlug?: string;
+  /**
+   * beads only: the cyboflow project whose repo path anchors the `bd`
+   * workspace to probe. The renderer sends the ID, never a path — main
+   * resolves it (TrackerSyncServiceDeps.resolveProjectPath), so no filesystem
+   * path a renderer composed can steer where the CLI is spawned.
+   */
+  projectId?: number;
 }
 
 /**

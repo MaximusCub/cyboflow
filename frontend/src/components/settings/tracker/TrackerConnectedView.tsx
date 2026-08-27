@@ -337,7 +337,9 @@ export function TrackerConnectedView({
     try {
       await trpc.cyboflow.tracker.updateCredentials.mutate({
         connectionId: connection.id,
-        apiKey: reconnectApiKey.trim(),
+        // A keyless connection has no key to rotate: the same call means
+        // RE-DETECT, and main refuses one that carries a key at all.
+        ...(meta.needsApiKey ? { apiKey: reconnectApiKey.trim() } : {}),
       });
       setReconnectApiKey('');
       // The connection flips to 'active' server-side; the parent's
@@ -445,32 +447,47 @@ export function TrackerConnectedView({
                 data-testid="tracker-reconnect-banner"
               >
                 <p className="text-xs font-semibold text-status-warning">
-                  Credentials need attention
+                  {meta.needsApiKey ? 'Credentials need attention' : 'Workspace needs attention'}
                 </p>
                 <p className="mt-1 text-xs leading-relaxed text-text-secondary">
-                  {meta.name} rejected the stored key on the last sync, so syncing is paused.
-                  Paste a new {meta.apiKeyLabel.toLowerCase()} to reconnect.
+                  {meta.needsApiKey ? (
+                    <>
+                      {meta.name} rejected the stored key on the last sync, so syncing is paused.
+                      Paste a new {meta.apiKeyLabel.toLowerCase()} to reconnect.
+                    </>
+                  ) : (
+                    <>
+                      The {meta.name} workspace could not be read on the last sync, so syncing is
+                      paused. Re-detect it — cyboflow resumes only if it is still the same database.
+                    </>
+                  )}
                 </p>
                 <div className="mt-3 flex items-center gap-2">
-                  <input
-                    type="password"
-                    value={reconnectApiKey}
-                    onChange={(e) => setReconnectApiKey(e.target.value)}
-                    placeholder="paste your key"
-                    aria-label={`New ${meta.apiKeyLabel}`}
-                    className={cn(trackerInputClass, 'max-w-[360px]')}
-                  />
+                  {meta.needsApiKey && (
+                    <input
+                      type="password"
+                      value={reconnectApiKey}
+                      onChange={(e) => setReconnectApiKey(e.target.value)}
+                      placeholder="paste your key"
+                      aria-label={`New ${meta.apiKeyLabel}`}
+                      className={cn(trackerInputClass, 'max-w-[360px]')}
+                    />
+                  )}
                   <Button
                     type="button"
                     variant="primary"
                     size="sm"
                     className="flex-shrink-0 rounded-none"
-                    disabled={reconnectApiKey.trim().length === 0 || reconnecting}
+                    // Nothing to paste for a keyless connection, so only an
+                    // in-flight probe disables the button.
+                    disabled={
+                      (meta.needsApiKey && reconnectApiKey.trim().length === 0) || reconnecting
+                    }
                     loading={reconnecting}
-                    loadingText="Reconnecting…"
+                    loadingText={meta.needsApiKey ? 'Reconnecting…' : 'Re-detecting…'}
                     onClick={() => void handleReconnect()}
                   >
-                    Reconnect
+                    {meta.needsApiKey ? 'Reconnect' : 'Re-detect'}
                   </Button>
                 </div>
                 {reconnectError !== null && (

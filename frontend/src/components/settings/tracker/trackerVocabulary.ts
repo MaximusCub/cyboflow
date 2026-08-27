@@ -36,10 +36,13 @@ export interface TrackerProviderMeta {
   /**
    * Does this provider need a pasted key at all? False only for beads
    * (docs/proposals/tracker-beads-provider.md "1. Keyless connect"): its
-   * Connect step probes the local `bd` CLI instead of validating a key.
-   * Phase 1 only threads this flag through the catalog; the wizard's Detect
-   * step (no key input, "Authorize" relabelled "Detect") is Phase 3 work —
-   * this field changes no rendering yet.
+   * Connect step renders no key input and probes the local `bd` CLI instead,
+   * and its reconnect banner re-detects rather than asking for a paste.
+   *
+   * The main-side twin is `providerNeedsSecret` in
+   * shared/types/trackerSync.ts, which the service's NULL-secret guards
+   * consult; a parity test pins the two together, because a row this table
+   * calls keyless and the service calls keyed cannot connect at all.
    */
   needsApiKey: boolean;
   /** Plane scopes every REST path under a workspace slug; Linear does not. */
@@ -121,9 +124,10 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     name: 'Beads',
     description: 'Map a beads workspace (local `bd` database) to a cyboflow project.',
     mark: 'BD',
-    // No key input in v1 (Phase 3 wires the Detect step); these two are
-    // display-only and unused while needsApiKey is false.
-    apiKeyLabel: 'Not required',
+    // Never rendered as an input (needsApiKey is false, so the Connect step
+    // shows Detect instead) — `apiKeyLabel` still names the credential in the
+    // prose both steps share, so it reads as a workspace, not a key.
+    apiKeyLabel: 'Local bd workspace',
     apiKeyHint: 'beads connects via the local `bd` CLI — no key to paste.',
     needsApiKey: false,
     needsWorkspaceSlug: false,
@@ -145,6 +149,72 @@ export function providerMeta(provider: TrackerProvider): TrackerProviderMeta {
   // return type is not needlessly optional.
   return meta ?? TRACKER_PROVIDERS[0];
 }
+
+// ---------------------------------------------------------------------------
+// Keyless detect (beads)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of the two keyless-detect failures a probe hit, for a Connect step
+ * that must offer two different fixes: install the CLI, or initialize a
+ * workspace in this repo.
+ *
+ * 'unknown' is the honest third answer — a lock timeout, an unreadable
+ * metadata file, a version below the supported floor — and its copy falls back
+ * to the server's own message, which already names the problem.
+ */
+export type KeylessDetectFailure = 'missing-cli' | 'missing-workspace' | 'unknown';
+
+/**
+ * MESSAGE MATCHING, and it is not the shape anyone would choose. Both failures
+ * arrive as the SAME error class (a `TrackerAuthError` with a null status, so
+ * the router hands both to the renderer as UNAUTHORIZED), and the CLI-missing
+ * case is an ENOENT the adapter has already turned into prose — there is no
+ * status, code, or class left to branch on by the time it crosses IPC.
+ *
+ * The markers are the stable, quoted halves of `beadsAdapter.ts`'s own
+ * strings: its ENOENT arm (`classifyBdFailure`) and the two ways an
+ * unresolvable workspace is reported (`bd`'s stderr marker in
+ * TERMINAL_STDERR_MARKERS, and `probeWorkspace`'s own message when `bd where`
+ * answers without a path). Both fall back to 'unknown', which degrades to the
+ * verbatim message rather than to wrong advice.
+ */
+const MISSING_CLI_MARKER = 'was not found on PATH';
+const MISSING_WORKSPACE_MARKERS: readonly string[] = [
+  'no beads database found',
+  'no resolvable beads workspace',
+];
+
+export function classifyKeylessDetectFailure(message: string): KeylessDetectFailure {
+  if (message.includes(MISSING_CLI_MARKER)) return 'missing-cli';
+  if (MISSING_WORKSPACE_MARKERS.some((marker) => message.includes(marker))) {
+    return 'missing-workspace';
+  }
+  return 'unknown';
+}
+
+/**
+ * What a user must know BEFORE running `bd init` on a repo they share, and the
+ * reason Detect never runs it for them. Both facts are probed behaviors of
+ * beads 1.2.2, not speculation (docs/proposals/tracker-beads-provider.md,
+ * "Keyless connect" / Phase 0):
+ *
+ *   - a vanilla non-interactive `bd init` COMMITS 18 files to the repo without
+ *     asking, among them a `.claude/settings.json` that registers a
+ *     SessionStart hook firing for every collaborator who checks the branch
+ *     out. `--skip-agents --skip-hooks` still commits; only `--stealth` does
+ *     not;
+ *   - beads telemetry is ON by default and posts to an external endpoint from
+ *     a detached process.
+ *
+ * Copy, not behavior: cyboflow runs neither command.
+ */
+export const BEADS_INIT_DISCLOSURE: readonly string[] = [
+  'Run `bd init --stealth` in this repo, then detect again. Plain `bd init` commits 18 files ' +
+    'to the repository without asking — including a `.claude/settings.json` hook that runs for ' +
+    'everyone who checks the branch out.',
+  'beads also sends usage telemetry by default; `bd metrics off` turns it off.',
+];
 
 // ---------------------------------------------------------------------------
 // State mapping

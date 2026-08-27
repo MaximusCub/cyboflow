@@ -547,3 +547,44 @@ describe('TrackerConnectedView — project mappings', () => {
     // above, projectId 9) — covered by the arming test.
   });
 });
+
+// ---------------------------------------------------------------------------
+// Keyless reconnect (beads) — Re-detect instead of a paste field
+// ---------------------------------------------------------------------------
+
+describe('TrackerConnectedView — keyless reconnect', () => {
+  it('re-detects a paused keyless connection with no key field and no key sent', async () => {
+    renderView(makeConnection({ provider: 'beads', status: 'paused', workspaceName: 'cf' }));
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    // A paste field here would ask for a credential that does not exist, and
+    // the button would stay disabled forever because nothing can fill it.
+    expect(within(banner).queryByRole('textbox')).not.toBeInTheDocument();
+    expect(banner).not.toHaveTextContent(/paste/i);
+
+    const button = within(banner).getByRole('button', { name: 'Re-detect' });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(mockUpdateCredentials).toHaveBeenCalledTimes(1));
+    // No apiKey key AT ALL — main refuses a keyless re-detect that carries one.
+    expect(mockUpdateCredentials).toHaveBeenCalledWith({ connectionId: 'conn-1' });
+  });
+
+  it('still asks a KEYED paused connection for a fresh key', async () => {
+    renderView(makeConnection({ status: 'paused' }));
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    expect(within(banner).getByRole('button', { name: 'Reconnect' })).toBeDisabled();
+    fireEvent.change(within(banner).getByLabelText(/^New /), {
+      target: { value: 'lin_rotated' },
+    });
+    fireEvent.click(within(banner).getByRole('button', { name: 'Reconnect' }));
+
+    await waitFor(() => expect(mockUpdateCredentials).toHaveBeenCalledTimes(1));
+    expect(mockUpdateCredentials).toHaveBeenCalledWith({
+      connectionId: 'conn-1',
+      apiKey: 'lin_rotated',
+    });
+  });
+});

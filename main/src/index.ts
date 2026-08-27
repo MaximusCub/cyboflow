@@ -1953,6 +1953,11 @@ async function initializeServices(): Promise<boolean> {
     db: databaseService.getDb(),
     router: taskChangeRouter,
     reviewRouter: reviewItemRouter,
+    // Keyless providers (beads) anchor their workspace to the project's repo.
+    // Resolved HERE rather than in the service so the renderer only ever sends
+    // a project id — no filesystem path it composes can decide where a CLI is
+    // spawned. See TrackerSyncServiceDeps.resolveProjectPath.
+    resolveProjectPath: (id) => sessionManager.getProjectById(id)?.path?.trim() || null,
     logger: cyboflowLogger,
   });
   trackerSyncService.start();

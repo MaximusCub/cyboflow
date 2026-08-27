@@ -105,23 +105,15 @@ export const PROVIDER_REQUIRES_GUARDED_UPDATES: Record<TrackerProvider, boolean>
 };
 
 /**
- * Does this provider need a stored credential at all? False only for beads
- * (migration 123 / docs/proposals/tracker-beads-provider.md "1. Keyless
- * connect"): its transport is a local `bd` CLI probe of the project's
- * workspace, not an API key. Every NULL-secret guard — `connect()`,
- * `buildAdapter()`, `credentialsForConnection()`, reconnect — is meant to
- * become provider-aware via {@link providerNeedsSecret} rather than treating
- * an absent ciphertext as fatal everywhere; that threading is Phase 3 work,
- * not done by this table's mere existence.
+ * "Does this provider need a stored credential at all?" — the NULL-secret
+ * predicate every guard consults (`connect`, `buildAdapter`,
+ * `credentialsForConnection`, reconnect). Re-exported rather than declared
+ * here: the tRPC router enforces the same rule on the wire and may not import
+ * main/src/services/*, so the one definition lives in shared/ (see its own
+ * comment for why a second copy would be a correctness bug rather than a
+ * duplicate fact).
  */
-export const PROVIDER_NEEDS_SECRET: Record<TrackerProvider, boolean> = {
-  linear: true,
-  plane: true,
-  dart: true,
-  beads: false,
-};
-
-/** Convenience wrapper over {@link PROVIDER_NEEDS_SECRET}. */
-export function providerNeedsSecret(provider: TrackerProvider): boolean {
-  return PROVIDER_NEEDS_SECRET[provider];
-}
+export {
+  PROVIDER_NEEDS_SECRET,
+  providerNeedsSecret,
+} from '../../../../shared/types/trackerSync';

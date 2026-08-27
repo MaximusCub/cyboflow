@@ -427,3 +427,115 @@ describe('cyboflow.tracker.updateCredentials', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Keyless credentials (beads)
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.tracker — the keyless credential shape', () => {
+  it('accepts a keyless provider with a project id and no key at all', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async (credentials) => {
+      seen.push(credentials);
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } });
+
+    expect(seen).toEqual([{ provider: 'beads', projectId: 7 }]);
+  });
+
+  it('refuses a keyless provider that names no project — nothing anchors the probe', async () => {
+    // The project id is beads' whole credential: without it main has no repo
+    // path to spawn `bd` in, and a renderer may not supply one directly.
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardValidate({ credentials: { provider: 'beads' } })).rejects.toThrow();
+  });
+
+  it('still refuses a KEYED provider with no key, which the optional field now makes expressible', async () => {
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardValidate({ credentials: { provider: 'linear' } })).rejects.toThrow();
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'linear', apiKey: '' } }),
+    ).rejects.toThrow();
+    // …including on the connect path, whose schema shares the same object.
+    await expect(
+      caller.connect({ ...BASE_CONNECT_INPUT, credentials: { provider: 'dart' } }),
+    ).rejects.toThrow();
+  });
+
+  it('re-detects a keyless connection through updateCredentials with no key', async () => {
+    const seen: Array<{ connectionId: string; apiKey: string | undefined }> = [];
+    const facade = new UnusedFacade();
+    facade.updateCredentials = async (connectionId, apiKey) => {
+      seen.push({ connectionId, apiKey });
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.updateCredentials({ connectionId: 'trk_beads' });
+
+    expect(seen).toEqual([{ connectionId: 'trk_beads', apiKey: undefined }]);
+  });
+
+  it('passes a KEYLESS auth failure through verbatim and keeps the keyed one generic', async () => {
+    // Both failures are the same class. For a keyed provider "check the API
+    // key" is always the fix; for a keyless one there is no key, and the two
+    // real causes (no `bd` binary / no workspace in this repo) have different
+    // fixes that the generic line would erase.
+    const beadsFailure = Object.assign(
+      new Error('[beads] `bd` was not found on PATH — install beads and re-detect this connection.'),
+      { name: 'TrackerAuthError', provider: 'beads' },
+    );
+    const linearFailure = Object.assign(new Error('[linear] 401 unauthorized'), {
+      name: 'TrackerAuthError',
+      provider: 'linear',
+    });
+
+    const facade = new UnusedFacade();
+    let next: Error = beadsFailure;
+    facade.wizardValidate = async () => {
+      throw next;
+    };
+    const caller = await callerWith(facade);
+
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } }),
+    ).rejects.toThrow(/not found on PATH/);
+    expect(
+      await codeOf(caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } })),
+    ).toBe('UNAUTHORIZED');
+
+    next = linearFailure;
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'linear', apiKey: 'k' } }),
+    ).rejects.toThrow(/Check the API key/);
+  });
+
+  it('maps a credential-wiring failure to PRECONDITION_FAILED, message intact', async () => {
+    // TrackerCredentialsError is not a provider rejection: the connection is
+    // not bound to a workspace it can reach, and the message names which of
+    // the three ways that happened.
+    const err = Object.assign(
+      new Error('project 7 has no repo path on disk, so there is no beads workspace to detect'),
+      { name: 'TrackerCredentialsError' },
+    );
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async () => {
+      throw err;
+    };
+    const caller = await callerWith(facade);
+
+    const call = caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } });
+    expect(await codeOf(call)).toBe('PRECONDITION_FAILED');
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } }),
+    ).rejects.toThrow(/no repo path on disk/);
+  });
+});

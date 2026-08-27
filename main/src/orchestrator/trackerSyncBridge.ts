@@ -110,11 +110,16 @@ export interface TrackerSyncFacade {
    * serve: against a connection that is still active or paused it would mint a
    * SECOND one and re-import the whole synced backlog.
    *
+   * KEYLESS CONNECTIONS (beads) take the same path with `apiKey` omitted, and
+   * it means RE-DETECT: the workspace is probed again, the connection resumes
+   * when the identity still matches, and nothing is stored. Passing a key for
+   * such a provider — or omitting one for a keyed provider — is refused.
+   *
    * Rejects with a NOT_FOUND-shaped error for an unknown id, and with a typed
    * mismatch error when the key authorizes a DIFFERENT workspace than the
    * connection is bound to. The returned identity carries no key material.
    */
-  updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity>;
+  updateCredentials(connectionId: string, apiKey?: string): Promise<TrackerWorkspaceIdentity>;
 
   /** The project's connected-view cards. */
   connections(projectId: number): Promise<TrackerConnectionSummary[]>;

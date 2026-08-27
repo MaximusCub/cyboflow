@@ -83,10 +83,12 @@ import type {
 import type { EntityCategory, Priority } from '../../../../../shared/types/tasks';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
 import {
+  BEADS_INIT_DISCLOSURE,
   CONTENT_MODE_OPTIONS,
   ENTITY_CATEGORIES,
   MAPPING_TARGETS,
   PRIORITY_LEVELS,
+  classifyKeylessDetectFailure,
   mappingTargetNote,
   providerMeta,
   seedCategoryMapping,
@@ -335,11 +337,25 @@ export function TrackerWizardModal({
     const trimmedSlug = workspaceSlug.trim().toLowerCase();
     return {
       provider,
-      apiKey: apiKey.trim(),
+      // A KEYLESS provider sends no key at all — not an empty string, which
+      // the router's schema would read as a keyed provider missing its key.
+      // It sends the ACTIVE PROJECT instead: main resolves that project's repo
+      // path and probes the workspace there, so nothing path-shaped that this
+      // renderer composed decides where the CLI runs.
+      ...(meta.needsApiKey ? { apiKey: apiKey.trim() } : { projectId }),
       ...(meta.defaultBaseUrl !== null && trimmedBase.length > 0 ? { baseUrl: trimmedBase } : {}),
       ...(meta.needsWorkspaceSlug && trimmedSlug.length > 0 ? { workspaceSlug: trimmedSlug } : {}),
     };
-  }, [provider, apiKey, baseUrl, workspaceSlug, meta.defaultBaseUrl, meta.needsWorkspaceSlug]);
+  }, [
+    provider,
+    projectId,
+    apiKey,
+    baseUrl,
+    workspaceSlug,
+    meta.needsApiKey,
+    meta.defaultBaseUrl,
+    meta.needsWorkspaceSlug,
+  ]);
 
   /**
    * What every probe sends as its credential source — EXACTLY one key, which is
@@ -1238,26 +1254,48 @@ export function TrackerWizardModal({
   const renderConnect = (): React.JSX.Element => (
     <div className="flex flex-col items-center gap-4 text-center">
       <ProviderTile mark={meta.mark} size="lg" />
-      <Eyebrow>{STEP_EYEBROWS[0]}</Eyebrow>
+      {/* "Authorize" is the wrong verb for a provider with nothing to
+          authorize against — this step finds a local workspace. */}
+      <Eyebrow>{meta.needsApiKey ? STEP_EYEBROWS[0] : 'Step 01 · Detect'}</Eyebrow>
       <h3 className="text-lg font-bold text-text-primary">Connect {meta.name}</h3>
       <p className="max-w-[430px] text-xs leading-relaxed text-text-secondary">
-        Paste a {meta.apiKeyLabel.toLowerCase()}. Cyboflow validates it against {meta.name} before
-        anything is stored, and the key never leaves this machine.
+        {meta.needsApiKey ? (
+          <>
+            Paste a {meta.apiKeyLabel.toLowerCase()}. Cyboflow validates it against {meta.name}{' '}
+            before anything is stored, and the key never leaves this machine.
+          </>
+        ) : (
+          <>
+            {meta.name} has no API key — it runs locally. Cyboflow looks for an initialized{' '}
+            <code>bd</code> workspace in this project&rsquo;s repository and binds the connection to
+            the database it finds.
+          </>
+        )}
       </p>
 
-      <div className={cn(CARD, 'w-full max-w-[440px] space-y-3 p-4 text-left')}>
-        <label className="block">
-          <Eyebrow className="mb-1.5">{meta.apiKeyLabel}</Eyebrow>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="paste your key"
-            aria-label={meta.apiKeyLabel}
-            className={trackerInputClass}
-          />
-          <p className="mt-1 text-[11px] text-text-tertiary">{meta.apiKeyHint}</p>
-        </label>
+      <div
+        className={cn(
+          CARD,
+          'w-full max-w-[440px] space-y-3 p-4 text-left',
+          // A keyless provider with no slug and no instance URL has no fields
+          // at all; the empty bordered card would read as a broken form.
+          !meta.needsApiKey && !meta.needsWorkspaceSlug && meta.defaultBaseUrl === null && 'hidden',
+        )}
+      >
+        {meta.needsApiKey && (
+          <label className="block">
+            <Eyebrow className="mb-1.5">{meta.apiKeyLabel}</Eyebrow>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="paste your key"
+              aria-label={meta.apiKeyLabel}
+              className={trackerInputClass}
+            />
+            <p className="mt-1 text-[11px] text-text-tertiary">{meta.apiKeyHint}</p>
+          </label>
+        )}
 
         {meta.needsWorkspaceSlug && (
           <label className="block">
@@ -1313,17 +1351,31 @@ export function TrackerWizardModal({
             variant="primary"
             size="sm"
             className="rounded-none"
-            disabled={apiKey.trim().length === 0 || validating}
+            // Nothing to type for a keyless provider, so the only thing that
+            // can disable Detect is a probe already in flight.
+            disabled={(meta.needsApiKey && apiKey.trim().length === 0) || validating}
             loading={validating}
-            loadingText={`Checking with ${meta.name}…`}
+            loadingText={
+              meta.needsApiKey ? `Checking with ${meta.name}…` : 'Looking for a workspace…'
+            }
             onClick={() => void handleAuthorize()}
           >
-            Authorize
+            {meta.needsApiKey ? 'Authorize' : 'Detect'}
           </Button>
           {authError !== null && (
-            <p className="max-w-[440px] text-xs text-status-error" role="alert">
-              {authError}
-            </p>
+            <div className="max-w-[440px] space-y-1.5 text-left" role="alert">
+              <p className="text-xs text-status-error">{authError}</p>
+              {/* The two keyless failures need DIFFERENT fixes, and only one of
+                  them warrants the init disclosure — a missing CLI is not
+                  helped by being told what `bd init` commits. */}
+              {!meta.needsApiKey &&
+                classifyKeylessDetectFailure(authError) === 'missing-workspace' &&
+                BEADS_INIT_DISCLOSURE.map((line) => (
+                  <p key={line} className="text-[11px] leading-relaxed text-text-tertiary">
+                    {line}
+                  </p>
+                ))}
+            </div>
           )}
         </div>
       ) : (
@@ -1337,7 +1389,9 @@ export function TrackerWizardModal({
             </span>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-text-primary">
-                Authorized as {identity.actorLabel}
+                {meta.needsApiKey
+                  ? `Authorized as ${identity.actorLabel}`
+                  : `Workspace found · syncing as ${identity.actorLabel}`}
               </p>
               <p className="mt-0.5 text-xs text-text-secondary">
                 workspace {identity.workspaceName}
