@@ -220,6 +220,50 @@ async function findEnabledStartRun(): Promise<HTMLElement> {
 }
 
 // ---------------------------------------------------------------------------
+// SubstrateSelector now renders TWO segmented radio rows (provider + mode)
+// instead of a single native <select>. These helpers drive/read it via its
+// `${idBase}-provider-<provider>` / `${idBase}-mode-<mode>` testids so the
+// tests below can keep asserting against the flat runtime id.
+// ---------------------------------------------------------------------------
+
+const RUNTIME_SEGMENTS: Record<string, { provider: string; mode: 'chat' | 'cli' }> = {
+  'claude-sdk': { provider: 'claude', mode: 'chat' },
+  'claude-interactive': { provider: 'claude', mode: 'cli' },
+  'codex-sdk': { provider: 'codex', mode: 'chat' },
+  'codex-pty': { provider: 'codex', mode: 'cli' },
+  'omp-sdk': { provider: 'omp', mode: 'chat' },
+  'omp-pty': { provider: 'omp', mode: 'cli' },
+};
+
+// Each click is flushed in its OWN act() call (never nested inside a caller's
+// act()) — the provider click and the mode click both read the runtime off
+// component state at render time, so the mode click must see the DOM AFTER
+// the provider click's onChange has actually re-rendered it. Two fireEvent
+// calls sharing one outer act() batch and never flush in between, which left
+// the mode click reading the stale (pre-provider-switch) render.
+async function chooseRuntime(runtime: string, idBase = 'workflow-picker-substrate'): Promise<void> {
+  const { provider, mode } = RUNTIME_SEGMENTS[runtime];
+  await act(async () => {
+    fireEvent.click(screen.getByTestId(`${idBase}-provider-${provider}`));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId(`${idBase}-mode-${mode}`));
+  });
+}
+
+function selectedRuntime(idBase = 'workflow-picker-substrate'): string {
+  const provider = (['claude', 'codex', 'omp'] as const).find(
+    (p) => screen.queryByTestId(`${idBase}-provider-${p}`)?.getAttribute('aria-checked') === 'true',
+  );
+  const mode = (['chat', 'cli'] as const).find(
+    (m) => screen.getByTestId(`${idBase}-mode-${m}`).getAttribute('aria-checked') === 'true',
+  );
+  return Object.entries(RUNTIME_SEGMENTS).find(
+    ([, seg]) => seg.provider === provider && seg.mode === mode,
+  )![0];
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -332,10 +376,8 @@ describe('WorkflowPicker — Quick Session button', () => {
     // PTY-backed quick session — not a silent SDK fallback (review finding F1).
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('claude-interactive');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('quick-session-button'));
@@ -350,10 +392,8 @@ describe('WorkflowPicker — Quick Session button', () => {
   it('selects Codex PTY for Quick Session only and threads Codex model/provider fields', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-pty' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('codex-pty');
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
     expect(await screen.findByRole('option', { name: /GPT-5\.4 —/i })).toBeInTheDocument();
@@ -387,13 +427,9 @@ describe('WorkflowPicker — Quick Session button', () => {
     useConfigStore.setState({ config: null });
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'claude-interactive' } });
-    });
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('claude-interactive');
+    await chooseRuntime('claude-sdk');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('quick-session-button'));
@@ -546,18 +582,24 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
   it('renders an agent runtime selector before model and gates the Codex CLI runtime for workflows', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
+    const providerClaude = await screen.findByTestId('workflow-picker-substrate-provider-claude');
     const modelSelect = screen.getByLabelText('Select Claude model');
-    expect(runtimeSelect).toBeInTheDocument();
-    expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(providerClaude).toBeInTheDocument();
+    expect(providerClaude.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Default reflects ConfigManager.defaultSubstrate floor ('sdk').
-    expect(runtimeSelect.value).toBe('claude-sdk');
-    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).not.toBeDisabled();
+    expect(selectedRuntime()).toBe('claude-sdk');
     expect(
       screen.getByText(/A structured runtime can run workflows or quick sessions/i),
     ).toBeInTheDocument();
     expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
+
+    // WorkflowPicker's runtimeScope is 'mixed', so neither Codex mode segment is
+    // disabled here (contrast ABTestLaunchModal's 'workflow' scope).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('workflow-picker-substrate-provider-codex'));
+    });
+    expect(screen.getByTestId('workflow-picker-substrate-mode-chat')).not.toBeDisabled();
+    expect(screen.getByTestId('workflow-picker-substrate-mode-cli')).not.toBeDisabled();
   });
 
   it("forwards the default substrate ('sdk') in the runs.start.mutate payload", async () => {
@@ -588,10 +630,8 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
   it("includes substrate: 'interactive' in the mutate payload when 'interactive' is picked", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('claude-interactive');
 
     const startRunBtn = await findEnabledStartRun();
     await act(async () => {
@@ -614,11 +654,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
   it('launches workflows with the Codex SDK runtime', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    expect(screen.getByTestId('workflow-picker-substrate-provider-codex')).not.toBeDisabled();
+    await chooseRuntime('codex-sdk');
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
     expect(screen.queryByLabelText('Select Claude model')).toBeNull();
@@ -650,10 +688,8 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
   it('keeps Quick Session available when Codex SDK is selected', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('codex-sdk');
 
     expect(screen.getByTestId('quick-session-button')).not.toBeDisabled();
   });
@@ -676,7 +712,7 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
 
   it("does NOT render the interactive caveats while 'sdk' is selected", async () => {
     render(<WorkflowPicker projectId={1} />);
-    await screen.findByLabelText('Select agent runtime');
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
 
     expect(screen.queryByTestId('workflow-picker-substrate-caveats')).toBeNull();
   });
@@ -684,10 +720,8 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
   it("renders the unconditional interactive v1 caveats when 'interactive' is selected, and NOT the approval-routing caveat (Probe A passed)", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('claude-interactive');
 
     const caveats = screen.getByTestId('workflow-picker-substrate-caveats');
     expect(caveats).toBeInTheDocument();
@@ -1267,23 +1301,19 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     setRunTypeDefaults({ 'workflow:wf-1': { model: 'sonnet' } });
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
     await waitFor(() => {
       expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
     });
 
     // Claude → Codex: the Claude alias is coerced off the Codex picker.
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     await waitFor(() => {
       expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
     });
 
     // Codex → Claude.
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
-    });
+    await chooseRuntime('claude-sdk');
     await waitFor(() => {
       expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
     });
@@ -1386,10 +1416,8 @@ describe('WorkflowPicker — per-run-type model default (TASK-151)', () => {
     setRunTypeDefaults({ quick: { model: 'haiku' } });
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-pty' } });
-    });
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
+    await chooseRuntime('codex-pty');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('quick-session-button'));
@@ -1537,8 +1565,7 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
     });
   }
 
-  const runtimeValue = (): string =>
-    (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+  const runtimeValue = (): string => selectedRuntime();
   const modelValue = (): string =>
     (screen.getByLabelText('Select Claude model') as HTMLSelectElement).value;
   const pressedPermissionLabel = (): string | null => {
@@ -1717,9 +1744,7 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
     await act(async () => {
       fireEvent.click(screen.getByLabelText("Permission mode: Don't ask"));
     });
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-sdk' } });
-    });
+    await chooseRuntime('claude-sdk');
 
     // A Settings edit re-seeds only UNTOUCHED controls.
     setConfig({
@@ -1735,15 +1760,11 @@ describe('WorkflowPicker — Configure controls seed from the stored per-type de
   it('leaves the model + permission keys UNTOUCHED across a Codex→Claude runtime round trip', async () => {
     setConfig({ 'workflow:wf-1': { permissionMode: 'auto' } });
     render(<WorkflowPicker projectId={1} />);
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await screen.findByTestId('workflow-picker-substrate-provider-claude');
     await findEnabledStartRun();
 
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
+    await chooseRuntime('claude-sdk');
 
     // If any coercion had used `setByUser`, this stored-default change would be
     // ignored for the rest of the mount.
@@ -1922,18 +1943,10 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
     render(<WorkflowPicker projectId={1} />);
     await findEnabledStartRun();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-interactive' },
-      });
-    });
+    await chooseRuntime('claude-interactive');
     expect(screen.getByTestId('workflow-picker-save-default')).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-sdk' },
-      });
-    });
+    await chooseRuntime('claude-sdk');
     expect(screen.queryByTestId('workflow-picker-save-default')).toBeNull();
   });
 
@@ -1995,9 +2008,7 @@ describe('WorkflowPicker — "Save as default" CTA + Undo (TASK-157)', () => {
     render(<WorkflowPicker projectId={1} />);
     await findEnabledStartRun();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('workflow-picker-save-default'));
@@ -2362,8 +2373,7 @@ describe('WorkflowPicker — global launch defaults (defaultLaunchModel / defaul
     });
   }
 
-  const runtimeControl = (): string =>
-    (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+  const runtimeControl = (): string => selectedRuntime();
   const modelControl = (): string =>
     (screen.getByLabelText('Select Claude model') as HTMLSelectElement).value;
 

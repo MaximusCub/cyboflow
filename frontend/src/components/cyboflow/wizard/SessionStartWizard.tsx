@@ -120,7 +120,6 @@ import { cn } from '../../../utils/cn';
 import { sameStringSet } from '../../../utils/sameStringSet';
 import { Switch } from '../../ui/Switch';
 import { Button } from '../../ui/Button';
-import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { SessionActionToast } from '../SessionActionToast';
 import { WizardStepHeader } from './WizardStepHeader';
 import type { WizardStep } from './WizardStepHeader';
@@ -746,9 +745,6 @@ export default function SessionStartWizard(): React.JSX.Element {
     }
   }, [tuningLevelOverride, variantSelection.mode]);
 
-  // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
-  const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
-
   // Planner pre-launch idea gate.
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [pendingWorkflowId, setPendingWorkflowId] = useState<string | null>(null);
@@ -982,14 +978,6 @@ export default function SessionStartWizard(): React.JSX.Element {
     setSelection(null);
     setStep(2);
   }, []);
-
-  const handleEditorSaved = useCallback(
-    (savedId: string) => {
-      setEditorMode(null);
-      void loadWorkflows(savedId);
-    },
-    [loadWorkflows],
-  );
 
   const handleProjectCreated = useCallback((project: Project) => {
     setCreateOpen(false);
@@ -1874,19 +1862,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* Session permission — shown for BOTH workflow and quick launches; an
-                explicit choice writes the host session's agent_permission_mode (the
-                sole execution authority) for either launch kind. Provider-specific
-                copy stays below runtime because runtime controls the provider. */}
-            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
-              <AgentPermissionModeSelector
-                value={permissionMode}
-                onChange={setPermissionModeByUser}
-                agentProvider={effectiveProvider}
-                agentRuntime={effectiveRuntime}
-              />
-            </div>
-
             {/* Model picker — shown for ALL launch kinds and scoped to the selected
                 runtime/provider. Quick + ultracode thread it into useQuickSession
                 (→ the claude panel / interactive eager spawn); workflow threads
@@ -1908,6 +1883,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                     if (!isOpusModel(m)) setFastMode(false);
                   }}
                   id="wizard-model"
+                  label={selection.kind === 'workflow' ? 'Default model' : 'Model'}
                   agentProvider={effectiveProvider}
                   agentRuntime={effectiveRuntime}
                 />
@@ -1991,30 +1967,18 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
             )}
 
-            {/* Per-run A/B variant selector (migration 048), WORKFLOW only — hidden
-                entirely for a workflow with zero variants. Threaded into
-                runs.start as variantId / baseline (never both); rotation sends
-                neither field. Replaced with a disabled/forced-baseline
-                placeholder (D4's mirror rule) while a tuning-level override is
-                active — a level override IS an explicit spec choice, so variant
-                pinning is disabled rather than silently ignored. */}
-            {selection.kind === 'workflow' && (
-              tuningLevelOverride !== null && selectedWorkflowVariants.length > 0 ? (
-                <div className="flex flex-col gap-1" data-testid="wizard-variant-disabled-by-tuning">
-                  <span className="text-xs font-medium text-text-secondary">Variant</span>
-                  <div className="w-full rounded-input border border-border-secondary bg-bg-primary px-2 py-1.5 text-xs text-text-tertiary opacity-60">
-                    Baseline (no variant) — disabled: tuning level override active
-                  </div>
-                </div>
-              ) : (
-                <VariantSelector
-                  workflowId={selection.workflowId}
-                  value={variantSelection}
-                  onChange={setVariantSelection}
-                  id="wizard-variant"
-                />
-              )
-            )}
+            {/* Session permission — shown for BOTH workflow and quick launches; an
+                explicit choice writes the host session's agent_permission_mode (the
+                sole execution authority) for either launch kind. Provider-specific
+                copy stays below runtime because runtime controls the provider. */}
+            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
+              <AgentPermissionModeSelector
+                value={permissionMode}
+                onChange={setPermissionModeByUser}
+                agentProvider={effectiveProvider}
+                agentRuntime={effectiveRuntime}
+              />
+            </div>
             {/* Advanced (QUICK + ULTRACODE): workspace plus Claude-only MCP/plugin
                 selection. These are a session-START decision — the deny-list is
                 enforced at the first spawn, so toggling mid-conversation was
@@ -2144,7 +2108,31 @@ export default function SessionStartWizard(): React.JSX.Element {
                     className="flex flex-col gap-2 border-t border-border-secondary px-3 py-3"
                     data-testid="wizard-workflow-advanced-body"
                   >
-                    <div className="flex flex-col gap-0.5">
+                    {/* Per-run A/B variant selector (migration 048) — hidden
+                        entirely for a workflow with zero variants. Threaded into
+                        runs.start as variantId / baseline (never both); rotation
+                        sends neither field. Replaced with a disabled/forced-
+                        baseline placeholder (D4's mirror rule) while a
+                        tuning-level override is active — a level override IS an
+                        explicit spec choice, so variant pinning is disabled
+                        rather than silently ignored. */}
+                    {tuningLevelOverride !== null && selectedWorkflowVariants.length > 0 ? (
+                      <div className="flex flex-col gap-1" data-testid="wizard-variant-disabled-by-tuning">
+                        <span className="text-xs font-medium text-text-secondary">Variant</span>
+                        <div className="w-full rounded-input border border-border-secondary bg-bg-primary px-2 py-1.5 text-xs text-text-tertiary opacity-60">
+                          Baseline (no variant) — disabled: workflow configuration override active
+                        </div>
+                      </div>
+                    ) : (
+                      <VariantSelector
+                        workflowId={selection.workflowId}
+                        value={variantSelection}
+                        onChange={setVariantSelection}
+                        id="wizard-variant"
+                      />
+                    )}
+
+                    <div className="mt-1 flex flex-col gap-0.5">
                       <span className="text-sm font-medium text-text-primary">Quality eval</span>
                       <span className="text-xs text-text-tertiary">
                         LLM-jury review of this run's diff at the review step
@@ -2263,29 +2251,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* Workflow-only control: blueprint-editor access (there is no
-                workflow to edit for a quick session). */}
-            {selection.kind === 'workflow' && (
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditorMode('edit')}
-                  data-testid="wizard-edit-flow"
-                  className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
-                >
-                  Edit blueprint
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditorMode('create')}
-                  data-testid="wizard-new-flow"
-                  className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
-                >
-                  New flow
-                </button>
-              </div>
-            )}
-
             {/* Save-as-default outcome. Undo is offered ONLY for a write the
                 store confirmed landed — a failure toast carries no Undo, because
                 replaying it would delete a default the failed write never
@@ -2319,15 +2284,15 @@ export default function SessionStartWizard(): React.JSX.Element {
               <SummaryRow label="Project" value={banner.name} />
               <SummaryRow label="Branch" value={banner.branch ?? '—'} />
               <SummaryRow
-                label="Mode"
+                label="Workflow"
                 value={
                   selection.kind === 'quick'
                     ? 'Quick session'
                     : selection.kind === 'ultracode'
-                      ? 'Ultracode (/ultracode)'
+                      ? 'Ultracode'
                       : selection.kind === 'design'
                         ? 'Design session'
-                        : selectedMeta?.slashCommand ?? '/workflow'
+                        : (selectedMeta?.slashCommand ?? '/workflow').replace(/^\//, '')
                 }
               />
               <SummaryRow label="Permission" value={permissionLabel} />
@@ -2464,20 +2429,6 @@ export default function SessionStartWizard(): React.JSX.Element {
           isOpen
           onClose={() => setCreateOpen(false)}
           onCreated={handleProjectCreated}
-        />
-      )}
-
-      {/* ── Workflow blueprint editor (step ③, workflow path) ── */}
-      {editorMode !== null && selectedProjectId !== null && selection?.kind === 'workflow' && (
-        <WorkflowEditorModal
-          isOpen
-          mode={editorMode}
-          workflowId={editorMode === 'edit' ? selection.workflowId : ''}
-          projectId={selectedProjectId}
-          onClose={() => setEditorMode(null)}
-          onSaved={handleEditorSaved}
-          // Dial stamps refresh the card metadata (tuningLevel) without closing.
-          onMutated={(savedId) => void loadWorkflows(savedId)}
         />
       )}
     </div>

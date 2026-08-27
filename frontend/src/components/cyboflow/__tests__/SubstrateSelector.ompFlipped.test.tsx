@@ -1,16 +1,13 @@
 /**
  * SubstrateSelector under the FLIPPED `selectableInPickers` state for OMP.
  *
- * Separate file from SubstrateSelector.test.tsx on purpose: that suite proves
- * the UNFLIPPED default (omp-sdk/omp-pty absent from every picker even with
- * the provider switched on — see its "offers exactly the picker-selectable
- * runtimes" describe block), which this file must not disturb. Here the
- * capability module is mocked to simulate the day
- * RUNTIME_CAPABILITIES.omp-sdk/omp-pty.selectableInPickers flips to true (the
- * "last Phase-1 step" docs/proposals/omp-provider-integration.md §5.5
- * describes) — proving the row, its onChange wiring, and the provider-toggle
- * interplay all work ahead of that flip, with everything else (every other
- * runtime's selectability) delegating to the real implementation.
+ * Separate file from SubstrateSelector.test.tsx on purpose: it mocks the
+ * capability module so the OMP lanes are picker-selectable regardless of what
+ * the shipped RUNTIME_CAPABILITIES table says (the "last Phase-1 step"
+ * docs/proposals/omp-provider-integration.md §5.5 describes) — proving the
+ * provider column, its onChange wiring, and the provider-toggle interplay all
+ * work under the flip, with everything else (every other runtime's
+ * selectability) delegating to the real implementation.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
@@ -43,30 +40,29 @@ beforeEach(() => {
   useConfigStore.setState({ config: null });
 });
 
-describe('SubstrateSelector — OMP rows once selectableInPickers flips', () => {
-  it('offers omp-sdk and omp-pty as real, enabled options once flipped AND the provider is on', () => {
+describe('SubstrateSelector — OMP lanes once selectableInPickers flips', () => {
+  it('offers the OMP provider with both lanes enabled once flipped AND the provider is on', () => {
     setProviderAccess({ claude: true, codex: true, omp: true });
-    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
+    render(<SubstrateSelector value="omp-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
-    expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: 'OMP (CLI)' })).not.toBeDisabled();
+    expect(screen.getByTestId('substrate-select-provider-omp')).toBeInTheDocument();
+    expect(screen.getByTestId('substrate-select-mode-chat')).not.toBeDisabled();
+    expect(screen.getByTestId('substrate-select-mode-cli')).not.toBeDisabled();
   });
 
-  it('still hides the OMP rows when flipped but the provider itself is off (absent ⇒ disabled)', () => {
+  it('still hides the OMP column when flipped but the provider itself is off (absent ⇒ disabled)', () => {
     setProviderAccess({ claude: true, codex: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
-    expect(screen.queryByRole('option', { name: /OMP/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('substrate-select-provider-omp')).not.toBeInTheDocument();
   });
 
-  it('selecting omp-sdk fires onChange with the runtime id', () => {
+  it('clicking the OMP provider segment fires onChange with the runtime id', () => {
     const onChange = vi.fn();
     setProviderAccess({ claude: true, codex: true, omp: true });
     render(<SubstrateSelector value="claude-sdk" onChange={onChange} runtimeScope="session" />);
 
-    fireEvent.change(screen.getByRole('combobox', { name: /select agent runtime/i }), {
-      target: { value: 'omp-sdk' },
-    });
+    fireEvent.click(screen.getByTestId('substrate-select-provider-omp'));
     expect(onChange).toHaveBeenCalledWith('omp-sdk');
   });
 

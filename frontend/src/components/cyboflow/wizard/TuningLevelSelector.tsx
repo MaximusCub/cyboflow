@@ -60,8 +60,8 @@ export function TuningLevelSelector({
 }: TuningLevelSelectorProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-1.5" data-testid="wizard-tuning-level">
-      <span className="text-xs font-medium text-text-secondary">Tuning level</span>
-      <div className="flex gap-1.5" role="radiogroup" aria-label="Tuning level" id={id}>
+      <span className="text-xs font-medium text-text-secondary">Workflow configuration</span>
+      <div className="flex gap-1.5" role="radiogroup" aria-label="Workflow configuration" id={id}>
         {TUNING_LEVELS.map((level) => {
           const isCustom = level === 'custom';
           const segmentDisabled = disabled || (isCustom && !customSlotAvailable);
@@ -78,7 +78,7 @@ export function TuningLevelSelector({
               data-testid={`wizard-tuning-level-${level}`}
               title={
                 !disabled && isCustom && !customSlotAvailable
-                  ? 'No custom definition yet — open Edit blueprint to create one'
+                  ? 'No custom definition yet — create one in the flow editor'
                   : undefined
               }
               className={cn(

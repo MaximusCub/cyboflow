@@ -1,9 +1,20 @@
 /**
- * SubstrateSelector — per-launch agent runtime choice. Claude runtimes still
- * project onto the legacy CLI substrate choice (SDK | Interactive PTY); Codex
- * runtimes are provider/runtime choices and do not carry a substrate value.
- * Controlled (value/onChange), but self-locks to the global PTY-only setting
- * (see below).
+ * SubstrateSelector — per-launch agent runtime choice, rendered as TWO
+ * segmented controls: **Runtime** (the provider — Claude / Codex / OMP / Pi)
+ * and **Mode** (the transport — Chat, i.e. the structured SDK lane, or CLI,
+ * the terminal-driven lane). The pair maps 1:1 onto the flat runtime ids the
+ * rest of the app speaks (`claude-sdk` … `pi-pty`), so the component's
+ * external contract is unchanged: `value`/`onChange` still carry a single
+ * {@link LaunchAgentRuntime}. Controlled, but self-locks to the global
+ * PTY-only setting (see below).
+ *
+ * OMP is the one provider whose lanes are install-dependent: the two OMP
+ * flavors are ALTERNATIVES, not a stack. A local install offers
+ * `omp-sdk`/`omp-pty` (Chat/CLI as usual); an Aria install supervises a
+ * REMOTE fleet, so its OMP column holds the single `omp-fleet` lane instead
+ * (no Mode row — there is no choice to make) and is offered DISABLED, naming
+ * the reason, while the bridge is not configured — hiding it would leave an
+ * Aria install with no OMP anywhere while Settings still reads "on".
  *
  * Substrate is honored on BOTH launch paths:
  *   - Workflow runs: threaded into runs.start as the `substrate` param, stamped
@@ -23,21 +34,23 @@
  * 'interactive' so the launch payload matches what will be stamped. Reading the
  * flag HERE (the single shared picker) locks every consumer at once.
  *
- * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
- * caveats text + lock behavior are single-sourced (no drift). `runtimeScope`
- * narrows by LAUNCH KIND, not by vendor: every structured runtime is launchable
- * for workflows and quick sessions alike, while the terminal runtimes
- * (`codex-pty`, `omp-pty`) stay session-only — the scope test reads
- * `workflowRuntimeForLaunch`, so a runtime joining the launchable set is offered
- * here with no edit.
+ * Shared by WorkflowPicker (legacy modal), ABTestLaunchModal, and
+ * SessionStartWizard step 3 so the caveats text + lock behavior are
+ * single-sourced (no drift). `runtimeScope` narrows by LAUNCH KIND, not by
+ * vendor: the scope test reads `workflowRuntimeForLaunch`, so a runtime joining
+ * the launchable set is offered here with no edit — today that means CLI mode
+ * is disabled for Codex/OMP/Pi on a workflow launch while Claude's CLI lane
+ * (claude-interactive) stays launchable.
  */
 import { useEffect } from 'react';
+import { cn } from '../../utils/cn';
 import {
+  AGENT_PROVIDERS,
   AGENT_RUNTIME_LABELS,
   firstEnabledRuntime,
   isRuntimeProviderEnabled,
-  isSessionAgentRuntime,
-  isWorkflowLaunchableRuntime,
+  providerForRuntime,
+  type AgentProvider,
   type AgentProviderAccess,
 } from '../../../../shared/types/agentRuntime';
 import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
@@ -108,111 +121,83 @@ export const PI_PTY_CAVEATS: readonly string[] = [
 interface SubstrateSelectorProps {
   value: LaunchAgentRuntime;
   onChange: (runtime: LaunchAgentRuntime) => void;
-  /** DOM id for the <select> (label association). */
+  /** id/testid base for the two radiogroups (`<id>-provider-*` / `<id>-mode-*`). */
   id?: string;
-  /** Heading text above the select. */
+  /** Heading text above the provider segments. */
   label?: string;
   /** data-testid for the caveats panel (per-surface to keep existing selectors stable). */
   caveatsTestId?: string;
-  /** Which launch surface owns the runtime choice. Codex PTY is session-only. */
+  /** Which launch surface owns the runtime choice. Codex/OMP/Pi CLI are session-only. */
   runtimeScope?: 'workflow' | 'session' | 'mixed';
 }
 
-/**
- * Every runtime this picker knows a row for, in display order.
- *
- * The NAME half comes from the shared {@link AGENT_RUNTIME_LABELS} so it cannot
- * drift from the Settings runtime list or the wizard's launch summary; only the
- * scope suffix — which is this picker's own concern — is added here.
- */
-const RUNTIME_SCOPE_SUFFIXES: Partial<Record<LaunchAgentRuntime, string>> = {
-  'claude-sdk': ' (default)',
-  'codex-pty': ' — quick sessions only',
-  'omp-fleet': ' — quick sessions only',
-  'pi-pty': ' — quick sessions only',
+type RuntimeMode = 'chat' | 'cli';
+
+/** One provider column's lanes. `cli` is absent for the Aria-mode OMP column,
+ *  whose single `omp-fleet` lane leaves no transport choice to render. */
+interface ProviderLanes {
+  chat: LaunchAgentRuntime;
+  cli?: LaunchAgentRuntime;
+}
+
+const PROVIDER_LABELS: Record<AgentProvider, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  omp: 'OMP',
+  pi: 'Pi',
 };
 
-const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = (
-  [
-    'claude-sdk',
-    'claude-interactive',
-    'codex-sdk',
-    'codex-pty',
-    'omp-sdk',
-    'omp-pty',
-    'omp-fleet',
-    'pi-sdk',
-    'pi-pty',
-  ] as const
-).map((runtime) => ({
-  runtime,
-  label: `${AGENT_RUNTIME_LABELS[runtime]}${RUNTIME_SCOPE_SUFFIXES[runtime] ?? ''}`,
-}));
+const MODE_LABELS: Record<RuntimeMode, string> = {
+  chat: 'Chat',
+  cli: 'CLI',
+};
 
 /**
- * The rows the picker may render at all, before the provider toggles narrow them
- * further. Gated on `RUNTIME_CAPABILITIES.selectableInPickers` rather than on
- * membership of the list above, so a runtime declared ahead of its managers can
- * carry its row and label here from the start and stay invisible until that one
- * flag flips — the alternative is a second list to remember, and a row added to
- * only one of them.
- *
- * Everything downstream (the option list, the disabled-provider fallback, the
- * "some are hidden" note) counts against THIS, never against RUNTIME_OPTIONS.
+ * THE provider × mode grid for one install — every cell is a runtime id the
+ * launch seams accept. Chat is the structured lane (SDK managers, structured
+ * events/usage/MCP); CLI is the terminal-driven lane. `claude-interactive`
+ * sits in the CLI column because it is user-facing "Claude (CLI)" even though
+ * it is workflow-launchable, unlike the other CLI cells. The OMP column is the
+ * flavor-dependent one (see the file header): Aria mode swaps its two local
+ * lanes for the single `omp-fleet` lane.
  */
-const SELECTABLE_RUNTIME_OPTIONS = RUNTIME_OPTIONS.filter((o) =>
-  isRuntimeSelectableInPickers(o.runtime),
-);
+function lanesForProvider(provider: AgentProvider, omp: OmpAvailability): ProviderLanes {
+  switch (provider) {
+    case 'claude':
+      return { chat: 'claude-sdk', cli: 'claude-interactive' };
+    case 'codex':
+      return { chat: 'codex-sdk', cli: 'codex-pty' };
+    case 'omp':
+      return omp.ariaMode ? { chat: 'omp-fleet' } : { chat: 'omp-sdk', cli: 'omp-pty' };
+    case 'pi':
+      return { chat: 'pi-sdk', cli: 'pi-pty' };
+  }
+}
+
+/** The mode a flat runtime id sits in — the inverse of {@link lanesForProvider}. */
+function modeForRuntime(runtime: LaunchAgentRuntime, omp: OmpAvailability): RuntimeMode {
+  return lanesForProvider(providerForRuntime(runtime), omp).cli === runtime ? 'cli' : 'chat';
+}
 
 /**
- * Scope-level unavailability — rendered as a DISABLED option so the user can
- * see the runtime exists but not here (e.g. Codex PTY on a workflow launch).
- * Provider access is a separate axis: a switched-off provider's runtimes are
- * hidden outright (see enabledRuntimeOptions), because they aren't available
- * anywhere until the toggle goes back on.
+ * Scope-level unavailability — the lane exists but not on THIS launch surface
+ * (e.g. Codex CLI, or the fleet supervisor, on a workflow launch). Provider
+ * access is a separate axis: a switched-off provider's column is hidden
+ * outright (see visibleProviders), because it isn't available anywhere until
+ * the toggle goes back on.
  */
 function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): boolean {
   if (scope === 'workflow') return workflowRuntimeForLaunch(runtime) === null;
-  if (scope === 'session') return false;
   return false;
 }
 
-/** The LOCAL OMP runtimes — an OMP process this machine runs. */
-const LOCAL_OMP_RUNTIMES: ReadonlySet<LaunchAgentRuntime> = new Set<LaunchAgentRuntime>(['omp-sdk', 'omp-pty']);
-
 /**
- * The options a picker may show, given the provider toggles + OMP availability.
- *
- * The two OMP flavors are ALTERNATIVES, not a stack: a panel is either a local
- * OMP process or a supervised remote worker. Aria mode picks which one this
- * install runs, so exactly one of them is ever offered — showing both would
- * imply a choice the runtime does not actually support, and `omp-fleet` needs a
- * configured bridge the local runtimes do not.
- */
-function flavorVisibleOptions(
-  omp: OmpAvailability,
-): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return SELECTABLE_RUNTIME_OPTIONS.filter((o) => {
-    // Visible on ARIA MODE ALONE, not on availability. Hiding it when the
-    // bridge is missing removed the last OMP row from an Aria install — the
-    // local runtimes are hidden precisely BECAUSE Aria is on — so the picker
-    // showed no OMP at all while Settings → Integrations still read "on", with
-    // no note explaining it (the hidden-runtimes note counts against THIS
-    // list, so a row removed here is invisible by construction). It is offered
-    // and DISABLED instead: see unavailableReason.
-    if (o.runtime === 'omp-fleet') return omp.ariaMode;
-    if (LOCAL_OMP_RUNTIMES.has(o.runtime)) return !omp.ariaMode;
-    return true;
-  });
-}
-
-/**
- * Why a VISIBLE runtime cannot be chosen right now, or null when it can.
+ * Why a VISIBLE lane cannot be chosen right now, or null when it can.
  *
  * Distinct from {@link isRuntimeDisabled}, which is about SCOPE ("this launch
  * surface can't run it"). This is about the machine's current configuration —
  * the runtime is right for the surface, but something outside the picker has to
- * be set up first. Rendering the reason beats removing the row: a user who
+ * be set up first. Rendering the reason beats removing the column: a user who
  * turned Aria mode on needs to learn the bridge is missing, not watch OMP
  * disappear from a picker whose provider toggle still says it is enabled.
  */
@@ -221,11 +206,31 @@ function unavailableReason(runtime: LaunchAgentRuntime, omp: OmpAvailability): s
   return null;
 }
 
-function enabledRuntimeOptions(
-  access: AgentProviderAccess,
+/** Whether a lane may actually be chosen (capability + scope + availability). */
+function isCellOfferable(
+  runtime: LaunchAgentRuntime,
+  scope: NonNullable<SubstrateSelectorProps['runtimeScope']>,
   omp: OmpAvailability,
-): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return flavorVisibleOptions(omp).filter((o) => isRuntimeProviderEnabled(access, o.runtime));
+): boolean {
+  return (
+    isRuntimeSelectableInPickers(runtime) &&
+    !isRuntimeDisabled(runtime, scope) &&
+    unavailableReason(runtime, omp) === null
+  );
+}
+
+/** The provider columns a picker may show, given the provider toggles. A
+ *  column stays visible even when its lanes are currently unpickable (the
+ *  Aria-mode bridge gap) — that state renders as a disabled segment with the
+ *  reason, never as a silent hole. */
+function visibleProviders(access: AgentProviderAccess, omp: OmpAvailability): readonly AgentProvider[] {
+  return AGENT_PROVIDERS.filter((p) => {
+    const lanes = lanesForProvider(p, omp);
+    const anySelectable =
+      isRuntimeSelectableInPickers(lanes.chat) ||
+      (lanes.cli !== undefined && isRuntimeSelectableInPickers(lanes.cli));
+    return anySelectable && isRuntimeProviderEnabled(access, lanes.chat);
+  });
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -238,7 +243,7 @@ function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): 
   return 'A structured runtime can run workflows or quick sessions. The CLI runtimes start quick sessions only.';
 }
 
-/** Shared caveats-block rendering — the interactive PTY and both OMP rows use
+/** Shared caveats-block rendering — the interactive PTY and the OMP/Pi rows use
  *  the same "v1 limits" panel, differing only in title + item list. */
 function CaveatsPanel({
   testId,
@@ -265,28 +270,41 @@ function CaveatsPanel({
   );
 }
 
+/** Segment styling matched to the AgentPermissionModeSelector rows so the
+ *  Configure step's button controls read as one family. */
+function segmentClass(selected: boolean, segmentDisabled: boolean): string {
+  return cn(
+    'flex flex-1 items-center justify-center rounded-button border px-3 py-2 text-sm font-medium transition-colors',
+    segmentDisabled
+      ? 'cursor-not-allowed border-border-secondary bg-surface-secondary text-text-tertiary opacity-50'
+      : selected
+        ? 'border-interactive bg-interactive-surface text-text-primary'
+        : 'border-border-secondary bg-surface-secondary text-text-primary hover:bg-surface-hover',
+  );
+}
+
 export function SubstrateSelector({
   value,
   onChange,
   id = 'substrate-select',
-  label = 'Agent runtime',
+  label = 'Runtime',
   caveatsTestId = 'substrate-caveats',
   runtimeScope = 'workflow',
 }: SubstrateSelectorProps): React.JSX.Element {
   // Global forced-substrate pin (see file header), mirroring the backend
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
+  // Reactive read so a config fetch resolving AFTER mount still locks the picker.
   const forced = useForcedSubstrate();
   // Provider toggles (Settings → Integrations / onboarding). A switched-off
-  // provider's runtimes leave the picker entirely and can never be submitted.
+  // provider's column leaves the picker entirely and can never be submitted.
   const providerAccess = useAgentProviderAccess();
   const omp = useOmpAvailability();
-  const options = enabledRuntimeOptions(providerAccess, omp);
-  // Baseline for the "…are hidden" note: the rows this OMP FLAVOR can show, not
-  // every selectable runtime. Aria mode always hides one flavor, so counting
-  // against the full list would fire the note permanently and blame the provider
-  // toggles for a row the flavor removed.
-  const flavorOptionCount = flavorVisibleOptions(omp).length;
+  const providers = visibleProviders(providerAccess, omp);
   const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
+
+  const selectedProvider = providerForRuntime(value);
+  const selectedMode = modeForRuntime(value, omp);
+  const selectedLanes = lanesForProvider(selectedProvider, omp);
 
   // Under the interactive lock, keep the controlled value consistent so the
   // launch payload matches the backend pin. Scoped to 'interactive' only: demo's
@@ -305,12 +323,14 @@ export function SubstrateSelector({
   // Snap a selection whose provider was switched off (e.g. the user disabled
   // Codex in Settings while a Codex runtime sat in this picker) back to the
   // first still-available runtime, so the rendered value and the launch payload
-  // always name a provider the backend will accept.
+  // always name a provider the backend will accept. An unavailable lane (the
+  // unconfigured fleet bridge) is never a fallback target.
   const fallbackRuntime = firstEnabledRuntime(
     providerAccess,
-    SELECTABLE_RUNTIME_OPTIONS.filter(
-      (o) => !isRuntimeDisabled(o.runtime, runtimeScope) && unavailableReason(o.runtime, omp) === null,
-    ).map((o) => o.runtime),
+    AGENT_PROVIDERS.flatMap((p) => {
+      const lanes = lanesForProvider(p, omp);
+      return lanes.cli !== undefined ? [lanes.chat, lanes.cli] : [lanes.chat];
+    }).filter((r) => isCellOfferable(r, runtimeScope, omp)),
   );
   useEffect(() => {
     if (isRuntimeProviderEnabled(providerAccess, value)) return;
@@ -319,7 +339,7 @@ export function SubstrateSelector({
 
   // Only the user-facing interactive lock gets the read-only locked UI. Demo
   // mode also pins ('sdk'), but it is a throwaway showcase profile — leave the
-  // normal select so demo never falsely renders "Interactive (PTY) — locked".
+  // normal picker so demo never falsely renders "Interactive (CLI) — locked".
   if (forced === 'interactive' && !claudeEnabled) {
     return (
       <div className="flex flex-col gap-1">
@@ -359,45 +379,110 @@ export function SubstrateSelector({
     );
   }
 
+  const hiddenProviders =
+    providers.length !==
+    visibleProviders({ claude: true, codex: true, omp: true, pi: true }, omp).length;
+  // The Aria-mode bridge gap for the SELECTED provider — rendered as a note so
+  // the user learns what to configure instead of meeting an inert segment.
+  const selectedChatReason = unavailableReason(selectedLanes.chat, omp);
+
   return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-xs font-medium text-text-secondary">
-        {label}
-      </label>
-      <select
-        id={id}
-        value={value}
-        onChange={(e) => {
-          const next = e.target.value;
-          if (
-            (isSessionAgentRuntime(next) || isWorkflowLaunchableRuntime(next)) &&
-            !isRuntimeDisabled(next, runtimeScope) &&
-            unavailableReason(next, omp) === null &&
-            isRuntimeProviderEnabled(providerAccess, next)
-          ) {
-            onChange(next);
-          }
-        }}
-        className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-        aria-label="Select agent runtime"
-      >
-        {options.map(({ runtime, label: optionLabel }) => {
-          const reason = unavailableReason(runtime, omp);
-          return (
-            <option
-              key={runtime}
-              value={runtime}
-              disabled={isRuntimeDisabled(runtime, runtimeScope) || reason !== null}
-            >
-              {reason === null ? optionLabel : `${optionLabel} (${reason})`}
-            </option>
-          );
-        })}
-      </select>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-text-secondary">{label}</span>
+        <div className="flex gap-1.5" role="radiogroup" aria-label="Runtime" id={`${id}-provider`}>
+          {providers.map((provider) => {
+            const lanes = lanesForProvider(provider, omp);
+            // A provider none of whose lanes is currently pickable (scope +
+            // availability) renders DISABLED with the reason in its tooltip —
+            // visible-but-unpickable, exactly like the old fleet option row.
+            const anyOfferable =
+              isCellOfferable(lanes.chat, runtimeScope, omp) ||
+              (lanes.cli !== undefined && isCellOfferable(lanes.cli, runtimeScope, omp));
+            const reason = unavailableReason(lanes.chat, omp);
+            const selected = provider === selectedProvider;
+            return (
+              <button
+                key={provider}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                disabled={!anyOfferable}
+                data-testid={`${id}-provider-${provider}`}
+                title={!anyOfferable && reason !== null ? reason : undefined}
+                onClick={() => {
+                  // Keep the current mode where the target lane offers it;
+                  // otherwise fall to the other lane (e.g. CLI → Chat when
+                  // switching Claude→Codex on a workflow launch).
+                  const preferred =
+                    selectedMode === 'cli' && lanes.cli !== undefined ? lanes.cli : lanes.chat;
+                  const alternate = preferred === lanes.chat ? lanes.cli : lanes.chat;
+                  const next = isCellOfferable(preferred, runtimeScope, omp)
+                    ? preferred
+                    : alternate !== undefined && isCellOfferable(alternate, runtimeScope, omp)
+                      ? alternate
+                      : null;
+                  if (next !== null && isRuntimeProviderEnabled(providerAccess, next)) {
+                    onChange(next);
+                  }
+                }}
+                className={segmentClass(selected, !anyOfferable)}
+              >
+                {PROVIDER_LABELS[provider]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* The Mode row exists only when the selected provider genuinely offers a
+          choice here: on a workflow launch Codex/OMP/Pi have no launchable CLI
+          lane — and the Aria-mode OMP column has no CLI lane at all — so a
+          permanently-greyed CLI segment would just beg the question; hide the
+          whole row instead (the scope help below still names the rule). */}
+      {selectedLanes.cli !== undefined && isCellOfferable(selectedLanes.cli, runtimeScope, omp) && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-text-secondary">Mode</span>
+          <div className="flex gap-1.5" role="radiogroup" aria-label="Mode" id={`${id}-mode`}>
+            {(['chat', 'cli'] as const).map((mode) => {
+              const runtime = mode === 'cli' ? selectedLanes.cli : selectedLanes.chat;
+              if (runtime === undefined) return null;
+              const selected = mode === selectedMode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`${id}-mode-${mode}`}
+                  onClick={() => {
+                    if (
+                      isCellOfferable(runtime, runtimeScope, omp) &&
+                      isRuntimeProviderEnabled(providerAccess, runtime)
+                    ) {
+                      onChange(runtime);
+                    }
+                  }}
+                  className={segmentClass(selected, false)}
+                >
+                  {MODE_LABELS[mode]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {selectedChatReason !== null && (
+        <p className="text-xs text-status-warning" data-testid={`${id}-unavailable-note`}>
+          {AGENT_RUNTIME_LABELS[selectedLanes.chat]} is not launchable yet — {selectedChatReason}.
+        </p>
+      )}
+
       <p className="text-xs text-text-tertiary">
-        {options.length === flavorOptionCount
-          ? scopeHelp(runtimeScope)
-          : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
+        {hiddenProviders
+          ? `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`
+          : scopeHelp(runtimeScope)}
       </p>
 
       {value === 'claude-interactive' && (

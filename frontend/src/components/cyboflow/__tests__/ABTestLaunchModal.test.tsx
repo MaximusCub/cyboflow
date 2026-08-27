@@ -498,9 +498,12 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
 
     const configA = screen.getByTestId('ab-test-quick-config-a');
-    fireEvent.change(within(configA).getByRole('combobox', { name: 'Select agent runtime' }), {
-      target: { value: 'claude-interactive' },
-    });
+    // SubstrateSelector renders TWO segmented radio rows (provider + mode)
+    // instead of a native <select>; the target runtime (claude-interactive) is
+    // Claude's CLI cell, and Claude is already the selected provider, so only
+    // the mode segment needs a click. runtimeScope='workflow' here (the CLI
+    // segment is disabled for Codex/OMP, but Claude's CLI lane stays launchable).
+    fireEvent.click(within(configA).getByTestId('ab-test-quick-config-a-runtime-mode-cli'));
     fireEvent.change(within(configA).getByRole('combobox', { name: 'Select Claude model' }), {
       target: { value: 'sonnet' },
     });

@@ -434,16 +434,41 @@ async function chooseModel(model: string): Promise<void> {
   });
 }
 
-/** Change the agent runtime on ③. */
+/** The provider × mode segment pair behind each flat runtime id. */
+const RUNTIME_SEGMENTS: Record<string, { provider: string; mode: 'chat' | 'cli' }> = {
+  'claude-sdk': { provider: 'claude', mode: 'chat' },
+  'claude-interactive': { provider: 'claude', mode: 'cli' },
+  'codex-sdk': { provider: 'codex', mode: 'chat' },
+  'codex-pty': { provider: 'codex', mode: 'cli' },
+  'omp-sdk': { provider: 'omp', mode: 'chat' },
+  'omp-pty': { provider: 'omp', mode: 'cli' },
+};
+
+/** Change the agent runtime on ③ via the Runtime + Mode segments. */
 async function chooseRuntime(runtime: string): Promise<void> {
+  const { provider, mode } = RUNTIME_SEGMENTS[runtime];
   await act(async () => {
-    fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: runtime } });
+    fireEvent.click(screen.getByTestId(`wizard-substrate-provider-${provider}`));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId(`wizard-substrate-mode-${mode}`));
   });
 }
 
-/** The agent-runtime picker's current value on ③. */
+/** The agent-runtime picker's current value on ③, read off the segments. */
 function runtimeValue(): string {
-  return (screen.getByLabelText('Select agent runtime') as HTMLSelectElement).value;
+  const provider = (['claude', 'codex', 'omp'] as const).find(
+    (p) =>
+      screen.queryByTestId(`wizard-substrate-provider-${p}`)?.getAttribute('aria-checked') ===
+      'true',
+  );
+  const mode = (['chat', 'cli'] as const).find(
+    (m) => screen.getByTestId(`wizard-substrate-mode-${m}`).getAttribute('aria-checked') === 'true',
+  );
+  const entry = Object.entries(RUNTIME_SEGMENTS).find(
+    ([, seg]) => seg.provider === provider && seg.mode === mode,
+  );
+  return entry?.[0] ?? '';
 }
 
 /**
@@ -541,17 +566,20 @@ describe('SessionStartWizard — step ③ navigation', () => {
 // Adaptive rendering
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — step ③ adaptive controls', () => {
-  it('shows substrate + blueprint editor for a WORKFLOW selection', async () => {
+  it('shows the runtime + mode segments (no blueprint editor) for a WORKFLOW selection', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
-    const runtimeSelect = screen.getByLabelText('Select agent runtime');
+    const providerSegment = screen.getByTestId('wizard-substrate-provider-claude');
     const modelSelect = screen.getByLabelText('Select Claude model');
-    expect(runtimeSelect).toBeInTheDocument();
-    expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).toBeDisabled();
-    expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
-    expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
+    expect(providerSegment).toBeInTheDocument();
+    expect(providerSegment.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Codex is offered; its CLI lane is workflow-disabled (visible after selecting codex).
+    await chooseRuntime('codex-sdk');
+    expect(screen.getByTestId('wizard-substrate-mode-cli')).toBeDisabled();
+    await chooseRuntime('claude-sdk');
+    // Blueprint-editor entry points are gone from the wizard.
+    expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
+    expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary always present.
     expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
     expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
@@ -562,11 +590,11 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    // Quick sessions can launch both structured Codex SDK chat and Codex PTY;
-    // workflows keep Codex disabled until workflow compatibility ships.
-    expect(screen.getByLabelText('Select agent runtime')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex \(CLI\)/i })).not.toBeDisabled();
+    // Quick sessions can launch both structured Codex SDK chat and Codex PTY.
+    expect(screen.getByTestId('wizard-substrate-provider-claude')).toBeInTheDocument();
+    await chooseRuntime('codex-sdk');
+    expect(screen.getByTestId('wizard-substrate-mode-cli')).not.toBeDisabled();
+    await chooseRuntime('claude-sdk');
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary still present.
@@ -591,11 +619,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     // strictMcpConfig + disallowedTools; interactive: --disallowed-tools +
     // disabledMcpjsonServers + enabledPlugins via --settings), so the Advanced
     // controls stay visible when Interactive is selected.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-interactive' },
-      });
-    });
+    await chooseRuntime('claude-interactive');
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
   });
 
@@ -603,19 +627,11 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'codex-sdk' },
-      });
-    });
+    await chooseRuntime('codex-sdk');
     expect(screen.getByText('Workspace writes · Codex auto-reviews')).toBeInTheDocument();
     expect(screen.getByText(/other requested approvals use the Cyboflow review queue/i)).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'codex-pty' },
-      });
-    });
+    await chooseRuntime('codex-pty');
 
     expect(screen.getByText('Currently same as Allow edits')).toBeInTheDocument();
     expect(screen.getByText(/prompts appear in its terminal/i)).toBeInTheDocument();
@@ -695,11 +711,7 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
 
     // Interactive substrate → still selectable (no SDK-only constraint).
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-interactive' },
-      });
-    });
+    await chooseRuntime('claude-interactive');
     expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
   });
 
@@ -733,11 +745,7 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
 
     // Flipping to interactive no longer resets the choice — in-place works there.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-interactive' },
-      });
-    });
+    await chooseRuntime('claude-interactive');
     expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
 
     await act(async () => {
@@ -942,9 +950,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await act(async () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
-    });
+    await chooseRuntime('claude-interactive');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
@@ -963,11 +969,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
-    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
     expect(screen.queryByLabelText('Select Claude model')).toBeNull();
@@ -1004,11 +1006,8 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
-    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: /^OMP$/i })).not.toBeDisabled();
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'omp-sdk' } });
-    });
+    expect(screen.getByTestId('wizard-substrate-provider-omp')).toBeInTheDocument();
+    await chooseRuntime('omp-sdk');
 
     expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('OMP');
     expect(screen.getByTestId('wizard-launch-summary')).not.toHaveTextContent('Claude SDK');
@@ -1069,9 +1068,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
-    });
+    await chooseRuntime('claude-interactive');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
@@ -1091,9 +1088,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-pty' } });
-    });
+    await chooseRuntime('codex-pty');
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
 
     await act(async () => {
@@ -1101,8 +1096,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     });
     await selectWorkflowAndConfigure();
 
-    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
-    await waitFor(() => expect(runtimeSelect.value).toBe('claude-sdk'));
+    await waitFor(() => expect(runtimeValue()).toBe('claude-sdk'));
 
     expect(mockEnsureSession).not.toHaveBeenCalled();
     expect(mockRunStart).not.toHaveBeenCalled();
@@ -1187,9 +1181,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     // app-server turn carries `effort`). The runtime flip clears the prior Claude
     // pick (scales differ), so the select resets to 'Default', now on the Codex
     // scale — which exposes the Codex-only 'minimal' level.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     const effortSelect = screen.getByTestId('wizard-effort-select') as HTMLSelectElement;
     expect(effortSelect.value).toBe(''); // reset to 'Default' on the runtime flip
     expect(screen.getByRole('option', { name: 'minimal' })).toBeInTheDocument(); // Codex-only level
@@ -1218,9 +1210,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(screen.getByTestId('wizard-effort-select')).toBeInTheDocument();
 
     // ...gone once the runtime flips to codex-pty — the PTY CLI emits no effort flag.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-pty' } });
-    });
+    await chooseRuntime('codex-pty');
     expect(screen.queryByTestId('wizard-effort-select')).toBeNull();
   });
 });
@@ -1364,7 +1354,7 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
     expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
 
     // Substrate is pinned to interactive — no selector.
-    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(screen.queryByTestId('wizard-substrate-provider-claude')).toBeNull();
 
     // Advanced (MCP/plugin) disclosure is offered, same as a quick launch.
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
@@ -1480,9 +1470,7 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
 
     // The Claude scale ('high') has no meaning on the Codex turn options — the
     // flip must clear it so a stale cross-provider value can never ride a launch.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('');
   });
 
@@ -1500,9 +1488,7 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
 
     // ...and STILL cleared by the provider flip: the seeding effect must not
     // re-apply the stored value on a runtime change (it is not a dependency).
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     expect((screen.getByTestId('wizard-effort-select') as HTMLSelectElement).value).toBe('');
   });
 
@@ -1513,21 +1499,15 @@ describe('SessionStartWizard — run-type defaults + seeded model selection', ()
 
     // Codex → Claude → Codex, ZERO interaction with the model control. Each
     // Codex leg coerces the Claude pin onto the Codex family default.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     expect((screen.getByLabelText('Select Codex model') as HTMLSelectElement).value).toBe('auto');
     // The Claude leg is asserted only as "the Claude picker is back": the Codex
     // family default is 'auto', which isCodexModelFamily does NOT match, so the
     // reverse coercion is a deliberate no-op and 'auto' rides through unchanged
     // — pre-existing behavior, untouched by the seeded-selection refactor.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-sdk' } });
-    });
+    await chooseRuntime('claude-sdk');
     expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
-    });
+    await chooseRuntime('codex-sdk');
     expect((screen.getByLabelText('Select Codex model') as HTMLSelectElement).value).toBe('auto');
 
     // The coercions used `reseed`, not `setByUser`, so the 'quick' key is still
@@ -2167,7 +2147,7 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     await selectUltracodeAndConfigure();
     expect(claudeModelValue()).toBe('fable');
     // Ultracode hides the runtime picker (it always runs the interactive PTY).
-    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(screen.queryByTestId('wizard-substrate-provider-claude')).toBeNull();
     expect(pressedPermissionLabel()).toBe('Ask before edits');
 
     // Fable greyed out ⇒ the Opus floor, unchanged.
@@ -2198,7 +2178,7 @@ describe('SessionStartWizard — Configure controls seed from the stored per-typ
     // all (design is hard-pinned to the Claude SDK substrate).
     expect(claudeModelValue()).toBe('opus');
     expect(pressedPermissionLabel()).toBe('Allow edits');
-    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(screen.queryByTestId('wizard-substrate-provider-claude')).toBeNull();
     // No save CTA: design is excluded from the stored-defaults surface.
     expect(screen.queryByTestId('wizard-save-default')).toBeNull();
   });
@@ -2679,7 +2659,7 @@ describe('SessionStartWizard — Design idea gate + launch', () => {
     await selectDesignAndConfigure();
 
     expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Start design session');
-    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
+    expect(screen.queryByTestId('wizard-substrate-provider-claude')).toBeNull();
     expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
     expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
   });
@@ -3228,11 +3208,7 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
     await act(async () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
-        target: { value: 'claude-interactive' },
-      });
-    });
+    await chooseRuntime('claude-interactive');
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
@@ -3677,6 +3653,10 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     ]);
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
+    // The variant picker now lives inside the Advanced disclosure.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
     await screen.findByLabelText('Select workflow variant');
 
     // Pin the specific variant → the tuning-level segments disable.
