@@ -6,6 +6,31 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-08-27
+
+### Added
+
+- **Backlog search + membership filters.** The backlog read model projects each entity's exact sprint/experiment memberships, and the backlog UI gains search, membership filters, and per-stage sorting.
+- **Codex/OMP session summaries.** The session summarizer now covers Codex and OMP SDK sessions — armed from their SDK turn seams, with `summarySupported` derived from provider *and* substrate.
+- **Agent finding + eval tools.** `cyboflow_get_eval` lets an agent read the jury's actual verdict; a settled session can now read and resolve its own findings; and `cyboflow_list_run_findings` is scoped to the session's runs rather than a single run id.
+- **Native pi provider + OMP fleet runtime** (migration 122).
+- **Workflow editor UX.** The workflow graph region scrolls independently, and a resolved model default threads into "run with modifications."
+- **Native folder creation** in the project directory picker.
+
+### Changed
+
+- Three more IPC channel groups move to tRPC routers: `config:*` → `cyboflow.config`, worktree-file `file:*`/`git:*` → `cyboflow.workspaceFiles`, and session-git `sessions:*`/`git:*` → `cyboflow.sessionGit`.
+- `streamParser`, `encodeCwd`, `modelContext`, and `agentProviderGuard` relocate under `shared/`, clearing the last relocatable standalone-invariant exemptions.
+- Seam errors group by `[seam, errorClass, errorDigest]`, and the opaque `other` class is also split at the programmatic-step-failed seam.
+
+### Fixed
+
+- **Clean shutdown.** The shutdown teardown is actually awaited instead of racing Electron on quit, and terminal-panel PTYs are killed on quit (`destroyAllTerminals` previously had no callers).
+- **Codex composer races.** Composer turns serialize to stop a 150 ms race that merged two sends, and PTY composer submit splits into a body write then a delayed Enter.
+- The SDK gate honors the run's permission mode and no longer allow-lists a `glob` tool the pi provider doesn't have.
+- Eval-jury and sprint-review findings addressed: stale membership filter, canvas backdrop, self-match child pruning, reorder-under-filter, and the workflow model-default rung.
+- `dynamicWorkflows` tailer IO settles on a condition instead of a fixed turn count, removing a load-dependent test flake.
+
 ## [0.2.7] — 2026-08-25
 
 ### Added
