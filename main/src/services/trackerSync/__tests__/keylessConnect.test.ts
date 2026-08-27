@@ -192,6 +192,19 @@ class FakeBeadsAdapter implements TrackerAdapter {
     this.calls.push('listIssueIds');
     return this.issues.map((issue) => issue.externalId);
   }
+  /**
+   * Required, not optional, for THIS fake: it declares
+   * `requiresIdReconciliation`, and the sweep asserts that pairing rather than
+   * falling back to a bare id diff (an adapter with the flag and no method
+   * would silently lose the reconciliation the flag exists to declare).
+   */
+  async listIssueRevisions(): Promise<Array<{ id: string; revision: string }>> {
+    this.calls.push('listIssueRevisions');
+    return this.issues.map((issue) => ({
+      id: issue.externalId,
+      revision: issue.revision ?? `rev-${issue.externalId}`,
+    }));
+  }
   async getIssue(): Promise<TrackerIssue | null> {
     this.calls.push('getIssue');
     return null;
@@ -489,6 +502,85 @@ describe('keyless connect — re-detect', () => {
 
     await expect(service.updateCredentials(connectionId)).rejects.toThrow(/not found on PATH/);
     expect(row(connectionId).status).toBe('paused');
+  });
+
+  it('RE-ANCHORS a workspace whose repo moved on disk, so the next pass spawns in the right place', async () => {
+    const connectionId = await connectKeyless();
+    expect(beadsWorkspacePath(row(connectionId))).toBe(PROJECT_PATH);
+    updateConnectionSettings(raw, connectionId, { status: 'paused' });
+
+    // The repo was renamed/relocated. Same beads database (same instance id),
+    // new location — so the identity check passes and re-detect succeeds.
+    const MOVED = '/tmp/p1-renamed';
+    raw.prepare('UPDATE projects SET path = ? WHERE id = ?').run(MOVED, PROJECT_ID);
+    projectPaths.set(PROJECT_ID, MOVED);
+
+    await service.updateCredentials(connectionId);
+
+    // WITHOUT the re-stamp this is where the loop starts: re-detect keeps
+    // succeeding against the new path while the row keeps naming the old one,
+    // so every following pass spawns in a directory with no workspace and
+    // pauses again, with no way out.
+    expect(beadsWorkspacePath(row(connectionId))).toBe(MOVED);
+
+    // And it is the path the NEXT adapter build actually sees — the thing that
+    // was broken, since a pass reads the anchor off the stored row.
+    factoryCalls.length = 0;
+    await service.wizardGroups({ connectionId });
+    expect(beadsWorkspacePath(factoryCalls[0].connection)).toBe(MOVED);
+  });
+
+  it('re-anchoring preserves the rest of source_json', async () => {
+    const connectionId = await connectKeyless();
+    const before = JSON.parse(row(connectionId).source_json ?? '{}') as Record<string, unknown>;
+    projectPaths.set(PROJECT_ID, '/tmp/p1-renamed');
+    raw.prepare('UPDATE projects SET path = ? WHERE id = ?').run('/tmp/p1-renamed', PROJECT_ID);
+
+    await service.updateCredentials(connectionId);
+
+    const after = JSON.parse(row(connectionId).source_json ?? '{}') as Record<string, unknown>;
+    // Step-1 choice, label, and everything else the blob carries survive — only
+    // the anchor moved.
+    expect(after).toEqual({ ...before, workspacePath: '/tmp/p1-renamed' });
+  });
+
+  it('leaves a KEYED provider’s source_json untouched — it has no workspace path to anchor', async () => {
+    insertConnection(raw, {
+      id: 'conn-linear',
+      project_id: PROJECT_ID,
+      provider: 'linear',
+      status: 'paused',
+      workspace_id: 'ws-linear',
+      workspace_name: 'Acme',
+      actor_label: 'K.',
+      base_url: null,
+      secret_ciphertext: null,
+      source_json: JSON.stringify({ containerId: 'team-1', narrowId: 'all', narrowKind: 'all' }),
+      selection_mode: 'all',
+      selection_json: null,
+      state_mapping_json: '{}',
+      status_sync_mode: 'auto',
+      pull_mode: 'auto',
+      push_mode: 'auto',
+      push_target: 1,
+      content_sync_mode: 'off',
+      archive_sync_mode: 'off',
+      priority_mapping_json: '{}',
+      category_mapping_json: '{}',
+      config_generation: 0,
+      mirror_subissues: 1,
+      conflict_mode: 'auto',
+      cursor_updated_at: null,
+      cursor_external_id: null,
+      last_sync_at: null,
+      last_sync_log_json: null,
+    });
+    const before = row('conn-linear').source_json;
+    adapter.instanceId = 'ws-linear';
+
+    await service.updateCredentials('conn-linear', 'lin_api_key');
+
+    expect(row('conn-linear').source_json).toBe(before);
   });
 
   it('refuses a key offered to a keyless connection rather than silently dropping it', async () => {

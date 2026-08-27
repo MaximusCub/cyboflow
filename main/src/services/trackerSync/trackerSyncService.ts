@@ -127,9 +127,10 @@ import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
 import { DartAdapter } from './dartAdapter';
 import { BeadsAdapter } from './beadsAdapter';
-import { providerNeedsSecret } from './providerCapabilities';
+import { guardedUpdatesUnavailable, providerNeedsSecret } from './providerCapabilities';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
+  bumpConfigGeneration,
   cancelPendingKinds,
   clearSecret,
   connectionMatchesIdentity,
@@ -266,6 +267,34 @@ const CONTENT_OUTBOX_KINDS = ['update_content'] as const;
  * 112).
  */
 const ARCHIVE_OUTBOX_KINDS = ['archive_issue'] as const;
+
+/**
+ * The {@link TrackerSettingsPatch} keys that change WHICH REMOTE ISSUES ARE
+ * ELIGIBLE, and therefore invalidate every "we considered this id and skipped
+ * it" verdict the reconciliation ledger holds (migration 123's
+ * `config_generation` — docs/proposals/tracker-beads-provider.md, "4. Pull
+ * reconciliation").
+ *
+ * THE THREE MAPPINGS AND THE SELECTION, and deliberately nothing else. A
+ * direction mode (`pullMode`, `statusSyncMode`, `contentSyncMode`, …) changes
+ * WHEN work happens, not what qualifies — and a held import is never ledgered
+ * in the first place, precisely so a mode flip needs no invalidation.
+ * `mirrorSubissues` and `conflictMode` are likewise about what we DO with an
+ * eligible issue, not about which ones are.
+ *
+ * `priorityMapping` / `categoryMapping` do not gate import today, but they are
+ * listed because the proposal states the rule as "any mapping/state-mapping/
+ * selection change" and the cost of an unnecessary bump is one re-evaluation
+ * pass — whereas the cost of a MISSING bump is a remote issue that stays
+ * invisible until something else happens to change.
+ */
+const ELIGIBILITY_PATCH_KEYS = [
+  'stateMapping',
+  'priorityMapping',
+  'categoryMapping',
+  'selectionMode',
+  'selectionJson',
+] as const satisfies readonly (keyof TrackerSettingsPatch)[];
 
 /**
  * True when a {@link TrackerContentSyncMode} direction may run under `trigger`.
@@ -953,8 +982,22 @@ export class TrackerSyncService implements TrackerSyncFacade {
         if (sweepDue) {
           if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
           entries.push({ marker: '▸', line: 'GET issue ids' });
+          // THE SAME DEPS THE INBOUND PASS RAN WITH, not a narrower set: a
+          // reconciliation sweep (beads) point-fetches unseen ids through the
+          // ordinary import path, so it must honour the same direction holds
+          // and file into the same review inbox. A sweep built without them
+          // would import while 'manual' pull is holding, and its resurrection
+          // findings would go nowhere.
           const sweep = await runDeletionSweep(
-            { db: this.db, adapter, router: this.router, nowIso: this.nowIso },
+            {
+              db: this.db,
+              adapter,
+              router: this.router,
+              reviewRouter: this.reviewRouter,
+              nowIso: this.nowIso,
+              applyLinkedStage,
+              importNewIssues: pullRuns,
+            },
             connection,
           );
           swept = true;
@@ -2038,7 +2081,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * checked against the row's, so a `.beads` directory that was deleted and
    * re-initialized (a NEW database wearing the old path) is refused instead of
    * resuming onto issue ids that no longer exist. Only step 3 differs: there
-   * is no cipher, so the row's NULL secret is left exactly as it is.
+   * is no cipher, so the row's NULL secret is left exactly as it is — and it
+   * gains a step 2b, RE-ANCHORING the stored workspace path to the one the
+   * probe just resolved (see the comment at that write for the unrecoverable
+   * loop it prevents when the repo has moved on disk).
    *
    * @throws {TrackerConnectionNotFoundError} unknown connection id.
    * @throws {TrackerCredentialsError} a key was supplied for a keyless
@@ -2073,6 +2119,32 @@ export class TrackerSyncService implements TrackerSyncFacade {
 
     if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
       throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
+    }
+
+    // RE-ANCHOR A MOVED WORKSPACE. A keyless connection stores the RESOLVED
+    // path it spawns its CLI in, and the project's repo can move on disk
+    // (renamed, relocated, re-cloned). Re-detect then succeeds — the probe
+    // above resolved the CURRENT path and proved the SAME database instance is
+    // there — while `source_json` still names the old one, so the very next
+    // pass spawns in a directory that no longer holds the workspace and pauses
+    // again. Re-detect would keep succeeding and the connection would keep
+    // pausing, with no way out. Stamping the proven path closes that loop.
+    //
+    // THE NAMED ROW ONLY, never the siblings fanned out below: this path is the
+    // one whose project the probe actually resolved. A sibling lives in a
+    // DIFFERENT cyboflow project with its own repo path, which nothing here has
+    // probed — writing this path onto it would point it at a workspace we never
+    // proved it shares. Each sibling re-anchors through its own re-detect.
+    if (!needsSecret) {
+      updateConnectionSettings(this.db, connection.id, {
+        source_json: JSON.stringify({
+          ...parseJsonObject(connection.source_json),
+          workspacePath: this.workspacePathForCredentials({
+            provider: connection.provider,
+            projectId: connection.project_id,
+          }),
+        }),
+      });
     }
 
     const cipher = key === null ? null : encryptTrackerSecret(key);
@@ -2254,6 +2326,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * inbound blocker would halt the pass at those issues forever. The sweep runs
    * after the write so it can never settle rows for a mode the write then
    * failed to apply, and only for the direction the user actually turned off.
+   *
+   * A CHANGE TO WHAT IS ELIGIBLE ALSO BUMPS `config_generation` — see
+   * {@link ELIGIBILITY_PATCH_KEYS}.
    */
   async updateSettings(connectionId: string, patch: TrackerSettingsPatch): Promise<void> {
     const connection = getConnection(this.db, connectionId);
@@ -2285,6 +2360,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
           }
         : {}),
     });
+
+    // AFTER the settings write, so a generation can never advance past a patch
+    // that failed to land. One bump per call however many eligibility keys the
+    // patch carried: the ledger's rule is "re-consider every skipped id ONCE
+    // per change", and the change is the patch, not each of its keys.
+    if (ELIGIBILITY_PATCH_KEYS.some((key) => patch[key] !== undefined)) {
+      bumpConfigGeneration(this.db, connectionId);
+    }
 
     if (patch.contentSyncMode === 'off') {
       cancelPendingKinds(
@@ -2702,6 +2785,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
     link: EntityExternalLinkRow,
     group: WriteBackGroup,
   ): boolean {
+    // The same guarded-update gate writeBack.ts's own enqueue applies, and this
+    // is the second door into the state outbox — a ruling that queued here
+    // would strand a row the drain refuses. See guardedUpdatesUnavailable.
+    if (guardedUpdatesUnavailable(connection.provider)) return false;
     const duplicate = listUnresolvedOutbox(this.db, connection.id).some(
       (row) =>
         row.external_id === link.external_id &&
@@ -3380,6 +3467,29 @@ function appendSweepLines(entries: TrackerSyncLogEntry[], sweep: InboundSweepRep
     entries.push({
       marker: '·',
       line: `${plural(sweep.entityLocked, 'deleted issue')} waiting on an active run`,
+    });
+  }
+  if (sweep.reconcileImported > 0) {
+    entries.push({
+      marker: '·',
+      line: `reconciled ${plural(sweep.reconcileImported, 'issue')} the cursor never saw`,
+    });
+  }
+  if (sweep.resurrected > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(sweep.resurrected, 'issue')} came back · un-archived`,
+    });
+  }
+  // The cost line, and only when a reconciliation actually spent lookups: it is
+  // how a user (and a bug report) tells "the ledger is working" from "every
+  // sweep re-fetches the workspace".
+  if (sweep.reconcileFetched > 0) {
+    entries.push({
+      marker: '·',
+      line:
+        `${plural(sweep.reconcileFetched, 'point lookup')} · ` +
+        `${sweep.reconcileSkipped} known, ${sweep.reconcileLedgered} recorded as skipped`,
     });
   }
   if (sweep.conflictsOpened > 0) {

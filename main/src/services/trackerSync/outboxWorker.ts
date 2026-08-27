@@ -57,11 +57,17 @@ import type {
 } from '../../../../shared/types/trackerSync';
 import type { EntityCategory, Priority } from '../../../../shared/types/tasks';
 import type { IssueContentPatch, IssueDraft, TrackerAdapter } from './adapterTypes';
-import { TrackerApiError, TrackerAuthError } from './errors';
+import {
+  TrackerApiError,
+  TrackerAuthError,
+  type TrackerRevisionMismatchError,
+} from './errors';
+import { PROVIDER_REQUIRES_GUARDED_UPDATES } from './providerCapabilities';
 import {
   claimNextPending,
   findCreateClientKey,
   getConnection,
+  insertConflict,
   listUnresolvedOutbox,
   markOrphaned,
   resolveOutbox,
@@ -155,6 +161,19 @@ export interface OutboxReport {
   contentWithheld: number;
   /** `archive_issue` rows the provider confirmed (a 404 counts — the twin was already gone). */
   archived: number;
+  /**
+   * GUARDED PROVIDERS ONLY (`capabilities.guardedUpdates`). Field conflicts
+   * opened because our write landed on top of a concurrent one — the count of
+   * FIELDS, since one write can clobber several. See
+   * {@link settleGuardedMismatch}.
+   */
+  guardedConflicts: number;
+  /**
+   * Guarded writes that raced a concurrent one which had already set the same
+   * value. Nothing was lost and nothing is filed; counted so the log can say
+   * the guard is doing work rather than going quiet.
+   */
+  guardedConverged: number;
   /** Rows that will never be retried (4xx, unresolvable state, malformed payload). */
   failedTerminal: number;
   /** Rows re-queued with a backoff `next_attempt_at`. */
@@ -181,6 +200,8 @@ function emptyReport(): OutboxReport {
     contentWritten: 0,
     contentWithheld: 0,
     archived: 0,
+    guardedConflicts: 0,
+    guardedConverged: 0,
     failedTerminal: 0,
     retriesScheduled: 0,
     ambiguousResolved: 0,
@@ -279,6 +300,16 @@ async function processRow(
   row: TrackerOutboxRow,
   report: OutboxReport,
 ): Promise<boolean> {
+  if (refusesUnguardedUpdate(connection, adapter, row)) {
+    failTerminal(
+      deps,
+      row,
+      report,
+      `${connection.provider} requires guarded updates and this adapter provides none — ` +
+        `a '${row.kind}' row should never have been enqueued`,
+    );
+    return false;
+  }
   if (row.kind === 'create_sub_issue') {
     return await processCreate(deps, connection, adapter, fields, row, report);
   }
@@ -292,6 +323,43 @@ async function processRow(
     return await processArchive(deps, connection, adapter, row, report);
   }
   return await processStateWrite(deps, connection, adapter, states, row, report);
+}
+
+/**
+ * Must this claimed row be REFUSED because it mutates an existing issue on a
+ * provider that requires guarded writes, using an adapter that cannot make
+ * them?
+ *
+ * THE BACKSTOP HALF of the guarded-update gate, exactly like {@link isSuperseded}
+ * is the backstop half of supersession. The primary gate is at ENQUEUE
+ * (writeBack's `guardedUpdatesUnavailable`), where no undrainable row is
+ * written in the first place; this catches anything that predates that gate or
+ * arrives through a path that forgets it.
+ *
+ * REFUSED, NOT DROPPED. `failTerminal` settles the row with the diagnostic
+ * attached, which matters twice over: the kind-agnostic inbound blocker would
+ * otherwise halt the pass at this issue forever, and a silent drop would hide
+ * an adapter/provider disagreement that is a bug on our side.
+ *
+ * Creates are absent by construction — a fresh issue has no concurrent editor
+ * to race, which is the whole reason the proposal's no-guard fallback still
+ * ships import + create-push.
+ */
+const GUARDED_OUTBOX_KINDS: ReadonlySet<TrackerOutboxRow['kind']> = new Set([
+  'update_state',
+  'close_parent',
+  'update_content',
+  'archive_issue',
+]);
+
+function refusesUnguardedUpdate(
+  connection: TrackerConnectionRow,
+  adapter: TrackerAdapter,
+  row: TrackerOutboxRow,
+): boolean {
+  if (!PROVIDER_REQUIRES_GUARDED_UPDATES[connection.provider]) return false;
+  if (adapter.capabilities.guardedUpdates) return false;
+  return GUARDED_OUTBOX_KINDS.has(row.kind);
 }
 
 /**
@@ -424,9 +492,39 @@ async function processStateWrite(
   }
 
   const externalId = row.external_id;
+
+  // GUARDED PROVIDERS TAKE A PRE-SEND READ (beads). Everything else keeps the
+  // status quo — one call, no extra round-trip.
+  let expectedToken: string | undefined;
+  if (adapter.capabilities.guardedUpdates) {
+    let current: TrackerIssue | null;
+    try {
+      current = await adapter.getIssue(externalId);
+    } catch (err) {
+      // Nothing sent — an ordinary backoff retry is safe.
+      return recordAdapterFailure(deps, connection, row, report, err);
+    }
+    if (current === null) {
+      resolveOutbox(deps.db, row.id, 'done', {
+        lastError: 'the issue is gone remotely — nothing to move',
+      });
+      return false;
+    }
+    expectedToken = current.concurrencyToken;
+  }
+
   try {
-    await adapter.updateIssueState(externalId, state.id);
+    await adapter.updateIssueState(externalId, state.id, expectedToken);
   } catch (err) {
+    if (isRevisionMismatch(err)) {
+      // The write LANDED (detect-after-write has no refusal) and clobbered a
+      // concurrent one. See {@link settleGuardedMismatch}.
+      settleGuardedMismatch(deps, connection, row, report, err, {
+        externalId,
+        written: { stateId: state.id },
+      });
+      return false;
+    }
     return recordAdapterFailure(deps, connection, row, report, err);
   }
 
@@ -437,6 +535,177 @@ async function processStateWrite(
   report.sent += 1;
   stampWriteBackBaseline(deps, connection, externalId, state.id, desiredGroup);
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Guarded updates — the detect-after-write mismatch state machine
+// ---------------------------------------------------------------------------
+
+/**
+ * Is this the typed outcome a GUARDED adapter raises when its post-write
+ * history diff finds an interleaved commit on a field we also wrote?
+ *
+ * BY NAME, like every other cross-realm error test in this engine
+ * (`isRequestAbort`, the router's deferrable-rejection probe): a test double
+ * throwing the same shape must be recognized the same way the real adapter's
+ * error is, and `instanceof` cannot promise that.
+ */
+function isRevisionMismatch(err: unknown): err is TrackerRevisionMismatchError {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'TrackerRevisionMismatchError'
+  );
+}
+
+/**
+ * `TrackerIssue`'s field names, as the conflict table spells them. Only
+ * `stateId` differs: a conflict row calls the status field `stage`, because its
+ * `local_value` is a BOARD STAGE id and the resolution paths branch on that
+ * name (see trackerSyncService's accept-local / accept-remote arms).
+ */
+function conflictFieldName(reportedField: string): string {
+  return reportedField === 'stateId' ? 'stage' : reportedField;
+}
+
+/** The value `recoveredIssue` held for one of {@link conflictFieldName}'s fields. */
+function recoveredFieldValue(issue: TrackerIssue | null, reportedField: string): string | null {
+  if (issue === null) return null;
+  switch (reportedField) {
+    case 'stateId':
+      return issue.stateId;
+    case 'title':
+      return issue.title;
+    case 'description':
+      return issue.description;
+    case 'priority':
+      return issue.priority;
+    case 'category':
+      return issue.category;
+    default:
+      return null;
+  }
+}
+
+/**
+ * "Did the interleaved writer set this field to what we were writing anyway?"
+ *
+ * Field-by-field semantics deliberately MIRROR {@link contentDivergence}'s, for
+ * the same reason it mirrors `composeContentPatch`'s: a difference that would
+ * not have produced a patch must not produce a conflict either. A description
+ * compared byte-for-byte would conflict on trailing whitespace; a priority
+ * compared case-sensitively would conflict on Dart's Title-cased echo.
+ */
+function guardedValuesEqual(field: string, written: string | null, recovered: string | null): boolean {
+  if (field === 'description') return normalizeDescription(written) === normalizeDescription(recovered);
+  if (field === 'priority' || field === 'category') return providerTokensEqual(written, recovered);
+  return written === recovered;
+}
+
+/**
+ * What a content patch actually PUT ON THE WIRE, in the field naming
+ * `TrackerRevisionMismatchError.conflictingFields` uses.
+ *
+ * `sentDescription` rather than `patch.description`: the patch carries the
+ * link's recovery marker appended (invariant 4) and every adapter STRIPS that
+ * marker from what it returns, so comparing the sent blob against a recovered
+ * value would report a divergence on a marker neither side disagrees about.
+ */
+function patchedValues(
+  patch: IssueContentPatch,
+  sentDescription: string | null | undefined,
+): Record<string, string | null> {
+  const written: Record<string, string | null> = {};
+  if (patch.title !== undefined) written.title = patch.title;
+  if (patch.description !== undefined) written.description = sentDescription ?? null;
+  if (patch.priority !== undefined) written.priority = patch.priority;
+  if (patch.category !== undefined) written.category = patch.category;
+  return written;
+}
+
+/**
+ * Consume a {@link TrackerRevisionMismatchError} — the ONE outcome unique to a
+ * guarded provider, and the only place in this module where a write that
+ * SUCCEEDED still owes the user something.
+ *
+ * WHY THERE IS NO RETRY ARM. beads has no conditional write, so the adapter
+ * cannot refuse: by the time this error exists our value is already the
+ * remote's value and the interleaved writer's is already overwritten. Re-sending
+ * would clobber it a second time and prove nothing. The verdict is final per
+ * attempt, which is exactly why the round-12 state machine's bounded-retry arm
+ * was retired when detect-after-write replaced conditional writes.
+ *
+ * TWO OUTCOMES, both settling the row `done` because the write is not coming
+ * back:
+ *
+ *   CONVERGED — every field the interleave touched already held the value we
+ *     were writing. Nobody lost anything (the concurrent writer and we agreed),
+ *     so this settles silently, with no conflict row to make the user read.
+ *   CLOBBERED — a field genuinely diverged. A `field_conflict` row is opened
+ *     carrying BOTH sides: `local_value` is what we wrote, `remote_value` is the
+ *     value recovered from the adapter's own history. This is the only record
+ *     the overwritten edit has anywhere, and opening it also PARKS the link (the
+ *     inbound merge skips a link with an open conflict), so nothing overwrites
+ *     the evidence before the user rules on it.
+ *
+ * The conflict is opened in the connection's CONFLICT MODE regardless of Auto
+ * vs Manual — unlike the ordinary inbound conflicts, Auto has no defensible
+ * automatic answer here. Auto's rule is "the tracker wins for content, cyboflow
+ * wins for stage", and both sides of THIS disagreement are already in the
+ * tracker: one in its current row, the other only in its history.
+ */
+function settleGuardedMismatch(
+  deps: OutboxDeps,
+  connection: TrackerConnectionRow,
+  row: TrackerOutboxRow,
+  report: OutboxReport,
+  err: TrackerRevisionMismatchError,
+  write: { externalId: string; written: Record<string, string | null> },
+): void {
+  const diverged = err.conflictingFields.filter((field) => {
+    // A field we did not write cannot have been clobbered BY US; the adapter
+    // reports on what it was given, so this is belt-and-braces.
+    if (!(field in write.written)) return false;
+    return !guardedValuesEqual(
+      field,
+      write.written[field],
+      recoveredFieldValue(err.recoveredIssue, field),
+    );
+  });
+
+  if (diverged.length === 0) {
+    resolveOutbox(deps.db, row.id, 'done', {
+      lastError: 'a concurrent tracker write set the same value — converged, nothing lost',
+    });
+    report.guardedConverged += 1;
+    return;
+  }
+
+  const link = getLinkByExternal(deps.db, connection.id, write.externalId);
+  const detectedAt = toSqliteUtc(deps.nowIso());
+  for (const field of diverged) {
+    insertConflict(deps.db, {
+      connection_id: connection.id,
+      link_id: link?.id ?? null,
+      kind: 'field_conflict',
+      field: conflictFieldName(field),
+      local_value: write.written[field],
+      remote_value: recoveredFieldValue(err.recoveredIssue, field),
+      payload_json: JSON.stringify({
+        externalId: write.externalId,
+        mode: connection.conflict_mode,
+        detectedAt,
+        // Named so the connected view can word this as what it is — an
+        // overwrite that already happened — rather than as an ordinary
+        // both-sides-changed diff.
+        guardedOverwrite: true,
+      }),
+    });
+  }
+  resolveOutbox(deps.db, row.id, 'done', {
+    lastError: `overwrote a concurrent tracker edit on ${diverged.join(', ')} — opened for review`,
+  });
+  report.guardedConflicts += diverged.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,8 +847,23 @@ async function processContentWrite(
 
   let written: TrackerIssue | null;
   try {
-    written = await adapter.updateIssueContent(externalId, patch);
+    // THE SAME READ SERVES BOTH GUARDS. `current` was fetched a few lines up for
+    // the divergence check, so a guarded provider spends no extra round-trip:
+    // its token comes off that read, which is exactly the pre-send read the
+    // adapter contract asks the caller to forward.
+    written = await adapter.updateIssueContent(
+      externalId,
+      patch,
+      adapter.capabilities.guardedUpdates ? current.concurrencyToken : undefined,
+    );
   } catch (err) {
+    if (isRevisionMismatch(err)) {
+      settleGuardedMismatch(deps, connection, row, report, err, {
+        externalId,
+        written: patchedValues(patch, sentDescription),
+      });
+      return false;
+    }
     return recordAdapterFailure(deps, connection, row, report, err);
   }
 

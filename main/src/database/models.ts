@@ -665,6 +665,39 @@ export interface TrackerConflictRow {
 }
 
 /**
+ * `tracker_reconciliation_ledger` row (migration 123) — the durable record of
+ * a reconciliation sweep's SKIPPED decisions, one row per (connection, remote
+ * id). Written only by providers declaring
+ * `TrackerAdapterCapabilities.requiresIdReconciliation` (beads today).
+ *
+ * WHY IT EXISTS: the sweep's ground truth is the FULL remote id set, so every
+ * id it does not already link would be point-fetched on every sweep — hundreds
+ * of CLI spawns per pass on a workspace dominated by closed or unmapped issues.
+ * A ledger row says "this id was considered and resolved without a link", so a
+ * repeat sweep can skip it for free. An IMPORTED id gets no row: its link IS
+ * the record.
+ *
+ * `last_seen_revision` is the adapter-derived content fingerprint the sweep
+ * already carries per id, so "did this skipped issue change?" costs a string
+ * compare rather than a lookup — without it a backdated remote edit that makes
+ * a skipped issue eligible would be suppressed forever.
+ * `config_generation` is `tracker_connections.config_generation` AS OF this
+ * row's write; a row behind the connection's current generation is treated as
+ * absent, which is what makes a mapping change re-consider every skipped id
+ * exactly once.
+ */
+export interface TrackerReconciliationLedgerRow {
+  id: number;
+  connection_id: string;
+  external_id: string;
+  /** Why the id resolved without a link — see ReconciliationSkipReason in inboundSync.ts. */
+  reason: string;
+  last_seen_revision: string | null;
+  config_generation: number;
+  seen_at: string;
+}
+
+/**
  * `run_usage` row (migration 026) — the durable per-run token/cost rollup, one
  * row per run (run_id PRIMARY KEY, hard-FK -> workflow_runs ON DELETE CASCADE).
  * Persisted token/cost subset of shared/types/insights.ts RunUsageRollup:

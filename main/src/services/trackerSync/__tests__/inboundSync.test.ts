@@ -81,6 +81,7 @@ import {
   runInboundSync,
   runDeletionSweep,
   type EntityWriteRouter,
+  type InboundSweepReport,
   type InboundSyncDeps,
   type ReviewFindingRouter,
   type TrackerBaseline,
@@ -320,6 +321,28 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     last_sync_log_json: null,
     ...overrides,
   });
+}
+
+/**
+ * A full {@link InboundSweepReport} with everything at zero except the counters
+ * a test names. Kept as a builder rather than inline literals so adding a
+ * counter to the report does not mean editing every sweep assertion — while
+ * `toEqual` against the WHOLE object still fails a test that quietly starts
+ * counting something it should not.
+ */
+function sweepReport(overrides: Partial<InboundSweepReport>): InboundSweepReport {
+  return {
+    sweepArchived: 0,
+    conflictsOpened: 0,
+    outOfScope: 0,
+    entityLocked: 0,
+    reconcileFetched: 0,
+    reconcileImported: 0,
+    reconcileLedgered: 0,
+    reconcileSkipped: 0,
+    resurrected: 0,
+    ...overrides,
+  };
 }
 
 /** Re-read the connection row (cursor assertions need the persisted values). */
@@ -1840,7 +1863,7 @@ describe('runDeletionSweep', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 0, entityLocked: 0 });
+    expect(sweep).toEqual(sweepReport({}));
     expect(ideas()[0].archived_at).toBeNull();
   });
 
@@ -1855,7 +1878,7 @@ describe('runDeletionSweep', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 0, entityLocked: 0 });
+    expect(sweep).toEqual(sweepReport({ sweepArchived: 1 }));
     expect(ideas()[0].archived_at).not.toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).not.toBeNull();
     expect(JSON.parse(conflicts()[0].payload_json ?? '{}')).toMatchObject({
@@ -1884,7 +1907,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
+    expect(sweep).toEqual(sweepReport({ outOfScope: 1 }));
     expect(ideas()[0].archived_at).toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
     expect(conflicts()).toHaveLength(0);
@@ -1902,7 +1925,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 0, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
+    expect(sweep).toEqual(sweepReport({ outOfScope: 1 }));
     expect(conflicts()).toHaveLength(0);
     expect(ideas()[0].archived_at).toBeNull();
     expect(getLinkByExternal(raw, 'conn-1', 'ext-1')?.orphaned_at).toBeNull();
@@ -1922,7 +1945,7 @@ describe('runDeletionSweep — an issue that left the configured scope', () => {
 
     const sweep = await runDeletionSweep(deps, reload());
 
-    expect(sweep).toEqual({ sweepArchived: 1, conflictsOpened: 0, outOfScope: 1, entityLocked: 0 });
+    expect(sweep).toEqual(sweepReport({ sweepArchived: 1, outOfScope: 1 }));
     const moved = getLinkByExternal(raw, 'conn-1', 'ext-1');
     const deleted = getLinkByExternal(raw, 'conn-1', 'ext-2');
     expect(moved?.orphaned_at).toBeNull();

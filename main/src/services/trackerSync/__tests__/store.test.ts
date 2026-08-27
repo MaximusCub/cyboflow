@@ -81,6 +81,11 @@ import {
   listOpenConflicts,
   resolveConflict,
   hasOpenConflictForLink,
+  clearOrphaned,
+  listLedgerEntries,
+  upsertLedgerEntry,
+  deleteLedgerEntries,
+  bumpConfigGeneration,
   type NewConnectionRow,
   type StoredSourceScope,
 } from '../store';
@@ -1385,5 +1390,127 @@ describe('trackerSync store — conflicts', () => {
     const conflict = insertConflict(raw, { connection_id: connId, kind: 'remote_deleted' });
     expect(conflict.link_id).toBeNull();
     expect(listOpenConflicts(raw, connId).map((c) => c.id)).toEqual([conflict.id]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reconciliation ledger (migration 123)
+// ---------------------------------------------------------------------------
+
+describe('store — reconciliation ledger', () => {
+  it('upserts on (connection_id, external_id) rather than appending a history', () => {
+    const connId = seedConnection();
+
+    upsertLedgerEntry(raw, {
+      connection_id: connId,
+      external_id: 'bd-1',
+      reason: 'unmapped-state',
+      last_seen_revision: 'rev-1',
+      config_generation: 0,
+    });
+    upsertLedgerEntry(raw, {
+      connection_id: connId,
+      external_id: 'bd-1',
+      reason: 'out-of-selection',
+      last_seen_revision: 'rev-2',
+      config_generation: 3,
+    });
+
+    const rows = [...listLedgerEntries(raw, connId).values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      external_id: 'bd-1',
+      // The CURRENT verdict replaces the old one — the ledger states what is
+      // true now, not what was ever true.
+      reason: 'out-of-selection',
+      last_seen_revision: 'rev-2',
+      config_generation: 3,
+    });
+  });
+
+  it('scopes reads to one connection and deletes only the ids it is given', () => {
+    const a = seedConnection({ id: 'conn-a' });
+    const b = seedConnection({ id: 'conn-b', workspace_id: 'ws-b' });
+    for (const externalId of ['bd-1', 'bd-2', 'bd-3']) {
+      upsertLedgerEntry(raw, {
+        connection_id: a,
+        external_id: externalId,
+        reason: 'archived',
+        last_seen_revision: 'r',
+        config_generation: 0,
+      });
+    }
+    upsertLedgerEntry(raw, {
+      connection_id: b,
+      external_id: 'bd-1',
+      reason: 'archived',
+      last_seen_revision: 'r',
+      config_generation: 0,
+    });
+
+    deleteLedgerEntries(raw, a, ['bd-2', 'bd-9']);
+
+    expect([...listLedgerEntries(raw, a).keys()].sort()).toEqual(['bd-1', 'bd-3']);
+    // The same external id under a SIBLING connection is a different row.
+    expect([...listLedgerEntries(raw, b).keys()]).toEqual(['bd-1']);
+  });
+
+  it('deletes in chunks, so a workspace-sized id list cannot exceed sqlite’s parameter cap', () => {
+    const connId = seedConnection();
+    const ids = Array.from({ length: 1200 }, (_, index) => `bd-${index}`);
+    for (const externalId of ids) {
+      upsertLedgerEntry(raw, {
+        connection_id: connId,
+        external_id: externalId,
+        reason: 'archived',
+        last_seen_revision: 'r',
+        config_generation: 0,
+      });
+    }
+
+    deleteLedgerEntries(raw, connId, ids);
+
+    expect(listLedgerEntries(raw, connId).size).toBe(0);
+  });
+
+  it('a deleted connection takes its ledger rows with it (ON DELETE CASCADE)', () => {
+    const connId = seedConnection();
+    upsertLedgerEntry(raw, {
+      connection_id: connId,
+      external_id: 'bd-1',
+      reason: 'archived',
+      last_seen_revision: 'r',
+      config_generation: 0,
+    });
+
+    raw.prepare('DELETE FROM tracker_connections WHERE id = ?').run(connId);
+
+    expect(listLedgerEntries(raw, connId).size).toBe(0);
+  });
+
+  it('bumpConfigGeneration advances the counter and returns the new value', () => {
+    const connId = seedConnection();
+    expect(getConnection(raw, connId)?.config_generation).toBe(0);
+
+    expect(bumpConfigGeneration(raw, connId)).toBe(1);
+    expect(bumpConfigGeneration(raw, connId)).toBe(2);
+    expect(getConnection(raw, connId)?.config_generation).toBe(2);
+  });
+
+  it('clearOrphaned is markOrphaned’s inverse', () => {
+    const connId = seedConnection();
+    const link = upsertLink(raw, {
+      connection_id: connId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'linear',
+      external_id: 'ext-1',
+    });
+
+    markOrphaned(raw, link.id);
+    expect(getLinkByExternal(raw, connId, 'ext-1')?.orphaned_at).not.toBeNull();
+
+    clearOrphaned(raw, link.id);
+    expect(getLinkByExternal(raw, connId, 'ext-1')?.orphaned_at).toBeNull();
   });
 });

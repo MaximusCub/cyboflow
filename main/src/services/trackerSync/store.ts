@@ -18,7 +18,7 @@
  * `next_attempt_at <= now`) stay consistent whether a row's timestamp came
  * from the schema default or a store write.
  *
- * Grouped into four sections mirroring the four tables:
+ * Grouped into five sections mirroring the five tables:
  *   - Connections: insertConnection / getConnection / listConnections /
  *     listConnectionsByIdentity / updateConnectionSettings /
  *     connectionMatchesIdentity / findDisconnectedConnection /
@@ -33,6 +33,8 @@
  *     requeueInFlightAsAmbiguous.
  *   - Conflicts: insertConflict / getConflict / listOpenConflicts /
  *     resolveConflict / hasOpenConflictForLink.
+ *   - Reconciliation ledger (migration 123): listLedgerEntries /
+ *     upsertLedgerEntry / deleteLedgerEntries / bumpConfigGeneration.
  */
 import type Database from 'better-sqlite3';
 import type {
@@ -40,6 +42,7 @@ import type {
   EntityExternalLinkRow,
   TrackerOutboxRow,
   TrackerConflictRow,
+  TrackerReconciliationLedgerRow,
 } from '../../database/models';
 
 // ---------------------------------------------------------------------------
@@ -827,6 +830,20 @@ export function markOrphaned(db: Database.Database, linkId: number): void {
 }
 
 /**
+ * Put an orphaned link back in sync — the inverse of {@link markOrphaned}, and
+ * the reason sweep-archival is REVERSIBLE (docs/proposals/
+ * tracker-beads-provider.md, round 18: a concurrent restore can always land
+ * after the last probe, so the sweep's answer to the race is correction rather
+ * than prevention). Only the reconciliation sweep calls it, and only for a
+ * link IT orphaned — see `SWEPT_ARCHIVED_AT` in inboundSync.ts.
+ */
+export function clearOrphaned(db: Database.Database, linkId: number): void {
+  db.prepare(
+    `UPDATE entity_external_links SET orphaned_at = NULL, updated_at = datetime('now') WHERE id = ?`,
+  ).run(linkId);
+}
+
+/**
  * List a mirrored parent's sub-issue links (children of `parentExternalId`
  * under one connection) — used by the "close parent when all mirrored
  * children are done" rollup.
@@ -1341,4 +1358,113 @@ export function hasOpenConflictForLink(
           .prepare('SELECT 1 FROM tracker_conflicts WHERE link_id = ? AND state = ? AND field = ?')
           .get(linkId, 'open', field);
   return row !== undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation ledger (migration 123)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every ledger row for one connection, keyed by remote id — the shape the
+ * reconciliation sweep consults once per pass rather than per id.
+ *
+ * READ WHOLE, DELIBERATELY. The sweep already holds the connection's entire
+ * remote id set in memory (it is the pass's ground truth), so N per-id
+ * `SELECT`s would buy nothing over one scan of a table that is bounded by the
+ * same id set. It is also what makes the opportunistic cleanup below cheap:
+ * "which ledgered ids are no longer in the remote set" is a set difference
+ * against a map that is already in hand.
+ */
+export function listLedgerEntries(
+  db: Database.Database,
+  connectionId: string,
+): Map<string, TrackerReconciliationLedgerRow> {
+  const rows = db
+    .prepare('SELECT * FROM tracker_reconciliation_ledger WHERE connection_id = ?')
+    .all(connectionId) as TrackerReconciliationLedgerRow[];
+  return new Map(rows.map((row) => [row.external_id, row]));
+}
+
+export interface LedgerEntryInput {
+  connection_id: string;
+  external_id: string;
+  reason: string;
+  last_seen_revision: string | null;
+  config_generation: number;
+}
+
+/**
+ * Record (or refresh) "this remote id was considered and resolved WITHOUT a
+ * link". UPSERTED on the natural key `(connection_id, external_id)`, never
+ * appended: the ledger states the CURRENT verdict for an id, so a re-visit
+ * that reaches a different reason — or the same reason at a new revision —
+ * replaces the row rather than growing a history nothing reads.
+ *
+ * `seen_at` is refreshed on every write so the row's age is "when we last
+ * confirmed this", not "when we first skipped it".
+ */
+export function upsertLedgerEntry(db: Database.Database, input: LedgerEntryInput): void {
+  db.prepare(
+    `INSERT INTO tracker_reconciliation_ledger (
+       connection_id, external_id, reason, last_seen_revision, config_generation
+     ) VALUES (
+       @connection_id, @external_id, @reason, @last_seen_revision, @config_generation
+     )
+     ON CONFLICT (connection_id, external_id) DO UPDATE SET
+       reason = excluded.reason,
+       last_seen_revision = excluded.last_seen_revision,
+       config_generation = excluded.config_generation,
+       seen_at = datetime('now')`,
+  ).run(input);
+}
+
+/**
+ * Drop ledger rows for ids the sweep resolved into something else — an id that
+ * vanished from the remote set (opportunistic cleanup, so the table can never
+ * outgrow the workspace it describes) or one that has just been IMPORTED and
+ * whose link is now the record.
+ *
+ * Chunked because sqlite caps a statement at SQLITE_MAX_VARIABLE_NUMBER
+ * parameters and this list is sized by the remote workspace, which the
+ * proposal's own sizing note puts in the thousands.
+ */
+export function deleteLedgerEntries(
+  db: Database.Database,
+  connectionId: string,
+  externalIds: readonly string[],
+): void {
+  const CHUNK = 500;
+  for (let start = 0; start < externalIds.length; start += CHUNK) {
+    const chunk = externalIds.slice(start, start + CHUNK);
+    db.prepare(
+      `DELETE FROM tracker_reconciliation_ledger
+       WHERE connection_id = ? AND external_id IN (${chunk.map(() => '?').join(',')})`,
+    ).run(connectionId, ...chunk);
+  }
+}
+
+/**
+ * Invalidate every ledger skip for a connection by advancing its
+ * `config_generation`, and return the new value.
+ *
+ * A COUNTER RATHER THAN A DELETE, which is the whole point: the ledger rows
+ * survive with their last-seen revisions intact, so the re-evaluation a config
+ * change forces is ONE point fetch per skipped id, after which the row is
+ * rewritten at the new generation and goes free again. Deleting them would
+ * lose the revisions too and make the next sweep re-fetch everything a SECOND
+ * time.
+ *
+ * Read-modify-write in SQL (`config_generation + 1`) so two callers racing the
+ * same connection cannot both stamp the same number.
+ */
+export function bumpConfigGeneration(db: Database.Database, connectionId: string): number {
+  const row = db
+    .prepare(
+      `UPDATE tracker_connections
+       SET config_generation = config_generation + 1, updated_at = datetime('now')
+       WHERE id = ?
+       RETURNING config_generation`,
+    )
+    .get(connectionId) as { config_generation: number } | undefined;
+  return row?.config_generation ?? 0;
 }

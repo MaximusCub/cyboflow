@@ -20,6 +20,10 @@ import { BeadsAdapter } from '../beadsAdapter';
 import { DartAdapter } from '../dartAdapter';
 import { LinearAdapter } from '../linearAdapter';
 import { PlaneAdapter } from '../planeAdapter';
+import {
+  PROVIDER_ADAPTER_GUARDS_UPDATES,
+  guardedUpdatesUnavailable,
+} from '../providerCapabilities';
 
 const noopFetch = (async () => {
   throw new Error('adapterCapabilities.test.ts never makes a network call');
@@ -120,5 +124,41 @@ describe('TrackerAdapterCapabilities — per-provider exhaustiveness', () => {
   it("beads' archive is also unreachable ('none' — `bd delete` is a hard delete)", async () => {
     expect(ADAPTERS.beads.capabilities.archive).toBe('none');
     await expect(ADAPTERS.beads.archiveIssue('bd-1')).rejects.toThrow(/unsupported/i);
+  });
+
+  /**
+   * `PROVIDER_ADAPTER_GUARDS_UPDATES` is the enqueue chokepoint's copy of a
+   * fact only a CONSTRUCTED adapter can state (writeBack.ts holds none — see
+   * that table's own comment). It cannot be the single definition, so this is
+   * what keeps it from drifting: a build where the two disagree fails here
+   * rather than silently gating every beads update, or silently queuing rows
+   * the drain will refuse.
+   */
+  it('PROVIDER_ADAPTER_GUARDS_UPDATES matches every constructed adapter', () => {
+    for (const provider of Object.keys(ADAPTERS) as TrackerProvider[]) {
+      expect(PROVIDER_ADAPTER_GUARDS_UPDATES[provider]).toBe(
+        ADAPTERS[provider].capabilities.guardedUpdates,
+      );
+    }
+  });
+
+  it('no shipped provider is in the degraded pairing today', () => {
+    for (const provider of Object.keys(ADAPTERS) as TrackerProvider[]) {
+      expect(guardedUpdatesUnavailable(provider)).toBe(false);
+    }
+  });
+
+  /**
+   * The other half of the same pairing: an adapter declaring
+   * `requiresIdReconciliation` MUST also implement `listIssueRevisions`, which
+   * is optional on the interface and therefore invisible to tsc. The sweep
+   * asserts this at runtime; this catches it at test time instead.
+   */
+  it('every reconciling adapter implements listIssueRevisions', () => {
+    for (const provider of Object.keys(ADAPTERS) as TrackerProvider[]) {
+      const adapter = ADAPTERS[provider];
+      if (!adapter.capabilities.requiresIdReconciliation) continue;
+      expect(typeof adapter.listIssueRevisions).toBe('function');
+    }
   });
 });
