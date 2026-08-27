@@ -54,7 +54,7 @@ The pattern for every phase:
 1. **Report the step.** Call `cyboflow_report_step` with the phase's `step_id` as
    you begin it (ids are in the step-reporting block appended below).
 2. **Do the phase.** Delegate to `cyboflow-compounder` with the **Agent tool**
-   (`subagent_type: "compounder"`, `prompt:` the source material + what to
+   (`subagent_type: "cyboflow-compounder"`, `prompt:` the source material + what to
    return), or run the gate yourself with **AskUserQuestion**.
 3. **Act on the `## Result`.** Subagents never write cyboflow state — *you*
    create the tasks and emit the findings once the user has approved them.

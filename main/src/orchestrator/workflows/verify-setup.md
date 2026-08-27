@@ -52,7 +52,7 @@ The pattern for every phase:
 1. **Report the step.** Call `cyboflow_report_step` with the phase's `step_id` as
    you begin it (ids are in the step-reporting block appended below).
 2. **Do the phase.** Delegate to `cyboflow-verify-setup` with the **Agent tool**
-   (`subagent_type: "verify-setup"`, `prompt:` what to probe / draft and what to
+   (`subagent_type: "cyboflow-verify-setup"`, `prompt:` what to probe / draft and what to
    return), or run the gate yourself with **AskUserQuestion**.
 3. **Act on the `## Result`.** The subagent returns findings and drafts — *you*
    write the files, call the `cyboflow_*` tools, and commit.
