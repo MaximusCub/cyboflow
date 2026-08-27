@@ -37,6 +37,17 @@ const TUNING_LEVEL_LABELS: Record<TuningLevel, string> = {
   custom: 'Custom',
 };
 
+/** One-line helper under the segments, per selected level — kept in step with
+ *  the flow editor's TuningLevelDial card copy so the two surfaces describe a
+ *  level the same way. */
+const TUNING_LEVEL_DESCRIPTIONS: Record<TuningLevel, string> = {
+  efficient:
+    'Fewest steps, cheaper models, review once per sprint — drafts, chores, low-risk changes.',
+  standard: 'The aligned defaults — balanced models on every step, every check on.',
+  thorough: 'Every check on, strongest models — ship-critical or gnarly work.',
+  custom: 'Your saved custom definition for this flow.',
+};
+
 export interface TuningLevelSelectorProps {
   /** The level currently shown as selected — the active override, else the stamped level. */
   value: TuningLevel;
@@ -102,6 +113,11 @@ export function TuningLevelSelector({
           );
         })}
       </div>
+      {!disabled && (
+        <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-desc">
+          {TUNING_LEVEL_DESCRIPTIONS[value]}
+        </p>
+      )}
       {disabled && (
         <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-variant-note">
           A pinned variant runs its own definition — tuning level is disabled for this run.

@@ -139,4 +139,36 @@ describe('TuningLevelSelector', () => {
     );
     expect(screen.queryByTestId('wizard-tuning-estimate-caption')).not.toBeInTheDocument();
   });
+
+  it('(h) renders a per-level helper sentence that tracks the selected level, hidden while disabled', () => {
+    const { rerender } = render(
+      <TuningLevelSelector
+        value="standard"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('wizard-tuning-level-desc')).toHaveTextContent(/aligned defaults/i);
+
+    rerender(
+      <TuningLevelSelector
+        value="efficient"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('wizard-tuning-level-desc')).toHaveTextContent(/cheaper models/i);
+
+    rerender(
+      <TuningLevelSelector
+        value="thorough"
+        customSlotAvailable={false}
+        disabled
+        onChange={vi.fn()}
+      />,
+    );
+    // Disabled (variant pinned) → the variant note replaces the helper.
+    expect(screen.queryByTestId('wizard-tuning-level-desc')).not.toBeInTheDocument();
+    expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
+  });
 });
