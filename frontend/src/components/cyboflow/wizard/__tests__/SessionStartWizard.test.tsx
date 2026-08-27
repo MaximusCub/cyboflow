@@ -3548,7 +3548,6 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
-    expect(screen.getByTestId('wizard-tuning-level-thorough-saved-tag')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-tuning-level-thorough')).toHaveAttribute('aria-checked', 'true');
     expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
 

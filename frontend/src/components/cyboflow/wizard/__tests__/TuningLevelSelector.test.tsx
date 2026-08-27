@@ -14,7 +14,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { TuningLevelSelector } from '../TuningLevelSelector';
 
 describe('TuningLevelSelector', () => {
-  it('(a) tags the saved level and shows no override caption when value === savedLevel', () => {
+  it('(a) selects the saved level and shows no override caption when value === savedLevel', () => {
     render(
       <TuningLevelSelector
         value="standard"
@@ -24,8 +24,12 @@ describe('TuningLevelSelector', () => {
         onChange={vi.fn()}
       />,
     );
-    expect(screen.getByTestId('wizard-tuning-level-standard-saved-tag')).toBeInTheDocument();
-    expect(screen.queryByTestId('wizard-tuning-level-efficient-saved-tag')).not.toBeInTheDocument();
+    // The selection alone marks the saved default — no extra tag text.
+    expect(screen.getByTestId('wizard-tuning-level-standard')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    expect(screen.queryByText(/saved default/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId('wizard-tuning-level-override-note')).not.toBeInTheDocument();
   });
 

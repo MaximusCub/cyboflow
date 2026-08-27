@@ -3,8 +3,9 @@
  * (docs/plans/workflow-tuning-levels.md D4 + §4 "SessionStartWizard").
  *
  * Four segments — Efficient / Standard / Thorough / Custom — defaulting to the
- * selected workflow's STAMPED level (`savedLevel`), tagged "saved default".
- * The component is a plain controlled radiogroup: `value` is whatever the
+ * selected workflow's STAMPED level (`savedLevel`; the selection itself shows
+ * it — no extra tag). The component is a plain controlled radiogroup: `value`
+ * is whatever the
  * caller currently wants shown as selected (the parent's per-run override when
  * one is active, else `savedLevel`), and `onChange` reports the segment the
  * user picked — the caller decides whether that pick IS an override (differs
@@ -41,7 +42,7 @@ const TUNING_LEVEL_LABELS: Record<TuningLevel, string> = {
 export interface TuningLevelSelectorProps {
   /** The level currently shown as selected — the active override, else `savedLevel`. */
   value: TuningLevel;
-  /** The workflow's stamped (persisted) level — tagged "saved default". */
+  /** The workflow's stamped (persisted) level — the override baseline. */
   savedLevel: TuningLevel;
   /** Display title of the selected flow, threaded into the override caption. */
   flowTitle: string;
@@ -91,7 +92,7 @@ export function TuningLevelSelector({
                   : undefined
               }
               className={cn(
-                'flex flex-1 flex-col items-center gap-0.5 border px-2 py-1.5 text-xs font-medium transition-colors',
+                'flex flex-1 flex-col items-center justify-center gap-0.5 border px-2 py-1.5 text-xs font-medium transition-colors',
                 segmentDisabled
                   ? 'cursor-not-allowed border-border-secondary bg-bg-primary text-text-tertiary opacity-50'
                   : selected
@@ -102,16 +103,6 @@ export function TuningLevelSelector({
               )}
             >
               <span>{TUNING_LEVEL_LABELS[level]}</span>
-              {/* Own line, not inline with the name — inline it overflowed the
-                  segment at wizard widths ("SAVED DEFAUL…"). */}
-              {level === savedLevel && (
-                <span
-                  className="eyebrow text-text-muted"
-                  data-testid={`wizard-tuning-level-${level}-saved-tag`}
-                >
-                  saved default
-                </span>
-              )}
               {estimate !== undefined && (
                 <span className="text-[10px] text-text-tertiary">{estimate}</span>
               )}
