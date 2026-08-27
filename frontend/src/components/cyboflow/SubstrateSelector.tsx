@@ -78,21 +78,16 @@ export const INTERACTIVE_CAVEATS: readonly string[] = [
  * The v1 limits of the OMP structured (omp-sdk) lane, mirroring
  * INTERACTIVE_CAVEATS' style.
  *
- * The last two were added after the 2026-08-16 release smoke returned RED on
- * this lane with exactly these two app-owned findings. Both are deliberate v1
- * gaps rather than defects — the `task` deny is the unconditional rule 2 in
- * `gate/ompGateExtension.ts` (OMP subagents run forced-yolo and whether the
- * gating hook is even installed inside one is unverified), and the dialog
- * cancel is `OmpApprovalBridge`'s no-question-bridge path. What the old wording
- * got wrong was the SEVERITY: "No question gate yet — approvals land in the
- * review queue" describes the approval prompt, which the bridge answers fine,
- * and says nothing about the agent's own `ask` tool, which is cancelled and
- * ENDS THE TURN ("Tool call denied by user" upstream). A user should know both
- * before choosing this lane, not after a run stops mid-task.
+ * The subagent caveat that used to sit here ("Subagents are unavailable —
+ * OMP's task tool is refused") was retired when `buildOmpGateConfig` flipped
+ * `denyTaskTool` to false: the 2026-08-23 live probe showed a `task`
+ * subagent's tool calls ARE gated (see the builder's doc comment in
+ * `main/src/services/panels/omp/ompGateConfigBuilder.ts`), so `task` is now
+ * allowed on every well-formed config and only the fail-closed
+ * malformed-config default still denies it.
  */
 export const OMP_SDK_CAVEATS: readonly string[] = [
   'Slow approvals (over 25s) are blocked and can be retried.',
-  'Subagents are unavailable — OMP’s task tool is refused, so the agent cannot delegate.',
 ];
 
 /** The v1 limits of the OMP CLI (omp-pty) lane. */

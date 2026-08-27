@@ -451,15 +451,23 @@ const RUNTIME_SEGMENTS: Record<string, { provider: string; mode: 'chat' | 'cli' 
   'omp-pty': { provider: 'omp', mode: 'cli' },
 };
 
-/** Change the agent runtime on ③ via the Runtime + Mode segments. */
+/** Change the agent runtime on ③ via the Runtime + Mode segments. The Mode row
+ *  is HIDDEN when the selected provider has no offerable CLI lane for the
+ *  scope (workflow × codex/omp) — chat is implied there, so the mode click is
+ *  conditional on the row existing. */
 async function chooseRuntime(runtime: string): Promise<void> {
   const { provider, mode } = RUNTIME_SEGMENTS[runtime];
   await act(async () => {
     fireEvent.click(screen.getByTestId(`wizard-substrate-provider-${provider}`));
   });
-  await act(async () => {
-    fireEvent.click(screen.getByTestId(`wizard-substrate-mode-${mode}`));
-  });
+  const modeSegment = screen.queryByTestId(`wizard-substrate-mode-${mode}`);
+  if (modeSegment !== null) {
+    await act(async () => {
+      fireEvent.click(modeSegment);
+    });
+  } else if (mode === 'cli') {
+    throw new Error(`CLI mode segment is not offered for ${runtime} here`);
+  }
 }
 
 /** The agent-runtime picker's current value on ③, read off the segments. */
@@ -469,9 +477,11 @@ function runtimeValue(): string {
       screen.queryByTestId(`wizard-substrate-provider-${p}`)?.getAttribute('aria-checked') ===
       'true',
   );
-  const mode = (['chat', 'cli'] as const).find(
-    (m) => screen.getByTestId(`wizard-substrate-mode-${m}`).getAttribute('aria-checked') === 'true',
-  );
+  // A hidden Mode row (no CLI lane for this provider/scope) implies chat.
+  const mode =
+    (['chat', 'cli'] as const).find(
+      (m) => screen.queryByTestId(`wizard-substrate-mode-${m}`)?.getAttribute('aria-checked') === 'true',
+    ) ?? 'chat';
   const entry = Object.entries(RUNTIME_SEGMENTS).find(
     ([, seg]) => seg.provider === provider && seg.mode === mode,
   );
@@ -580,9 +590,10 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     const modelSelect = screen.getByLabelText('Select Claude model');
     expect(providerSegment).toBeInTheDocument();
     expect(providerSegment.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // Codex is offered; its CLI lane is workflow-disabled (visible after selecting codex).
+    // Codex is offered; its CLI lane is workflow-unavailable, so the Mode row
+    // hides entirely while Codex is selected.
     await chooseRuntime('codex-sdk');
-    expect(screen.getByTestId('wizard-substrate-mode-cli')).toBeDisabled();
+    expect(screen.queryByTestId('wizard-substrate-mode-cli')).not.toBeInTheDocument();
     await chooseRuntime('claude-sdk');
     // Blueprint-editor entry points are gone from the wizard.
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
