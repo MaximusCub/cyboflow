@@ -1,7 +1,11 @@
 # Beads as the 4th tracker-sync provider
 
-Status: PROPOSAL (investigation complete 2026-08-26; Codex adversarial rounds 1-18 absorbed (25 high + 3 medium) —
-see "Review findings absorbed" at the end; not started)
+Status: PROPOSAL, Phase 0 EXECUTED (investigation complete 2026-08-26; Codex adversarial rounds
+1-18 absorbed (25 high + 3 medium) — see "Review findings absorbed" at the end. Phase 0 live
+probes ran 2026-08-26 against `bd 1.2.2`: 7 groups, ~59 probes, all with negative controls —
+verdicts and evidence in `tracker-beads-phase0/findings.md`, raw transcripts alongside as Phase 2
+fixtures. Probe-refuted sections below are revised in place and marked "[Phase 0]".
+Implementation not started)
 
 Beads (`bd`, github.com/gastownhall/beads, MIT, Go, single static binary) is a git-adjacent,
 agent-first issue tracker a user has asked us to support. This proposal's core finding: **the
@@ -31,8 +35,10 @@ paths in that repo.
    conflicts between lanes, no merge-back or post-merge reconciliation problem. A lane agent
    running `bd` in its worktree and our sync engine running `bd` at the project root hit the same
    database.
-3. **Cross-machine sync is the user's job.** `bd dolt push/pull` (or the `bd sync` wrapper)
-   against the same git remote, explicitly invoked or cron'd by the user. v1 does not touch it.
+3. **Cross-machine sync is the user's job.** `bd dolt remote` + `bd dolt push/pull`, explicitly
+   invoked or cron'd by the user. v1 does not touch it. [Phase 0: there is NO `bd sync` command —
+   an earlier doc-derived reference here was wrong; the second, separate mechanism is
+   `bd federation` (named peers, per-peer `ours|theirs` strategy), also untouched by v1.]
 4. **JSONL is dead as a storage format.** `.beads/issues.jsonl` is export/interchange only,
    opt-in, "not the canonical cross-machine sync channel" [`docs/core-concepts/sync-concepts.md`].
    The SQLite backend that preceded Dolt was fully deleted ("Dolt is the only backend",
@@ -73,9 +79,9 @@ of their own." `writeBack.ts` makes zero network calls by design and needs nothi
 | `listGroups()` / `listContainers()` / `listNarrows()` | — | one degenerate "workspace" group (Dart-space precedent); narrows = `['all']` |
 | `listStates(selection)` | status vocabulary from config/`bd` | built-ins `open, in_progress, blocked, deferred, closed` + custom statuses; each custom status carries a behavior category (`active/wip/done/frozen`) that seeds `TrackerStateGroup` like Plane's `group` field |
 | `listFieldOptions()` | static + config | priorities 0–4; types `bug/feature/task/epic/chore` (+ customs) |
-| `listIssues(sel, sinceIso)` | `bd list --all --json --limit 0 --updated-after <iso>` | `--all` is load-bearing: default `bd list` **excludes closed issues**, so without it a remote close never syncs as a state transition. Keep the Dart hedge on the bound: send it widened, re-apply the exact inclusive bound client-side (gt-vs-gte undocumented) |
-| `listIssueIds(sel)` | — (superseded for beads) | beads implements the OPTIONAL `listIssueRevisions(sel)` instead (see "Pull reconciliation" — the sweep needs (id, revision) pairs, which `listIssueIds(): Promise<string[]>` cannot carry); the engine's sweep uses `listIssueRevisions` when the adapter provides it, else `listIssueIds` (HTTP providers unchanged). Ground-truth rules are identical: `--all --limit 0`, closed issues MUST be included; `bd prune`/`bd gc`-decayed issues drop out and the sweep archiving the local twin is the correct reading of a remote GC |
-| `listIssueRevisions(sel)` *(new, optional)* | `bd list --all --limit 0 --format <id+revision template>` | `Promise<Array<{id: string; revision: string}>>`; declared alongside `capabilities.requiresIdReconciliation` |
+| `listIssues(sel, sinceIso)` | `bd list --all --json --limit 0 --updated-after <iso>` | `--all` is load-bearing: default `bd list` **excludes closed AND pinned issues** [Phase 0: the hidden set is exactly `{closed, pinned}`, hardcoded]. [Phase 0 resolved gt-vs-gte: the comparator is INCLUSIVE after FLOORING the stored value to whole seconds, while every read path ROUNDS `updated_at` to the NEAREST second for display — a displayed cursor can exceed the comparator's floor by 1s and silently skip rows. The engine's existing 10-minute overlap window swallows this; additionally never emit date-only cursors (LOCAL midnight) and always emit strict RFC3339 UTC: a date-shaped-but-invalid cursor (`2026-13-45`) silently DROPS the filter, exit 0, full unfiltered result] |
+| `listIssueIds(sel)` | — (superseded for beads) | beads implements the OPTIONAL `listIssueRevisions(sel)` instead (see "Pull reconciliation"); the engine's sweep uses `listIssueRevisions` when the adapter provides it, else `listIssueIds` (HTTP providers unchanged). Ground-truth rules are identical: `--all --limit 0`, closed issues MUST be included; `bd delete` is a HARD delete [Phase 0] and `bd prune`/`bd gc`-decayed issues drop out — the sweep archiving the local twin is the correct reading of both |
+| `listIssueRevisions(sel)` *(new, optional)* | `bd list --all --json --limit 0` + client-side fingerprint | `Promise<Array<{id: string; revision: string}>>`; declared alongside `capabilities.requiresIdReconciliation`. [Phase 0 REFUTED the cheap `--format` projection: the Go-template branch iterates dependency EDGES, not issues, and silently emits 0 bytes/exit 0 on a dependency-free workspace; no `revision` field exists in any CLI output. So the adapter takes the FULL `--json` listing (measured: 12.3MB/0.6s at 80 issues × 150KB descriptions; bounded-listing policy applies) and derives `revision` itself: a stable content fingerprint (sha256 over the sync-relevant fields of the listed row, sorted keys). This is STRONGER than a revision: it also catches label/comment-count/dependency changes, which — Phase 0 headline — do NOT bump `updated_at` and are invisible to the incremental cursor] |
 | `getIssue(id)` | `bd show <id> --json` | local + fast; sweep's N point-lookups are fine |
 | `createIssue` / `createSubIssue` | `bd create --json` (+ `--parent <id>`) | client key via `--metadata` (below) |
 | `updateIssueState(id, stateId)` | `bd update <id> --status … --json` | |
@@ -84,7 +90,15 @@ of their own." `writeBack.ts` makes zero network calls by design and needs nothi
 
 Spawn every command with `BD_JSON_ENVELOPE=1` (envelope `{"schema_version":1,"data":…}` becomes
 the default in v2.0 — opting in now pins us to the stable shape across that break)
-[`docs/reference/json-schema.md`].
+[`docs/reference/json-schema.md`]. [Phase 0 — the JSON contract has holes the parser must own:
+the envelope shape differs by VERB (`create` → bare object; `update`/`close`/`show`/`list` →
+array under `data`); errors are NEVER JSON-enveloped and `bd update <missing-id>` emits NOTHING
+on stdout (plain text on stderr only) while `show`/`close` emit differently-worded JSON error
+objects; no-op/preview paths (`close` on closed, `reopen` on open, `delete` sans `--force`)
+print plain human text to stdout with exit 0 DESPITE `--json` — and double-close's success line
+echoes the new reason while persisting nothing. Rules: classify from stderr on exit≠0; tolerate
+non-JSON stdout on the known no-op paths; confirm state changes by re-fetch, never by success
+text.]
 
 ### Capabilities row
 
@@ -103,14 +117,19 @@ beads: {
 response was lost = `bd list --all --json --limit 0 --metadata-field cyboflow_client_key=<uuid>`
 (`--all` here too — Codex round-2 finding 2: a create that lands, loses its response, and is
 closed before recovery runs — e.g. across an app restart — would otherwise report "no match" and
-the non-idempotent retry duplicates it; Phase 0 gets the matching negative control) — cleaner
-than the
+the non-idempotent retry duplicates it). [Phase 0 VALIDATED this design wholesale: the
+`--metadata-field` filter passed every negative control — wrong value → 0 rows, bogus key →
+0 rows (not everything), uuid-prefix substring → 0 rows (exact match) — and the
+recovery-after-close control passed: create with client key, close, `--all --metadata-field`
+still finds it, correctly not without `--all`; 10KB metadata values round-trip byte-exact.]
+Cleaner than the
 Plane/Dart description-marker hack, and the marker never pollutes descriptions a user reads in
 `bd show`. Caveat carried into implementation: the caller-side body-write marker re-append
 (field-writeback invariant 4) exists *because* the key lives in the description for Plane/Dart;
 with a metadata key, beads description writes need **no** marker composition at all. If the
 caller-side marker plumbing turns out to be provider-keyed in a way that fights this, fall back to
-Dart's markdown marker line verbatim — decide at Phase 0 with a probe, not by reading harder.
+Dart's markdown marker line verbatim — a cyboflow-code question, decided at Phase 2 by reading
+the marker plumbing's provider-keying, not a bd probe.
 Reserved-namespace note: beads reserves `bd:`/`_`-prefixed metadata keys; `cyboflow_client_key`
 is safe.
 
@@ -118,15 +137,23 @@ is safe.
 
 - **Priority**: beads 0–4 (0 = highest) → `CANONICAL_TOKENS` seed P0→`0` … P4→`4`, P5/P6→`4`
   (lossy tail-compression like every provider; comparisons stay in provider space per invariant 2
-  of the field-writeback plan). Unset/default semantics probed at Phase 0.
+  of the field-writeback plan). [Phase 0: create defaults are `priority: 2`, `status: open`,
+  `issue_type: task`; unset fields are OMITTED from JSON, never null; there is no `assignee` key
+  when unset, but an unrequested `owner` auto-populates from git identity.]
 - **Category**: `CATEGORY_SYNC_SUPPORTED: true`. Seed `bug→bug`, `feature→feature`, `chore→chore`;
   `task` and the exotic types (`epic`, `decision`, `molecule`, `gate`, …) map inbound to `feature`
   by default, overridable by the existing category overlay.
 - **Hierarchy**: parent-child (`--parent`, dotted hierarchical ids) covers sub-issue mirroring.
   `nativeParentAutoClose: false` → our shared close-parent-when-children-done write applies, as
   with Plane.
-- **Statuses**: the 5 built-ins + customs feed the ordinary state-mapping wizard step;
-  `deferred`/`blocked` land wherever the user maps them.
+- **Statuses**: [Phase 0] SEVEN built-ins (`open, in_progress, blocked, deferred, closed,
+  pinned, hooked`; categories active/wip/frozen/done) + customs feed the ordinary state-mapping
+  wizard step; `deferred`/`blocked`/`pinned`/`hooked` land wherever the user maps them. Sync
+  scope ruling from the excluded-class audit: gates (hidden even from `--all`; need
+  `--include-gates`) and ephemeral/wisp beads incl. `--type message` (hidden even from `--all`;
+  need `--include-infra`) are OUT of sync scope — the adapter passes neither include flag, on
+  both `listIssues` and the sweep listing, so the two views stay consistent by construction.
+  `molecule`-typed beads are visible by default and map through category like other exotics.
 - **Identifier**: beads ids (`bd-a1b2`, hash-based, collision-safe across clones) are both
   `externalId` and `external_identifier` — human-readable enough, like Dart.
 
@@ -144,7 +171,14 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   Connect step renders no key input; Authorize becomes **Detect**: probe the `bd` binary (reuse
   `probeCliVersion` + `getShellPath` — the macOS-GUI-minimal-PATH problem is already solved) and
   confirm `project.path` is `bd init`ed. Failure copy distinguishes "bd not installed" from
-  "repo has no beads workspace" with the init hint.
+  "repo has no beads workspace" with the init hint. [Phase 0 — Detect must NEVER run `bd init`
+  for the user, and the init hint's docs must disclose two probed behaviors: vanilla
+  non-interactive `bd init` auto-COMMITS 18 files to the repo unprompted (including a
+  `.claude/settings.json` registering a SessionStart hook, `bd prime --hook-json`, that fires
+  for every collaborator; `--skip-agents --skip-hooks` still auto-commits; only `--stealth`
+  avoids the commit), and beads telemetry is ON by default (external endpoint in the global
+  `~/.config/bd/config.yaml`; a detached `bd send-metrics` process spawns) — the user may want
+  `bd metrics off`.]
 - **Every NULL-secret consumer becomes provider-aware, not just `connect()`** (Codex round-2
   finding 1: a connect-only branch produces a connection that pauses on its first sync).
   Introduce a single `providerNeedsSecret(provider)` predicate (a
@@ -175,10 +209,17 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   only as display metadata, the promised rename-pause was unreachable — and if a rename rewrites
   issue identifiers, the sweep would read every old id as deleted and archive its twin): the
   identity probe returns (instance id, prefix); both are compared at every sandwich checkpoint;
-  either changing discards results and pauses for re-detect. Phase 0 probes whether
-  `rename-prefix` rewrites existing issue ids — if it does, the re-detect flow treats the rename
-  as a migration needing explicit link remapping (or a documented deliberate re-import), never a
-  silent continue. Negative test: rename the prefix mid-pass, prove zero local mutations.
+  either changing discards results and pauses for re-detect. [Phase 0 resolved the anchor: the
+  instance id is `.beads/metadata.json` → `project_id` (UUID) — PROVEN to survive
+  `bd rename-prefix` and to change on `rm -rf .beads && bd init`. It is exposed by NO bd command
+  (`bd info`/`bd context`/`bd config list` all omit it; `bd info --json` ignores `--json`
+  entirely) — the adapter reads the file directly. The init banner's "Repository ID"/"Clone ID"
+  are unusable: deterministically derived (identical across a same-path reinit) and persisted
+  nowhere.] Whether `rename-prefix` rewrites EXISTING issue ids stayed unproven (the probe's
+  workspace was empty at rename) — an implementation-time check; if it does, the re-detect flow
+  treats the rename as a migration needing explicit link remapping (or a documented deliberate
+  re-import), never a silent continue. Negative test: rename the prefix mid-pass, prove zero
+  local mutations.
 
 ### 2. CLI transport
 
@@ -193,10 +234,14 @@ factory (it already receives the connection row, which carries `project_id`).
 copies `process.env`, and beads honors a `BEADS_DIR` override ahead of discovery — an app
 launched with `BEADS_DIR` set (a documented beads usage pattern) would silently probe, import,
 close, and update issues in that one workspace for *every* project while each connection looks
-valid. Fix is deterministic pinning, not just scrubbing: the Detect step resolves the workspace
-(`bd where`) with `BEADS_DIR` **deleted** from the child env, persists the resolved `.beads`
-path on the connection, and every subsequent spawn passes that stored path back explicitly as
-`BEADS_DIR` — discovery can never drift, and a stored path that stops resolving throws
+valid. [Phase 0 proved the full precedence with sentinel-exclusion controls:
+**`--db` > `-C` > `BEADS_DIR` > cwd walk-up** — argv flags BEAT the env var. And walk-up is
+silent: a wrong-cwd call operates on an ancestor's database with exit 0, no "not initialized
+here" error exists.] So pinning is argv-first: every spawn passes `-C <project.path>` (immune to
+inherited env by precedence), with `BEADS_DIR` additionally scrubbed from the child env as
+defense-in-depth. The Detect step resolves the workspace (`bd where`, env scrubbed), persists
+the resolved `.beads` path on the connection, and every pass re-verifies the `-C` resolution
+still lands on that stored path + instance id; a stored path that stops resolving throws
 `TrackerAuthError` (re-detect). Negative test: an inherited `BEADS_DIR` in the parent env must
 not redirect detection, reads, recovery, or writes. External-shared-workspace setups (deliberate
 `BEADS_DIR` decoupling) are out of v1 scope — Detect fails honestly on a repo with no
@@ -209,9 +254,10 @@ would archive every linked local entity. So the connection stores TWO things, wi
 homes: the canonical workspace path (in `source_json`, alongside the existing opaque selection
 payload — no new column) and an **immutable database instance identifier as `workspace_id`**
 (replacing the prefix, which moves to `workspace_name` — committed config survives a reinit, an
-instance id does not). Phase 0 probes the best anchor: a `metadata.json` identifier if beads
-exposes one, else the Dolt database's root-commit hash via SQL (deterministic and immutable per
-init). **Validation is a sandwich, not a preflight** (Codex rounds 6-7: a top-of-pass check
+instance id does not). [Phase 0 resolved the anchor: `metadata.json` → `project_id`, read from
+disk — proven immutable across `rename-prefix`, fresh per reinit; see "Keyless connect". The
+SQL fallback is moot (`bd sql` is refused in embedded mode).] **Validation is a sandwich, not a
+preflight** (Codex rounds 6-7: a top-of-pass check
 leaves TOCTOU windows), applied per direction:
 
 - **Inbound (imports, merges, cursor, sweep archival)**: every adapter read returns its complete
@@ -273,7 +319,13 @@ re-probes before applying decisions. If HEAD moved, ONLY the destructive subset 
 decisions — is discarded ("deferred — workspace changed mid-sweep"; deletion handling is not
 urgent and a quiet window recurs), while imports and merges still apply (each is individually
 safe under ordinary merge semantics). Scoping the guard to archival keeps busy workspaces from
-starving the whole sweep. **The guard narrows the window; resurrection closes the family**
+starving the whole sweep. [Phase 0 demoted this guard to best-effort: no cheap HEAD anchor
+exists — there is no `bd dolt log`, and `bd history <id> --json` (whose newest `CommitHash` IS
+effectively the DB head, since history is unfiltered) returns a FULL issue snapshot per DB
+commit, so an unbounded call is O(all commits). Implement the guard only if `bd history` proves
+boundable (Phase 2 checks for a limit flag); otherwise drop it — the reversible-archival rule
+below is the primary defense and was designed to suffice alone.] **The guard narrows the
+window; resurrection closes the family**
 (Codex round-18: a restore can still land between the final HEAD probe and the local archive —
 no sequence of probes ends this, because probe and apply can never be atomic over a CLI). So
 sweep-archival is defined as REVERSIBLE end-to-end: it is already a soft archive with an
@@ -296,38 +348,62 @@ not a URL).
 **Error taxonomy: retry only the recognized-transient** (Codex round-5 finding 2). The
 retryable-by-default mapping would let a deterministic failure — unknown flag after a `bd`
 downgrade, incompatible output after an upgrade, permission failure, corrupt workspace — churn
-forever at the release velocity this proposal itself documents. Inverted classification:
-- recognized transient (embedded-lock contention, timeout) → `TrackerApiError{status: null}`,
-  the retry path;
-- deterministic configuration/compat failures (`bd` missing from PATH, repo not a beads
-  workspace, unrecognized-flag usage errors, envelope/schema parse mismatch,
-  `schema_version` ≠ 1, permission errors, workspace-integrity failures, version-below-minimum)
-  → `TrackerAuthError` — paused with the actionable stderr in the banner; re-detect resumes;
+forever at the release velocity this proposal itself documents. [Phase 0 pinned the shapes, and
+two facts reshape the mechanism. (1) **bd NEVER reports contention on its own** — it blocks on
+the flock indefinitely (proven to 200.9s, then success; no timeout knob exists anywhere in bd).
+The lock-contention error is only produced when the CALLER cancels a blocked child: our own
+`execFile` timeout's SIGTERM makes bd exit 1 (not 143 — it traps the signal) with the
+classifiable string; SIGKILL escalation yields exit 137, empty stderr. The adapter timeout
+CREATES the retry signal — without it the retry path is dead code and a wedged holder hangs
+sync forever. (2) **Exit codes cannot classify** — every failure is exit 1, plain stderr, empty
+stdout, and the retryable and corrupt-store strings share a byte-identical 68-char prefix.
+Classify on stderr CONTENT:]
+- recognized transient → `TrackerApiError{status: null}`, the retry path. Exactly two shapes:
+  stderr containing `the database is locked by another dolt process` (our timeout fired), and
+  exit 137 with empty stderr (our SIGKILL escalation);
+- deterministic configuration/compat failures → `TrackerAuthError` — paused with the actionable
+  stderr in the banner; re-detect resumes. Pinned strings: `no beads database found` (workspace
+  unresolved — identical text whether `.beads` is missing, renamed, or `BEADS_DIR` dangles),
+  suffix `open db: EOF` or a leaked `strconv.ParseUint` Go error (corrupt store — `bd doctor`
+  is a no-op in embedded mode), `Error 1049: database not found` (store gutted),
+  `is not allowed in read-only mode`, plus `bd` missing from PATH, unrecognized-flag usage
+  errors, envelope/schema parse mismatch, `schema_version` ≠ 1, version-below-minimum.
+  `no issue found matching` is terminal per-item, not per-connection;
 - unclassified non-zero exits → retryable, but with a consecutive-failure threshold per
   connection (N failed passes → escalate to the paused state with the last stderr) so unknown
   deterministic failures cannot loop silently.
-Phase 0 pins the failure shapes for: downgraded/upgraded `bd`, malformed JSON, permission
-denial, and the reinit case above.
 
 **Bounded listings — overflow is terminal, not transient** (Codex round-3 finding 3).
 `runToolCapture`'s default `maxBuffer` is 10MB (`runGit.ts:38`); a large workspace's
 `bd list --all --json --limit 0` can exceed it, and a buffer overflow classified as retryable
-would stall initial import or every sweep in an infinite retry loop. Design: (a) the sweep never
-captures full JSON — project ids only via `bd list`'s `--format` go-template (one id per line;
-bounded at ~20 bytes/issue, fine far past beads' own 100k-issue guidance); (b) incremental
-`listIssues` windows are naturally small; the full backfill (no cursor) pages by
-`--created-after`/`--created-before` time windows if Phase 0 shows single-shot output can be
-large, else runs single-shot under an explicit raised cap (64MB); (c) a `maxBuffer` overflow maps
-to a TERMINAL, actionable failure (pause + "workspace too large — see docs"), never the
-transient-retry path. Phase 0 includes a probe whose listing output exceeds the default 10MB.
+would stall initial import or every sweep in an infinite retry loop. [Phase 0 measured the
+shape: 80 issues × 150KB descriptions = 12.3MB of listing JSON in 0.6s; against a 10MiB
+maxBuffer, Node `execFile` fails with `err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'`, the
+child is NOT killed, and stdout arrives truncated at exactly 10,485,760 bytes mid-string —
+unparseable. Output is fully buffered server-side (TTFB = 91.5% of wall time), so streaming
+consumption is not an option. And the cheap projection escape hatch is GONE: `--format`
+go-templates iterate dependency edges, not issues (silent 0-byte no-op), and there is no
+embedded pagination (`--offset` requires `--proxied-server`; `--limit N` has no offset
+companion).] Design, revised: (a) both the sweep listing and the backfill run single-shot under
+an explicit raised cap (64MB — beads' own 100k-issue guidance at observed ~1.5KB/issue for
+normal descriptions sits far below it; the 12.3MB probe workspace was deliberately pathological);
+(b) incremental `listIssues` windows are naturally small; if the backfill overflows even 64MB it
+pages by `--created-after`/`--created-before` time windows; (c) a `maxBuffer` overflow
+(`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`, with the orphaned child reaped explicitly since Node does
+not kill it) maps to a TERMINAL, actionable failure (pause + "workspace too large — see docs"),
+never the transient-retry path.
 
 Error taxonomy: ONE authoritative classification — see "Error taxonomy: retry only the
 recognized-transient" below (Codex round-6 finding 2 caught an earlier retryable-by-default
 mapping left standing here in contradiction; it is deleted, the inverted table below governs).
 
-Timeout: per-adapter constant, not the HTTP 30s verbatim — `bd` is local and usually ms-fast, but
-Dolt maintenance ops can take seconds; use `execFile`'s `timeout` (start at 30s, revisit at
-Phase 0 with measurements).
+Timeout: per-adapter constant, not the HTTP 30s verbatim. [Phase 0 measurements: ~0.4s fixed
+cost per invocation (fresh process boots the embedded Dolt engine); reads under write load
+spread 0.35–5.4s; a single contended write waited 9.8s and succeeded; 12.3MB listing 0.6s.
+30s via `execFile`'s `timeout` (SIGTERM, then SIGKILL escalation) is comfortably above p99 while
+still bounding the no-timeout-in-bd hang — and per the taxonomy above, the timeout is also what
+manufactures the retryable contention signal. One more Phase 0 hazard for lifecycle code: the
+spawned process image is named `beads`, not `bd` — match reapers/health checks accordingly.]
 
 ### 3. Concurrency and the single-writer lock
 
@@ -335,26 +411,45 @@ Three writer populations contend for the embedded lock: our tick/outbox, session
 `bd` in worktrees, and the human's own `bd`. Mitigations, in order:
 
 - Serialize **our own** spawns per project with the existing in-process `withLock` mutex — never
-  let the inbound pass and the outbox drain race each other into the lock.
-- Treat external contention as transient retryable (above). The outbox already retries with
-  backoff; a failed inbound pass retries on the next 5-minute tick. This matches beads' own
-  multi-agent guidance, where embedded-lock errors are expected transients.
-- Whether **reads** also take the lock is undocumented (verified UNSPECIFIED) — probe at Phase 0.
-  If reads lock too, keep passes short (they already are: one `bd list` + point lookups) and
-  document `bd init --server` (dolt sql-server, concurrent writers) as the recommended setup for
-  heavy multi-agent use. Do not auto-migrate the user's storage mode — respect their init choice.
+  let the inbound pass and the outbox drain race each other into the lock. [Phase 0 upgraded
+  this from prudent to mandatory: **reads take the same whole-database exclusive flock as
+  writes** — 8 concurrent `bd list` fully serialize, `--readonly` doesn't help (it's only an
+  app-level write guard), and one workspace hard-caps at ~2.7 ops/sec regardless of fan-out
+  (negative control: 4 separate workspaces scale linearly).]
+- Treat external contention as transient retryable (above — noting the taxonomy's Phase 0
+  finding that the retry signal only exists because our own timeout fires; bd itself blocks
+  forever, fairly, without starvation: 16 waiters behind a 200s hold all succeeded). The outbox
+  already retries with backoff; a failed inbound pass retries on the next 5-minute tick. This
+  matches beads' own multi-agent guidance.
+- Keep passes short (they already are: one `bd list` + point lookups) and document
+  `bd init --server` (dolt sql-server, concurrent writers) as the recommended setup for heavy
+  multi-agent use. Do not auto-migrate the user's storage mode — respect their init choice.
 - The detached visual-verify snapshot worktree is read-only territory: a `bd` write there mutates
   the *shared* database from a throwaway checkout — worth one sentence in the verify agent docs,
   not machinery.
+- [Phase 0] **The flock is inode-bound and silently defeatable**: `rm -f` of
+  `.beads/embeddeddolt/<db>/.dolt/noms/LOCK` while held lets a second writer proceed
+  immediately, no error on either side — so a `git clean -xfd` or `rm -rf` racing an in-flight
+  `bd` yields two concurrent writers. Cyboflow's own cleanup paths must never touch `.beads`;
+  worth a docs warning for users' cleanup scripts. (SIGKILL mid-write, by contrast, is safe:
+  kernel releases the flock, recovery is automatic, data stayed intact across 10 kills — the
+  only residue is leaked `nbs_manifest_*` temp files.)
 
 ### 4. Pull reconciliation — timestamp-independent discovery
 
-Codex round-4 finding: `bd dolt pull` merges Dolt history while (expectedly — Phase 0 must
-confirm) **preserving each issue's original `updated_at`**. An issue authored on another machine
-and pulled in later can therefore carry a timestamp older than our persisted cursor minus the
-overlap window — `--updated-after` will never return it, and the deletion sweep can't recover it
-because it only compares the remote id set against *already-linked* entities. Permanently
-invisible, with no error.
+Codex round-4 finding: `bd dolt pull` merges Dolt history while **preserving each issue's
+original `updated_at`**. An issue authored on another machine and pulled in later can therefore
+carry a timestamp older than our persisted cursor minus the overlap window — `--updated-after`
+will never return it, and the deletion sweep can't recover it because it only compares the
+remote id set against *already-linked* entities. Permanently invisible, with no error.
+[Phase 0 CONFIRMED this end-to-end with two real clones over a `file://` Dolt remote: pulled
+issues keep their origin stamps, and an issue created before a cursor snapshot but pushed after
+is invisible to `bd list --updated-after <cursor>`, with positive and negative filter controls.
+A second proven vector: `bd import --allow-stale` applies content changes while preserving a
+fabricated old `updated_at` verbatim. And a third gap the proposal had not predicted:
+`bd label add`, `bd comment`, and `bd dep add` do not bump `updated_at` AT ALL — real content
+changes structurally invisible to any cursor. Reconciliation is therefore not just a pull
+backstop; it is the only detection path for three ordinary local mutation types.]
 
 Fix rides the pass structure that already exists: the every-12th-pass (and every manual
 "Sync now") sweep already fetches the **full remote id set**. Extend that pass, gated by a new
@@ -378,6 +473,8 @@ through a remote property change (e.g. an excluded type edited into an included 
 backdated — without a stored revision the ledger would suppress it forever. Since the sweep
 projection already carries (id, revision), the comparison is free: a ledgered id whose swept
 revision differs point-fetches and re-evaluates (import, or re-ledger at the new revision).
+[Phase 0: `revision` here is the adapter-derived content fingerprint — see "Linked issues need
+the same backstop" below; the ledger column stores it as the same opaque string.]
 The zero-lookup guarantee below holds for UNCHANGED ledgered ids. `config_generation` is a
 counter stamped
 on the connection and bumped by any mapping/state-mapping/selection change; ledger rows from an
@@ -392,28 +489,38 @@ included) — a bounded one-time cost, after which each id is linked or ledgered
 already-linked issue — edited offline before the cursor position, pushed after — evades the
 incremental listing, and an unseen-id diff sees the id as known; the change stays invisible and
 outbound sync may later overwrite it). So the sweep projection is **(id, revision) pairs**, not
-bare ids — `revision` is a template-renderable field ("always present"), adding it to the
-`--format` projection costs nothing. **This is an adapter-contract addition** (Codex round-14:
+bare ids. [Phase 0 REFUTED the cheap source: no `revision` field exists in any CLI output, and
+`--format` go-templates iterate dependency edges (silent 0-byte no-op on a dependency-free
+workspace). The revised source: the sweep takes the FULL
+`bd list --all --json --limit 0` listing (bounded-listing policy above) and the adapter derives
+`revision` as a **content fingerprint** — sha256 over the sync-relevant fields of the listed
+row, sorted keys, volatile fields excluded. Strictly stronger than a server revision: it also
+catches the label/comment-count/dependency changes that never bump `updated_at`.]
+**This is an adapter-contract addition** (Codex round-14:
 `listIssueIds(): Promise<string[]>` cannot carry it): a new OPTIONAL method
 `listIssueRevisions(selection): Promise<Array<{id: string; revision: string}>>`, implemented
 only by adapters declaring `capabilities.requiresIdReconciliation`; the deletion-sweep consumer
 calls it when present and falls back to `listIssueIds` otherwise, so the three HTTP providers
-change nothing. Contract tests: changed linked and ledgered revisions trigger point fetches;
-unchanged entries trigger none. Each link persists its last-seen revision inside
-`baseline_json` (no new column; our own outbound writes stamp the response, revision included,
-so echoes never false-positive). A linked id whose swept revision differs from the stored one
-gets a `getIssue` point fetch and runs through the ordinary inbound merge/conflict path. If
-Phase 0 finds the template cannot emit revision, the fallback is a full `listIssues` (no
-`sinceIso`) on reconciliation passes, under the bounded-listing strategy. This completes the
-partition: every id in the full sweep is unseen (point-fetch → import or ledger), ledgered
-(revision compare → zero cost when unchanged, re-evaluate on change), or linked (revision
-compare → merge on change) — no remote change class is outside a detection path.
+change nothing — `revision` is contractually OPAQUE (compare-for-equality only), so a derived
+fingerprint satisfies the same contract a server token would. Contract tests: changed linked
+and ledgered fingerprints trigger point fetches; unchanged entries trigger none. Each link
+persists its last-seen fingerprint inside `baseline_json` (no new column; our own outbound
+writes recompute it from the write's response echo, so echoes never false-positive — the
+fingerprint function is the adapter's own, applied identically both places). A linked id whose
+swept fingerprint differs from the stored one gets a `getIssue` point fetch and runs through
+the ordinary inbound merge/conflict path. One derived-token caveat: `getIssue` (`bd show`)
+returns fields the listing may lack; the fingerprint is defined over the LISTING field set
+only, so both sources compute it identically. This completes the partition: every id in the
+full sweep is unseen (point-fetch → import or ledger), ledgered (fingerprint compare → zero
+cost when unchanged, re-evaluate on change), or linked (fingerprint compare → merge on change)
+— no remote change class is outside a detection path.
 
-Phase 0 negative controls: (a) advance the cursor, introduce an issue with an older
-`updated_at` (via `bd import` of a backdated record, simulating a pull), prove the
-reconciliation pass discovers and imports it; (b) backdated edit to an already-LINKED issue,
-prove it merges or opens a conflict; (c) confirm the pull-preserves-`updated_at` assumption
-directly; (d) confirm the `--format` template can render `revision`.
+Phase 0 negative controls — ALL EXECUTED 2026-08-26 (see `tracker-beads-phase0/findings.md`):
+(a) cursor evasion proven live via two-clone `file://` push/pull AND via
+`bd import --allow-stale`; (b) covered by the fingerprint design (the mechanism the backdated
+edit must defeat is now content-derived, not timestamp-derived); (c) pull-preserves-`updated_at`
+CONFIRMED (a no-op pull changes nothing); (d) REFUTED — template cannot render issues at all,
+which is why the fingerprint design above replaced it.
 
 ### 5. Migration + mechanical widenings
 
@@ -432,30 +539,25 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
 
 ## Phases
 
-- **Phase 0 — live probes with negative controls** (the Dart lesson: probes that only assert the
-  wanted row came back "confirm" filters that never ran). Install `bd`, init a scratch repo, and
-  measure: `--updated-after` gt-vs-gte and timezone handling; whether reads hit the embedded lock
-  (two concurrent `bd list`); `--metadata-field` filtering with a garbage-value control; create
-  defaults (priority/status when omitted); `bd update --json` response shape (envelope on);
-  `bd close` semantics for the archive fallback; behavior when the workspace is missing/renamed;
-  concurrent write contention (two `bd update` racing) and the exact lock-error stderr text;
-  `bd list` output cap (default limit 50 — pass `--limit 0` and verify it means unlimited);
-  **negative controls for the list filters** (Codex round-1 finding): prove a closed issue stays
-  present in both `bd list --all` incremental results and the id sweep, and audit which issue
-  types/statuses the default AND `--all` listings exclude (gates, templates, wisps/ephemeral,
-  `deferred`/`frozen`-category customs) — decide explicitly per excluded class whether the adapter
-  needs additional include flags or documents the class as out of sync scope;
-  **guarded-update semantics**: whether `bd update` can condition on `revision` (expected-revision
-  arg? SQL fallback?) and what a mismatch returns — this gates the v1 lost-update design;
-  **recovery-after-close control**: create with a metadata client key, close the issue, prove
-  `--all --metadata-field` recovery still finds it;
-  **workspace pinning**: `bd where` output shape; that an explicit `BEADS_DIR` wins over
-  discovery and a deleted one falls back to walk-up; the failure shape when the pinned dir is
-  gone;
-  **scale**: `--format` go-template id-only projection works with `--all`; a listing whose JSON
-  exceeds 10MB (synthetic bulk import) to pin the overflow failure shape.
+- **Phase 0 — live probes with negative controls: ✅ EXECUTED 2026-08-26** against `bd 1.2.2`
+  (7 groups, ~59 probes, all negative-controlled). Full verdicts + evidence:
+  `tracker-beads-phase0/findings.md`; raw transcripts alongside. Every probe listed in the
+  original matrix ran; the design-changing verdicts are folded into the sections above (marked
+  "[Phase 0]"): no revision field + dead `--format` templates → fingerprint sweep;
+  detect-after-write via Dolt CommitHash replaces conditional writes; reads take the write lock
+  (~2.7 ops/s per workspace); bd blocks on the lock FOREVER (our timeout manufactures the retry
+  signal); cursor evasion via pull confirmed end-to-end; label/comment/dep changes never bump
+  `updated_at`; identity anchor = `metadata.json` `project_id`; pinning precedence
+  `--db` > `-C` > `BEADS_DIR` > walk-up; `--metadata-field` recovery validated wholesale;
+  maxBuffer overflow shape pinned.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
-- **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from Phase 0).
+- **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from
+  Phase 0 at `tracker-beads-phase0/transcripts/`). Carries the three checks Phase 0 left open:
+  the effective `--dolt-auto-commit` policy (help says default "off" yet every write observably
+  produced a Dolt commit — the detect-after-write gate rests on this), whether `bd history`
+  accepts a bound/limit flag (gates the optional sweep HEAD guard and caps post-write
+  verification cost), and whether `bd rename-prefix` rewrites EXISTING issue ids (the Phase 0
+  rename ran on an empty workspace).
 - **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, the
   `providerNeedsSecret` predicate threaded through every NULL-secret consumer
   (`buildAdapter`/`credentialsForConnection`/`connect`/reconnect), re-detect reconnect surface,
@@ -472,11 +574,21 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
 ## Risks / open questions
 
 - **Upstream velocity**: ~100 releases in ~10.5 months, two completed architecture rewrites
-  (daemon removed; SQLite→Dolt). Pin a minimum supported `bd` version at detect time and probe
-  `bd version` per pass start is overkill — per connect/reconnect is enough. `BD_JSON_ENVELOPE=1`
-  hedges the announced v2.0 output-shape break.
-- **Read-lock semantics UNSPECIFIED** (docs never distinguish read vs write contention) — Phase 0
-  gate; worst case is more frequent transient retries, not corruption.
+  (daemon removed; SQLite→Dolt). Pin the minimum supported `bd` version at 1.2.2 — the version
+  every Phase 0 verdict certifies (several findings are version-specific bugs: the dead
+  go-template branch, the dead default `--limit 50`, the display-round vs comparator-floor
+  mismatch — an upstream fix to any of them changes behavior under us). Probe `bd version` per
+  connect/reconnect; per pass start is overkill. `BD_JSON_ENVELOPE=1` hedges the announced v2.0
+  output-shape break.
+- ~~Read-lock semantics UNSPECIFIED~~ **[Phase 0 RESOLVED: reads take the same whole-database
+  exclusive flock as writes]** — one workspace serializes at ~2.7 ops/s; worst case remains
+  latency, not corruption, and the per-project spawn mutex + own-timeout design absorbs it.
+- **[Phase 0] Telemetry + init side effects**: bd phones home by default and vanilla `bd init`
+  auto-commits agent hooks into the user's repo (see "Keyless connect") — pure docs/UX
+  disclosure for us, but reputationally load-bearing for a privacy-conscious user base.
+- **[Phase 0] `.beads` deletion races**: the flock is inode-bound; `rm -rf .beads`/
+  `git clean -xfd` racing an in-flight `bd` silently yields two concurrent writers (see
+  "Concurrency"). Not our machinery's job to fix — docs warning only.
 - **Live upstream footgun**: beads currently pins Dolt 2.2.0 because Dolt 2.3.x breaks
   `DOLT_RESET('--hard')` paths (`bd flatten`, `bd admin compact`, pull rollback). Embedded-mode
   users are unaffected by our integration; add a docs note for server-mode users.
@@ -488,30 +600,56 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   suppression + pre-send `contentDivergence` guard (Codex round-3 fix from the field-writeback
   work) is the baseline — but for beads the pre-send read is not atomic with the write, and
   unlike the HTTP providers, concurrent local writers are *expected* (sprint lanes), not rare.
-  Beads ships a `revision` guarded-write optimistic-concurrency token ("always present"), so
-  **revision-conditional writes are a HARD v1 requirement for every outbound mutation of an
-  existing issue** — state and content alike (Codex round-2 finding 3, hardened by round-3
-  finding 1: an unguarded fallback knowingly loses user data in a race the design itself calls
-  expected). Carry `revision` from the pre-send read into every update. **A mismatch is a signal
-  to interpret, not a verdict** (Codex round-12 finding 1: revision is issue-WIDE — concurrent
-  churn on an unrelated field like assignee bumps it, and a settle-unsent-on-any-mismatch rule
-  would permanently drop a non-conflicting title write, since inbound finds no conflict on that
-  field and the settled row never retries; the existing `contentDivergence` guard is
-  field-scoped and does not have this bug — the revision guard must not be coarser than what it
-  strengthens). Mismatch state machine: re-fetch the issue, compare the **patched fields**
-  against the pre-send baseline (`contentDivergence` semantics):
-  - target fields unchanged remotely (unrelated churn) → refresh the token and retry the
-    conditional write, bounded attempts;
-  - a target field genuinely diverged → settle unsent as a held conflict (existing behavior);
-  - the desired values already landed → settle done, unsent.
-  Tests: revision bumps from non-overlapping fields must not lose the write. **If Phase 0 finds no guard mechanism** — probe both `bd update`'s flag
-  surface and a conditional-`UPDATE … WHERE revision = N` via Dolt SQL as the escape hatch (the
-  SQL path is only a valid guard if the probe ALSO proves it preserves beads' `revision`
-  increment, `updated_at` stamping, validation, and event semantics — a raw write bypassing
-  those is not an escape hatch, it is corruption) —
-  **v1 ships import + create-push only** (creates race nothing — a fresh issue has no
-  concurrent editor), with outbound edits deferred until a guarded transport exists
-  (`bd serve`, SQL, or upstream flag). No unguarded fallback ships. **The disable must be
+
+  **[Phase 0 executed the guard-mechanism hunt (probe group D, opus). Verdict:
+  DETECT-AFTER-WRITE — every prevention-shaped mechanism is refuted live.]** The docs'
+  "revision" token does not exist in the 1.2.2 CLI (no revision/version/etag field in any
+  `list`/`show` output at any verbosity); zero CAS/if-match flags across all 109 subcommands
+  (`--claim` is a genuine CAS but only on (assignee, status), protects no other field —
+  advisory lock at best); `bd sql` is refused in embedded mode; the direct-`dolt` SQL guard
+  works mechanically but is disqualified exactly as this document predicted — it stamps
+  `updated_at` in LOCAL time which bd then serializes with a lying `Z` suffix (the row reads
+  ~7h old and breaks every newer-than comparison), makes no Dolt commit (the edit is later
+  absorbed into an unrelated issue's auto-commit), and STILL silently loses updates guarding on
+  a 1-second-resolution `updated_at` (lost update reproduced live in 3 attempts; the trap
+  `content_hash` column is frozen at creation and never recomputed). What DOES hold: **every
+  `bd` write is a Dolt commit**, `bd history <id> --json` returns
+  `{CommitHash, CommitDate, Issue: <full snapshot>}` per commit, and
+  `bd show <id> --as-of <CommitHash>` resolves a stored token to its exact historical snapshot.
+
+  So v1's guarantee is **detect-and-recover, not prevent** — and because `bd update` patches
+  only the flags it is given (per-field, unlike an HTTP PUT), the ONLY hazard is a concurrent
+  write to the SAME field landing inside the pre-send window; unrelated-field churn is never
+  clobbered by our write at all. Per outbound mutation of an existing issue (state and content
+  alike): (1) pre-send, alongside the existing `contentDivergence` read, capture
+  `concurrencyToken` = the newest `CommitHash` from `bd history`; (2) write via `bd update`
+  (never SQL); (3) post-write, re-read history and diff adjacent snapshots from our own write's
+  commit back to the token, attributing exactly which fields changed in between. Outcomes,
+  preserving the round-12 field-scoped state machine's arms:
+  - no interleaved commit touched a patched field (incl. unrelated churn) → settle done;
+  - an interleaved commit wrote a patched field a DIFFERENT value → we clobbered it: hold as
+    conflict (existing behavior) **with the overwritten value recovered from its snapshot** —
+    strictly better than the HTTP providers, where the raced value is unrecoverable;
+  - an interleaved commit wrote the same value we sent → settle done (converged).
+  Nothing is ever silently lost: the race outcome is always visible in history and the loser's
+  value is always recoverable (`--as-of` gives a true 3-way base). Costs/caveats, all probed:
+  `bd history` is UNFILTERED (entries ≈ all DB commits since the issue's creation — 33 entries
+  for 1 real change), so walk back to the token only and check for a bound flag at Phase 2;
+  `Committer` is always literal `root` (attribution is what-changed, never who);
+  `bd compact`/`bd flatten`/`bd gc` squash history and invalidate stored tokens → re-baseline
+  on unresolvable-token, which surfaces as bd's ONLY exit-0 error (empty stdout, error on
+  stderr only — parse for it explicitly); `--claim` may optionally be taken as an advisory
+  lock to shrink the window. Tests: interleaved same-field write → held conflict carrying the
+  recovered value; interleaved unrelated-field write → settle done, zero data movement;
+  unresolvable token → re-baseline, not error-loop.
+
+  **The remaining hard gate**: this design requires that bd writes reliably produce per-write
+  Dolt commits. Observed true under 1.2.2 defaults, but the `--dolt-auto-commit` help claims
+  default "off" while behavior showed per-write commits — Phase 2 pins the effective policy
+  (and the `batch` mode's implications) before relying on it. **If history proves unusable,
+  v1 ships import + create-push only** (creates race nothing — a fresh issue has no concurrent
+  editor), with outbound edits deferred until a guarded transport exists (`bd serve`, upstream
+  CAS flag, or server-mode SQL). No unguarded-undetected fallback ships. **The disable must be
   expressible** (Codex round-15 finding 2: `contentWrite: false` gates content writes, but
   `updateIssueState` has no capability gate — the state outbox path would either send the
   forbidden unguarded write or strand rows that block the issue's inbound processing). New
@@ -526,34 +664,45 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   the current interface cannot express it — `TrackerIssue` exposes no revision and
   `updateIssueState`/`updateIssueContent` accept no expected-revision, so an implementer
   "following the plan" would either write unguarded or hide a second read inside the adapter,
-  reopening the race). Contract changes, enumerated:
+  reopening the race). Contract changes, enumerated [Phase 0 re-semantics in brackets — the
+  contract SHAPE survives the detect-after-write pivot; only what the token IS and when the
+  check runs changed]:
   - `TrackerIssue` gains an optional opaque `concurrencyToken?: string` — populated only by
-    adapters that support guarded writes (beads: the `revision`); HTTP adapters leave it
-    undefined.
+    adapters that support guarded writes [beads: the newest Dolt `CommitHash` from
+    `bd history`, captured with the pre-send read]; HTTP adapters leave it undefined.
   - `updateIssueState`/`updateIssueContent` gain an optional `expectedToken?: string` final
-    parameter; existing adapters ignore it (unguarded, their status quo).
+    parameter; existing adapters ignore it (unguarded, their status quo). [beads: the write
+    always lands; the adapter then verifies AFTER the write by diffing history snapshots back
+    to `expectedToken`, and reports an interleaved same-field write as the mismatch error —
+    carrying the clobbered remote value recovered from its snapshot.]
   - A distinct typed outcome, `TrackerRevisionMismatchError`, which the outbox drain consumes
-    via the mismatch state machine above — re-fetch, patched-field compare, then
-    retry-with-fresh-token / hold-as-conflict / settle-done — NEVER an unconditional
-    settle-unsent (Codex round-13 caught this bullet contradicting the round-12 state machine;
-    the state machine is authoritative for both content AND state writes). Bounded-retry
-    exhaustion (churn on every attempt, cap ~3) degrades to the hold-as-conflict arm — held,
-    visible, never silently dropped. Tests cover content and state writes across all four
-    outcomes: unrelated churn, already-landed, genuine divergence, retry exhaustion.
+    via the mismatch state machine above — patched-field attribution, then hold-as-conflict
+    (with the recovered value) / settle-done (unrelated churn or converged) — NEVER an
+    unconditional settle-unsent (Codex round-13 caught this bullet contradicting the round-12
+    state machine; the state machine is authoritative for both content AND state writes).
+    [The retry-with-fresh-token arm and its exhaustion bound are RETIRED: they were artifacts
+    of conditional-write refusal, and detect-after-write has no refusal — the write lands and
+    the verdict is final per attempt.] Tests cover content and state writes across the
+    outcomes: unrelated churn, already-landed/converged, genuine same-field divergence.
   - Callers enumerated: `drainContentWrite` already does the pre-send `getIssue` — it forwards
     that read's token; the state-write drain path gains the same pre-send read + token when
     (and only when) the adapter populates `concurrencyToken`. No other mutation callers exist
     (creates and archive are not existing-issue updates).
-- **Scale**: beads self-reports fast at thousands of issues; our full-fetch sweep every 12th pass
-  is a `bd list` of ids — fine at that scale.
+- **Scale**: beads self-reports fast at thousands of issues. [Phase 0: the sweep is now a full
+  `--json` listing (no cheap projection exists) — measured 0.6s for a deliberately pathological
+  12.3MB workspace, fully buffered; the every-12th-pass cadence and the 64MB terminal cap in
+  "Bounded listings" govern it. Also measured: ~18KB on-disk Dolt-journal growth per `bd update`
+  with compaction disabled by default — a busy synced workspace grows fast, the user's
+  `bd compact` is the remedy, and our stored CommitHash tokens re-baseline after it.]
 
 ## Non-goals (v1)
 
-`bd serve` transport · automating `bd dolt push/pull`/`bd sync` (the user's cron/manual job; at
-most a docs pointer) · events-journal cursor (`bd events tail --since <seq>` — off by default;
-a future upgrade over `--updated-after`) · routing/federation/multi-repo · wisps, molecules,
-formulas, gates (exotic types just map through category) · bundling the `bd` binary · JSONL
-anything.
+`bd serve` transport · automating `bd dolt push/pull` or `bd federation sync` (the user's
+cron/manual job; at most a docs pointer — [Phase 0: these are two distinct mechanisms; there is
+no `bd sync`]) · events-journal cursor (`bd events tail --since <seq>` — off by default;
+a future upgrade over `--updated-after`) · routing/federation/multi-repo · wisps, gates
+(hidden even from `--all` without include flags — out of sync scope per the Phase 0 audit;
+molecules are visible and map through category) · bundling the `bd` binary · JSONL anything.
 
 ## Review findings absorbed
 
@@ -779,3 +928,38 @@ absorbed; this round closes the TOCTOU family terminally:
    Absorbed: pre-import reconciliation matches by marker/client key, repoints links atomically,
    user-confirms ambiguity, suppresses fresh import until done; imported and pushed-origin
    entities both tested (see "Replacement recovery").
+
+## Phase 0 execution record (2026-08-26)
+
+Executed against `bd 1.2.2 (Homebrew)` — 7 probe groups (list semantics, cursor/timestamps,
+CRUD+metadata+recovery, revision-guard, concurrency/locks, workspace identity+scale,
+cross-machine pull), ~59 probes, every filter probe with a negative control, two-clone `file://`
+Dolt-remote experiment included. Full verdicts, evidence, and the error-classification table:
+`tracker-beads-phase0/findings.md`; raw transcripts (Phase 2 fixtures):
+`tracker-beads-phase0/transcripts/`.
+
+Score against the proposal as reviewed through Codex round 18: the sync-engine architecture
+(keyless connect, identity sandwich, reconciliation ledger, reversible archival, adopt-new-
+workspace, enqueue gating) survived intact; **four load-bearing mechanisms were refuted live
+and are redesigned in place** (marked "[Phase 0]" above):
+
+1. The per-issue `revision` token does not exist in the CLI, and `--format` go-templates
+   iterate dependency edges (silent 0-byte no-op) → the (id, revision) sweep became a full-
+   listing sweep with an adapter-derived content fingerprint — which also covers the newly
+   discovered `updated_at` blind spots (label/comment/dependency changes never bump it).
+2. Conditional writes are impossible in embedded mode (no CAS flags; `bd sql` refused; direct
+   `dolt sql` corrupts timestamps/history and still races within `updated_at`'s 1-second
+   resolution) → guarded updates became detect-and-recover via Dolt `CommitHash` history
+   diffing, with the clobbered value always recoverable (`--as-of`) — strictly better recovery,
+   weaker prevention, gated at Phase 2 on the effective auto-commit policy.
+3. `BEADS_DIR` pinning was superseded: proven precedence `--db` > `-C` > `BEADS_DIR` > walk-up
+   makes `-C` argv pinning the primary lever (env scrubbing demoted to defense-in-depth).
+4. The retryable-contention error is unreachable under pure contention — bd blocks on the flock
+   forever with no timeout knob — so the adapter's own timeout+SIGTERM is what CREATES the
+   classifiable retry signal, and exit codes classify nothing (stderr-suffix table in the
+   findings doc governs).
+
+Confirmed as designed: worktree sharing (`env -i` proof), pull-preserved timestamps and
+end-to-end cursor evasion (the reconciliation ledger's justification), metadata client-key
+recovery (all negative controls), hard-delete sweep semantics, `metadata.json` `project_id` as
+the instance identity anchor, and the terminal maxBuffer overflow shape.
