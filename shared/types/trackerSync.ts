@@ -311,6 +311,23 @@ export interface TrackerIssue {
    */
   recoveryClientKey: string | null;
   /**
+   * OPAQUE compare-for-equality content fingerprint, populated only by
+   * adapters whose `capabilities.requiresIdReconciliation` is true (beads —
+   * docs/proposals/tracker-beads-provider.md, "4. Pull reconciliation"). The
+   * same value {@link import('../../main/src/services/trackerSync/adapterTypes').TrackerAdapter.listIssueRevisions}
+   * pairs with each id, surfaced here as well so the reconciliation sweep can
+   * stamp a link's last-seen fingerprint from ANY issue the adapter returns
+   * (a listing row, a point fetch, or a write's post-write echo) rather than
+   * only from the sweep projection.
+   *
+   * NOT the concurrency token: {@link concurrencyToken} identifies one remote
+   * WRITE (beads: a Dolt `CommitHash`) and gates a guarded update, whereas
+   * this identifies remote CONTENT and answers "has this issue changed since
+   * we last looked" for an adapter whose `updatedAt` cannot be trusted to
+   * advance. Never parsed, ordered, or compared across adapters.
+   */
+  revision?: string;
+  /**
    * Opaque concurrency token for a GUARDED write (migration 123's
    * `guardedUpdates` capability) — populated only by adapters that support
    * detect-after-write concurrency checking (beads: the newest Dolt

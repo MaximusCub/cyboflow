@@ -1000,7 +1000,11 @@ async function adoptCreatedIssue(
     provider: connection.provider,
     external_id: issue.externalId,
     external_identifier: issue.identifier,
-    external_url: issue.url,
+    // '' is beads' "this provider has no web URL at all" (no HTTP surface
+    // exists to link to); stored as NULL so no "open in tracker" affordance
+    // renders a dead link. Behaviour-neutral for the HTTP providers, whose
+    // `url` is never empty.
+    external_url: issue.url || null,
     external_parent_id: parentExternalId,
     baseline_json: JSON.stringify(baselineSnapshot(issue)),
   });
@@ -1175,7 +1179,9 @@ async function adoptPushedIssue(
     provider: connection.provider,
     external_id: issue.externalId,
     external_identifier: issue.identifier,
-    external_url: issue.url,
+    // See the sub-issue adopt path above: beads has no per-issue URL, so its
+    // '' becomes NULL rather than an empty link.
+    external_url: issue.url || null,
     external_parent_id: issue.parentExternalId,
     baseline_json: JSON.stringify(
       group === null ? snapshot : { ...snapshot, lastWrittenGroup: group },

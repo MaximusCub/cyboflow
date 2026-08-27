@@ -1421,7 +1421,10 @@ async function importIssueAsIdea(
     provider: connection.provider,
     external_id: issue.externalId,
     external_identifier: issue.identifier,
-    external_url: issue.url,
+    // beads reports '' — it has no web UI and therefore no per-issue URL — and
+    // an empty link is worse than none, so it is stored as NULL. Never reached
+    // by the HTTP providers, whose `url` is always populated.
+    external_url: issue.url || null,
     external_parent_id: issue.parentExternalId,
     baseline_json: JSON.stringify(group === null ? snapshot : { ...snapshot, lastWrittenGroup: group }),
   });

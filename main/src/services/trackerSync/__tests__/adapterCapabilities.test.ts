@@ -117,8 +117,8 @@ describe('TrackerAdapterCapabilities — per-provider exhaustiveness', () => {
     await expect(ADAPTERS.plane.archiveIssue('proj1/iss1')).rejects.toThrow(/unsupported/i);
   });
 
-  it("beads' archive is also 'none' (no trash/archive endpoint), stubbed as not-implemented for now", async () => {
+  it("beads' archive is also unreachable ('none' — `bd delete` is a hard delete)", async () => {
     expect(ADAPTERS.beads.capabilities.archive).toBe('none');
-    await expect(ADAPTERS.beads.archiveIssue('bd-1')).rejects.toThrow(/not implemented/i);
+    await expect(ADAPTERS.beads.archiveIssue('bd-1')).rejects.toThrow(/unsupported/i);
   });
 });
