@@ -612,6 +612,38 @@ export default function SessionStartWizard(): React.JSX.Element {
   // interactive gate rides the inline `--settings` flag — no checkout writes).
   // Default 'inherit' keeps launches byte-identical.
   const [worktreeModeOverride, setWorktreeModeOverride] = useState<'inherit' | QuickSessionWorktreeMode>('inherit');
+  // Advanced (Configure ③, QUICK + WORKFLOW): per-launch base branch — the
+  // branch the session worktree is cut from. '' = project default (the
+  // checkout's HEAD; `baseBranch` is omitted from the launch payload, legacy
+  // behavior). Threaded into createQuick for a quick session and into
+  // ensureSessionForLaunch (→ the host session's createQuick) for a workflow
+  // run. Reset with the project so a branch from one repo never leaks into
+  // another's launch.
+  const [baseBranchOverride, setBaseBranchOverride] = useState<string>('');
+  // The selected project's local branches (Advanced base-branch picker),
+  // lazily fetched per project on ③.
+  const [projectBranches, setProjectBranches] = useState<string[]>([]);
+  useEffect(() => {
+    setBaseBranchOverride('');
+    setProjectBranches([]);
+    if (selectedProjectId === null) return;
+    let cancelled = false;
+    void API.projects
+      .listBranches(String(selectedProjectId))
+      .then((res) => {
+        if (cancelled || !res.success || !Array.isArray(res.data)) return;
+        const names = (res.data as Array<{ name?: unknown }>)
+          .map((b) => (typeof b.name === 'string' ? b.name : null))
+          .filter((n): n is string => n !== null);
+        setProjectBranches(names);
+      })
+      .catch(() => {
+        /* branches stay empty — the picker renders only the default option */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectId]);
   // Advanced (Configure ③, WORKFLOW only): per-run A/B variant choice (migration
   // 048, VariantSelector). Defaults to 'rotation' — a no-op selection
   // (variantSelectionToStartInput sends neither `variantId` nor `baseline`) so a
@@ -1051,6 +1083,8 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentProvider: providerForRuntime(workflowRuntime),
             agentRuntime: workflowRuntime,
             agentModel: model,
+            // Advanced base-branch pick — '' = project default (omit).
+            ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1142,7 +1176,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1179,6 +1213,8 @@ export default function SessionStartWizard(): React.JSX.Element {
             agentProvider: providerForRuntime(workflowRuntime),
             agentRuntime: workflowRuntime,
             agentModel: model,
+            // Advanced base-branch pick — '' = project default (omit).
+            ...(baseBranchOverride !== '' ? { baseBranch: baseBranchOverride } : {}),
           });
           pendingHostedSessionIdRef.current = sessionId;
         }
@@ -1236,7 +1272,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1320,6 +1356,10 @@ export default function SessionStartWizard(): React.JSX.Element {
         quickProvider,
         sessionRuntime,
         reasoningEffort ?? undefined,
+        undefined,
+        undefined,
+        // Advanced base-branch pick — '' = project default (omit).
+        baseBranchOverride !== '' ? baseBranchOverride : undefined,
       );
       return;
     }
@@ -1347,6 +1387,11 @@ export default function SessionStartWizard(): React.JSX.Element {
         // No reasoningEffort: the Ultracode card pins xhigh and the interactive
         // spawn suppresses --effort while effort==='ultracode' (a selection
         // would be a no-op), so the wizard never offers the control here.
+        undefined,
+        undefined,
+        undefined,
+        // Advanced base-branch pick — '' = project default (omit).
+        baseBranchOverride !== '' ? baseBranchOverride : undefined,
       );
       return;
     }
@@ -1400,7 +1445,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride, mixedProviderPrompt]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride, mixedProviderPrompt, baseBranchOverride]);
 
   const handleIdeaPicked = useCallback(
     // `opts.separateIdeaIds` ("Plan separately", IDEA-009) is deliberately NOT
@@ -1636,6 +1681,39 @@ export default function SessionStartWizard(): React.JSX.Element {
     tuningLevelOverride !== null;
 
   const combinedError = launchError ?? quickError ?? designLaunchError;
+
+  // Advanced: per-launch base branch (shared by the quick and workflow Advanced
+  // bodies). '' = project default — the launch omits `baseBranch` and the
+  // worktree is cut from the checkout's HEAD, exactly as before the picker.
+  const baseBranchControl = (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-0.5">
+        <label htmlFor="wizard-base-branch" className="text-sm font-medium text-text-primary">
+          Base branch
+        </label>
+        <span className="text-xs text-text-tertiary">
+          The branch this session&apos;s worktree is created from
+        </span>
+      </div>
+      <select
+        id="wizard-base-branch"
+        data-testid="wizard-base-branch"
+        value={baseBranchOverride}
+        onChange={(e) => setBaseBranchOverride(e.target.value)}
+        className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
+        aria-label="Select base branch"
+      >
+        <option value="">
+          Project default{banner.branch !== null ? ` (${banner.branch})` : ''}
+        </option>
+        {projectBranches.map((name) => (
+          <option key={name} value={name}>
+            {name}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 
   // Selected-project banner card — shared by the workflow step (②) and the
   // configure step (③).
@@ -2075,6 +2153,8 @@ export default function SessionStartWizard(): React.JSX.Element {
                         ))}
                       </div>
                     </div>
+
+                    {baseBranchControl}
                   </div>
                 )}
               </div>
@@ -2131,6 +2211,8 @@ export default function SessionStartWizard(): React.JSX.Element {
                         id="wizard-variant"
                       />
                     )}
+
+                    {baseBranchControl}
 
                     <div className="mt-1 flex flex-col gap-0.5">
                       <span className="text-sm font-medium text-text-primary">Quality eval</span>
@@ -2282,7 +2364,10 @@ export default function SessionStartWizard(): React.JSX.Element {
             >
               <span className="eyebrow text-text-secondary">Launch summary</span>
               <SummaryRow label="Project" value={banner.name} />
-              <SummaryRow label="Branch" value={banner.branch ?? '—'} />
+              <SummaryRow
+                label="Base branch"
+                value={baseBranchOverride !== '' ? baseBranchOverride : (banner.branch ?? '—')}
+              />
               <SummaryRow
                 label="Workflow"
                 value={

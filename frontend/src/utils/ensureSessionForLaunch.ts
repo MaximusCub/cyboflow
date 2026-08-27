@@ -66,6 +66,13 @@ export interface EnsureSessionForLaunchOptions {
   agentProvider?: AgentProvider;
   agentRuntime?: SessionAgentRuntime;
   agentModel?: string;
+  /**
+   * Branch the host session's worktree is cut from (the wizard's Advanced
+   * "Base branch" pick). Only applies when this helper CREATES a session —
+   * a reused selection already has its worktree. Omitted → the project
+   * checkout's HEAD (legacy behavior).
+   */
+  baseBranch?: string;
 }
 
 /**
@@ -117,6 +124,7 @@ export async function ensureSessionForLaunch(
     ...(opts.agentRuntime ? { agentRuntime: opts.agentRuntime } : {}),
     ...(opts.agentModel ? { agentModel: opts.agentModel } : {}),
     ...(opts.agentRuntime ? {} : { substrate: 'sdk' as const }),
+    ...(opts.baseBranch !== undefined ? { baseBranch: opts.baseBranch } : {}),
   });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');

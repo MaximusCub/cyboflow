@@ -175,6 +175,13 @@ vi.mock('../../../../utils/api', () => ({
     projects: {
       getAll: vi.fn().mockResolvedValue({ success: true, data: [{ id: 1, name: 'Proj', path: '/tmp/p' }] }),
       detectBranch: vi.fn().mockResolvedValue({ success: true, data: 'main' }),
+      listBranches: vi.fn().mockResolvedValue({
+        success: true,
+        data: [
+          { name: 'main', isCurrent: true, hasWorktree: false },
+          { name: 'develop', isCurrent: false, hasWorktree: false },
+        ],
+      }),
     },
     sessions: {
       createQuick: vi.fn(),
@@ -3695,5 +3702,63 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
     expect(screen.queryByTestId('wizard-tuning-level')).not.toBeInTheDocument();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Base-branch picker (Advanced) — threads `baseBranch` into the session/worktree
+// creation for both launch kinds; the '' default omits the field entirely.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — base-branch picker (Advanced)', () => {
+  it('threads the picked base branch into a quick-session launch', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+    await screen.findByTestId('wizard-base-branch');
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('wizard-base-branch'), { target: { value: 'develop' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ baseBranch: 'develop' }),
+    );
+  });
+
+  it('omits baseBranch entirely when the default is kept (quick launch)', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('baseBranch');
+  });
+
+  it('threads the picked base branch into the workflow host-session create', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await screen.findByTestId('wizard-base-branch');
+    await act(async () => {
+      fireEvent.change(screen.getByTestId('wizard-base-branch'), { target: { value: 'develop' } });
+    });
+    // The summary reflects the pick.
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('develop');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockEnsureSession).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ baseBranch: 'develop' }),
+    );
   });
 });

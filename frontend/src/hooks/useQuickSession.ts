@@ -123,6 +123,7 @@ interface UseQuickSessionReturn {
     reasoningEffort?: ReasoningEffort,
     designIdeaId?: string,
     kickoffPrompt?: string,
+    baseBranch?: string,
   ) => Promise<void>;
   /**
    * Zero-arg-friendly entry point for launches that only know a run-type key
@@ -165,6 +166,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       reasoningEffort?: ReasoningEffort,
       designIdeaId?: string,
       kickoffPrompt?: string,
+      baseBranch?: string,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -223,6 +225,9 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // session binds to. Only sent by the wizard's Design arm; every other
           // launch omits it.
           ...(designIdeaId !== undefined ? { designIdeaId } : {}),
+          // Base branch for the session worktree (wizard Advanced) — omitted →
+          // the project checkout's HEAD.
+          ...(baseBranch !== undefined ? { baseBranch } : {}),
         });
 
         if (!result.success || !result.data) {

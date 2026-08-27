@@ -1115,7 +1115,7 @@ describe('useQuickSession — source guard: start() signature is unexpanded (TAS
   const hookPath = resolve(dirname(fileURLToPath(import.meta.url)), '../useQuickSession.ts');
   const source = readFileSync(hookPath, 'utf-8');
 
-  it("the `const start = useCallback(async (...) => ...)` implementation still declares exactly 13 positional parameters", () => {
+  it("the `const start = useCallback(async (...) => ...)` implementation still declares exactly 14 positional parameters", () => {
     const startMatch = source.match(/const start = useCallback\(\s*async \(([\s\S]*?)\): Promise<void> => \{/);
     expect(startMatch).not.toBeNull();
 
@@ -1124,7 +1124,9 @@ describe('useQuickSession — source guard: start() signature is unexpanded (TAS
       .map((p) => p.trim())
       .filter((p) => p.length > 0);
 
-    expect(params).toHaveLength(13);
+    // 13 at TASK-153, +1 when the wizard's Advanced base-branch pick added
+    // `baseBranch` (a genuine launch option, not a startWithDefaults expansion).
+    expect(params).toHaveLength(14);
   });
 
   it("startWithDefaults is declared as its OWN separate `useCallback` taking a single `key: string` param — it did not become start's 14th positional param", () => {
