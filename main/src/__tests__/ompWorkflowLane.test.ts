@@ -380,20 +380,22 @@ describe('omp-sdk workflow lane — per-step spawn plumbing', () => {
     await ompManager.killAllProcesses();
   });
 
-  it('renders the step prompt as IDENTITY — no provider envelope for OMP', async () => {
-    // PROVIDER_PROMPT_ENVELOPES.omp is null: an envelope is authored for a
-    // provider taught the T2 orchestrator contract, and pasting Codex's in would
-    // describe a contract OMP does not implement.
+  it('renders the step prompt with the OMP runtime-adapter envelope', async () => {
+    // The T1 step prompt tells the step to delegate to its `cyboflow-<agent>`
+    // role and claims that role is installed in `.claude/agents/` — true on
+    // Claude only. The envelope corrects that and forbids resolving the
+    // prefix-stripped name against OMP's own roster (which is how a real run
+    // adopted a third-party `compounder`).
     const { runner, clients, ompManager } = makeHarness({ runtime: 'omp-sdk' }, 'ok', {
-      promptRenderContext: { provider: 'claude', runtime: 'claude-sdk', executionModel: 'programmatic' },
+      promptRenderContext: { provider: 'omp', runtime: 'omp-sdk', executionModel: 'programmatic' },
     });
 
     await runner.runStep(STEP, CTX);
 
     const prompt = clients[0].prompts[0];
-    expect(prompt).not.toContain('# Runtime adapter');
-    // …and it IS the composed step prompt, not an empty string that would
-    // trivially satisfy the assertion above.
+    expect(prompt).toContain('# Runtime adapter: OMP');
+    expect(prompt).toContain('NEVER pass a `cyboflow-*` name');
+    // …and the composed step prompt is still there, after the envelope.
     expect(prompt).toContain('code-review');
     await ompManager.killAllProcesses();
   });

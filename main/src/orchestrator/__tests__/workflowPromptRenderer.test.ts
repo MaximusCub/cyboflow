@@ -65,15 +65,13 @@ describe('renderWorkflowPromptForRuntime', () => {
   });
 
   /**
-   * OMP runs T1 programmatic step agents but has NO envelope, and that is a
-   * decision rather than an omission: a step turn is a self-contained task whose
-   * gates the host owns, while an envelope adapts the T2 ORCHESTRATOR contract
-   * (AskUserQuestion redirection, subagent role mapping) that OMP has not been
-   * taught. Pasting Codex's in would describe a contract OMP does not implement,
-   * so identity is the correct rendering — asserted as a REFERENCE equality so a
-   * future envelope cannot slip in unnoticed.
+   * OMP DOES get an envelope, because the T1 step prompt is not
+   * provider-neutral: it tells the step to delegate to its `cyboflow-<agent>`
+   * role and asserts that role is installed in `.claude/agents/`, which is true
+   * on Claude only. Without the envelope an OMP step resolves the prefix-stripped
+   * name against its own roster and can adopt a same-named THIRD-PARTY agent.
    */
-  it('renders an OMP programmatic-step prompt as identity, envelope-free', () => {
+  it('prepends the OMP envelope to a programmatic-step prompt', () => {
     const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
       provider: 'omp',
       runtime: 'omp-sdk',
@@ -81,8 +79,32 @@ describe('renderWorkflowPromptForRuntime', () => {
       turnKind: 'programmatic-step',
     });
 
-    expect(rendered).toBe(BASE_PROMPT);
-    expect(rendered.prompt).not.toContain('# Runtime adapter');
-    expect(PROVIDER_PROMPT_ENVELOPES.omp).toBeNull();
+    expect(rendered.prompt).toContain('# Runtime adapter: OMP');
+    expect(rendered.prompt.endsWith(BASE_PROMPT.prompt)).toBe(true);
+    expect(rendered.systemPromptAppend).toBe(BASE_PROMPT.systemPromptAppend);
+  });
+
+  /**
+   * The envelope's whole job is to stop a step adopting a same-named agent from
+   * the host environment — the exact failure that killed a real Compound run.
+   */
+  it('forbids resolving a cyboflow role against the host agent roster', () => {
+    const envelope = PROVIDER_PROMPT_ENVELOPES.omp;
+
+    expect(envelope).not.toBeNull();
+    expect(envelope).toContain('NEVER pass a `cyboflow-*` name');
+    expect(envelope).toContain('with the prefix stripped');
+    expect(envelope).toContain('plugin cache');
+  });
+
+  /** A nudge / resume turn stays identity for OMP, same rule as Codex. */
+  it('leaves an OMP nudge or resume turn unenveloped', () => {
+    for (const turnKind of ['nudge', 'resume'] as const) {
+      expect(renderWorkflowPromptForRuntime(BASE_PROMPT, {
+        provider: 'omp',
+        runtime: 'omp-sdk',
+        turnKind,
+      })).toBe(BASE_PROMPT);
+    }
   });
 });
