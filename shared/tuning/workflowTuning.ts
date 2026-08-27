@@ -371,9 +371,11 @@ const SHIP_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> =
 };
 
 /**
- * Compound — a single `compounder` agent drives all three agent steps
- * (load-sprint / extract / write-back), so one pin covers the flow. Extraction
- * is the judgment-heavy core, which sets the tier. Pins only: the five-step
+ * Compound — three agent steps, three agents, so the tier can follow the work
+ * instead of one pin covering the flow. `compound-load` is a read-only survey
+ * (the cheapest thing here); `compounder` is the judgment-heavy core that sets
+ * the flow's tier; `compound-writeback` applies edits the human already
+ * approved, which needs care but no fresh judgment. Pins only: the five-step
  * propose → gate → apply → gate shape has nothing removable.
  *
  * `evalDefault: false` is a no-op here (compound is eval-EXEMPT by name in
@@ -382,14 +384,26 @@ const SHIP_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> =
  */
 const COMPOUND_PRESETS: Readonly<Partial<Record<TuningPresetLevel, TuningPreset>>> = {
   efficient: {
-    agentConfigs: { compounder: { model: 'sonnet', effort: 'medium' } },
+    agentConfigs: {
+      'compound-load': { model: 'haiku', effort: 'low' },
+      compounder: { model: 'sonnet', effort: 'medium' },
+      'compound-writeback': { model: 'sonnet', effort: 'medium' },
+    },
     evalDefault: false,
   },
   standard: {
-    agentConfigs: { compounder: { model: 'opus', effort: 'medium' } },
+    agentConfigs: {
+      'compound-load': { model: 'sonnet', effort: 'low' },
+      compounder: { model: 'opus', effort: 'medium' },
+      'compound-writeback': { model: 'sonnet', effort: 'medium' },
+    },
   },
   thorough: {
-    agentConfigs: { compounder: { model: 'opus', effort: 'high' } },
+    agentConfigs: {
+      'compound-load': { model: 'sonnet', effort: 'medium' },
+      compounder: { model: 'opus', effort: 'high' },
+      'compound-writeback': { model: 'opus', effort: 'medium' },
+    },
   },
 };
 

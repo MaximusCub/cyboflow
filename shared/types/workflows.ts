@@ -1043,7 +1043,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'load-sprint',
             name: 'Load merged work',
-            agent: 'compounder',
+            agent: 'compound-load',
             mcps: ['filesystem', 'git'],
             retries: 0,
             desc: 'Gather the session diff + raw run data for recently merged/completed runs; the compounder returns ONLY a Merged work summary here — no learnings and no discarded list yet (those come at extract), and nothing is filed as a review item.',
@@ -1069,7 +1069,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           {
             id: 'write-back',
             name: 'Write back',
-            agent: 'compounder',
+            agent: 'compound-writeback',
             mcps: ['filesystem'],
             retries: 0,
             desc: "Apply EVERY approved item in-place (quick fixes AND approved CLAUDE.md/CODE-PATTERNS.md doc edits) + create approved tasks + commit + post a concise summary of what was applied. Emits NO review items — the terminal human-review step is the final gate. NEVER a decision per edit, NEVER per discarded candidate, NEVER kind:'finding'.",

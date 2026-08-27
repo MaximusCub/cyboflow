@@ -43,7 +43,16 @@ export const CANONICAL_AGENT_KEYS = [
   // to sprint-review because it consumes what that step (and every lane's
   // code-review) produced.
   'address-review',
+  // Compound's three agent steps, split so each one carries only its own
+  // instructions: `compound-load` surveys the merged work read-only,
+  // `compounder` judges it against the durability + instruction-file bars, and
+  // `compound-writeback` is the only one that can edit files. They were one
+  // `compounder` key bound to all three steps, which put the extraction bars in
+  // front of the survey step and named a read-only agent on the step that
+  // applies edits.
+  'compound-load',
   'compounder',
+  'compound-writeback',
   // The verify-setup flow's single subagent (docs/proposals/verification-setup-flow.md
   // §5.1). Its key deliberately EQUALS its workflow name — the flow binds exactly
   // one agent to four of its five steps, so a distinct persona name would only add

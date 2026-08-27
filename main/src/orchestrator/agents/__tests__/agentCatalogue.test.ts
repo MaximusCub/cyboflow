@@ -30,9 +30,9 @@ import { CLI_TOOLS, type CliTool } from '../../../../../shared/types/cliTools';
 const cliToolSet = new Set<string>(CLI_TOOLS);
 
 describe('loadBuiltInAgents', () => {
-  it('parses exactly the 20 canonical builtins', () => {
+  it('parses exactly the 22 canonical builtins', () => {
     const catalogue = loadBuiltInAgents();
-    expect(catalogue.size).toBe(20);
+    expect(catalogue.size).toBe(22);
     expect(catalogueMatchesCanonical(catalogue)).toBe(true);
   });
 

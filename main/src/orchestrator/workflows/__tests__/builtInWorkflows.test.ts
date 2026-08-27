@@ -130,8 +130,13 @@ describe('buildBuiltInWorkflows', () => {
 
     // Write-back APPLIES approved doc edits in-place (not per-edit decisions) and
     // emits NO review items — the terminal human-review step is the merge gate.
+    // The edits themselves are delegated to `cyboflow-compound-writeback`, the
+    // one compound agent that can write files; the orchestrator still commits.
+    expect(body, 'write-back delegates the approved edits to the write-back agent').toMatch(
+      /delegate to\s+`cyboflow-compound-writeback`/,
+    );
     expect(body, 'write-back applies approved doc edits in-place').toMatch(
-      /apply the approved edit\s+\*\*in-place/,
+      /It applies them in place/,
     );
     // Whitespace-normalized so multi-word phrases match regardless of line wrapping.
     const flat = body.replace(/\s+/g, ' ');
@@ -157,10 +162,11 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'seeded path omits the Discarded section').toMatch(/omit `## Discarded`/);
   });
 
-  it('compound compounder subagent tags quick/task/doc (not "decision") and scopes load vs extract', () => {
+  it('compound compounder subagent tags quick/task/doc (not "decision") and is extract-only', () => {
     // The compounder returns the learning TAG `doc`, not `decision` — `decision` is
     // the review-item KIND, and overloading the word made the step agent file
-    // decisions prematurely. It also returns only Merged work at the load phase.
+    // decisions prematurely. Surveying the merged work is no longer its job at
+    // all: that is `cyboflow-compound-load`'s own step.
     // [Codex review findings 2 + 3]
     const compound = buildBuiltInWorkflows().find((d) => d.name === 'compound')!;
     const compounderPath = join(dirname(compound.path), 'compound', 'agents', 'compounder.md');
@@ -188,11 +194,61 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'incident detail is an automatic discard').toContain(
       'carrying a migration number, version stamp, date, commit SHA, session name, or run id as part of the rule',
     );
-    expect(body, 'compounder load phase returns ONLY Merged work').toContain(
-      'Load phase',
+    // Extract-only: the compounder consumes the load step's summary and must not
+    // re-survey or re-emit it. Its two returned sections are Learnings +
+    // Discarded, nothing else.
+    expect(body, 'compounder consumes the load step summary').toContain(
+      'summary that `cyboflow-compound-load` produced',
     );
-    expect(body, 'compounder load phase returns only the Merged work summary').toMatch(
-      /Load phase[^:]*:[^)]*return ONLY a `## Merged work`/,
+    expect(body, 'compounder returns exactly two sections').toContain(
+      'Return TWO sections, and only these two',
+    );
+    expect(body, 'compounder does not re-report a Merged work summary').toContain(
+      'do not re-report a `## Merged work` summary here',
+    );
+  });
+
+  it('compound splits its three agent steps across three agents with the right write access', () => {
+    // One `compounder` bound to load-sprint / extract / write-back put the
+    // extraction bars in front of the read-only survey step AND named a
+    // read-only agent on the step that applies edits. Each step now has its own
+    // agent, and only write-back's can write.
+    const compound = buildBuiltInWorkflows().find((d) => d.name === 'compound')!;
+    const agentsDir = join(dirname(compound.path), 'compound', 'agents');
+    const steps = WORKFLOW_DEFINITIONS.compound.phases.flatMap((phase) => phase.steps);
+    const agentByStep = Object.fromEntries(steps.map((step) => [step.id, step.agent]));
+
+    expect(agentByStep['load-sprint']).toBe('compound-load');
+    expect(agentByStep.extract).toBe('compounder');
+    expect(agentByStep['write-back']).toBe('compound-writeback');
+
+    // Frontmatter tools: only write-back may edit files.
+    const toolsOf = (key: string): string => {
+      const raw = readFileSync(join(agentsDir, `${key}.md`), 'utf-8');
+      return /^tools:(.*)$/m.exec(raw)?.[1] ?? '';
+    };
+    for (const readOnly of ['compound-load', 'compounder']) {
+      expect(toolsOf(readOnly), `${readOnly} is read-only`).not.toMatch(/\bEdit\b|\bWrite\b/);
+    }
+    expect(toolsOf('compound-writeback'), 'write-back can edit files').toMatch(/\bEdit\b/);
+    expect(toolsOf('compound-writeback'), 'write-back can create files').toMatch(/\bWrite\b/);
+
+    // The load agent surveys; judging is the extract step's job.
+    const loadBody = readFileSync(join(agentsDir, 'compound-load.md'), 'utf-8').replace(/\s+/g, ' ');
+    expect(loadBody, 'load agent does not mine learnings').toContain(
+      'You survey; you do not judge',
+    );
+
+    // The write-back agent applies what the gate approved; it does not re-decide.
+    const writeBody = readFileSync(join(agentsDir, 'compound-writeback.md'), 'utf-8').replace(
+      /\s+/g,
+      ' ',
+    );
+    expect(writeBody, 'write-back does not re-litigate the gate').toContain(
+      'The approval is settled',
+    );
+    expect(writeBody, 'write-back never creates backlog tasks').toContain(
+      'You do **not** create backlog tasks',
     );
   });
 

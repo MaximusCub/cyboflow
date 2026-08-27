@@ -42,22 +42,33 @@ write-back (they are the deliverable) and reviewed at the human-review merge gat
 
 ## How to run this flow
 
-You **own all workflow state.** Each heavy phase below is delegated to the
-`compounder` subagent installed in `.claude/agents/`, so the reading, diffing,
-and learning-extraction happen in *its* context window and only a compact result
-returns to you — this session stays lean across the whole flow. The human-gate
-phase you run yourself, inline, because only this session can ask the user a
-question.
+You **own all workflow state.** Each heavy phase below is delegated to one of
+this flow's three subagents, installed in `.claude/agents/`, so the reading,
+diffing, judging, and editing happen in *their* context windows and only a
+compact result returns to you — this session stays lean across the whole flow.
+One agent per phase, and the split is load-bearing:
+
+- **`cyboflow-compound-load`** (`load-sprint`) — surveys the merged work
+  read-only and returns ONE `## Merged work` summary. It does not judge.
+- **`cyboflow-compounder`** (`extract`) — takes that summary and mines it against
+  the durability bar and the instruction-file bars, returning `## Learnings` +
+  `## Discarded`. It does not edit files.
+- **`cyboflow-compound-writeback`** (`write-back`) — applies the APPROVED quick
+  fixes and doc edits in place. It is the only one of the three that can write,
+  and it never re-decides what the gate approved.
+
+The human-gate phases you run yourself, inline, because only this session can ask
+the user a question.
 
 The pattern for every phase:
 
 1. **Report the step.** Call `cyboflow_report_step` with the phase's `step_id` as
    you begin it (ids are in the step-reporting block appended below).
-2. **Do the phase.** Delegate to `cyboflow-compounder` with the **Agent tool**
-   (`subagent_type: "cyboflow-compounder"`, `prompt:` the source material + what to
-   return), or run the gate yourself with **AskUserQuestion**.
+2. **Do the phase.** Delegate to that phase's agent with the **Agent tool**
+   (`subagent_type:` the exact `cyboflow-*` name above, `prompt:` the source
+   material + what to return), or run the gate yourself with **AskUserQuestion**.
 3. **Act on the `## Result`.** Subagents never write cyboflow state — *you*
-   create the tasks and emit the findings once the user has approved them.
+   create the tasks, resolve the findings, report the artifacts, and commit.
 
 ## Source material
 
@@ -104,25 +115,28 @@ from plugin state files:
 >    record of what you are about to apply; the seeded run has no approve gate
 >    (the human already triaged), so publish it, then proceed straight to
 >    write-back.
-> 2. **write-back** → walk the findings **in the order returned** (already
->    P0 → P1 → P2). For each finding, apply the action for its target bucket and
->    then **IMMEDIATELY** call `cyboflow_resolve_finding` for that finding —
->    before moving to the next one:
->    - **`quick`** (target `fix`) → apply the fix in-place in the worktree, then
+>    2. **write-back** → delegate the FILE EDITS to `cyboflow-compound-writeback`
+>    (`subagent_type: "cyboflow-compound-writeback"`), passing the findings whose
+>    target is `fix` or `docs` **in the order returned** (already P0 → P1 → P2)
+>    with each one's bucket and body; it applies them in place and returns
+>    `## Applied` (one entry per finding, applied or `SKIPPED`). The `task` bucket
+>    never goes to it — that is your `cyboflow_create_task` call.
+>
+>    Then walk the findings in the same order and **IMMEDIATELY** call
+>    `cyboflow_resolve_finding` for each one as its action lands:
+>    - **`quick`** (target `fix`) → once write-back reports it `## Applied`,
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"fixed")`.
->    - **`doc`** (target `docs`, incl. legacy `prompt`) → apply the docs /
->      CLAUDE.md / CODE-PATTERNS.md edit in-place (the human already triaged it, so
->      the admission bar is settled — but you still author the WORDING: an imperative
->      rule with its consequence, amending existing text where it can, carrying no
->      migration number, run id, version stamp, date, commit SHA, or "we used to"
->      history, and kept to the fewest lines that state the rule), then
->      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"triaged")`.
->      Do NOT emit a per-edit `decision` — the human-review merge gate below reviews
->      every applied change at once.
+>    - **`doc`** (target `docs`, incl. legacy `prompt`) → once write-back reports
+>      the edit applied, `cyboflow_resolve_finding(review_item_id:<id>,
+>      resolution_kind:"triaged")`. Do NOT emit a per-edit `decision` — the
+>      human-review merge gate below reviews every applied change at once.
 >    - **`task`** (target `backlog`) → `cyboflow_create_task` (title, body,
 >      acceptance criteria, file / dependency hints), then
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"promoted",
 >      task_id:<the new task id>)`.
+>
+>    A finding write-back reports `SKIPPED` was NOT applied: leave it unresolved
+>    and say so in your summary, rather than resolving it `fixed`.
 >
 > After every finding's action has landed and been resolved, **commit the applied
 > changes** and proceed to the **human-review** step below — the single "merge in
@@ -136,12 +150,15 @@ from plugin state files:
 > resolve mid-run is deselected by the terminal-seam close-out (it stays in
 > *Ready* for the human to re-decide, never silently auto-re-compounded).
 
-1. **load-sprint** → delegate to `cyboflow-compounder`. Pass the base branch + the
-   ids of the recently merged / completed runs (from the digest when present, else
-   ask the user which work to compound). It reads the git diff and the raw run
-   data and returns a `## Merged work` summary — what shipped, where, and any
-   verifier reports or stuck-task notes worth mining.
-2. **extract** → re-delegate to `cyboflow-compounder` with the `## Merged work`
+1. **load-sprint** → delegate to `cyboflow-compound-load`
+   (`subagent_type: "cyboflow-compound-load"`). Pass the base branch + the ids of
+   the recently merged / completed runs (from the digest when present, else ask
+   the user which work to compound). It reads the git diff and the raw run data
+   and returns a `## Merged work` summary — what shipped, where, how the runs
+   went, and what repeated. It deliberately returns NO learnings; do not ask it
+   for any, and do not treat an observation in its summary as a decided candidate.
+2. **extract** → delegate to `cyboflow-compounder`
+   (`subagent_type: "cyboflow-compounder"`) with the `## Merged work`
    summary. It returns TWO lists: a `## Learnings` list (the act-on set) and a
    `## Discarded` list (candidates it considered and set aside, one line + reason
    each). The discarded list is context for the recommendations doc's Discarded
@@ -182,25 +199,25 @@ from plugin state files:
    rail tracks the gate. This gate approves the PLAN (which learnings to act on)
    and emits **no review items** — it only asks the question. Do **not** proceed to
    write-back until the user answers; record which learnings were approved.
-5. **write-back** → **apply every approved learning in-place, commit, and emit NO
-   review items.** The approve-learnings gate already approved these, so you APPLY
-   them — you do not re-ask approval per edit:
-   - **quick** → apply the fix in-place in the worktree (you hold Edit/Write as
-     the orchestrator). Keep it small and scoped; run the local check it warrants.
-   - **doc** (`doc:claude-md` or `doc:reference`) → apply the approved edit
-     **in-place too** (it was approved at the gate — do NOT defer it to the human and
-     do NOT file a per-edit `decision` re-asking approval). Write the wording the
-     gate approved: an imperative rule with its consequence, amending existing text
-     wherever it can, and carrying no migration number, run id, version stamp, date,
-     commit SHA, session name, or "we used to" history. Keep a CLAUDE.md edit to the
-     fewest lines that state the rule; if it wants a paragraph of context, that
-     context belongs in `docs/*.md` behind the existing load-on-demand pointer.
-   - **task** → `cyboflow_create_task` (title, body, acceptance criteria,
-     file / dependency hints) so they queue for a future Sprint run.
+5. **write-back** → **apply every approved learning, commit, and emit NO review
+   items.** The approve-learnings gate already approved these, so they get APPLIED
+   — nobody re-asks approval per edit:
+   - **quick** and **doc** (`doc:claude-md` / `doc:reference`) → delegate to
+     `cyboflow-compound-writeback`
+     (`subagent_type: "cyboflow-compound-writeback"`), passing the approved
+     learnings with their buckets, target files, and the wording the gate approved.
+     It applies them in place and returns `## Applied` (one entry per learning,
+     applied or `SKIPPED`, with the file(s) it touched) plus an optional
+     `## Noticed`. Do NOT hand it a learning the gate did not approve, and do not
+     file a per-edit `decision` re-asking approval.
+   - **task** → `cyboflow_create_task` yourself (title, body, acceptance criteria,
+     file / dependency hints) so they queue for a future Sprint run. Write-back
+     never creates tasks.
 
-   Commit the applied changes atomically, then post a concise summary of what you
-   applied — grouped **Quick fixes / CLAUDE.md edits / Doc edits / Tasks** (each with
-   its file(s)).
+   Read the `## Applied` list before you commit: a `SKIPPED` entry was NOT applied,
+   so report it as skipped rather than as done. Commit the applied changes
+   atomically, then post a concise summary — grouped **Quick fixes / CLAUDE.md
+   edits / Doc edits / Tasks** (each with its file(s)), with any skips called out.
    Do **NOT** call `cyboflow_report_finding` — write-back emits no review-queue
    items at all. The final approval happens at the next step.
 6. **human-review** → **human gate, inline.** This is the terminal **"merge in
@@ -279,14 +296,16 @@ ENRICHES it, so you can refine the doc as you go.
   discarded candidate. Per-item gates are the sequential-gate spam this flow exists
   to avoid. Discarded candidates live in the `## Discarded` section of the doc and
   NOWHERE else.
-- **You are the single writer.** Only this session calls the `cyboflow_*` write
-  tools (`cyboflow_create_task`, `cyboflow_report_artifact`, and — on a seeded run —
-  `cyboflow_resolve_finding`); the `compounder` subagent returns results and you
-  persist them. (`cyboflow_get_selected_findings` is read-only and likewise
-  parent-only.) Never write per-learning markdown / plugin-state files to disk.
-  Approved CLAUDE.md / CODE-PATTERNS.md edits, by contrast, ARE applied to those
-  files in-place at write-back — they are the deliverable, reviewed at the
-  human-review merge gate.
+- **You are the single writer of cyboflow STATE.** Only this session calls the
+  `cyboflow_*` write tools (`cyboflow_create_task`, `cyboflow_report_artifact`,
+  and — on a seeded run — `cyboflow_resolve_finding`); all three subagents return
+  results and you persist them. (`cyboflow_get_selected_findings` is read-only and
+  likewise parent-only.) FILE edits are the one thing you delegate rather than do:
+  `cyboflow-compound-writeback` applies the approved quick fixes and instruction-file
+  edits in place, and you commit them. Never write per-learning markdown /
+  plugin-state files to disk. Approved CLAUDE.md / CODE-PATTERNS.md edits, by
+  contrast, ARE applied to those files in-place at write-back — they are the
+  deliverable, reviewed at the human-review merge gate.
 - **Two gates, both steps — never per-item.** On the **unseeded** path: publish
   the `compound-recommendations` artifact, run the `approve-learnings`
   **AskUserQuestion** gate (pointing at that tab) to approve the plan, apply the
