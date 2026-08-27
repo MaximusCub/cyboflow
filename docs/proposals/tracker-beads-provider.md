@@ -559,6 +559,11 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   `--db` > `-C` > `BEADS_DIR` > walk-up; `--metadata-field` recovery validated wholesale;
   maxBuffer overflow shape pinned.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
+  **✅ EXECUTED 2026-08-27** (migration 123 + ledger table + contract widenings). Phases 2–5 all
+  executed 2026-08-27 on this branch; per-phase notes below. One seed deviation: the wizard's
+  beads priority DEFAULT mapping reuses the shared `RUNG_FOR_LOCAL` rungs (P0→'0', P1→'1',
+  P2/P3→'2', P4/P5→'3', P6→'4') rather than this doc's literal P0–P4 identity — same mechanism
+  every provider seeds through, user-overridable in the wizard.
 - **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from
   Phase 0 at `tracker-beads-phase0/transcripts/`). The three checks Phase 0 left open were ALL
   RESOLVED by live probes 2026-08-27, each in the design's favor: (1) effective
@@ -577,7 +582,15 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   lock-error recognition).
 - **Phase 5 — full gate + live smoke** against a real beads repo: connect wizard end-to-end,
   import, edit both directions, conflict, sweep (close + prune an issue remotely), field
-  write-back, lock-contention behavior with a parallel `bd` writer.
+  write-back, lock-contention behavior with a parallel `bd` writer. **✅ EXECUTED 2026-08-27**:
+  full `pnpm typecheck` + `lint` + `test:unit` green, plus a 7-scenario live smoke driving the
+  REAL service + REAL `defaultAdapterFactory` + real `bd` 1.2.2 workspace (connect at the
+  service seam, import, both-direction edits, the pre-send withhold + auto convergence for a
+  concurrent edit, remote close + hard-delete sweep archival, priority write-back, and a
+  parallel 8-create `bd` writer contending the flock mid-pass — all imported, connection stayed
+  active). Note the smoke confirmed the withhold guard is what a before-the-drain concurrent
+  edit hits; the guarded detect-after-write path covers only the read-to-send milliseconds and
+  is exercised by the unit suite's injected mismatches, not reproducible from outside.
 
 Effort calibration: Dart was a 756-line adapter + ~8 mechanical widenings + migration; beads adds
 the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30–40%.
