@@ -507,7 +507,7 @@ export type {
 export interface TrackerConnectionRow {
   id: string;
   project_id: number;
-  provider: 'linear' | 'plane' | 'dart';
+  provider: 'linear' | 'plane' | 'dart' | 'beads';
   status: 'active' | 'paused' | 'disconnected';
   workspace_id: string | null;
   workspace_name: string | null;
@@ -550,6 +550,15 @@ export interface TrackerConnectionRow {
   priority_mapping_json: string;
   /** categoryMapping.ts's overlay, same shape and default as priority_mapping_json. */
   category_mapping_json: string;
+  /**
+   * Counter (migration 129), bumped on any mapping/state-mapping/selection
+   * change. Consumed by `tracker_reconciliation_ledger`: a ledger row stamped
+   * at an older generation is treated as absent, so a config change
+   * re-evaluates every previously-skipped remote id exactly once. Read by
+   * providers declaring `requiresIdReconciliation` (beads today); the three
+   * HTTP providers bump and ignore it.
+   */
+  config_generation: number;
   mirror_subissues: number; // 0 | 1
   conflict_mode: 'auto' | 'manual';
   cursor_updated_at: string | null;
@@ -577,7 +586,7 @@ export interface EntityExternalLinkRow {
   connection_id: string;
   entity_type: 'idea' | 'epic' | 'task';
   entity_id: string;
-  provider: 'linear' | 'plane' | 'dart';
+  provider: 'linear' | 'plane' | 'dart' | 'beads';
   external_id: string;
   external_identifier: string | null;
   external_url: string | null;

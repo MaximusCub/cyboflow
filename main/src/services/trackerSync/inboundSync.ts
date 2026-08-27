@@ -431,6 +431,7 @@ const PROVIDER_LABEL: Record<TrackerProvider, string> = {
   linear: 'Linear',
   plane: 'Plane',
   dart: 'Dart',
+  beads: 'Beads',
 };
 
 /** The provenance block appended to an imported idea's body (issue ref + URL). */

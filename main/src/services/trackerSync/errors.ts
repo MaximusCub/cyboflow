@@ -5,7 +5,7 @@
  * prompts, everything else feeds the outbox retry/backoff machinery.
  */
 
-import type { TrackerProvider } from '../../../../shared/types/trackerSync';
+import type { TrackerIssue, TrackerProvider } from '../../../../shared/types/trackerSync';
 
 export class TrackerApiError extends Error {
   constructor(
@@ -75,6 +75,35 @@ export class TrackerIdentityMismatchError extends Error {
         'or connect the other workspace as a new connection.',
     );
     this.name = 'TrackerIdentityMismatchError';
+  }
+}
+
+/**
+ * Thrown by a GUARDED update (`capabilities.guardedUpdates === true`,
+ * beads today — docs/proposals/tracker-beads-provider.md, "Dual writers on
+ * one issue") when a post-write verification finds an interleaved remote
+ * commit touched a field the caller's own patch also touched. beads has no
+ * conditional-write primitive, so the write ALWAYS lands; this error is
+ * raised after the fact, from a history diff back to the caller's
+ * `expectedToken`, not in place of the write.
+ *
+ * `conflictingFields` names exactly which patched field(s) an interleaved
+ * commit also touched — an unrelated-field interleave is NOT reported this
+ * way (the caller settles it as done; nothing was clobbered).
+ * `recoveredIssue` carries the clobbered remote value recovered from the
+ * adapter's own write history (beads: `bd show <id> --as-of <CommitHash>`),
+ * which is strictly more than an HTTP provider's raced-and-lost value ever
+ * offers. The outbox drain consumes this as its own typed outcome — hold as
+ * conflict with the recovered value, never an unconditional settle-unsent.
+ */
+export class TrackerRevisionMismatchError extends Error {
+  constructor(
+    message: string,
+    readonly conflictingFields: readonly string[],
+    readonly recoveredIssue: TrackerIssue | null,
+  ) {
+    super(message);
+    this.name = 'TrackerRevisionMismatchError';
   }
 }
 

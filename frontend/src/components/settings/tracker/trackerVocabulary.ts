@@ -33,6 +33,15 @@ export interface TrackerProviderMeta {
   mark: string;
   apiKeyLabel: string;
   apiKeyHint: string;
+  /**
+   * Does this provider need a pasted key at all? False only for beads
+   * (docs/proposals/tracker-beads-provider.md "1. Keyless connect"): its
+   * Connect step probes the local `bd` CLI instead of validating a key.
+   * Phase 1 only threads this flag through the catalog; the wizard's Detect
+   * step (no key input, "Authorize" relabelled "Detect") is Phase 3 work —
+   * this field changes no rendering yet.
+   */
+  needsApiKey: boolean;
   /** Plane scopes every REST path under a workspace slug; Linear does not. */
   needsWorkspaceSlug: boolean;
   /** Plane can be self-hosted, so its origin is user-supplied (pre-filled with the cloud default). */
@@ -60,6 +69,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'LN',
     apiKeyLabel: 'Personal API key',
     apiKeyHint: 'Linear → Settings → Security & access → Personal API keys.',
+    needsApiKey: true,
     needsWorkspaceSlug: false,
     defaultBaseUrl: null,
     scopes: [
@@ -77,6 +87,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'PL',
     apiKeyLabel: 'Personal access token',
     apiKeyHint: 'Plane → Workspace settings → API tokens.',
+    needsApiKey: true,
     needsWorkspaceSlug: true,
     defaultBaseUrl: 'https://api.plane.so',
     scopes: [
@@ -93,6 +104,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'DT',
     apiKeyLabel: 'Personal authentication token',
     apiKeyHint: 'Dart → Settings → Account → Authentication token.',
+    needsApiKey: true,
     // Dart scopes everything by the token itself and is cloud-only, so it needs
     // neither a workspace slug nor a base URL — see dartAdapter.ts.
     needsWorkspaceSlug: false,
@@ -102,6 +114,27 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
       { label: 'write:tasks', granted: true },
     ],
     scopeFootnote: 'No access to docs, comments, attachments, or billing.',
+    supportsCategorySync: true,
+  },
+  {
+    provider: 'beads',
+    name: 'Beads',
+    description: 'Map a beads workspace (local `bd` database) to a cyboflow project.',
+    mark: 'BD',
+    // No key input in v1 (Phase 3 wires the Detect step); these two are
+    // display-only and unused while needsApiKey is false.
+    apiKeyLabel: 'Not required',
+    apiKeyHint: 'beads connects via the local `bd` CLI — no key to paste.',
+    needsApiKey: false,
+    needsWorkspaceSlug: false,
+    // beads has no HTTP origin: its transport is a local `bd` CLI spawn
+    // against the project's own workspace.
+    defaultBaseUrl: null,
+    scopes: [
+      { label: 'read:issues', granted: true },
+      { label: 'write:issues', granted: true },
+    ],
+    scopeFootnote: 'Runs the `bd` CLI locally — no network access, no billing.',
     supportsCategorySync: true,
   },
 ];

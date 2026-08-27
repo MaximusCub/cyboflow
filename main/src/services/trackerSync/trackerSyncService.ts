@@ -437,6 +437,15 @@ export function defaultAdapterFactory(
       // neither a base URL nor a workspace slug — the key alone addresses
       // everything.
       return new DartAdapter({ apiKey: secret });
+    case 'beads':
+      // Phase 2 wires the real CLI transport (docs/proposals/
+      // tracker-beads-provider.md "2. CLI transport" — needs the connection's
+      // project path threaded through this factory, which it does not have
+      // today). Every pass that reaches here for a beads connection pauses
+      // rather than silently adopting some other adapter.
+      throw new TrackerCredentialsError(
+        `connection ${connection.id}: beads adapter is not wired into the default factory yet (Phase 4)`,
+      );
     case 'plane': {
       const workspaceSlug = (connection.workspace_id ?? '').trim();
       if (workspaceSlug.length === 0) {
@@ -1317,6 +1326,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       archive_sync_mode: 'off',
       priority_mapping_json: '{}',
       category_mapping_json: '{}',
+      // Irrelevant to a probe (nothing reconciles through a scratch row) but
+      // the shape is the row's, same reasoning as the two modes above.
+      config_generation: 0,
       mirror_subissues: 0,
       conflict_mode: 'auto',
       cursor_updated_at: null,
@@ -1662,6 +1674,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
         payload.priorityMapping !== undefined ? JSON.stringify(payload.priorityMapping) : '{}',
       category_mapping_json:
         payload.categoryMapping !== undefined ? JSON.stringify(payload.categoryMapping) : '{}',
+      // A brand-new connection starts at generation 0 — the reconciliation
+      // ledger has nothing to invalidate yet.
+      config_generation: 0,
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -3228,7 +3243,7 @@ function isLogEntry(value: unknown): value is TrackerSyncLogEntry {
 // ---------------------------------------------------------------------------
 
 /** Link lookup order for an entity whose provider we do not know up front. */
-const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart'];
+const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart', 'beads'];
 
 /** The connected view's source label, read back off `source_json`. */
 function readSourceLabel(connection: TrackerConnectionRow): string {

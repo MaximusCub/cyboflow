@@ -148,6 +148,8 @@ class FakeAdapter implements TrackerAdapter {
     idempotentCreate: true,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'trash',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   states: TrackerState[] = STATES;
@@ -316,6 +318,8 @@ class FakeMarkerAdapter extends FakeAdapter {
     idempotentCreate: false,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'none',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   /** externalId -> the client key stamped into that issue's description. */
@@ -506,6 +510,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     archive_sync_mode: 'off',
     priority_mapping_json: '{}',
     category_mapping_json: '{}',
+    config_generation: 0,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,

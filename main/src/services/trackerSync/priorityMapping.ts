@@ -129,6 +129,11 @@ const CANONICAL_TOKENS: Record<TrackerProvider, Record<PriorityRung, string | nu
   linear: { urgent: '1', high: '2', medium: '3', low: '4', unset: '0' },
   plane: { urgent: 'urgent', high: 'high', medium: 'medium', low: 'low', unset: 'none' },
   dart: { urgent: 'critical', high: 'high', medium: 'medium', low: 'low', unset: null },
+  // beads' scale is '0'..'4' (0 = highest; create defaults to '2'). Unlike
+  // Dart there is no reserved "no value" token, so `unset` takes the lowest
+  // rung '4' rather than null — a real, always-present token, same shape as
+  // Linear's '0' and Plane's 'none'.
+  beads: { urgent: '0', high: '1', medium: '2', low: '3', unset: '4' },
 };
 
 // ---------------------------------------------------------------------------

@@ -42,6 +42,12 @@ export const PROVIDER_ARCHIVE_CAPABILITY: Record<
   linear: 'trash',
   plane: 'none',
   dart: 'trash',
+  // beads exposes no archive/trash endpoint at all (`bd delete` is a HARD
+  // delete, per docs/proposals/tracker-beads-provider.md's method-by-method
+  // mapping) — same 'none' shape as Plane: the engine falls back to the
+  // cancelled-state write, and the removal dialog's disclosure already
+  // handles the copy.
+  beads: 'none',
 };
 
 /**
@@ -72,4 +78,50 @@ export function removalWriteBackAction(
   return archiveSyncMode !== 'off' && providerSupportsRemoteArchive(provider)
     ? 'archive'
     : 'cancel';
+}
+
+/**
+ * Does this provider's adapter guard an existing-issue write with a
+ * detect-after-write concurrency check (migration 123's `guardedUpdates`
+ * capability on {@link TrackerAdapterCapabilities})? True only for beads: its
+ * embedded single-writer database has no CAS/if-match primitive, so every
+ * outbound state/content mutation of an EXISTING issue must be sandwiched
+ * with a pre-send token capture and a post-write history diff (see
+ * `TrackerRevisionMismatchError` in errors.ts). The three HTTP providers
+ * write unguarded, as before.
+ *
+ * A SEPARATE table from `PROVIDER_ARCHIVE_CAPABILITY` rather than folded into
+ * the adapter's own capabilities object: this is consulted at the ENQUEUE
+ * chokepoint (docs/proposals/tracker-beads-provider.md, "The disable must be
+ * expressible" — the gate-at-enqueue pattern the `'off'` content/archive
+ * modes already use), where no adapter is in hand, exactly like
+ * `PROVIDER_ARCHIVE_CAPABILITY` above.
+ */
+export const PROVIDER_REQUIRES_GUARDED_UPDATES: Record<TrackerProvider, boolean> = {
+  linear: false,
+  plane: false,
+  dart: false,
+  beads: true,
+};
+
+/**
+ * Does this provider need a stored credential at all? False only for beads
+ * (migration 123 / docs/proposals/tracker-beads-provider.md "1. Keyless
+ * connect"): its transport is a local `bd` CLI probe of the project's
+ * workspace, not an API key. Every NULL-secret guard — `connect()`,
+ * `buildAdapter()`, `credentialsForConnection()`, reconnect — is meant to
+ * become provider-aware via {@link providerNeedsSecret} rather than treating
+ * an absent ciphertext as fatal everywhere; that threading is Phase 3 work,
+ * not done by this table's mere existence.
+ */
+export const PROVIDER_NEEDS_SECRET: Record<TrackerProvider, boolean> = {
+  linear: true,
+  plane: true,
+  dart: true,
+  beads: false,
+};
+
+/** Convenience wrapper over {@link PROVIDER_NEEDS_SECRET}. */
+export function providerNeedsSecret(provider: TrackerProvider): boolean {
+  return PROVIDER_NEEDS_SECRET[provider];
 }

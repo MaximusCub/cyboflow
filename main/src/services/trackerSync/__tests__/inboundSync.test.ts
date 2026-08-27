@@ -124,6 +124,8 @@ class FakeAdapter implements TrackerAdapter {
     idempotentCreate: true,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'trash',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   issues: TrackerIssue[] = [];
@@ -309,6 +311,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     archive_sync_mode: 'off',
     priority_mapping_json: '{}',
     category_mapping_json: '{}',
+    config_generation: 0,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,

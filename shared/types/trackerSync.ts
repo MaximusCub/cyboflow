@@ -13,7 +13,7 @@
  */
 import type { EntityCategory, Priority } from './tasks';
 
-export type TrackerProvider = 'linear' | 'plane' | 'dart';
+export type TrackerProvider = 'linear' | 'plane' | 'dart' | 'beads';
 
 /** Renderer→main, connect-time only. */
 export interface TrackerCredentialsInput {
@@ -310,6 +310,18 @@ export interface TrackerIssue {
    * is gone from every `description` an adapter returns.
    */
   recoveryClientKey: string | null;
+  /**
+   * Opaque concurrency token for a GUARDED write (migration 123's
+   * `guardedUpdates` capability) — populated only by adapters that support
+   * detect-after-write concurrency checking (beads: the newest Dolt
+   * `CommitHash` from `bd history`, captured alongside the pre-send read).
+   * `undefined` on every adapter that does not declare `guardedUpdates`
+   * (Linear, Plane, Dart today); those never populate this field. See
+   * `updateIssueState`/`updateIssueContent`'s optional `expectedToken`
+   * parameter in adapterTypes.ts and `TrackerRevisionMismatchError` in
+   * errors.ts for how the token is consumed.
+   */
+  concurrencyToken?: string;
 }
 
 export type TrackerSelectionMode = 'all' | 'assignee' | 'manual';

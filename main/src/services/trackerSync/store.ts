@@ -214,6 +214,10 @@ const PROVIDER_DEFAULT_BASE_URL: Record<TrackerConnectionRow['provider'], string
   linear: null,
   plane: 'https://api.plane.so',
   dart: null,
+  // beads has no HTTP origin at all — its transport is a local `bd` CLI spawn
+  // against the project's own workspace (base_url stays NULL always; the
+  // wizard's instance-URL field hides itself for this provider).
+  beads: null,
 };
 
 /**
