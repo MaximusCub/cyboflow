@@ -215,11 +215,15 @@ Authorize button gates on a non-empty key (`TrackerWizardModal.tsx:1316`). The
   (`bd info`/`bd context`/`bd config list` all omit it; `bd info --json` ignores `--json`
   entirely) — the adapter reads the file directly. The init banner's "Repository ID"/"Clone ID"
   are unusable: deterministically derived (identical across a same-path reinit) and persisted
-  nowhere.] Whether `rename-prefix` rewrites EXISTING issue ids stayed unproven (the probe's
-  workspace was empty at rename) — an implementation-time check; if it does, the re-detect flow
-  treats the rename as a migration needing explicit link remapping (or a documented deliberate
-  re-import), never a silent continue. Negative test: rename the prefix mid-pass, prove zero
-  local mutations.
+  nowhere.] **[Phase 2 check RESOLVED 2026-08-27: `bd rename-prefix` DOES rewrite existing issue
+  ids** — probed on a populated workspace: `chk-2lz` → `newpfx-2lz`, suffix preserved verbatim,
+  `project_id` unchanged, and the old id becomes unlookupable (`no issue found matching`). The
+  suffix preservation makes link remapping DETERMINISTIC: on rename detection (same instance id,
+  changed prefix — the sandwich pauses the pass), the re-detect recovery offers "prefix renamed —
+  remap links", rewriting each link's `external_id`/`external_identifier` from
+  `<old>-<suffix>` to `<new>-<suffix>` atomically; never a silent continue, and never the sweep
+  (which would read every old id as deleted).] Negative test: rename the prefix mid-pass, prove
+  zero local mutations; recovery test: remap rewrites every link and the next pass runs clean.
 
 ### 2. CLI transport
 
@@ -324,7 +328,11 @@ exists — there is no `bd dolt log`, and `bd history <id> --json` (whose newest
 effectively the DB head, since history is unfiltered) returns a FULL issue snapshot per DB
 commit, so an unbounded call is O(all commits). Implement the guard only if `bd history` proves
 boundable (Phase 2 checks for a limit flag); otherwise drop it — the reversible-archival rule
-below is the primary defense and was designed to suffice alone.] **The guard narrows the
+below is the primary defense and was designed to suffice alone. **Phase 2 check RESOLVED
+2026-08-27: `bd history <id> --limit int` EXISTS (0 = all) and works** — so the HEAD anchor is
+cheap (`bd history <any-linked-id> --limit 1 --json` → newest `CommitHash`, which is the DB head
+since history is unfiltered) and the guard is implementable as designed; it remains best-effort,
+with reversible archival still the primary defense.] **The guard narrows the
 window; resurrection closes the family**
 (Codex round-18: a restore can still land between the final HEAD probe and the local archive —
 no sequence of probes ends this, because probe and apply can never be atomic over a CLI). So
@@ -552,12 +560,15 @@ Dart addition — the `never` guard in `defaultAdapterFactory` only catches the 
   maxBuffer overflow shape pinned.
 - **Phase 1 — migration + type widenings** (compile-green with a stub adapter).
 - **Phase 2 — `beadsAdapter.ts` + tests** (injected `execImpl`; fixture transcripts from
-  Phase 0 at `tracker-beads-phase0/transcripts/`). Carries the three checks Phase 0 left open:
-  the effective `--dolt-auto-commit` policy (help says default "off" yet every write observably
-  produced a Dolt commit — the detect-after-write gate rests on this), whether `bd history`
-  accepts a bound/limit flag (gates the optional sweep HEAD guard and caps post-write
-  verification cost), and whether `bd rename-prefix` rewrites EXISTING issue ids (the Phase 0
-  rename ran on an empty workspace).
+  Phase 0 at `tracker-beads-phase0/transcripts/`). The three checks Phase 0 left open were ALL
+  RESOLVED by live probes 2026-08-27, each in the design's favor: (1) effective
+  `--dolt-auto-commit` default is `on` (help text stale) AND it is a global argv flag, so the
+  adapter pins `--dolt-auto-commit on` per spawn — the detect-after-write gate holds by
+  construction; (2) `bd history --limit int` exists (0 = all), bounding post-write verification
+  and making the best-effort sweep HEAD guard cheap; (3) `bd rename-prefix` DOES rewrite
+  existing issue ids, suffix-preserved (`chk-2lz` → `newpfx-2lz`, `project_id` stable, old id
+  unlookupable) — so rename recovery is a deterministic link remap. Details at the marked
+  sections above.
 - **Phase 3 — keyless connect**: `needsApiKey` meta, wizard Detect step, the
   `providerNeedsSecret` predicate threaded through every NULL-secret consumer
   (`buildAdapter`/`credentialsForConnection`/`connect`/reconnect), re-detect reconnect surface,
@@ -592,10 +603,13 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
 - **Live upstream footgun**: beads currently pins Dolt 2.2.0 because Dolt 2.3.x breaks
   `DOLT_RESET('--hard')` paths (`bd flatten`, `bd admin compact`, pull rollback). Embedded-mode
   users are unaffected by our integration; add a docs note for server-mode users.
-- **`bd rename-prefix`** breaks connection identity (workspace_id) → reconnect required; sweep is
-  guarded by detect-first (a missing workspace throws `TrackerAuthError` before `listIssueIds`
-  could read as "everything was deleted" — the Dart `assertContainerExists` lesson, enforced in
-  the adapter).
+- **`bd rename-prefix`** breaks the per-pass identity invariant's PREFIX half (the instance id —
+  `workspace_id` — survives; the prefix lives in `workspace_name`) → the sandwich pauses the
+  pass, and [Phase 2 check 2026-08-27] because a rename REWRITES existing issue ids
+  suffix-preserved, recovery is the deterministic "prefix renamed — remap links" flow (see
+  "Keyless connect"), never a silent continue; sweep is guarded by detect-first (a missing
+  workspace throws `TrackerAuthError` before `listIssueIds` could read as "everything was
+  deleted" — the Dart `assertContainerExists` lesson, enforced in the adapter).
 - **Dual writers on one issue** (session agent's `bd` + our write-back): the existing echo
   suppression + pre-send `contentDivergence` guard (Codex round-3 fix from the field-writeback
   work) is the baseline — but for beads the pre-send read is not atomic with the write, and
@@ -634,7 +648,10 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   Nothing is ever silently lost: the race outcome is always visible in history and the loser's
   value is always recoverable (`--as-of` gives a true 3-way base). Costs/caveats, all probed:
   `bd history` is UNFILTERED (entries ≈ all DB commits since the issue's creation — 33 entries
-  for 1 real change), so walk back to the token only and check for a bound flag at Phase 2;
+  for 1 real change), so walk back to the token only — and the bound flag EXISTS
+  [Phase 2 check resolved 2026-08-27: `--limit int`, 0 = all, verified live], so post-write
+  verification fetches a bounded window (`--limit` a small N, escalating only if the token is
+  not inside it; a token absent from full history means squashed → re-baseline);
   `Committer` is always literal `root` (attribution is what-changed, never who);
   `bd compact`/`bd flatten`/`bd gc` squash history and invalidate stored tokens → re-baseline
   on unresolvable-token, which surfaces as bd's ONLY exit-0 error (empty stdout, error on
@@ -643,10 +660,14 @@ the keyless-connect and CLI-transport work Dart never needed. Estimate Dart + 30
   recovered value; interleaved unrelated-field write → settle done, zero data movement;
   unresolvable token → re-baseline, not error-loop.
 
-  **The remaining hard gate**: this design requires that bd writes reliably produce per-write
-  Dolt commits. Observed true under 1.2.2 defaults, but the `--dolt-auto-commit` help claims
-  default "off" while behavior showed per-write commits — Phase 2 pins the effective policy
-  (and the `batch` mode's implications) before relying on it. **If history proves unusable,
+  **The remaining hard gate — RESOLVED [Phase 2 check, 2026-08-27]**: this design requires that
+  bd writes reliably produce per-write Dolt commits, and they do — the EFFECTIVE default policy
+  is `on` (`bd config get dolt.auto-commit` → `on` in a fresh workspace with no config file
+  setting it; the flag help's "Default: off" is stale text in 1.2.2; verified live: two writes →
+  two `CommitHash` entries). Better still, `--dolt-auto-commit on` is a GLOBAL argv flag on
+  every command, so the adapter pins it per spawn exactly as it pins `-C` — the per-write-commit
+  invariant then holds by construction regardless of the user's config (a user-set `off`/`batch`
+  cannot silently disable detection). **If history proves unusable,
   v1 ships import + create-push only** (creates race nothing — a fresh issue has no concurrent
   editor), with outbound edits deferred until a guarded transport exists (`bd serve`, upstream
   CAS flag, or server-mode SQL). No unguarded-undetected fallback ships. **The disable must be
