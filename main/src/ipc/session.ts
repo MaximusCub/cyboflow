@@ -3963,23 +3963,33 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  // Save images for a session
-  ipcMain.handle('sessions:save-images', async (_event, sessionId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => {
-    try {
-      // For pending sessions (those created before the actual session), we still need to save the files
-      // Check if this is a pending session ID (starts with 'pending_')
-      const isPendingSession = sessionId.startsWith('pending_');
-      
-      if (!isPendingSession) {
-        // For real sessions, verify it exists
-        const session = await sessionManager.getSession(sessionId);
-        if (!session) {
-          throw new Error('Session not found');
-        }
-      }
+  /**
+   * Validate the id a composer attachment is namespaced under.
+   *
+   * The id is used ONLY as the `artifacts/<id>` directory key, but it must still
+   * name something this app owns so a renderer can never write an arbitrary path
+   * segment. Three owners are legal:
+   *   - `pending_*`  — a session id minted before the session row exists.
+   *   - a session id — quick-session chat (useClaudePanel / QuickSessionComposer).
+   *   - a WORKFLOW RUN id — the run-chat composer, the AskUserQuestion card, and
+   *     the question-gate answer path all namespace by runId. A run id is NOT a
+   *     session id (workflowRegistry mints its own UUID), so the session-only
+   *     check this replaced rejected every one of them with "Session not found",
+   *     which is why attaching an image to a flow run's chat failed outright.
+   */
+  const assertAttachmentOwner = async (ownerId: string): Promise<void> => {
+    if (ownerId.startsWith('pending_')) return;
+    if (await sessionManager.getSession(ownerId)) return;
+    if (cyboflow.workflowRegistry.getRunById(ownerId)) return;
+    throw new Error('Attachment owner not found');
+  };
 
-      // Create images directory in CYBOFLOW_DIR/artifacts/{sessionId}
-      const imagesDir = getCyboflowSubdirectory('artifacts', sessionId);
+  ipcMain.handle('sessions:save-images', async (_event, ownerId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => {
+    try {
+      await assertAttachmentOwner(ownerId);
+
+      // Create images directory in CYBOFLOW_DIR/artifacts/{ownerId}
+      const imagesDir = getCyboflowSubdirectory('artifacts', ownerId);
       if (!existsSync(imagesDir)) {
         await fs.mkdir(imagesDir, { recursive: true });
       }
@@ -4013,22 +4023,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   });
 
   // Save large text for a session
-  ipcMain.handle('sessions:save-large-text', async (_event, sessionId: string, text: string) => {
+  ipcMain.handle('sessions:save-large-text', async (_event, ownerId: string, text: string) => {
     try {
-      // For pending sessions (those created before the actual session), we still need to save the files
-      // Check if this is a pending session ID (starts with 'pending_')
-      const isPendingSession = sessionId.startsWith('pending_');
-      
-      if (!isPendingSession) {
-        // For real sessions, verify it exists
-        const session = await sessionManager.getSession(sessionId);
-        if (!session) {
-          throw new Error('Session not found');
-        }
-      }
+      await assertAttachmentOwner(ownerId);
 
-      // Create text directory in CYBOFLOW_DIR/artifacts/{sessionId}
-      const textDir = getCyboflowSubdirectory('artifacts', sessionId);
+      // Create text directory in CYBOFLOW_DIR/artifacts/{ownerId}
+      const textDir = getCyboflowSubdirectory('artifacts', ownerId);
       if (!existsSync(textDir)) {
         await fs.mkdir(textDir, { recursive: true });
       }
