@@ -1071,10 +1071,20 @@ export class WorkflowController {
        *     supervisor just asked it to redo;
        *   - the one-shot prompt sections + any armed loopback attempt write are
        *     dropped (they describe the superseded attempt);
-       *   - `laneAttempt` is NOT bumped. A rescue must not BURN the lane's
-       *     FAN_OUT_LANE_ATTEMPT_CAP budget — the same reasoning that exempts an
-       *     operator rewind (and an operator step-skip) from the budgets they
-       *     bypass. It is bounded by MONITOR_LANE_RESCUE_CAP instead.
+       *   - `laneAttempt` is NOT bumped at the three inner-chain sites. A rescue
+       *     must not BURN the lane's FAN_OUT_LANE_ATTEMPT_CAP budget — the same
+       *     reasoning that exempts an operator rewind (and an operator step-skip)
+       *     from the budgets they bypass. It is bounded by
+       *     MONITOR_LANE_RESCUE_CAP instead. The ONE exception is the two
+       *     MERGE-GATE arms, which bump it after this returns: the verification
+       *     scheduler's enqueue key is `${runId}:${ref}:${attempt}`, and the
+       *     request the gate just resolved owns the current number — without a
+       *     fresh attempt, the rescued traversal's re-enqueue would dedup onto
+       *     that terminal request and be failed on its stale verdict. At those
+       *     arms the loopback budgets are already exhausted, so the bump grants
+       *     nothing; it only keeps the "fresh attempt ⇒ fresh verification"
+       *     contract the normal merge-gate loopback keeps via
+       *     `laneAttempt = outcome.attempt`.
        *
        * `needsRevive` is set at the MERGE-GATE sites only: the merge-gate driver
        * durably wrote the lane row 'failed' before `awaitVerdict` resolved, so a
@@ -1229,6 +1239,21 @@ export class WorkflowController {
               true,
             );
             if (rescueTarget !== null) {
+              // A MERGE-GATE rescue must advance the verification attempt: the
+              // scheduler's enqueue key is `${runId}:${ref}:${attempt}`, and the
+              // request that just FAILED owns the current number — re-enqueueing
+              // under it dedups onto that terminal row, so the rescued traversal
+              // would be judged on the PRE-rescue tree's stale verdict and fail
+              // unconditionally. The bump is the same "genuinely fresh attempt
+              // re-fires" contract the normal loopback keeps via
+              // `laneAttempt = outcome.attempt`; it grants no loopback budget
+              // (the caps were already exhausted at this arm), and the fresh
+              // PASS's supersession pass is what resolves the stale blocking
+              // finding (it only supersedes LOWER attempts). Synced to the lane
+              // row at the target spawn (`loopbackAttemptStepIndex`) so the
+              // gate's own DB-side cap keeps reading the true count.
+              laneAttempt += 1;
+              loopbackAttemptStepIndex = rescueTarget;
               k = rescueTarget - 1; // The loop's k++ lands on the target next.
               continue;
             }
@@ -1263,6 +1288,12 @@ export class WorkflowController {
                 true,
               );
               if (rescueTarget !== null) {
+                // Same verification-attempt advance as the 'failed' arm above —
+                // the refused verdict's request owns the current enqueue key, so
+                // an un-bumped re-enqueue would dedup onto it and replay the
+                // stale verdict against the rescued traversal.
+                laneAttempt += 1;
+                loopbackAttemptStepIndex = rescueTarget;
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }

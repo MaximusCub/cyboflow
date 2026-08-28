@@ -169,6 +169,8 @@ interface TriageHost {
   host: ControllerHost;
   driver: ReturnType<typeof makeDriver>;
   consults: LaneTriageFailure[];
+  /** The `attempt` of every visual-verification enqueue, in call order. */
+  enqueueAttempts: number[];
 }
 
 /**
@@ -187,6 +189,7 @@ function makeTriageHost(opts: {
   const driver = makeDriver(opts.items, opts.deps);
   const queue = [...(opts.outcomes ?? [])];
   const consults: LaneTriageFailure[] = [];
+  const enqueueAttempts: number[] = [];
   const host: ControllerHost = {
     reportStep: () => undefined,
     async requestHumanGate() {
@@ -196,10 +199,16 @@ function makeTriageHost(opts: {
     ...(opts.visualGate ? { visualGate: opts.visualGate } : {}),
     ...(opts.visualGate
       ? {
-          enqueueVisualVerification: async (): Promise<TaskEnqueueResult> => ({
-            outcome: 'enqueued',
-            requestId: 'req-1',
-          }),
+          // Records each call's `attempt`: the production scheduler dedups on
+          // `${runId}:${ref}:${attempt}`, so a re-verification is only real when
+          // the attempt advanced — the merge-gate rescue tests pin exactly that.
+          enqueueVisualVerification: async (args: { attempt: number }): Promise<TaskEnqueueResult> => {
+            enqueueAttempts.push(args.attempt);
+            return {
+              outcome: 'enqueued',
+              requestId: `req-${enqueueAttempts.length}`,
+            };
+          },
         }
       : {}),
     ...(opts.triage === false
@@ -211,7 +220,7 @@ function makeTriageHost(opts: {
           },
         }),
   };
-  return { host, driver, consults };
+  return { host, driver, consults, enqueueAttempts };
 }
 
 /** A visual gate that replays scripted verdicts (default 'advance'). */
@@ -334,7 +343,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
     });
     // The gate FAILS at its own cap first, then passes on the rescued attempt.
     const visualGate = makeVisualGate([{ kind: 'failed' }, { kind: 'advance' }]);
-    const { host, driver, consults } = makeTriageHost({
+    const { host, driver, consults, enqueueAttempts } = makeTriageHost({
       items: ['t1'],
       outcomes: [rescue('implement')],
       visualGate,
@@ -350,6 +359,16 @@ describe('WorkflowController — autonomous lane rescue', () => {
     expect(driver.revived).toEqual(['t1']);
     expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
     expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+    // The rescued traversal must re-verify under a FRESH attempt: the production
+    // scheduler dedups on `${runId}:${ref}:${attempt}`, and the request that just
+    // FAILED owns the pre-rescue number — an un-bumped re-enqueue would bind the
+    // rescued lane to that terminal request's stale verdict and fail it without
+    // ever verifying the new code.
+    expect(enqueueAttempts).toEqual([1, 2]);
+    // ...and the advanced attempt is synced onto the lane row at the target
+    // step's spawn, so the gate's DB-side cap keeps reading the true count.
+    const rowAttempts = driver.lanes.filter((l) => l.attempt !== undefined).map((l) => l.attempt);
+    expect(rowAttempts).toContain(2);
   });
 
   // ── give_up: byte-identical to the pre-seam behavior ───────────────────────
