@@ -1376,6 +1376,32 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   //    and awaits the verdict; the ENGINE marks (project, modality, hash) proven
   //    off a PASSING request with full §5.3 provenance. Proof-by-running is
   //    engine-enforced precisely so a flow cannot assert its own success.
+  //
+  // WHAT THE PROSE ABOVE ASSUMES, AND WHICH PLANE ACTUALLY HAS IT. This flow's
+  // markdown body (`workflows/verify-setup.md`) is written for the ORCHESTRATED
+  // plane, where one session owns every step and simply remembers the survey, the
+  // proposal, and the gate answer. Programmatic runs — which is what an SDK run
+  // floors to, so in practice most of them — give each step a FRESH agent turn
+  // with no memory and no MCP tool that reads an artifact. Three consequences
+  // that are easy to re-break:
+  //  - `derive`'s `outputArtifact` is the ONLY durable channel from the drafting
+  //    step to `prove`; the host threads it back in as a prompt section
+  //    (defaultProgrammaticRunner.readRunbookProposalMarkdown). Its atype is
+  //    therefore load-bearing twice over: composeStepPrompt's `artifactFollowUp`
+  //    switches on it for the doc contract, and the reader keys on it. It read
+  //    'compound-recommendations' until 2026-08-28, which handed `derive`
+  //    COMPOUND's instructions and left `prove` asking a human to paste the
+  //    proposal back.
+  //  - `inspect` declares NO output, so a programmatic `derive` cannot receive the
+  //    survey and re-surveys the repo itself. That is redundant work rather than
+  //    lost correctness (derive holds the same worktree and the same subagent), so
+  //    it is left as-is — but it is why the flow prose's "re-delegate with the
+  //    survey" does not literally happen here.
+  //  - The `approve-runbook` gate is ALL-OR-NOTHING on this plane: the host opens a
+  //    generic blocking decision item (a typed payload exists only for launch's
+  //    approve-ideas) and reduces its resolution to approve/reject/revise. The
+  //    prose's "Pick subset" option is orchestrated-only; the sole trimming signal
+  //    that survives to `prove` is free text a human typed into the gate note.
   'verify-setup': {
     id: 'verify-setup',
     phases: [
@@ -1398,7 +1424,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'verify-setup',
             mcps: ['filesystem'],
             retries: 0,
-            outputArtifact: { atype: 'compound-recommendations', label: 'Runbook proposal' },
+            outputArtifact: { atype: 'verify-runbook', label: 'Runbook proposal' },
             desc: 'Draft the PORTABLE runbook per declared modality — build/serve command TEMPLATES carrying ${PORT}-style lever placeholders (never a resolved port, never a temp dir, never an install or native-rebuild command) plus the REQUIRED attestation spec for each modality — alongside the machine-local bindings (binary paths, data-dir lever name, ABI facts) and any rung-ladder repo changes: rung 0 existing levers only, rung 1 config-only, rung 2 a proposed diff that is NEVER auto-applied. Publish ONE proposal doc via cyboflow_report_artifact; nothing is written to the repo at this step.',
           },
           {

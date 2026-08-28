@@ -156,6 +156,15 @@ export interface SpawnStepRunnerOptions {
    */
   projectBrief?: () => string | undefined;
   /**
+   * The verify-setup run's approved runbook-proposal markdown, and the raw
+   * `approve-runbook` gate resolution. Thunks re-read per step: both are
+   * undefined on `inspect`/`derive` (which run before the artifact and the gate
+   * exist) and on every other flow, so only `prove` carries them. Absent ⇒ no
+   * section (byte-identical prompts).
+   */
+  runbookProposal?: () => string | undefined;
+  approveRunbookResolution?: () => string | undefined;
+  /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
    */
@@ -231,6 +240,11 @@ export class SpawnStepRunner implements StepRunner {
     // Re-read the project brief per step — undefined until the brief artifact
     // is reported, then every later step turn carries the grounding section.
     const projectBrief = this.opts.projectBrief?.();
+    // Re-read the verify-setup proposal + gate note per step — undefined until
+    // `derive` publishes the artifact and the human resolves the gate, so in
+    // practice only `prove` receives them.
+    const runbookProposal = this.opts.runbookProposal?.();
+    const approveRunbookResolution = this.opts.approveRunbookResolution?.();
     // Re-resolve the bootstrap's written paths per step: the bootstrap fires
     // mid-run at a lane's visual-verify, so a value read at construction would be
     // empty on exactly the run that needs the denylist.
@@ -288,6 +302,8 @@ export class SpawnStepRunner implements StepRunner {
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(approveIdeasDecisions ? { approveIdeasDecisions } : {}),
       ...(projectBrief ? { projectBrief } : {}),
+      ...(runbookProposal ? { runbookProposal } : {}),
+      ...(approveRunbookResolution ? { approveRunbookResolution } : {}),
       ...(userGuidance ? { userGuidance } : {}),
       ...(bootstrapProtectedPaths && bootstrapProtectedPaths.length > 0
         ? { bootstrapProtectedPaths }

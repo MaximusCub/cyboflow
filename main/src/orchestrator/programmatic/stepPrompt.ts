@@ -86,6 +86,34 @@ export interface ComposeStepPromptArgs {
    */
   projectBrief?: string;
   /**
+   * The verify-setup run's runbook PROPOSAL markdown — the payload of the run's
+   * `verify-runbook` artifact (the doc the `derive` step published and the
+   * `approve-runbook` gate approved), resolved live by the host for each fresh
+   * step turn. `prove` must write the runbook, the machine-local bindings, and
+   * the approved rung-1/rung-2 edits EXACTLY as proposed, but a programmatic
+   * step turn has no MCP surface that READS an artifact — so without this
+   * section it cannot recover what was approved and asks the human to paste it
+   * back (observed live 2026-08-27: the prove agent filed three gate questions,
+   * "the prior proposal/gate payload was not included in this step invocation").
+   * Absent / empty ⇒ no section (byte-identical prompts; naturally absent on
+   * `inspect`/`derive`, which run before the artifact exists, and on every
+   * non-verify-setup flow).
+   */
+  runbookProposal?: string;
+  /**
+   * The human's raw `approve-runbook` gate resolution string, when it carries
+   * more than a bare verdict. The programmatic plane's gate is an all-or-nothing
+   * blocking decision item whose resolution the host reduces to
+   * approve/reject/revise (humanGate.parseGateVerdict), so there is NO structured
+   * per-modality / per-rung subset here — the flow's "Pick subset" option exists
+   * only on the orchestrated plane, where the answering agent keeps it in
+   * context. What a human CAN do is type a qualification into the note
+   * ("approve, but skip native-screen"), and that free text is the only trimming
+   * signal that survives to `prove`. Absent / empty / a bare verdict word ⇒ no
+   * section.
+   */
+  approveRunbookResolution?: string;
+  /**
    * The human's per-idea approve-ideas gate decisions — the pre-rendered
    * `- IDEA-014: approve` verdict lines the host read off the run's RESOLVED
    * `gate:human-step:approve-ideas` item (readApproveIdeasDecisionLines).
@@ -189,6 +217,8 @@ function artifactFollowUp(
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
     case 'project-brief':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-interview\` subagent returns its \`## Project brief\`, call \`cyboflow_report_artifact\` yourself with \`atype: 'project-brief'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the full brief markdown>"}\` — that call is the ONLY thing that mints this run's Project brief tab, and the approve-brief gate has nothing to review without it. Re-report the same atype after any revision to enrich the same tab.`;
+    case 'verify-runbook':
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-verify-setup\` subagent returns its \`## Runbook draft\`, \`## Rung ladder\`, and \`## Open risks\` sections, compose ONE proposal doc — the ONLY surface the \`approve-runbook\` gate reviews — with exactly these three top-level sections, in this order:\n\n- \`## Runbook\` — per declared modality: the \`build\` steps, the \`serve\` form, the REQUIRED \`attestation\` spec, and the behaviors that will serve as the proof. Show the PORTABLE half verbatim (it is what gets committed) and list the machine-local bindings separately, saying plainly that those stay on this machine. Levers stay as \${PORT}-style placeholders — never a resolved port, never a temp dir, never an install or native-rebuild command.\n- \`## Repo changes\` — grouped \`### Rung 0 (no change)\` / \`### Rung 1 (config only)\` / \`### Rung 2 (proposed diff)\`, in that order. Keep every heading even when a rung is empty and write \`None.\` — the human should SEE which rungs you cleared, not guess. Every rung-2 entry names the exact file, what it replaces, and the verbatim proposed change.\n- \`## Risks\` — what could still make the proof fail, and what the fallback is.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'verify-runbook'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's proposal tab, and the approve-runbook gate has nothing to review without it. It is also the ONLY channel by which the later \`prove\` step can see what you drafted: every step is a fresh agent turn with no memory of this one and no tool that can read your prose, so anything you leave out of this doc is lost.\n\nThis is NOT a Compound run: do not compose \`## Act on\` / \`## Discarded\` sections, do not delegate to \`cyboflow-compounder\`, and do not propose CLAUDE.md or docs edits. Write NOTHING to the repo at this step — nothing is registered and nothing is committed until the human approves.`;
     case 'compound-recommendations':
       return `\n\n## Artifact to report\n\nAfter your \`cyboflow-compounder\` subagent returns its \`## Learnings\` and \`## Discarded\` lists, compose ONE summary-of-recommendations markdown doc — the single thing the human reads at the approve-learnings gate — with TWO top-level sections:\n\n- \`## Act on\` — the learnings that cleared the bar, grouped as \`### Quick fixes\` / \`### CLAUDE.md edits\` / \`### Doc edits\` / \`### Tasks\`, in that order, one entry per learning with its general rule, evidence (recurrence + run ids, files), computed impact, and the proposed change.\n- \`## Discarded\` — the candidates the compounder considered and set aside, one line each with its reason. This is the "here's what I discarded" half of the review. Omit the section only if the compounder returned no discarded list.\n\nCLAUDE.md edits get their OWN section and are never folded into \`### Doc edits\` — CLAUDE.md is loaded into every session of every flow, so its edits carry the strictest bar in this flow (capped at ONE per run; zero is the expected outcome). List each with the exact file + section, the verbatim wording, the text it replaces, and its answers to the compounder's five admission questions. When there are none, keep the heading and write \`None.\` so the human sees the bar was applied. \`### Doc edits\` holds \`docs/*.md\` (incl. CODE-PATTERNS.md / ARCHITECTURE.md) edits only, and those clear their own lower-but-real bar. Drop any proposed instruction-file edit whose rule carries a migration number, run id, version stamp, date, commit SHA, or "we used to" history — that is the incident, not the rule.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'compound-recommendations'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's recommendations tab; skipping it leaves the gate with nothing to review.\n\nHard limits on what becomes a review-queue item: do NOT emit \`cyboflow_report_finding\` with \`kind:'finding'\` (a finding is Compound's input, not its output), and do NOT emit a \`cyboflow_report_finding\` \`decision\` — or any review item — for a DISCARDED candidate. Discarded candidates live in the \`## Discarded\` section of THIS doc and nowhere else; filing one per drop is exactly the sequential-gate spam this flow must not produce. This flow emits NO \`decision\` review items at all — the final approval is the workflow's own \`human-review\` step (a "merge in changes" gate like Sprint/Ship), not a reported item. Never file a \`decision\` here, at write-back, per edit, or per drop.`;
     default:
@@ -284,6 +314,30 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.projectBrief !== undefined && args.projectBrief.trim().length > 0
       ? `\n\n# Project brief\n\nThe run's APPROVED project brief — the constitution every post-brief step grounds in (a programmatic step turn cannot read artifacts, so it is threaded here):\n\n${args.projectBrief.trim()}`
       : '';
+  const runbookProposal =
+    args.runbookProposal !== undefined && args.runbookProposal.trim().length > 0
+      ? `\n\n# Approved runbook proposal\n\nThis run's \`derive\` step published this proposal and the human APPROVED it at the \`approve-runbook\` gate. It is authoritative — write the runbook, the machine-local bindings, and the rung-1/rung-2 edits exactly as they stand here. Do NOT re-derive, re-survey, or "improve" any command, attestation, or lever: a proposal the human approved and a runbook you re-invented are different documents, and only the first was reviewed. If something in it is genuinely wrong, say so in your summary and fire the proof against it anyway so the failure is diagnosed against what was approved.\n\n` + args.runbookProposal.trim()
+      : '';
+  // The programmatic gate reduces to approve/reject/revise, so a bare verdict
+  // word carries nothing prove can act on — only a human's added qualification
+  // does. Rendering the bare word would be prompt noise that reads like a
+  // trimming instruction when there is none.
+  const gateNote = (args.approveRunbookResolution ?? '').trim();
+  const approveRunbookResolution =
+    gateNote.length > 0 && !/^(approve|approved|reject|revise|retry)$/i.test(gateNote)
+      ? `\n\n## Gate note from the human\n\nThe human resolved the \`approve-runbook\` gate with this note:\n\n` + `> ${gateNote}` + `\n\nRead it as a qualification of the approved proposal above (e.g. a modality or a rung change to leave out). If it says nothing beyond approving, the proposal stands whole.`
+      : '';
+  // verify-setup's `prove` is the one step in any flow whose work is WRITING,
+  // committing, registering, and firing a verification — everything the generic
+  // "delegate to the `cyboflow-<agent>` role" prose in step 1 sends to a role
+  // that is contractually read-only. It is also safety-sensitive (an
+  // uncommitted runbook makes every proof judge an empty tree), and the step's
+  // one-line `desc` cannot carry the procedure. Keyed on the flow + step id
+  // rather than the agent key, which `inspect`/`derive` share.
+  const proveContract =
+    workflowName === 'verify-setup' && step.id === 'prove'
+      ? `\n\n## Prove-step contract (verify-setup) — overrides step 1 above\n\nYou do this step YOURSELF. Do NOT delegate it: the \`cyboflow-verify-setup\` role is a read-only surveyor/drafter (\`tools: Read, Grep, Glob, Bash\`, and its own contract says it never writes repo files, never writes cyboflow state, and never commits), so handing it this step hands the work to a role that cannot perform it. Its drafting is already done — it lives in the approved proposal above.\n\nIn this order:\n\n1. **Write and commit the portable half.** Write \`.cyboflow/verify-runbook.json\` (the portable half ONLY — placeholders, never a resolved port or temp dir) plus the APPROVED rung-1/rung-2 changes, and commit atomically. **\`git add\` on this path silently does nothing in many projects**: \`.cyboflow/\` is where cyboflow keeps worktrees and local state, so it is very often in \`.gitignore\` or \`.git/info/exclude\`, and \`git add\` on an ignored path is a no-op that reports success. Stage it with \`git add -f .cyboflow/verify-runbook.json\` and CONFIRM the commit really contains it with \`git cat-file -e HEAD:.cyboflow/verify-runbook.json\` before going further. The verifier runs against a DETACHED SNAPSHOT at a commit, so an uncommitted runbook is invisible to it and every proof will be judged against a tree that has no runbook in it.\n2. **Register each approved modality** with \`cyboflow_register_verify_runbook\`, passing the machine-local \`bindings_json\` from the proposal. Quote the returned \`hash\` and \`version\` in your summary. If it returns \`committed: false\`, go back to step 1 — that is a blocker on proving, not a note.\n3. **Prove each modality by RUNNING it**, one at a time. Compose the \`VerificationTaskV1\` FROM the runbook you just committed — its build steps, its serve form, its attestation, verbatim — not from memory and not from what you would have preferred; a composed task that does not match the registered runbook is rejected as a \`runbook/sha mismatch\` and proves nothing. Fire \`cyboflow_request_verification\` with \`setup_proof: true\` and the \`runbook_hash\` + \`runbook_local_version\` you just got back, then BLOCK on \`cyboflow_await_verification\`. Do not poll, do not continue past the await, and do not fire the next modality until this one has returned.\n4. **Never mark a runbook proven.** Only a PASSING \`setup_proof\` request does, via the engine. Report what came back and claim nothing beyond it.\n5. **On FAIL, read \`failureClass\` first** — \`env\` means fix the ISOLATION lever, \`deliverable\` means fix the commands, \`ambiguous\` means narrow the proof — then re-write, re-commit, re-register (the hash changed), and re-prove. At most 3 rounds per modality. On exhaustion the unproven draft STAYS committed and registered: write the diagnosis into your summary and into the proposal artifact, and finish the step. That is a completed run, not a failure.\n\nRe-report the \`verify-runbook\` artifact at the end, enriching the approved proposal with the per-modality proof outcomes so the human's merge gate sees what actually happened.`
+      : '';
   const artifactNote =
     step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact, workflowName) : '';
   // Task-verify relay contract (verification-agent redesign §5.1; live-smoke fix
@@ -376,7 +430,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${projectBrief}${runOwnedIdeaScope}${approveIdeasDecisions}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${projectBrief}${runbookProposal}${approveRunbookResolution}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 
@@ -384,5 +438,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

@@ -723,4 +723,112 @@ describe('composeStepPrompt', () => {
     });
     expect(planner).toContain("fold it into the IDEA's body");
   });
+
+  // ---------------------------------------------------------------------------
+  // verify-setup grounding (2026-08-27 live defect): the programmatic `prove`
+  // step could not see the proposal `derive` had published, so it asked the human
+  // to paste it back. Nothing on this plane can read an artifact.
+  // ---------------------------------------------------------------------------
+
+  it("renders verify-runbook's own artifact contract, never Compound's", () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'derive',
+        name: 'Derive the runbook',
+        agent: 'verify-setup',
+        outputArtifact: { atype: 'verify-runbook', label: 'Runbook proposal' },
+      }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+    });
+    expect(out).toContain("atype: 'verify-runbook'");
+    expect(out).toContain('## Runbook');
+    expect(out).toContain('## Repo changes');
+    expect(out).toContain('## Risks');
+    expect(out).toContain('Rung 2 (proposed diff)');
+    // The exact cross-wiring the stale atype caused: Compound's follow-up told
+    // this step to delegate to the compounder and compose a learnings doc.
+    expect(out).not.toContain('After your `cyboflow-compounder` subagent returns');
+    expect(out).not.toContain('## Learnings');
+    expect(out).not.toContain('summary-of-recommendations');
+    // ...and this contract says so out loud, since the agent may have seen the old one.
+    expect(out).toContain('This is NOT a Compound run');
+    // Placeholders survive into the prompt un-interpolated.
+    expect(out).toContain('${PORT}-style placeholders');
+  });
+
+  it('threads the approved runbook proposal and marks it authoritative', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'prove', name: 'Prove the runbook', agent: 'verify-setup' }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+      runbookProposal: '## Runbook\n\ncdp-app: serve `pnpm electron-dev`',
+      });
+    expect(out).toContain('# Approved runbook proposal');
+    expect(out).toContain('cdp-app: serve `pnpm electron-dev`');
+    expect(out).toContain('Do NOT re-derive');
+  });
+
+  it('omits the proposal section entirely when there is none', () => {
+    const bare = composeStepPrompt({
+      step: step({ id: 'prove', name: 'Prove the runbook', agent: 'verify-setup' }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+    });
+    expect(bare).not.toContain('# Approved runbook proposal');
+    // A non-verify-setup step is byte-identical with and without the field absent.
+    const other = composeStepPrompt({ step: step({ id: 'a' }), workflowName: 'planner', attempt: 1 });
+    expect(other).not.toContain('# Approved runbook proposal');
+    expect(other).not.toContain('Prove-step contract');
+  });
+
+  it('renders a human gate NOTE but drops a bare verdict word', () => {
+    const qualified = composeStepPrompt({
+      step: step({ id: 'prove', name: 'Prove', agent: 'verify-setup' }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+      approveRunbookResolution: 'approve, but skip native-screen',
+    });
+    expect(qualified).toContain('Gate note from the human');
+    expect(qualified).toContain('skip native-screen');
+
+    // 'approve' alone carries nothing prove can act on — rendering it would read
+    // like a trimming instruction when the human gave none.
+    for (const bare of ['approve', 'Approved', 'reject', 'revise', 'retry']) {
+      const out = composeStepPrompt({
+        step: step({ id: 'prove', name: 'Prove', agent: 'verify-setup' }),
+        workflowName: 'verify-setup',
+        attempt: 1,
+        approveRunbookResolution: bare,
+      });
+      expect(out, bare).not.toContain('Gate note from the human');
+    }
+  });
+
+  it('gives prove its own do-it-yourself contract, and only prove', () => {
+    const prove = composeStepPrompt({
+      step: step({ id: 'prove', name: 'Prove the runbook', agent: 'verify-setup' }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+    });
+    expect(prove).toContain('Prove-step contract (verify-setup)');
+    // The generic step-1 prose would send this step's WRITING work to a role whose
+    // own contract forbids writing files, cyboflow state, or commits.
+    expect(prove).toContain('Do NOT delegate it');
+    // The two failure modes seen live: an ignored .cyboflow/ path staged as a
+    // silent no-op, and a composed task that does not match the registered runbook.
+    expect(prove).toContain('git add -f .cyboflow/verify-runbook.json');
+    expect(prove).toContain('git cat-file -e HEAD:.cyboflow/verify-runbook.json');
+    expect(prove).toContain('runbook/sha mismatch');
+    expect(prove).toContain('setup_proof: true');
+    expect(prove).toContain('Never mark a runbook proven');
+
+    // inspect/derive share prove's agent key, so the contract must key on the step.
+    const derive = composeStepPrompt({
+      step: step({ id: 'derive', name: 'Derive', agent: 'verify-setup' }),
+      workflowName: 'verify-setup',
+      attempt: 1,
+    });
+    expect(derive).not.toContain('Prove-step contract');
+  });
 });

@@ -418,7 +418,15 @@ describe('buildBuiltInWorkflows', () => {
     // run never mints the doc the approve-runbook gate reviews (the exact gap that
     // once shipped a doc-less compound run).
     const derive = steps.find((s) => s.id === 'derive')!;
-    expect(derive.outputArtifact?.atype).toBe('compound-recommendations');
+    // 'verify-runbook', NOT 'compound-recommendations'. The atype the proposal was
+    // first shipped under is a Compound deliverable, and migration 097 minted
+    // 'verify-runbook' precisely to stop mislabeling it as one at the gate where a
+    // human approves repo changes. The atype is also load-bearing on the
+    // programmatic plane: composeStepPrompt's artifactFollowUp switches on it, so
+    // the stale value handed `derive` COMPOUND's instructions (delegate to
+    // cyboflow-compounder, compose `## Act on` / `## Discarded`) and produced a
+    // runbook proposal shaped as a compound report (observed live 2026-08-27).
+    expect(derive.outputArtifact?.atype).toBe('verify-runbook');
     expect(derive.outputArtifact?.label).toBe('Runbook proposal');
   });
 

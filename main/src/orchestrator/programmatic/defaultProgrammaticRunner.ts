@@ -24,7 +24,11 @@
  * The stateless collaborators (spawner, reporter, gate) are injected once at the
  * composition root; per-run state is bound inside run().
  */
-import { resolveWorkflowDefinition, type WorkflowStep } from '../../../../shared/types/workflows';
+import {
+  resolveWorkflowDefinition,
+  VERIFY_SETUP_WORKFLOW_NAME,
+  type WorkflowStep,
+} from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
@@ -213,6 +217,84 @@ export function readProjectBriefMarkdown(db: DatabaseLike, runId: string): strin
   }
 }
 
+/**
+ * Read the run's runbook PROPOSAL markdown — the payload of the `verify-runbook`
+ * artifact the verify-setup flow's `derive` step published, which the
+ * `approve-runbook` gate then approved. The programmatic `prove` step has no MCP
+ * tool that READS an artifact, so without this it cannot recover what it is
+ * supposed to write and asks the human to paste the proposal back (observed live
+ * 2026-08-27).
+ *
+ * LEGACY FALLBACK. `derive` declared `outputArtifact.atype:
+ * 'compound-recommendations'` until this fix — the atype `verify-runbook` was
+ * minted (migration 097) to replace exactly that mislabel and the flow definition
+ * was never switched over. Runs that are IN FLIGHT across the fix, or that get
+ * rewound, still carry their proposal under the old atype, so fall back to it
+ * rather than stranding them. Scoped to the verify-setup flow by the caller, so a
+ * real Compound run's recommendations can never be read as a runbook.
+ *
+ * KNOWN LIMITATION (deliberate, not an oversight): this reads the run's CURRENT
+ * proposal, not a revision pinned at the moment the gate approved it. The
+ * artifact is one-per-run and `prove` is told to re-report it enriched with the
+ * proof outcomes, so a REWOUND run that re-enters `prove` reads back a document
+ * carrying its own previous attempt's outcomes rather than the pristine approved
+ * one. Pinning it properly means an approved-revision reference in the gate
+ * payload, which today has a typed shape only for launch's approve-ideas — a
+ * bigger change than this fix. The enriched doc still contains the same approved
+ * runbook, so the failure mode is noise in the prompt, not a different runbook.
+ *
+ * Fail-soft like readProjectBriefMarkdown: a missing table or unparseable payload
+ * yields undefined and the step prompt simply omits the section.
+ */
+export function readRunbookProposalMarkdown(db: DatabaseLike, runId: string): string | undefined {
+  const read = (atype: string): string | undefined => {
+    try {
+      const row = db
+        .prepare('SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = ? LIMIT 1')
+        .get(runId, atype) as { payloadJson?: string | null } | undefined;
+      if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
+      const parsed: unknown = JSON.parse(row.payloadJson);
+      if (typeof parsed !== 'object' || parsed === null) return undefined;
+      const markdown = (parsed as { markdown?: unknown }).markdown;
+      return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return read('verify-runbook') ?? read('compound-recommendations');
+}
+
+/**
+ * Read the raw resolution string of this run's RESOLVED `approve-runbook` gate.
+ *
+ * Unlike launch's approve-ideas fold there is nothing structured to parse: the
+ * programmatic plane opens `approve-runbook` as a generic blocking decision item
+ * (HumanStepManager supplies a typed payload only for approve-ideas) and the UI
+ * offers only Approve / Reject, so `humanGate.parseGateVerdict` string-sniffs the
+ * resolution down to approve/reject/revise. The flow's "Pick subset" option is
+ * therefore ORCHESTRATED-ONLY. The one trimming signal that survives to `prove`
+ * is a qualification a human typed into the note, so the raw string is what we
+ * hand over — composeStepPrompt drops it when it is a bare verdict word.
+ *
+ * Fail-soft: a missing review_items table or any thrown query yields undefined.
+ */
+export function readApproveRunbookResolution(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT resolution FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'resolved'
+            AND source = 'gate:human-step:approve-runbook'
+          ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(runId) as { resolution?: string | null } | undefined;
+    const resolution = row?.resolution;
+    return typeof resolution === 'string' && resolution.trim().length > 0 ? resolution : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class DefaultProgrammaticRunner implements ProgrammaticRunner {
   constructor(private readonly deps: DefaultProgrammaticRunnerDeps) {}
 
@@ -276,6 +358,21 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return readProjectBriefMarkdown(this.deps.db, ctx.runId);
     };
 
+    // Re-read the verify-setup run's approved runbook proposal + its gate note per
+    // step. Naturally undefined on `inspect`/`derive` (they run BEFORE the artifact
+    // exists) and on every other flow ⇒ no section, so all other prompts stay
+    // byte-identical. Flow-gated by name for the same reason projectBrief is: the
+    // reader falls back to the legacy `compound-recommendations` atype, which
+    // outside this flow is a real Compound deliverable.
+    const runbookProposal = (): string | undefined => {
+      if (ctx.workflow.name !== VERIFY_SETUP_WORKFLOW_NAME || !this.deps.db) return undefined;
+      return readRunbookProposalMarkdown(this.deps.db, ctx.runId);
+    };
+    const approveRunbookResolution = (): string | undefined => {
+      if (ctx.workflow.name !== VERIFY_SETUP_WORKFLOW_NAME || !this.deps.db) return undefined;
+      return readApproveRunbookResolution(this.deps.db, ctx.runId);
+    };
+
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
     // empty no-op set so the walk is byte-identical. Read by reference at the
@@ -321,6 +418,8 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runOwnedIdeaIds,
         approveIdeasDecisions,
         projectBrief,
+        runbookProposal,
+        approveRunbookResolution,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
