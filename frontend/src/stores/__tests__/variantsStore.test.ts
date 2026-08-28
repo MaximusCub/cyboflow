@@ -8,8 +8,11 @@
  *   (d) invalidate re-fetches even if a (settled) fetch already ran, and
  *       bypasses the loading re-entrancy guard.
  *   (e) two workflowIds are tracked independently.
+ *   (f) useWorkflowVariants narrows to ONE tuning level (migration 125) without
+ *       a second fetch — one request backs every level's view.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { renderHook, waitFor } from '@testing-library/react';
 import type { WorkflowVariantRow } from '../variantsStore';
 
 const { mockVariantsListQuery, mockGetBaselineRotationQuery } = vi.hoisted(() => ({
@@ -33,7 +36,7 @@ vi.mock('../../trpc/client', () => ({
   },
 }));
 
-import { useVariantsStore } from '../variantsStore';
+import { useVariantsStore, useWorkflowVariants } from '../variantsStore';
 
 function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
   return {
@@ -46,6 +49,7 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
     execution_model: null,
     agent_provider: null,
     agent_runtime: null,
+    tuning_level: null,
     weight: 1,
     status: 'active',
     archived_at: null,
@@ -129,5 +133,39 @@ describe('variantsStore.invalidate', () => {
 
     expect(mockVariantsListQuery).toHaveBeenCalledTimes(2);
     expect(useVariantsStore.getState().byWorkflowId['wf-1']).toHaveLength(2);
+  });
+});
+
+describe('useWorkflowVariants — tuning-level narrowing (migration 125)', () => {
+  const rows = [
+    makeVariant({ id: 'wfv_std', tuning_level: 'standard' }),
+    makeVariant({ id: 'wfv_thorough', tuning_level: 'thorough' }),
+    makeVariant({ id: 'wfv_flow', tuning_level: null }),
+    makeVariant({ id: 'wfv_std_archived', tuning_level: 'standard', archived_at: '2026-08-01' }),
+  ];
+
+  it('returns only the named level, splitting archived rows the same way', async () => {
+    mockVariantsListQuery.mockResolvedValue(rows);
+    const { result } = renderHook(() => useWorkflowVariants('wf-1', 'standard'));
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+
+    expect(result.current.variants.map((v) => v.id)).toEqual(['wfv_std']);
+    expect(result.current.archivedVariants.map((v) => v.id)).toEqual(['wfv_std_archived']);
+    // ONE request backs every level's view — switching levels is a re-filter.
+    expect(mockVariantsListQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats NULL as a real level (a level-less flow), not as "any"', async () => {
+    mockVariantsListQuery.mockResolvedValue(rows);
+    const { result } = renderHook(() => useWorkflowVariants('wf-1', null));
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.variants.map((v) => v.id)).toEqual(['wfv_flow']);
+  });
+
+  it('returns every live row when no level is named', async () => {
+    mockVariantsListQuery.mockResolvedValue(rows);
+    const { result } = renderHook(() => useWorkflowVariants('wf-1'));
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.variants.map((v) => v.id)).toEqual(['wfv_std', 'wfv_thorough', 'wfv_flow']);
   });
 });

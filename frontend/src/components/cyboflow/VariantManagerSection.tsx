@@ -39,10 +39,19 @@ import {
   type RotationExperimentSummary,
   type WorkflowVariantStatus,
 } from '../../../../shared/types/experiments';
+import { TUNING_LEVEL_LABELS, type TuningLevel } from '../../../../shared/tuning/workflowTuning';
 
 export interface VariantManagerSectionProps {
   workflowId: string;
   projectId: number;
+  /**
+   * The tuning level this panel manages (migration 125) — the editor page the
+   * user is on. Variants are scoped to one level, so the panel shows ONLY that
+   * level's challengers, creates into it, and asks the rotation summary for its
+   * pool. `null` for a flow outside the level system (a "save as new" custom
+   * flow), whose single pool holds all of its variants.
+   */
+  tuningLevel: TuningLevel | null;
   /**
    * The host editor's unsaved-graph state (WorkflowEditorModal.isDirty). Variants
    * snapshot the workflow's LAST SAVED spec_json from the DB — NOT the live graph
@@ -188,6 +197,7 @@ function StatusPill({ status }: { status: WorkflowVariantStatus }): React.JSX.El
 export function VariantManagerSection({
   workflowId,
   projectId,
+  tuningLevel,
   editorDirty = false,
 }: VariantManagerSectionProps): React.JSX.Element {
   const {
@@ -196,7 +206,7 @@ export function VariantManagerSection({
     baseline,
     loading,
     error: loadError,
-  } = useWorkflowVariants(workflowId);
+  } = useWorkflowVariants(workflowId, tuningLevel);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renamingVariant, setRenamingVariant] = useState<WorkflowVariantRow | null>(null);
@@ -216,12 +226,15 @@ export function VariantManagerSection({
 
   const refreshRotation = useCallback(async () => {
     try {
-      const summary = await trpc.cyboflow.experiments.getRunningRotation.query({ workflowId });
+      const summary = await trpc.cyboflow.experiments.getRunningRotation.query({
+        workflowId,
+        tuningLevel,
+      });
       setRotation(summary);
     } catch {
       setRotation(null);
     }
-  }, [workflowId]);
+  }, [workflowId, tuningLevel]);
 
   useEffect(() => {
     void refreshRotation();
@@ -277,14 +290,20 @@ export function VariantManagerSection({
         // fresh row in the editor straight away rather than leaving the user to
         // find it in the list and click Edit. `create` returns the inserted row,
         // so this needs no extra read.
-        const created = await trpc.cyboflow.variants.create.mutate({ workflowId, label });
+        const created = await trpc.cyboflow.variants.create.mutate({
+          workflowId,
+          label,
+          // Omitted for a level-less flow: the server rejects an explicit level
+          // there rather than storing one that could never match a launch.
+          ...(tuningLevel !== null ? { tuningLevel } : {}),
+        });
         await invalidate();
         setEditingVariant(created);
       } catch (err: unknown) {
         setActionError(err instanceof Error ? err.message : 'Failed to create variant');
       }
     },
-    [workflowId, invalidate],
+    [workflowId, tuningLevel, invalidate],
   );
 
   const handleRename = useCallback(
@@ -419,7 +438,15 @@ export function VariantManagerSection({
   return (
     <div className="flex flex-col gap-2 border-t border-border-primary px-4 py-3" data-testid="variant-manager-section">
       <div className="flex items-center gap-2">
-        <h3 className="text-xs font-semibold text-text-primary">Variants</h3>
+        <h3 className="text-xs font-semibold text-text-primary">
+          Variants
+          {tuningLevel !== null && (
+            <span className="font-normal text-text-tertiary">
+              {' · '}
+              {TUNING_LEVEL_LABELS[tuningLevel]}
+            </span>
+          )}
+        </h3>
         <button
           type="button"
           onClick={() => setCreateDialogOpen(true)}

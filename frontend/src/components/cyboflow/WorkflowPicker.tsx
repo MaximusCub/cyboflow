@@ -35,6 +35,7 @@ import {
   type PermissionMode,
   type WorkflowRow,
   CYBOFLOW_WORKFLOW_NAMES,
+  isCyboflowWorkflowName,
 } from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
@@ -829,6 +830,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
+  // The pool a launch from this picker rotates in (migration 125). A picker
+  // launch never overrides the level, so it is the workflow's saved stamp — NULL
+  // for a flow outside the level system, whose variants all sit in one pool.
+  const selectedWorkflowRow = workflows.find((wf) => wf.id === selectedId);
+  const selectedWorkflowTuningLevel =
+    selectedWorkflowRow !== undefined && isCyboflowWorkflowName(selectedWorkflowRow.name)
+      ? selectedWorkflowRow.tuning_level
+      : null;
   const selectedSubstrate = substrateForRuntime(agentRuntime);
   const selectedProvider = providerForRuntime(agentRuntime);
 
@@ -892,11 +901,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         agentRuntime={agentRuntime}
       />
       {/* Per-run A/B variant selector (migration 048) — hidden entirely for a
-          workflow with zero variants. Threaded into runs.start as variantId /
-          baseline (never both); rotation sends neither field. */}
+          workflow with zero variants AT THIS LEVEL. Threaded into runs.start as
+          variantId / baseline (never both); rotation sends neither field.
+          This picker has no level override, so its pool is the workflow's SAVED
+          level (migration 125) — exactly the level its launches will run at. */}
       {selectedId !== null && (
         <VariantSelector
           workflowId={selectedId}
+          tuningLevel={selectedWorkflowTuningLevel}
           value={variantSelection}
           onChange={setVariantSelection}
           id="workflow-picker-variant"

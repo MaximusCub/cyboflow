@@ -231,6 +231,7 @@ import { trpc } from '../../../../trpc/client';
 import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
 import type { AppConfig } from '../../../../types/config';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
+import type { WorkflowVariantRow } from '../../../../../../shared/types/experiments';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../../shared/types/sessionDefaults';
 import type { ApplyRunTypeDefaultResult } from '../../../../stores/configStore';
 
@@ -327,6 +328,28 @@ const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
 };
 
 /** Compound row stamped THOROUGH with no custom slot — tuning-level defaulting/override tests. */
+/** A live, pickable variant row scoped to a tuning level (migration 125). */
+function makeVariantRow(
+  over: Partial<WorkflowVariantRow> & Pick<WorkflowVariantRow, 'id' | 'label'>,
+): WorkflowVariantRow {
+  return {
+    workflow_id: 'wf-compound',
+    spec_json: '{}',
+    agent_overrides_json: null,
+    model: null,
+    execution_model: null,
+    agent_provider: null,
+    agent_runtime: null,
+    tuning_level: null,
+    weight: 1,
+    status: 'active',
+    archived_at: null,
+    created_at: '',
+    updated_at: '',
+    ...over,
+  };
+}
+
 const COMPOUND_THOROUGH_ROW: WorkflowRow = {
   id: 'wf-compound',
   project_id: 1,
@@ -3166,6 +3189,11 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
     // The preselect lands the user on ③ Configure with compound selected.
     await screen.findByTestId('wizard-step3');
     expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Run /compound');
+    // The runtime seed lands one render AFTER `selection` becomes the workflow
+    // (the quick card's PTY default seeds first, then the workflow key re-seeds
+    // it to the SDK). Wait for the settled value rather than racing it — the
+    // launch payload asserted below carries whatever the control holds.
+    await waitFor(() => expect(runtimeValue()).toBe('claude-sdk'));
 
     // Launch — compound is not gated, so the CTA fires runs.start directly.
     await act(async () => {
@@ -3649,25 +3677,15 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'custom' }));
   });
 
-  it('D4 mutual exclusion: a pinned variant disables the level segments; an active override forces/disables the variant picker', async () => {
+  it('level containment (migration 125): the level picks the variant POOL, and both reach runs.start', async () => {
+    // Two challengers at DIFFERENT levels. The workflow is stamped 'thorough',
+    // so the picker opens on the thorough pool; overriding to efficient swaps
+    // the pool (and clears the stale thorough pin) rather than disabling either
+    // control — that mutual exclusion existed only because variants had no level.
     mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
     mockVariantsList.mockResolvedValue([
-      {
-        id: 'wfv_1',
-        workflow_id: 'wf-compound',
-        label: 'Variant A',
-        spec_json: '{}',
-        agent_overrides_json: null,
-        model: null,
-        execution_model: null,
-        agent_provider: null,
-        agent_runtime: null,
-        weight: 1,
-        status: 'active',
-        archived_at: null,
-        created_at: '',
-        updated_at: '',
-      },
+      makeVariantRow({ id: 'wfv_thorough', label: 'Thorough A', tuning_level: 'thorough' }),
+      makeVariantRow({ id: 'wfv_efficient', label: 'Efficient A', tuning_level: 'efficient' }),
     ]);
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
@@ -3675,36 +3693,38 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
     });
+    const picker = (): HTMLSelectElement =>
+      screen.getByLabelText('Select workflow variant') as HTMLSelectElement;
     await screen.findByLabelText('Select workflow variant');
 
-    // Pin the specific variant → the tuning-level segments disable.
-    await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select workflow variant'), { target: { value: 'wfv_1' } });
-    });
-    expect(screen.getByTestId('wizard-tuning-level-efficient')).toBeDisabled();
-    expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
+    // Only the SAVED level's variant is offered.
+    expect(Array.from(picker().options).map((o) => o.value)).toContain('wfv_thorough');
+    expect(Array.from(picker().options).map((o) => o.value)).not.toContain('wfv_efficient');
 
-    // Back to rotation (no explicit pin) — the level segments re-enable.
+    // Pinning it leaves the level segments fully usable.
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select workflow variant'), { target: { value: '__rotation__' } });
+      fireEvent.change(picker(), { target: { value: 'wfv_thorough' } });
     });
     expect(screen.getByTestId('wizard-tuning-level-efficient')).not.toBeDisabled();
 
-    // Set a level override → the variant picker is replaced by the forced-baseline placeholder.
+    // Overriding the level swaps the pool — and the stale cross-level pin is
+    // re-seeded away, never sent to a launch that would refuse it.
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
     });
-    expect(screen.getByTestId('wizard-variant-disabled-by-tuning')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Select workflow variant')).not.toBeInTheDocument();
+    expect(Array.from(picker().options).map((o) => o.value)).toContain('wfv_efficient');
+    expect(Array.from(picker().options).map((o) => o.value)).not.toContain('wfv_thorough');
+    expect(picker().value).not.toBe('wfv_thorough');
 
+    // Pin inside the overridden pool: both fields go to runs.start together.
+    await act(async () => {
+      fireEvent.change(picker(), { target: { value: 'wfv_efficient' } });
+    });
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
     expect(mockRunStart).toHaveBeenCalledWith(
-      expect.objectContaining({ tuningLevel: 'efficient', baseline: true }),
-    );
-    expect(mockRunStart).toHaveBeenCalledWith(
-      expect.not.objectContaining({ variantId: expect.anything() }),
+      expect.objectContaining({ tuningLevel: 'efficient', variantId: 'wfv_efficient' }),
     );
   });
 

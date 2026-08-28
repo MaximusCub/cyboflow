@@ -244,6 +244,7 @@ function experiment(overrides: Partial<ExperimentRow> = {}): ExperimentRow {
     merge_sha: null,
     decided_at: null,
     rerun_of_experiment_id: null,
+    tuning_level: null,
     promoted_variant_id: null,
     promoted_arm: null,
     promoted_at: null,

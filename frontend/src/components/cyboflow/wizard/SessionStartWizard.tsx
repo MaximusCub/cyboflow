@@ -104,7 +104,6 @@ import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFA
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
-import { useWorkflowVariants } from '../../../stores/variantsStore';
 import { TuningLevelSelector } from './TuningLevelSelector';
 import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
@@ -661,13 +660,6 @@ export default function SessionStartWizard(): React.JSX.Element {
   // below). Reset alongside `variantSelection` whenever the selected workflow
   // changes so a prior flow's override never bleeds onto a different launch.
   const [tuningLevelOverride, setTuningLevelOverride] = useState<TuningLevel | null>(null);
-  // Live variant count for the CURRENT workflow selection — read here (not just
-  // inside VariantSelector) so the mutual-exclusion placeholder below can tell
-  // "this workflow has variants but they're disabled by a level override" apart
-  // from "this workflow has none, so VariantSelector renders nothing anyway".
-  const selectedWorkflowVariants = useWorkflowVariants(
-    selection?.kind === 'workflow' ? selection.workflowId : null,
-  ).variants;
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -752,30 +744,6 @@ export default function SessionStartWizard(): React.JSX.Element {
       cancelled = true;
     };
   }, [selectedWorkflowId, workflowMetas]);
-
-  // D4 mutual exclusion, half 1: pinning a SPECIFIC variant runs its own frozen
-  // definition, so any pending level override is meaningless — and sending
-  // both `variantId` and `tuningLevel` to `runs.start` is a BAD_REQUEST server
-  // side. Clear the override the moment the user pins one. `variantSelection`
-  // modes 'rotation' and 'baseline' are NOT an explicit pin (D4: "picking a
-  // non-baseline variant"), so they leave an active override alone.
-  useEffect(() => {
-    if (variantSelection.mode === 'variant' && tuningLevelOverride !== null) {
-      setTuningLevelOverride(null);
-    }
-  }, [variantSelection, tuningLevelOverride]);
-
-  // D4 mutual exclusion, half 2 (the mirror rule): an active level override IS
-  // an explicit spec choice, so it forces the variant picker to baseline —
-  // "Rotation … with a level override forces baseline for that run" (D4).
-  // Runs after half 1 settles (variantSelection can only be 'variant' here if
-  // tuningLevelOverride is already null, per the effect above), so this never
-  // fights it.
-  useEffect(() => {
-    if (tuningLevelOverride !== null && variantSelection.mode !== 'baseline') {
-      setVariantSelection({ mode: 'baseline' });
-    }
-  }, [tuningLevelOverride, variantSelection.mode]);
 
   // Planner pre-launch idea gate.
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
@@ -1528,6 +1496,14 @@ export default function SessionStartWizard(): React.JSX.Element {
     selection?.kind === 'workflow'
       ? workflowMetas.find((m) => m.id === selection.workflowId)
       : undefined;
+  // The tuning level this launch will actually run at — the pool its variant
+  // choice is drawn from (migration 125). Variants are scoped to a level, so the
+  // LEVEL PICKS THE POOL and the variant control picks inside it; the two are no
+  // longer mutually exclusive (they were, under plan D4, precisely because the
+  // level dimension was missing). Changing the level re-seeds the variant
+  // selection inside VariantSelector, which keys its one-shot seed on this.
+  const launchTuningLevel: TuningLevel | null =
+    selectedMeta?.isBuiltIn === true ? tuningLevelOverride ?? selectedMeta.tuningLevel : null;
   let ctaLabel: string;
   if (selection === null) {
     ctaLabel = 'Select a workflow';
@@ -2033,7 +2009,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               <TuningLevelSelector
                 value={tuningLevelOverride ?? selectedMeta.tuningLevel}
                 customSlotAvailable={selectedMeta.hasCustomSlot}
-                disabled={variantSelection.mode === 'variant'}
                 onChange={(level) => {
                   // Picking the saved level back CLEARS the override (D3/D4:
                   // only a genuine divergence from the stamp is an override);
@@ -2196,21 +2171,13 @@ export default function SessionStartWizard(): React.JSX.Element {
                         tuning-level override is active — a level override IS an
                         explicit spec choice, so variant pinning is disabled
                         rather than silently ignored. */}
-                    {tuningLevelOverride !== null && selectedWorkflowVariants.length > 0 ? (
-                      <div className="flex flex-col gap-1" data-testid="wizard-variant-disabled-by-tuning">
-                        <span className="text-xs font-medium text-text-secondary">Variant</span>
-                        <div className="w-full rounded-input border border-border-secondary bg-bg-primary px-2 py-1.5 text-xs text-text-tertiary opacity-60">
-                          Baseline (no variant) — disabled: workflow configuration override active
-                        </div>
-                      </div>
-                    ) : (
-                      <VariantSelector
-                        workflowId={selection.workflowId}
-                        value={variantSelection}
-                        onChange={setVariantSelection}
-                        id="wizard-variant"
-                      />
-                    )}
+                    <VariantSelector
+                      workflowId={selection.workflowId}
+                      tuningLevel={launchTuningLevel}
+                      value={variantSelection}
+                      onChange={setVariantSelection}
+                      id="wizard-variant"
+                    />
 
                     {baseBranchControl}
 

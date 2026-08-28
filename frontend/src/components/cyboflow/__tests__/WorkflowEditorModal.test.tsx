@@ -1394,6 +1394,7 @@ describe('WorkflowEditorModal — save-target prompt', () => {
       execution_model: null,
       agent_provider: null,
       agent_runtime: null,
+      tuning_level: null,
       status: 'draft',
       weight: 1,
       archived_at: null,

@@ -29,6 +29,7 @@
  */
 import {
   TUNING_LEVELS,
+  TUNING_LEVEL_LABELS,
   type TuningLevel,
 } from '../../../../shared/tuning/workflowTuning';
 
@@ -37,22 +38,22 @@ const LEVEL_COPY: Readonly<
   Record<TuningLevel, { label: string; tag: string; desc: string }>
 > = {
   efficient: {
-    label: 'Efficient',
+    label: TUNING_LEVEL_LABELS.efficient,
     tag: '~0.5×',
     desc: 'Preset — fewest steps, cheaper models, review once per sprint. Drafts, chores, low-risk changes.',
   },
   standard: {
-    label: 'Standard',
+    label: TUNING_LEVEL_LABELS.standard,
     tag: '1.0×',
     desc: 'The aligned defaults — balanced models on every step, every check on.',
   },
   thorough: {
-    label: 'Thorough',
+    label: TUNING_LEVEL_LABELS.thorough,
     tag: '~2.6×',
     desc: 'Preset — every check on, strongest models. Ship-critical or gnarly work.',
   },
   custom: {
-    label: 'Custom',
+    label: TUNING_LEVEL_LABELS.custom,
     tag: '—',
     desc: 'Your definition — edit it in Advanced.',
   },

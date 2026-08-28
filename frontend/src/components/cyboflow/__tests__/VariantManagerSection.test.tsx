@@ -92,6 +92,7 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
     execution_model: null,
     agent_provider: null,
     agent_runtime: null,
+    tuning_level: null,
     weight: 1,
     status: 'draft',
     archived_at: null,
@@ -120,6 +121,7 @@ function makeRotation(overrides: Partial<RotationExperimentSummary> = {}): Rotat
   return {
     experimentId: 'exp_1',
     workflowId: 'wf-1',
+    tuningLevel: null,
     startedAt: '2026-07-01T00:00:00.000Z',
     arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }],
     runCount: 12,
@@ -149,7 +151,7 @@ beforeEach(() => {
 describe('VariantManagerSection', () => {
   it('(a) create-from-current calls variants.create then invalidates', async () => {
     setVariantsHook({ variants: [], baseline: null, loading: false, error: null });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-manager-create-button'));
     fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'My Variant' } });
@@ -164,7 +166,7 @@ describe('VariantManagerSection', () => {
   it('(a2) create-from-current opens the new variant in the editor', async () => {
     setVariantsHook({ variants: [], baseline: null, loading: false, error: null });
     mockCreate.mockResolvedValue(makeVariant({ id: 'wfv_new', label: 'My Variant' }));
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-manager-create-button'));
     fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'My Variant' } });
@@ -184,7 +186,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
 
@@ -201,7 +203,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-pause-button-wfv_1'));
 
@@ -217,7 +219,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-retire-button-wfv_1'));
 
@@ -233,7 +235,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     const input = screen.getByTestId('variant-weight-input-wfv_1');
     fireEvent.change(input, { target: { value: '5' } });
@@ -252,7 +254,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.queryByTestId('variant-weight-input-wfv_1')).not.toBeInTheDocument();
     expect(screen.getByTestId('variant-activate-button-wfv_1')).toBeInTheDocument();
@@ -265,7 +267,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-delete-button-wfv_1'));
 
@@ -288,7 +290,7 @@ describe('VariantManagerSection', () => {
         'WorkflowRegistry.deleteVariant: variant wfv_1 has run history (3 run(s)); retire it instead of deleting',
       ),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-delete-button-wfv_1'));
 
@@ -306,7 +308,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.queryByTestId('mock-variant-editor-modal')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('variant-edit-button-wfv_1'));
@@ -320,7 +322,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-rename-button-wfv_1'));
     expect(screen.getByTestId('flow-name-input')).toHaveValue('Variant A');
@@ -342,7 +344,7 @@ describe('VariantManagerSection', () => {
       error: null,
     });
     mockUpdate.mockRejectedValue(new Error('WorkflowRegistry.updateVariant: label already exists'));
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('variant-rename-button-wfv_1'));
     fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'Variant B' } });
@@ -356,7 +358,7 @@ describe('VariantManagerSection', () => {
 
   it('(i) create button is DISABLED with a save-first hint when the editor is dirty', () => {
     setVariantsHook({ variants: [], baseline: null, loading: false, error: null });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} editorDirty />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} editorDirty />);
 
     expect(screen.getByTestId('variant-manager-create-button')).toBeDisabled();
     expect(screen.getByTestId('variant-manager-dirty-hint')).toHaveTextContent(/save the workflow first/i);
@@ -364,7 +366,7 @@ describe('VariantManagerSection', () => {
 
   it('(j) create button is ENABLED with no hint when the editor is clean (default)', () => {
     setVariantsHook({ variants: [], baseline: null, loading: false, error: null });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.getByTestId('variant-manager-create-button')).not.toBeDisabled();
     expect(screen.queryByTestId('variant-manager-dirty-hint')).not.toBeInTheDocument();
@@ -379,7 +381,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.getByTestId('variant-row-baseline')).toHaveTextContent('Baseline');
     expect(screen.getByTestId('baseline-status-pill')).toHaveTextContent('Baseline');
@@ -397,7 +399,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.getByTestId('baseline-status-pill')).toHaveTextContent('In rotation');
     expect(screen.getByTestId('baseline-weight-input')).toBeInTheDocument();
@@ -410,7 +412,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     fireEvent.click(screen.getByTestId('baseline-activate-button'));
 
@@ -427,7 +429,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     expect(screen.getByTestId('baseline-status-pill')).toHaveTextContent('In rotation');
     fireEvent.click(screen.getByTestId('baseline-pause-button'));
@@ -444,7 +446,7 @@ describe('VariantManagerSection', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
 
     const input = screen.getByTestId('baseline-weight-input');
     fireEvent.change(input, { target: { value: '7' } });
@@ -462,7 +464,7 @@ describe('VariantManagerSection', () => {
 describe('VariantManagerSection — archive (migration 116)', () => {
   it('(v) Archive calls setArchived({ archived: true }) then invalidates', async () => {
     setVariantsHook({ variants: [makeVariant()], baseline: null, loading: false, error: null });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('variant-archive-button-wfv_1'));
@@ -481,7 +483,7 @@ describe('VariantManagerSection — archive (migration 116)', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     // Collapsed by default — only the toggle, carrying the count.
@@ -500,7 +502,7 @@ describe('VariantManagerSection — archive (migration 116)', () => {
 
   it('(w2) renders no toggle at all when nothing is archived', async () => {
     setVariantsHook({ variants: [makeVariant()], baseline: null, loading: false, error: null });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     expect(screen.queryByTestId('variant-manager-show-archived-toggle')).toBeNull();
@@ -514,7 +516,7 @@ describe('VariantManagerSection — archive (migration 116)', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('variant-archive-button-wfv_1'));
@@ -532,7 +534,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
       loading: false,
       error: null,
     });
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
@@ -553,7 +555,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 }] }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
@@ -572,7 +574,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }] }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('variant-pause-button-wfv_1'));
@@ -591,7 +593,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 2 }] }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     fireEvent.click(screen.getByTestId('baseline-pause-button'));
@@ -610,7 +612,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 2 }] }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     const input = screen.getByTestId('variant-weight-input-wfv_1');
@@ -631,7 +633,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }] }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     const input = screen.getByTestId('variant-weight-input-wfv_1');
@@ -654,7 +656,7 @@ describe('VariantManagerSection — rotation supersede-confirm', () => {
     mockGetRunningRotation.mockResolvedValue(
       makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 2 }], runCount: 4 }),
     );
-    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    render(<VariantManagerSection tuningLevel={null} workflowId="wf-1" projectId={1} />);
     await flushRotationLoad();
 
     // Cancel first: no mutation fires and the modal closes.

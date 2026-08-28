@@ -32,6 +32,7 @@ import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useWorkflowVariants } from '../../stores/variantsStore';
 import { pickableVariants } from './variantSelectorLogic';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { BASELINE_VARIANT_SENTINEL, QUICK_ARM_SENTINEL } from '../../../../shared/types/experiments';
 import { resolveSprintMaxTasks } from '../../../../shared/types/sprintBatch';
 import { useConfigStore } from '../../stores/configStore';
@@ -244,6 +245,14 @@ export interface ABTestLaunchModalProps {
    * swaps the seed-idea picker for the required seed-task multi-select.
    */
   workflowName: string;
+  /**
+   * The tuning level both arms are drawn from (migration 125). Variants are
+   * level-scoped and the server refuses a cross-level head-to-head — comparing
+   * an Efficient variant with a Thorough one measures the LEVELS, not the
+   * variants — so the arm pickers only offer this level's set. NULL for a flow
+   * outside the level system.
+   */
+  tuningLevel: TuningLevel | null;
   onClose: () => void;
 }
 
@@ -253,6 +262,7 @@ export function ABTestLaunchModal({
   projects,
   workflowId,
   workflowName,
+  tuningLevel,
   onClose,
 }: ABTestLaunchModalProps): React.JSX.Element {
   const isSprint = workflowName === 'sprint';
@@ -270,7 +280,7 @@ export function ABTestLaunchModal({
   // correct it. The modal unmounts on close, so this re-initialises per open.
   const [selectedProjectId, setSelectedProjectId] = useState<number>(projectId);
   const showProjectPicker = (projects?.length ?? 0) > 1;
-  const { variants, loaded } = useWorkflowVariants(workflowId);
+  const { variants, loaded } = useWorkflowVariants(workflowId, tuningLevel);
   const options = pickableVariants(variants);
 
   const [variantAId, setVariantAId] = useState<string>('');
@@ -298,13 +308,15 @@ export function ABTestLaunchModal({
   // is ready to submit. With EXACTLY one pickable variant — the primary use case —
   // seed arm A = the current workflow (baseline) and arm B = that variant, so a
   // one-variant workflow can be tested head-to-head against the live workflow. With
-  // >=2 variants, seed the first two distinct variants. Guarded per-workflowId so it
-  // re-seeds for a newly targeted workflow without ever overwriting a later choice.
+  // >=2 variants, seed the first two distinct variants. Guarded per workflow AND
+  // tuning level (migration 125 — the arms come from one level's pool) so it
+  // re-seeds for a newly targeted pool without ever overwriting a later choice.
   const seededForWorkflowId = useRef<string | null>(null);
+  const poolKey = `${workflowId}::${tuningLevel ?? ''}`;
   useEffect(() => {
     if (!isOpen || !loaded) return;
-    if (seededForWorkflowId.current === workflowId) return;
-    seededForWorkflowId.current = workflowId;
+    if (seededForWorkflowId.current === poolKey) return;
+    seededForWorkflowId.current = poolKey;
     if (options.length === 0) {
       // No variants at all: the only valid pairs involve the quick sentinel
       // (baseline-vs-quick / quick-vs-quick), so seed the former — the modal is
@@ -319,7 +331,7 @@ export function ABTestLaunchModal({
       setVariantBId(options[1]?.id ?? '');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, loaded, workflowId]);
+  }, [isOpen, loaded, poolKey]);
 
   // Sprint seed-task load (only for the task-driven sprint workflow). Loads the
   // project's tasks + boards and keeps ONLY the sprint-eligible ones, EXACTLY as

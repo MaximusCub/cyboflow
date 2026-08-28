@@ -126,6 +126,7 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
     execution_model: null,
     agent_provider: null,
     agent_runtime: null,
+    tuning_level: null,
     weight: 1,
     status: 'active',
     archived_at: null,
@@ -167,7 +168,7 @@ describe('ABTestLaunchModal — no pickable variants', () => {
       error: null,
     });
     render(
-      <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />,
+      <ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />,
     );
     // Baseline-vs-quick and quick-vs-quick are valid server-side, so a
     // zero-variant workflow must not be blocked — the hint is informational.
@@ -191,7 +192,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('renders selects (not the explainer), seeded to baseline (A) vs the variant (B), submit enabled', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.queryByTestId('ab-test-insufficient-variants')).not.toBeInTheDocument();
     const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
     const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
@@ -204,7 +205,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('submit calls startSideBySide with the baseline sentinel for arm A', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
     await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
@@ -217,7 +218,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('picking baseline for BOTH arms disables submit and shows the different-arms hint', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     // Set arm B to baseline too — now A === B === baseline.
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), {
       target: { value: BASELINE_VARIANT_SENTINEL },
@@ -243,7 +244,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('renders both selects, seeded to the first two distinct pickable variants; excludes paused/retired', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
     const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
     expect(selectA.value).toBe('a');
@@ -255,7 +256,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('picking the same variant for both arms disables submit and shows the hint', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: 'a' } });
     expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
     expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
@@ -263,7 +264,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
 
   it('seedless submit: mutate is called with no seedIdeaId key', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -274,7 +275,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('seeded submit: picking a seed idea threads seedIdeaId into the mutate call', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
 
     fireEvent.click(screen.getByTestId('ab-test-add-seed-idea'));
     fireEvent.click(screen.getByText('pick IDEA-1'));
@@ -294,7 +295,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
 
   it('on success: bootstraps arm A panels, sets active run/project, navigates to session, and closes', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -309,7 +310,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   it('mutation failure surfaces the typed backend error and does not navigate', async () => {
     mockStartSideBySide.mockRejectedValue(new Error('the two arms must use different variants'));
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -323,7 +324,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('planner (non-sprint) shows the seed-idea picker and NOT the seed-task picker', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.getByTestId('ab-test-add-seed-idea')).toBeInTheDocument();
     expect(screen.queryByTestId('ab-test-seed-tasks')).not.toBeInTheDocument();
   });
@@ -343,7 +344,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('the "Quick session" option is offered in both selects', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(
       within(screen.getByTestId('ab-test-variant-a')).getByRole('option', { name: 'Quick session' }),
     ).toBeInTheDocument();
@@ -353,7 +354,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('selecting quick for arm A reveals ONLY arm A\'s config sub-form', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.queryByTestId('ab-test-quick-config-a')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
@@ -363,7 +364,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('quick-vs-quick is submittable: no same-variant hint, submit enabled', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
 
@@ -374,14 +375,14 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('two identical REAL variants still block submit and show the hint (unchanged non-quick behavior)', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: 'a' } });
     expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
     expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
   });
 
   it('submit sends quickConfigA (and not quickConfigB) when only arm A is quick', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
@@ -405,7 +406,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('submit sends BOTH quickConfigA and quickConfigB for quick-vs-quick', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
 
@@ -426,7 +427,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
   it('navigation targets arm B (the quick arm) via the quick-session host when only arm B is quick', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
@@ -442,7 +443,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
   it('navigation targets arm A via the quick-session host when only arm A is quick', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
@@ -455,7 +456,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
 
   it('navigation targets arm A (the default) via the quick-session host for quick-vs-quick', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
 
@@ -468,7 +469,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it("selecting quick for arm B reveals ONLY arm B's config sub-form", () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.queryByTestId('ab-test-quick-config-b')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
@@ -478,7 +479,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it('switching arm A from quick back to a real variant hides the sub-form and omits quickConfigA from submit', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
     expect(screen.getByTestId('ab-test-quick-config-a')).toBeInTheDocument();
 
@@ -494,7 +495,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it("changing arm A's quick-config fields (runtime, model, reasoning effort, permission mode) updates the submitted quickConfigA", async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
 
     const configA = screen.getByTestId('ab-test-quick-config-a');
@@ -525,7 +526,7 @@ describe('ABTestLaunchModal — quick-arm option (TASK-118)', () => {
   });
 
   it("arm A and arm B quick configs are wired independently — changing each arm's model updates only that arm's payload", async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-a'), { target: { value: QUICK_ARM_SENTINEL } });
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: QUICK_ARM_SENTINEL } });
 
@@ -588,7 +589,7 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
       // Ineligible: terminal (done) stage.
       { ...eligibleTask('t4', 'TSK-4', 'Done'), stage_id: 'stage-done' } as unknown as BacklogTaskItem,
     ]);
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
 
     // Seed-task section is shown; the idea picker is NOT.
     expect(await screen.findByTestId('ab-test-seed-tasks')).toBeInTheDocument();
@@ -603,7 +604,7 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
 
   it('submit is disabled until >=1 task is selected (hint shown), then carries seedTaskIds', async () => {
     mockTasksList.mockResolvedValue([eligibleTask('t1', 'TSK-1', 'First'), eligibleTask('t2', 'TSK-2', 'Second')]);
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
 
     await screen.findByTestId('ab-test-seed-task-item-t1');
     // No task selected → submit disabled + required hint.
@@ -634,7 +635,7 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
       eligibleTask('t1', 'TSK-1', 'First'),
       eligibleTask('t2', 'TSK-2', 'Second'),
     ]);
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
     await screen.findByTestId('ab-test-seed-task-item-t1');
 
     fireEvent.click(screen.getByTestId('ab-test-select-all-tasks'));
@@ -654,7 +655,7 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
       Promise.resolve(projectId === 2 ? [eligibleTask('t9', 'TSK-9', 'On project 2')] : []),
     );
     render(
-      <ABTestLaunchModal
+      <ABTestLaunchModal tuningLevel={null}
         isOpen
         projectId={1}
         projects={[
@@ -685,12 +686,12 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
   it('project picker is hidden with 0–1 projects', () => {
     mockTasksList.mockResolvedValue([]);
     const { rerender } = render(
-      <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />,
+      <ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />,
     );
     expect(screen.queryByTestId('ab-test-project')).not.toBeInTheDocument();
 
     rerender(
-      <ABTestLaunchModal
+      <ABTestLaunchModal tuningLevel={null}
         isOpen
         projectId={1}
         projects={[{ id: 1, name: 'Alpha' }]}

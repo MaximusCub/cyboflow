@@ -18,9 +18,15 @@
  * Shared by WorkflowPicker's Configure section and SessionStartWizard's
  * Advanced options so the option logic + default never drifts between the two
  * launch surfaces.
+ *
+ * Variants are TUNING-LEVEL scoped (migration 125): the options are the variants
+ * of the level this launch will run at, since only those can rotate into it or
+ * be pinned for it. Changing the level therefore re-seeds the selection — a pin
+ * carried across levels would name a variant the launch would refuse.
  */
 import { useEffect, useRef } from 'react';
 import { useWorkflowVariants } from '../../stores/variantsStore';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import {
   buildVariantSelectorOptions,
   defaultVariantSelection,
@@ -31,6 +37,11 @@ import {
 
 interface VariantSelectorProps {
   workflowId: string;
+  /**
+   * The tuning level this launch will run at (migration 125) — the pool whose
+   * variants are offered. `null` for a flow outside the level system.
+   */
+  tuningLevel: TuningLevel | null;
   value: VariantSelection;
   onChange: (selection: VariantSelection) => void;
   /** DOM id for the <select> (label association). */
@@ -41,28 +52,42 @@ interface VariantSelectorProps {
 
 export function VariantSelector({
   workflowId,
+  tuningLevel,
   value,
   onChange,
   id = 'variant-select',
   label = 'Variant',
 }: VariantSelectorProps): React.JSX.Element | null {
-  const { variants, loaded } = useWorkflowVariants(workflowId);
+  const { variants, loaded } = useWorkflowVariants(workflowId, tuningLevel);
   const options = buildVariantSelectorOptions(variants);
 
   // One-shot default seeding: the FIRST time this workflow's variant list
   // resolves, hand the parent the architect-specified default ("Rotation
   // (auto)" when eligible, else "Baseline") so an un-touched picker launches
-  // with the right behavior. Guarded per-workflowId so switching the picker's
-  // target workflow re-seeds once for the new workflow, but the user's own
-  // subsequent choice is never overwritten.
-  const seededForWorkflowId = useRef<string | null>(null);
+  // with the right behavior. Guarded per workflow AND LEVEL so switching either
+  // the picker's target workflow or its tuning level re-seeds once for the new
+  // pool, while the user's own choice within a pool is never overwritten. The
+  // level belongs in the key, not just the filter: a variant pinned under
+  // Standard is not a member of Thorough's pool, so carrying the pin across
+  // would send the launcher an id it refuses.
+  const seededForPool = useRef<string | null>(null);
+  const poolKey = `${workflowId}::${tuningLevel ?? ''}`;
   useEffect(() => {
     if (!loaded) return;
-    if (seededForWorkflowId.current === workflowId) return;
-    seededForWorkflowId.current = workflowId;
-    if (options.length > 0) onChange(defaultVariantSelection(variants));
+    if (seededForPool.current === poolKey) return;
+    seededForPool.current = poolKey;
+    if (options.length > 0) {
+      onChange(defaultVariantSelection(variants));
+      return;
+    }
+    // An EMPTY pool offers nothing, so this renders nothing and stays silent —
+    // a variant-less workflow launches exactly as it always has. The one
+    // exception is a pin inherited from the pool we just left: it names a
+    // variant this launch would refuse, so it is dropped to 'rotation' (the
+    // no-op selection that sends no variant fields at all).
+    if (value.mode === 'variant') onChange({ mode: 'rotation' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, workflowId]);
+  }, [loaded, poolKey]);
 
   if (!loaded || options.length === 0) return null;
 

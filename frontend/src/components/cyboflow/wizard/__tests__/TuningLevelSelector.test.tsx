@@ -7,8 +7,8 @@
  *       shared "Save as default" CTA instead);
  *   (b) picking a segment reports it via onChange;
  *   (c) Custom is disabled with a hint while the slot is empty, selectable once filled;
- *   (d) `disabled` greys out every segment (incl. Custom) and shows the
- *       variant-pinned note.
+ *   (d) — removed: migration 125 scoped variants to a level, so a pinned variant
+ *       no longer contradicts a level pick and the control has no disabled state.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -84,24 +84,6 @@ describe('TuningLevelSelector', () => {
     expect(onChange).toHaveBeenCalledWith('custom');
   });
 
-  it('(d) disabled=true greys out every segment, incl. Custom with a slot, and shows the variant note', () => {
-    const onChange = vi.fn();
-    render(
-      <TuningLevelSelector
-        value="thorough"
-        customSlotAvailable
-        disabled
-        onChange={onChange}
-      />,
-    );
-    for (const level of ['efficient', 'standard', 'thorough', 'custom'] as const) {
-      expect(screen.getByTestId(`wizard-tuning-level-${level}`)).toBeDisabled();
-    }
-    fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
-    expect(onChange).not.toHaveBeenCalled();
-    expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
-  });
-
   it('(e) renders no estimate lines and no caption when estimateLabels is omitted', () => {
     render(
       <TuningLevelSelector
@@ -140,7 +122,7 @@ describe('TuningLevelSelector', () => {
     expect(screen.queryByTestId('wizard-tuning-estimate-caption')).not.toBeInTheDocument();
   });
 
-  it('(h) renders a per-level helper sentence that tracks the selected level, hidden while disabled', () => {
+  it('(h) renders a per-level helper sentence that tracks the selected level', () => {
     const { rerender } = render(
       <TuningLevelSelector
         value="standard"
@@ -163,12 +145,9 @@ describe('TuningLevelSelector', () => {
       <TuningLevelSelector
         value="thorough"
         customSlotAvailable={false}
-        disabled
         onChange={vi.fn()}
       />,
     );
-    // Disabled (variant pinned) → the variant note replaces the helper.
-    expect(screen.queryByTestId('wizard-tuning-level-desc')).not.toBeInTheDocument();
-    expect(screen.getByTestId('wizard-tuning-level-variant-note')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-tuning-level-desc')).toHaveTextContent(/strongest models/i);
   });
 });

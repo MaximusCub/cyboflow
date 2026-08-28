@@ -39,7 +39,12 @@ import { WorkflowEditorModal } from '../cyboflow/WorkflowEditorModal';
 import { AgentEditorModal } from '../cyboflow/agents/AgentEditorModal';
 import { ABTestLaunchModal } from '../cyboflow/ABTestLaunchModal';
 import type { WorkflowGalleryEntry, AgentGalleryEntry } from '../../stores/workflowsStore';
-import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
+import {
+  isCyboflowWorkflowName,
+  type WorkflowDefinition,
+  type PermissionMode,
+} from '../../../../shared/types/workflows';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 
 /** First-load skeleton — two placeholder section blocks under the header. */
 function LoadingSkeleton(): React.JSX.Element {
@@ -220,6 +225,13 @@ export function WorkflowsView(): React.JSX.Element {
     workflowId: string;
     workflowName: string;
     isGlobal: boolean;
+    /**
+     * The level whose variants the head-to-head draws its arms from (migration
+     * 125) — the flow's SAVED level, since a head-to-head compares variants
+     * within one level and the arms launch at whatever the flow currently runs.
+     * NULL for a flow outside the level system.
+     */
+    tuningLevel: TuningLevel | null;
   } | null>(null);
 
   /**
@@ -395,6 +407,7 @@ export function WorkflowsView(): React.JSX.Element {
       workflowId: entry.row.id,
       workflowName: entry.row.name,
       isGlobal: entry.row.project_id === null,
+      tuningLevel: isCyboflowWorkflowName(entry.row.name) ? entry.row.tuning_level : null,
     });
   };
 
@@ -630,6 +643,7 @@ export function WorkflowsView(): React.JSX.Element {
           projects={abTestTarget.isGlobal ? projectList : undefined}
           workflowId={abTestTarget.workflowId}
           workflowName={abTestTarget.workflowName}
+          tuningLevel={abTestTarget.tuningLevel}
           onClose={() => setAbTestTarget(null)}
         />
       )}

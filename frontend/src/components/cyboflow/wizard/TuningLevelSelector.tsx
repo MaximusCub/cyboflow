@@ -16,10 +16,9 @@
  * segments (interactive/terracotta), so a stored definition always reads as a
  * different KIND of choice from a calibrated preset.
  *
- * `disabled` (+ its note) greys out every segment — set by the parent when a
- * non-baseline variant is pinned (D4's mutual-exclusion rule): a pinned
- * variant runs its own frozen definition, so a level choice would be
- * meaningless and the server rejects `tuningLevel` + `variantId` together.
+ * There is no whole-control disabled state: variants are scoped to a tuning
+ * level (migration 125), so a pinned variant no longer contradicts a level pick
+ * — the level chooses the POOL and the variant picker chooses inside it.
  *
  * `estimateLabels` (plan §5 phase 7, `shared/tuning/workflowTuningEstimates`)
  * renders a small secondary line under whichever segment(s) supply one. Those
@@ -28,14 +27,11 @@
  * one-line "excl. eval" caption below the segments, once per surface.
  */
 import { cn } from '../../../utils/cn';
-import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
-
-const TUNING_LEVEL_LABELS: Record<TuningLevel, string> = {
-  efficient: 'Efficient',
-  standard: 'Standard',
-  thorough: 'Thorough',
-  custom: 'Custom',
-};
+import {
+  TUNING_LEVELS,
+  TUNING_LEVEL_LABELS,
+  type TuningLevel,
+} from '../../../../../shared/tuning/workflowTuning';
 
 /** One-line helper under the segments, per selected level — kept in step with
  *  the flow editor's TuningLevelDial card copy so the two surfaces describe a
@@ -53,8 +49,6 @@ export interface TuningLevelSelectorProps {
   value: TuningLevel;
   /** Whether the workflow's `spec_json` slot holds a real custom definition. */
   customSlotAvailable: boolean;
-  /** Grey out every segment (a non-baseline variant is pinned — D4 mutual exclusion). */
-  disabled?: boolean;
   onChange: (level: TuningLevel) => void;
   /** Optional per-level token-estimate seam (plan §5 phase 7) — no query wired yet. */
   estimateLabels?: Partial<Record<TuningLevel, string>>;
@@ -64,7 +58,6 @@ export interface TuningLevelSelectorProps {
 export function TuningLevelSelector({
   value,
   customSlotAvailable,
-  disabled = false,
   onChange,
   estimateLabels,
   id = 'wizard-tuning-level',
@@ -75,7 +68,7 @@ export function TuningLevelSelector({
       <div className="flex gap-1.5" role="radiogroup" aria-label="Workflow configuration" id={id}>
         {TUNING_LEVELS.map((level) => {
           const isCustom = level === 'custom';
-          const segmentDisabled = disabled || (isCustom && !customSlotAvailable);
+          const segmentDisabled = isCustom && !customSlotAvailable;
           const selected = value === level;
           const estimate = estimateLabels?.[level];
           return (
@@ -88,9 +81,7 @@ export function TuningLevelSelector({
               onClick={() => onChange(level)}
               data-testid={`wizard-tuning-level-${level}`}
               title={
-                !disabled && isCustom && !customSlotAvailable
-                  ? 'No custom definition yet — create one in the flow editor'
-                  : undefined
+                segmentDisabled ? 'No custom definition yet — create one in the flow editor' : undefined
               }
               className={cn(
                 // Matched to AgentPermissionModeSelector's row styling so the
@@ -113,16 +104,9 @@ export function TuningLevelSelector({
           );
         })}
       </div>
-      {!disabled && (
-        <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-desc">
-          {TUNING_LEVEL_DESCRIPTIONS[value]}
-        </p>
-      )}
-      {disabled && (
-        <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-variant-note">
-          A pinned variant runs its own definition — tuning level is disabled for this run.
-        </p>
-      )}
+      <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-desc">
+        {TUNING_LEVEL_DESCRIPTIONS[value]}
+      </p>
 
       {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
         <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-estimate-caption">

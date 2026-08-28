@@ -11,10 +11,11 @@
  * separate subscription — variant edits are always user-initiated from the same
  * client, unlike run status which needs a push channel).
  */
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
+import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
 import type { AppRouter } from '../../../shared/types/trpc';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
@@ -116,8 +117,18 @@ export const useVariantsStore = create<VariantsState>((set, get) => ({
  * Hook: a workflow's variant list, fetched on mount / whenever `workflowId`
  * changes. Pass `null` to skip fetching (e.g. create-mode editor with no
  * workflow row yet) — returns an empty, not-loaded result.
+ *
+ * `tuningLevel` (migration 125) narrows the returned rows to the variants that
+ * challenge ONE level — the only ones that can rotate into, or be pinned for, a
+ * launch at that level. The fetch itself is still per-workflow (one request
+ * backs every level's view), so switching levels is a re-filter, not a refetch.
+ * Pass `undefined` for the un-narrowed list; `null` is a REAL level meaning "the
+ * flow has no levels", and narrows to exactly those rows.
  */
-export function useWorkflowVariants(workflowId: string | null): {
+export function useWorkflowVariants(
+  workflowId: string | null,
+  tuningLevel?: TuningLevel | null,
+): {
   /** LIVE variants only — archived rows are split out below. */
   variants: WorkflowVariantRow[];
   /** Archived variants (migration 116), for the manager's "Show archived" view. */
@@ -137,11 +148,19 @@ export function useWorkflowVariants(workflowId: string | null): {
 
   // Split ONCE per row-array identity: every caller but the manager wants the
   // live set, and returning a fresh filtered array each render would defeat the
-  // memoized consumers downstream.
-  const variants = useMemo(() => allVariants.filter((v) => v.archived_at === null), [allVariants]);
+  // memoized consumers downstream. The level narrowing folds into the same pass.
+  const inLevel = useCallback(
+    (v: WorkflowVariantRow): boolean =>
+      tuningLevel === undefined || (v.tuning_level ?? null) === tuningLevel,
+    [tuningLevel],
+  );
+  const variants = useMemo(
+    () => allVariants.filter((v) => v.archived_at === null && inLevel(v)),
+    [allVariants, inLevel],
+  );
   const archivedVariants = useMemo(
-    () => allVariants.filter((v) => v.archived_at !== null),
-    [allVariants],
+    () => allVariants.filter((v) => v.archived_at !== null && inLevel(v)),
+    [allVariants, inLevel],
   );
 
   useEffect(() => {
