@@ -327,10 +327,11 @@ mix on those surfaces.
 Flow-editor mix dial (sibling of `TuningLevelDial`) and Insights UI are
 follow-ups, not v1.
 
-## Open items carried from the canvas (flagged, not blocking)
+## Open items carried from the canvas
 
-1. `write-tests` classed execution (flip to verification = one class-table edit).
-2. Codex-only launches programmatic, not orchestrated (D3 rationale) — canvas
-   said orchestrated; needs Krishna's ack.
-3. `haiku → luna·low` assumed (unspecified in the calibration comment).
+1. `write-tests` classed execution (flip to verification = one class-table edit)
+   — still open, awaiting Krishna's call.
+2. ~~Codex-only launches programmatic, not orchestrated~~ — **DECIDED 2026-08-28:
+   Krishna ack'd programmatic** (D3 rationale stands; canvas superseded).
+3. ~~`haiku → luna·low`~~ — **DECIDED 2026-08-28: Krishna ack'd luna·low.**
 4. Compound/verify-setup: mixed segments disabled (empty verification class).
