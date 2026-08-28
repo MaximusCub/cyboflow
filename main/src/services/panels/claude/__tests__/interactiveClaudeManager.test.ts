@@ -2089,6 +2089,98 @@ describe('InteractiveClaudeManager', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 'turn-start' — the per-turn START edge a persistent REPL otherwise cannot
+  // report. 'spawned' fires once per PROCESS, so before this event only the
+  // composer path (sessions:input -> markRunning) could flip a quick session to
+  // 'running'; a turn started by raw terminal keystrokes (how a TUI
+  // AskUserQuestion is answered) left the session at its resting status for the
+  // whole turn, which froze sessions.idle_since and kept the row out of the
+  // board's "Working" group. Emitted on the SAME edge the ROB-5 mark arms.
+  // -------------------------------------------------------------------------
+  describe("'turn-start' emission (the raw-keystroke status seam)", () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    async function spawnLive(panelId: string, prompt = 'go'): Promise<{ sessionId: string; spawn: Promise<void> }> {
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: `sess-${panelId}`, worktreePath: `/tmp/wt-${panelId}`, prompt });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[mgr.fakeSources.length - 1].started);
+      return { sessionId: `sess-${panelId}`, spawn };
+    }
+
+    async function drain(spawn: Promise<void>): Promise<void> {
+      mgr.ptys[mgr.ptys.length - 1].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    }
+
+    it('a submitted line that starts a turn emits turn-start with { panelId, sessionId, runId }', async () => {
+      const { sessionId, spawn } = await spawnLive('panel-ts1');
+      const seen: Array<{ panelId: string; sessionId: string; runId: string }> = [];
+      mgr.on('turn-start', (p) => seen.push(p as { panelId: string; sessionId: string; runId: string }));
+
+      mgr.notifyTurnEnd('panel-ts1'); // the REPL parks (e.g. on a question)
+      mgr.sendInput('panel-ts1', 'yes, rebase and push\r'); // the raw-terminal answer
+
+      expect(seen).toEqual([{ panelId: 'panel-ts1', sessionId, runId: 'panel-ts1' }]);
+      await drain(spawn);
+    });
+
+    it('does NOT re-emit for a second submitted line inside the same turn (arming EDGE only)', async () => {
+      const { spawn } = await spawnLive('panel-ts2');
+      const seen: unknown[] = [];
+      mgr.on('turn-start', (p) => seen.push(p));
+
+      mgr.notifyTurnEnd('panel-ts2');
+      mgr.sendInput('panel-ts2', 'first\r');
+      mgr.sendInput('panel-ts2', 'second\r'); // already in flight
+      expect(seen).toHaveLength(1);
+
+      // A new turn boundary re-arms the edge, so the NEXT answer emits again.
+      mgr.notifyTurnEnd('panel-ts2');
+      mgr.sendInput('panel-ts2', 'third\r');
+      expect(seen).toHaveLength(2);
+      await drain(spawn);
+    });
+
+    it('a bare Enter with no composed body starts nothing and emits nothing', async () => {
+      const { spawn } = await spawnLive('panel-ts3');
+      const seen: unknown[] = [];
+      mgr.on('turn-start', (p) => seen.push(p));
+
+      mgr.notifyTurnEnd('panel-ts3');
+      mgr.sendInput('panel-ts3', '\r');
+      expect(seen).toHaveLength(0);
+
+      // A navigation keystroke (no CR/LF) is not a submit either — but it DOES
+      // leave composed body behind, so the following Enter is a real turn.
+      mgr.sendInput('panel-ts3', '\x1b[B');
+      expect(seen).toHaveLength(0);
+      mgr.sendInput('panel-ts3', '\r');
+      expect(seen).toHaveLength(1);
+      await drain(spawn);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // (T2) __quick__ sentinel step-append suppression: a quick-session run row
   // points at the per-project __quick__ sentinel workflow, which has no real
   // steps — buildStepReportingAppendForRun must return '' BY NAME even when a

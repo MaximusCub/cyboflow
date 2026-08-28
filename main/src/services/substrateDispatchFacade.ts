@@ -123,6 +123,15 @@ export interface SubstrateDispatchFacadeOptions {
 interface LaneWiring {
   readonly output: boolean;
   readonly spawned: boolean;
+  /**
+   * The persistent-REPL turn BOUNDARY pair — 'turn-start' and 'turn-end'. One
+   * flag because they are the same fact seen from both ends and no lane wants
+   * one without the other: a consumer that rests a session on turn-end must see
+   * the turn-start that made it busy, or it silently no-ops (which is exactly
+   * the defect that motivated 'turn-start'; see InteractiveTurnStartPayload).
+   * Only a PTY lane has boundaries to report — an SDK lane's per-turn edges are
+   * 'spawned'/'exit'.
+   */
   readonly turnEnd: boolean;
   /**
    * Keep the PTY backlog when the process exits NON-ZERO, so a terminal that
@@ -444,10 +453,16 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       });
     }
     if (wiring.turnEnd) {
-      // Turn-end fan-in (TASK-818 / IDEA-030) — each persistent-REPL assistant
-      // turn boundary emits 'turn-end'; re-emitted by reference to RunExecutor's
-      // event-driven rest handler. The payload also carries { panelId, runId } —
+      // Turn-boundary fan-in (TASK-818 / IDEA-030) — a persistent REPL emits
+      // 'turn-start' when a submitted line starts a turn and 'turn-end' at the
+      // assistant turn boundary; both are re-emitted by reference (turn-end to
+      // RunExecutor's event-driven rest handler, turn-start to index.ts's
+      // quick-session status flip). Both payloads carry { panelId, runId } —
       // a second mapping source, live even before any PTY byte flows.
+      this.subscribe(manager, 'turn-start', (payload) => {
+        this.recordInteractivePanelMapping(payload, manager);
+        this.emit('turn-start', payload);
+      });
       this.subscribe(manager, 'turn-end', (payload) => {
         this.recordInteractivePanelMapping(payload, manager);
         this.emit('turn-end', payload);

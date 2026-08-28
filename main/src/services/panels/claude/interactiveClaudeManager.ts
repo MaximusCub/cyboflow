@@ -302,6 +302,34 @@ export interface InteractiveTurnEndPayload {
   runId: string;
 }
 
+/**
+ * Payload of the 'turn-start' event emitted when a submitted line actually
+ * STARTS a turn on a persistent interactive REPL — the exact edge the ROB-5
+ * in-flight mark arms (see {@link InteractiveClaudeManager.sendInput}).
+ *
+ * It exists because 'spawned' is not a per-turn signal on a PTY lane: a
+ * persistent REPL spawns ONCE and then serves every later turn through
+ * sendInput, so nothing downstream could tell "the user just started the agent
+ * working" from "the REPL is merely alive". Without it only the COMPOSER path
+ * (`sessions:input` -> relayOrSpawnPtyPanel -> markRunning) flipped the session
+ * to 'running'; a turn started by raw terminal keystrokes — which is how an
+ * AskUserQuestion in the TUI is answered — left the session at its resting
+ * status for the whole turn. The board then derived `idle` while the agent
+ * worked, the turn-end rester bailed on its `status !== 'running'` guard, and
+ * `sessions.idle_since` (stamped only at the busy->resting transition) stayed
+ * frozen at the PREVIOUS rest — rendering as a "quiet 19h" label on a session
+ * that had been working for hours.
+ *
+ * Field-identical to {@link InteractiveTurnEndPayload} so the facade fans both
+ * in the same way and consumers can share a handler shape. The SDK manager
+ * NEVER emits this event (its per-turn edge is 'spawned').
+ */
+export interface InteractiveTurnStartPayload {
+  panelId: string;
+  sessionId: string;
+  runId: string;
+}
+
 export class InteractiveClaudeManager extends AbstractCliManager {
   /** Per-run pipeline (router -> sink), keyed by panelId. */
   private readonly pipelines = new Map<string, PipelineTuple>();
@@ -1703,7 +1731,23 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       const bodyInThisWrite = input.replace(/[\r\n]/g, '').trim().length > 0;
       if (bodyInThisWrite || this.pendingBodyPanelIds.has(panelId)) {
         this.pendingBodyPanelIds.delete(panelId);
+        // Emit 'turn-start' on the ARMING EDGE only (not already in flight), so
+        // a multi-line submit inside one turn does not re-announce it. This is
+        // the per-turn start signal a persistent REPL otherwise has no way to
+        // give — see InteractiveTurnStartPayload for why the composer's own
+        // markRunning was not enough. Emitted AFTER the mark is set so a
+        // synchronous listener that probes turn-in-flight state sees it armed.
+        const wasInFlight = this.turnInFlightPanelIds.has(panelId);
         this.turnInFlightPanelIds.add(panelId);
+        const run = this.interactiveRuns.get(panelId);
+        if (!wasInFlight && run) {
+          const payload: InteractiveTurnStartPayload = {
+            panelId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+          };
+          this.emit('turn-start', payload);
+        }
       }
     } else if (input.length > 0) {
       this.pendingBodyPanelIds.add(panelId);

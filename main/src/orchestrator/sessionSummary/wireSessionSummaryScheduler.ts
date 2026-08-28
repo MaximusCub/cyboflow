@@ -24,12 +24,17 @@
  *    the feature is built around. The scheduler re-runs its own eligibility
  *    gate per fire, so passing a manager here never widens WHICH sessions
  *    qualify — only when they are noticed.
- *  - PTY facade `SubstrateDispatchFacade`: Stop-hook `'turn-end'` → arm.
+ *  - PTY facade `SubstrateDispatchFacade`: Stop-hook `'turn-end'` → arm,
+ *    `'turn-start'` (a submitted line that starts a REPL turn) → clear.
  *
- * The PTY relay seam (plan §2.2) — where a composer turn on a live REPL emits
- * NO `'spawned'` — is cleared from the `sessions:input` IPC handler instead
- * (it calls `scheduler.noteTurnStart` directly with the sessionId), and is not
- * wired here.
+ * The composer's own PTY relay seam (plan §2.2) — a turn on a live REPL emits
+ * NO `'spawned'` — is ALSO cleared from the `sessions:input` IPC handler (it
+ * calls `scheduler.noteTurnStart` directly with the sessionId). That stayed
+ * when `'turn-start'` landed: the handler clears BEFORE dispatching, so it
+ * still wins the race against an armed timer for a composer turn, while
+ * `'turn-start'` covers the raw-keystroke path the IPC handler never sees (a
+ * TUI question answered with arrow keys + Enter). noteTurnStart is idempotent,
+ * so a composer turn simply clears twice.
  */
 import type { SessionSummarySchedulerLike } from './sessionSummaryScheduler';
 
@@ -72,12 +77,16 @@ export function wireSessionSummaryScheduler(deps: WireSessionSummarySchedulerDep
   const onTurnEnd = (payload: SessionTurnPayload): void => {
     if (payload?.sessionId) scheduler.noteTurnEnd(payload.sessionId);
   };
+  const onTurnStart = (payload: SessionTurnPayload): void => {
+    if (payload?.sessionId) scheduler.noteTurnStart(payload.sessionId);
+  };
 
   for (const manager of sdkManagers) {
     manager.on('exit', onExit);
     manager.on('spawned', onSpawned);
   }
   facade.on('turn-end', onTurnEnd);
+  facade.on('turn-start', onTurnStart);
 
   return () => {
     for (const manager of sdkManagers) {
@@ -85,5 +94,6 @@ export function wireSessionSummaryScheduler(deps: WireSessionSummarySchedulerDep
       manager.off('spawned', onSpawned);
     }
     facade.off('turn-end', onTurnEnd);
+    facade.off('turn-start', onTurnStart);
   };
 }

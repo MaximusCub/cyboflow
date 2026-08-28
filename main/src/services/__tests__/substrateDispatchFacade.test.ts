@@ -766,6 +766,28 @@ describe('SubstrateDispatchFacade — runId→panelId translation (PTY quick ses
     expect(interactive.sendInput).toHaveBeenCalledWith('panel-X', 'hi');
   });
 
+  it("re-emits 'turn-start' by reference and learns the mapping from it", () => {
+    const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = makeFacade(sdk, interactive, registry, makeSpyLogger());
+    const seen: unknown[] = [];
+    facade.on('turn-start', (p) => seen.push(p));
+
+    const payload = { panelId: 'panel-X', sessionId: 'sess-X', runId: 'run-Y' };
+    interactive.emit('turn-start', payload);
+
+    // Re-emitted by REFERENCE (same object), like every other fan-in.
+    expect(seen).toEqual([payload]);
+    expect(seen[0]).toBe(payload);
+
+    // ...and it is a mapping source in its own right: a turn-start can land
+    // before any PTY byte for a re-attached panel.
+    facade.relayInput('run-Y', 'hi');
+    expect(interactive.sendInput).toHaveBeenCalledWith('panel-X', 'hi');
+  });
+
   it('relayResize translates runId to the live panelId', () => {
     const run = makeWorkflowRunRow({ id: 'run-Y', substrate: 'interactive' });
     const registry = makeRegistry(run);
@@ -1771,7 +1793,7 @@ describe('SubstrateDispatchFacade — construction', () => {
   it('subscribes each lane per its wiring row, and dispose() unsubscribes every one', () => {
     const { facade, managers } = makeFourLaneFacade(makeEmptyRegistry());
     const seen: string[] = [];
-    for (const event of ['output', 'exit', 'spawned', 'pty-output', 'turn-end']) {
+    for (const event of ['output', 'exit', 'spawned', 'pty-output', 'turn-start', 'turn-end']) {
       facade.on(event, () => seen.push(event));
     }
 
@@ -1794,9 +1816,10 @@ describe('SubstrateDispatchFacade — construction', () => {
     managers['omp-sdk'].emit('output', { panelId: 'p' });
     managers['omp-pty'].emit('output', { panelId: 'p' });
     managers['omp-pty'].emit('pty-output', { panelId: 'p', runId: 'p', data: 'x' });
+    managers['omp-pty'].emit('turn-start', { panelId: 'p', runId: 'p' });
     managers['omp-pty'].emit('turn-end', { panelId: 'p', runId: 'p' });
 
-    expect(seen).toEqual(['spawned', 'output', 'output', 'pty-output', 'turn-end']);
+    expect(seen).toEqual(['spawned', 'output', 'output', 'pty-output', 'turn-start', 'turn-end']);
 
     facade.dispose();
     seen.length = 0;

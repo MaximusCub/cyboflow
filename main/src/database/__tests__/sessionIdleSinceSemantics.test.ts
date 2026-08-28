@@ -122,6 +122,36 @@ describe('updateSession clears idle_since when the session goes busy', () => {
   });
 });
 
+describe('a second turn on an already-rested session moves the boundary', () => {
+  /**
+   * The regression this pins is not the SQL — it is that SOMETHING must write
+   * the busy status for arm 2 to have an edge to see. A PTY quick session whose
+   * next turn was started by RAW TERMINAL KEYSTROKES (how a TUI AskUserQuestion
+   * is answered) used to reach neither arm: nothing flipped it to 'running', so
+   * the turn-end rest wrote `completed` over `completed` and idle_since kept the
+   * PREVIOUS rest — the board rendered "quiet 19h" over a session that had been
+   * working for hours. The manager's 'turn-start' event now supplies that edge
+   * (index.ts's facade listener); this is the DB contract it depends on.
+   */
+  it('completed → running → completed restamps rather than preserving', () => {
+    createSession('s1', { status: 'completed', idleSince: SEEDED_IDLE_SINCE });
+
+    db.updateSession('s1', { status: 'running' }); // the turn-start flip
+    expect(read('s1').idle_since).toBeNull(); // busy sessions have no quiet clock
+
+    db.updateSession('s1', { status: 'completed' }); // the turn-end rest
+    const row = read('s1');
+    expect(row.idle_since).not.toBeNull();
+    expect(row.idle_since).not.toBe(SEEDED_IDLE_SINCE);
+  });
+
+  it('without the busy edge the SAME two rests preserve the stale boundary (the defect)', () => {
+    createSession('s1', { status: 'completed', idleSince: SEEDED_IDLE_SINCE });
+    db.updateSession('s1', { status: 'completed' }); // turn-end with no turn-start
+    expect(read('s1').idle_since).toBe(SEEDED_IDLE_SINCE);
+  });
+});
+
 describe('idle_since survives writes that are not a rest boundary', () => {
   it('a resting → resting REFINEMENT preserves the original boundary', () => {
     // stopped → failed is a reclassification of the same rest, not a new one.

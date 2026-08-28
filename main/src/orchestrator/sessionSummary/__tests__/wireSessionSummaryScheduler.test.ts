@@ -240,6 +240,42 @@ describe('wireSessionSummaryScheduler (composition)', () => {
     expect(h.summarize).not.toHaveBeenCalled();
   });
 
+  it('raw-keystroke turn: the facade turn-start clears the timer the IPC seam never sees', async () => {
+    const h = makeHarness();
+
+    // A PTY turn ends → Stop-hook turn-end arms the timer.
+    h.facade.emit('turn-end', { sessionId: SID });
+
+    // The user answers an AskUserQuestion in the TUI (arrow keys + Enter). That
+    // path is xterm -> runs.relayInput -> sendInput; `sessions:input` is NEVER
+    // reached, so the input-seam clear does not run — only the manager's own
+    // 'turn-start', fanned in by the facade, can clear the armed timer.
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS / 2);
+    h.facade.emit('turn-start', { sessionId: SID });
+
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS);
+    await flush();
+    expect(h.summarize).not.toHaveBeenCalled();
+
+    // The answered turn finally ends → re-arm → one summarize.
+    h.facade.emit('turn-end', { sessionId: SID });
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS);
+    await flush();
+    expect(h.summarize).toHaveBeenCalledTimes(1);
+  });
+
+  it('unwire detaches the facade turn-start listener too', async () => {
+    const h = makeHarness();
+
+    h.facade.emit('turn-end', { sessionId: SID }); // arm
+    h.unwire();
+    h.facade.emit('turn-start', { sessionId: SID }); // detached → no clear
+
+    vi.advanceTimersByTime(SESSION_SUMMARY_IDLE_MS);
+    await flush();
+    expect(h.summarize).toHaveBeenCalledTimes(1);
+  });
+
   it('unwire detaches every SDK manager, not only the first', async () => {
     const h = makeHarness();
     h.unwire();

@@ -3943,6 +3943,44 @@ async function initializeServices(): Promise<boolean> {
     if (evt.panelId !== evt.runId) ptyPublisher(evt.panelId, evt.data);
   });
 
+  // Turn-START status flip for PTY QUICK sessions — the twin of the turn-end
+  // rest below, and the reason it can fire at all.
+  //
+  // Only the COMPOSER path marked a PTY quick session 'running'
+  // (ipc/ptyPanelDispatch.ts's markRunning, reached from `sessions:input`). A
+  // turn started by RAW TERMINAL KEYSTROKES — which is how an AskUserQuestion in
+  // the Claude TUI is answered, arrow keys then Enter — goes
+  // xterm -> runs.relayInput -> facade.relayInput -> sendInput and touched no
+  // session state. The session then sat at its RESTING status for the whole
+  // turn, with three visible consequences: the board derived `idle` so the row
+  // never moved to "Working"; the turn-end rest below bailed on its
+  // `status !== 'running'` guard; and because `sessions.idle_since` is stamped
+  // ONLY at the busy->resting transition (database.ts's
+  // IDLE_SINCE_ON_STATUS_CHANGE), the quiet clock stayed frozen at the PREVIOUS
+  // rest — a session that had worked for two hours rendered "quiet 19h".
+  //
+  // Guards mirror the rester exactly (interactive substrate + chat_run_id match,
+  // so a flow run's turn never touches the chat session) and it is a no-op when
+  // the session is already 'running' — the composer path still flips first for a
+  // turn it dispatches, and this must not re-write on every submitted line.
+  // Fail-soft: a status-flip failure must never disturb the live REPL.
+  substrateFacade.on('turn-start', (payload) => {
+    try {
+      const evt = payload as { panelId: string; sessionId: string; runId: string };
+      const dbSession = sessionManager.getDbSession(evt.sessionId);
+      if (!dbSession || dbSession.substrate !== 'interactive') return;
+      if (!dbSession.chat_run_id || dbSession.chat_run_id !== evt.runId) return;
+      if (dbSession.status === 'running') return;
+      // updateSession (not a direct db write) because 'running' needs no
+      // completed_unviewed preservation and this is the SAME call the composer
+      // path makes — it maps the status, stamps idle_since NULL through the
+      // shared CASE, and emits 'session-updated' itself.
+      sessionManager.updateSession(evt.sessionId, { status: 'running' });
+    } catch (err) {
+      console.error('[Main] Failed to flip PTY quick-session status on turn-start:', err);
+    }
+  });
+
   // Turn-end status rest for PTY QUICK sessions (IDEA-030 follow-on). The facade
   // re-emits the interactive manager's 'turn-end' ({ panelId, sessionId, runId }),
   // but RunExecutor only listens for runs it executes — the sentinel `__quick__`
