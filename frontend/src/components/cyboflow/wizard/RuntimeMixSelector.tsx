@@ -33,11 +33,15 @@ import {
   type RuntimeMix,
 } from '../../../../../shared/tuning/runtimeMix';
 
-/** The two-line segment label per mix — provider on top, aspect below. */
+/**
+ * The two-line segment label per mix — the version's name on top, and below it
+ * either the whole-flow aspect ("only") or WHO the secondary provider is (the
+ * name alone doesn't say which family verifies).
+ */
 const RUNTIME_MIX_SEGMENT_LABELS: Record<RuntimeMix, { provider: string; aspect: string }> = {
   claude: { provider: 'CLAUDE', aspect: 'only' },
-  'claude-primary': { provider: 'CLAUDE', aspect: 'primary' },
-  'codex-primary': { provider: 'CODEX', aspect: 'primary' },
+  'claude-primary': { provider: 'CLAUDE PRIMARY', aspect: 'codex secondary' },
+  'codex-primary': { provider: 'CODEX PRIMARY', aspect: 'claude secondary' },
   codex: { provider: 'CODEX', aspect: 'only' },
 };
 

@@ -32,9 +32,11 @@ describe('RuntimeMixSelector', () => {
     }
     expect(screen.getByTestId('wizard-runtime-mix-claude')).toHaveAttribute('aria-checked', 'true');
     expect(screen.getByTestId('wizard-runtime-mix-codex')).toHaveAttribute('aria-checked', 'false');
-    // Two-line labels: provider on top, aspect below.
-    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveTextContent('CODEX');
-    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveTextContent('primary');
+    // Two-line labels: the version's name on top, the secondary provider below.
+    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveTextContent('CODEX PRIMARY');
+    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveTextContent('claude secondary');
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toHaveTextContent('codex secondary');
+    expect(screen.getByTestId('wizard-runtime-mix-codex')).toHaveTextContent('only');
   });
 
   it('(b) clicking a segment reports it', async () => {
