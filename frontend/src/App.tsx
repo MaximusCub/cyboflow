@@ -28,6 +28,7 @@ import { InsightsView } from './components/Insights/InsightsView';
 import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
+import { ProjectOverviewPage } from './components/overview/ProjectOverviewPage';
 import { StatusBar } from './components/StatusBar';
 import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
 import { DesignPlannerPrompt } from './components/cyboflow/design/DesignPlannerPrompt';
@@ -64,6 +65,10 @@ function App() {
   const experimentComparisonId = useNavigationStore((s) => s.experimentComparisonId);
   const showVerifyQueue = useNavigationStore((s) => s.verifyQueueOpen);
   const toggleVerifyQueue = useNavigationStore((s) => s.toggleVerifyQueue);
+  // The per-project overview page (sidebar project click). Rendered only with a
+  // resolved activeProjectId — a set flag with no project falls through to
+  // LandingHome rather than rendering a project page for no project.
+  const showProjectOverview = useNavigationStore((s) => s.projectOverviewOpen);
   // Human-review rail badge: pending PERMISSION approvals (global approval
   // stream) + pending decision/human_task/notification review items aggregated
   // across all projects from the landing store (init'd app-wide below). Approvals alone
@@ -389,6 +394,17 @@ function App() {
                 </div>
               )}>
                 <BacklogPane projectId={activeProjectId} />
+              </ErrorBoundary>
+            ) : showProjectOverview && activeProjectId !== null ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Project overview error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <ProjectOverviewPage projectId={activeProjectId} />
               </ErrorBoundary>
             ) : (
               <ErrorBoundary fallback={(error) => (
