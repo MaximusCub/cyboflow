@@ -72,6 +72,43 @@ describe('schema-version gate', () => {
     expect(readUserVersion(dbPath)).toBe(50);
   });
 
+  it('readSchemaVersionStatus reports tooNew without mutating the newer DB (pre-gate read)', () => {
+    // Newer build stamps user_version = 50.
+    const newerDir = join(dbDir, 'newer');
+    mkdirSync(newerDir, { recursive: true });
+    writeMigration(newerDir, '050_future.sql');
+    const newer = new DatabaseService(dbPath);
+    newer.setMigrationsDirForTesting(newerDir);
+    newer.initialize();
+    newer.getDb().close();
+
+    // Older binary reads the verdict BEFORE initialize() — the boot sequence
+    // shows the too-new dialog on this value, and on Quit initialize() never
+    // runs. Nothing may have been written: no baseline DDL, no ledger-missing
+    // migration, no stamp change.
+    const olderDir = join(dbDir, 'older');
+    mkdirSync(olderDir, { recursive: true });
+    writeFileSync(
+      join(olderDir, '005_old.sql'),
+      'CREATE TABLE IF NOT EXISTS gate_older_marker (id INTEGER PRIMARY KEY);'
+    );
+    const older = new DatabaseService(dbPath);
+    older.setMigrationsDirForTesting(olderDir);
+
+    expect(older.readSchemaVersionStatus()).toEqual({ onDisk: 50, appMax: 5, tooNew: true });
+    // Idempotent: initialize() (the "Open Anyway" path) reuses the cached
+    // pre-migration verdict rather than recomputing it.
+    expect(older.getSchemaVersionStatus()).toEqual({ onDisk: 50, appMax: 5, tooNew: true });
+
+    const marker = older
+      .getDb()
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gate_older_marker'")
+      .all();
+    expect(marker).toEqual([]);
+    expect(older.getDb().pragma('user_version', { simple: true })).toBe(50);
+    older.getDb().close();
+  });
+
   it('reports not-too-new when reopening with the same migration set', () => {
     const migrationsDir = join(dbDir, 'm');
     mkdirSync(migrationsDir, { recursive: true });

@@ -308,16 +308,27 @@ export class DatabaseService {
     });
   }
 
-  initialize(): void {
-    // Schema-version gate (docs/UPDATES.md): both packaged variants share
-    // ~/.cyboflow, so a newer build (e.g. Cyboflow Dev) may have forward-migrated
-    // this DB past what THIS binary understands. Capture that BEFORE we touch the
-    // schema so the boot sequence can warn + offer an update instead of silently
-    // running old code against a newer schema (which destructive migrations such
-    // as 015_entity_model_rebuild would turn into corruption).
+  /**
+   * Compute (once) the boot-time schema-version verdict WITHOUT touching the
+   * schema (docs/UPDATES.md): both packaged variants can reach the same data
+   * dir (a shared CYBOFLOW_DIR override, or downgrading the same kind), so a
+   * newer build may have forward-migrated this DB past what THIS binary
+   * understands. The boot sequence calls this first and shows the
+   * warn/quit dialog BEFORE initialize() — a binary about to be told "you are
+   * too old to open this" must not have re-run baseline DDL or ledger-missing
+   * migrations against the newer schema first. Idempotent; initialize() reuses
+   * the cached verdict so the reported onDisk value is always pre-migration.
+   */
+  readSchemaVersionStatus(): SchemaVersionStatus {
+    if (this.schemaVersionStatus) return this.schemaVersionStatus;
     const onDisk = this.db.pragma('user_version', { simple: true }) as number;
     const appMax = this.computeAppMaxMigrationVersion();
     this.schemaVersionStatus = { onDisk, appMax, tooNew: onDisk > appMax };
+    return this.schemaVersionStatus;
+  }
+
+  initialize(): void {
+    const { onDisk, appMax } = this.readSchemaVersionStatus();
 
     this.initializeSchema();
     this.runMigrations();
@@ -330,7 +341,10 @@ export class DatabaseService {
     }
   }
 
-  /** The boot-time schema-version verdict, or null if initialize() hasn't run. */
+  /**
+   * The cached schema-version verdict, or null if neither
+   * readSchemaVersionStatus() nor initialize() has run.
+   */
   getSchemaVersionStatus(): SchemaVersionStatus | null {
     return this.schemaVersionStatus;
   }

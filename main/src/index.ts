@@ -1489,6 +1489,10 @@ async function createWindow() {
  * build that only knew migration 60 did exactly that against a v85 database and
  * stranded every MCP subprocess spawned afterwards. A build that is about to be
  * told "you are too old to open this" must not have mutated shared state first.
+ * That now includes the database itself: the gate runs BEFORE initialize(), so
+ * on Quit the older binary has not re-run baseline DDL or applied
+ * ledger-missing migrations against the newer schema. The caller must have run
+ * readSchemaVersionStatus() first.
  *
  * Returns false when the user chose Quit — the caller must abort boot without
  * constructing anything further.
@@ -1590,6 +1594,15 @@ async function initializeServices(): Promise<boolean> {
   }
 
   databaseService = new DatabaseService(dbPath);
+
+  // Gate BEFORE initialize(): a binary about to be told "you are too old to
+  // open this" must not have re-run baseline DDL or applied ledger-missing
+  // migrations against the newer schema first. readSchemaVersionStatus() only
+  // reads PRAGMA user_version; the first mutation happens inside initialize()
+  // below, after the user has chosen to continue.
+  databaseService.readSchemaVersionStatus();
+  if (!runSchemaVersionGate()) return false;
+
   try {
     databaseService.initialize();
   } catch (err) {
@@ -1598,7 +1611,7 @@ async function initializeServices(): Promise<boolean> {
     // about to run against it — which surfaces as scattered "no such column"
     // failures that trace back to nothing. Stop here, loudly, while aborting is
     // still free: nothing cross-instance (above all the orch socket) is bound
-    // yet, exactly as at the schema-version gate below.
+    // yet, exactly as at the schema-version gate above.
     const error = err instanceof Error ? err : new Error(String(err));
     logger.error(`[Main] Database migration failed — refusing to boot: ${error.message}`);
     captureSeamError('boot-migration-failed', error, { platform: process.platform });
@@ -1623,11 +1636,6 @@ async function initializeServices(): Promise<boolean> {
     app.quit();
     return false;
   }
-
-  // The DB is open and its pre-migration user_version is known — gate NOW, while
-  // aborting is still free. Everything below this line either owns cross-instance
-  // state (the orch socket) or spawns subprocesses that depend on it.
-  if (!runSchemaVersionGate()) return false;
 
   sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
