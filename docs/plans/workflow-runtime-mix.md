@@ -329,8 +329,9 @@ follow-ups, not v1.
 
 ## Open items carried from the canvas
 
-1. `write-tests` classed execution (flip to verification = one class-table edit)
-   — still open, awaiting Krishna's call.
+1. ~~`write-tests` classed execution~~ — **DECIDED 2026-08-28: Krishna ack'd
+   execution class** (authors shipped test files; same-provider keeps the lane's
+   diff coherent).
 2. ~~Codex-only launches programmatic, not orchestrated~~ — **DECIDED 2026-08-28:
    Krishna ack'd programmatic** (D3 rationale stands; canvas superseded).
 3. ~~`haiku → luna·low`~~ — **DECIDED 2026-08-28: Krishna ack'd luna·low.**
