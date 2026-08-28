@@ -121,6 +121,20 @@ export interface ControllerStepContext {
    * why. Absent on every normal turn (output unchanged).
    */
   loopbackFeedback?: string;
+  /**
+   * The final text of the most recent preceding AGENT step, forwarded to a step
+   * whose definition sets `consumesPriorStepOutput` (see
+   * `WorkflowStep.consumesPriorStepOutput` for why the channel exists). Human
+   * gates are transparent when looking back, so a step after a gate still sees
+   * the last agent turn.
+   *
+   * `text` is absent when the previous step produced no capturable final text —
+   * a substrate that cannot capture it, or a turn that returned nothing. The
+   * consuming prompt renders that case explicitly rather than dropping the
+   * section, so the agent knows the channel failed instead of assuming the
+   * previous step had nothing to say.
+   */
+  priorStepOutput?: { stepId: string; name: string; text?: string };
 }
 
 /**

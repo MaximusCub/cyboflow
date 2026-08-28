@@ -122,6 +122,89 @@ describe('WorkflowController', () => {
     ]);
   });
 
+  describe('prior-step output handoff', () => {
+    /** A runner that records the ctx.priorStepOutput each step was handed. */
+    function makeHandoffRunner(texts: Record<string, string | null>): StepRunner & {
+      seen: Record<string, { stepId: string; name: string; text?: string } | undefined>;
+    } {
+      const seen: Record<string, { stepId: string; name: string; text?: string } | undefined> = {};
+      return {
+        seen,
+        async runStep(s, ctx) {
+          seen[s.id] = ctx.priorStepOutput;
+          return { status: 'ok', resultText: texts[s.id] ?? null };
+        },
+      };
+    }
+
+    it('hands a consuming step the previous agent step\'s final text', async () => {
+      const d = def([
+        phase('p', [
+          step({ id: 'load', name: 'Load merged work' }),
+          step({ id: 'extract', consumesPriorStepOutput: true }),
+        ]),
+      ]);
+      const runner = makeHandoffRunner({ load: '## Merged work\n\nthe survey' });
+
+      const result = await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.seen.extract).toEqual({
+        stepId: 'load',
+        name: 'Load merged work',
+        text: '## Merged work\n\nthe survey',
+      });
+    });
+
+    it('does NOT hand it to a step that has not opted in', async () => {
+      // Most steps re-derive their inputs from the repo and the database;
+      // prepending the previous agent's prose to all of them would spend context
+      // on text they must not treat as authoritative.
+      const d = def([phase('p', [step({ id: 'load' }), step({ id: 'other' })])]);
+      const runner = makeHandoffRunner({ load: 'the survey' });
+
+      await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(runner.seen.other).toBeUndefined();
+    });
+
+    it('carries the output ACROSS a human gate', async () => {
+      // Compound's chain is extract → approve-learnings → write-back: the gate
+      // records the human's approved subset, but the learning bodies it refers
+      // to come from the last AGENT step, so a gate must not break the channel.
+      const d = def([
+        phase('p', [
+          step({ id: 'extract', name: 'Extract learnings' }),
+          step({ id: 'approve', agent: 'human', human: true }),
+          step({ id: 'write-back', consumesPriorStepOutput: true }),
+        ]),
+      ]);
+      const runner = makeHandoffRunner({ extract: '## Act on\n\nthe learnings' });
+
+      await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(runner.seen['write-back']).toEqual({
+        stepId: 'extract',
+        name: 'Extract learnings',
+        text: '## Act on\n\nthe learnings',
+      });
+    });
+
+    it('still names the producer when its text could not be captured', async () => {
+      // The consuming prompt must distinguish "the channel failed" from "the
+      // step found nothing" — so the entry is recorded with no text rather than
+      // dropped.
+      const d = def([
+        phase('p', [step({ id: 'load', name: 'Load merged work' }), step({ id: 'extract', consumesPriorStepOutput: true })]),
+      ]);
+      const runner = makeHandoffRunner({ load: null });
+
+      await new WorkflowController(runner, makeHost()).run('r', d);
+
+      expect(runner.seen.extract).toEqual({ stepId: 'load', name: 'Load merged work' });
+    });
+  });
+
   it('calls awaitBlockingReviewItems before each step and proceeds on "proceed"', async () => {
     const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
     const runner = makeRunner();

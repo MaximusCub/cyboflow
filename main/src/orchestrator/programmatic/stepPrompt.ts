@@ -122,6 +122,18 @@ export interface ComposeStepPromptArgs {
    */
   loopbackFeedback?: string;
   /**
+   * The most recent preceding AGENT step's final text, for a step whose
+   * definition sets `consumesPriorStepOutput`. Rendered as a
+   * `## Previous step output` section. Absent ⇒ no section.
+   *
+   * `text` absent (with the step still named) means the channel was unavailable
+   * — the previous turn produced no capturable final text. That renders as an
+   * explicit note, never as silence: a consuming agent told nothing at all would
+   * reasonably conclude the previous step found nothing, which is a different
+   * and wrong thing.
+   */
+  priorStepOutput?: { stepId: string; name: string; text?: string };
+  /**
    * Repo paths this run's RUNBOOK BOOTSTRAP wrote
    * (docs/proposals/lane-runbook-bootstrap.md §11), rendered as a do-not-touch
    * list on the address-review step.
@@ -341,6 +353,19 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.contractError !== undefined && args.contractError.trim().length > 0
       ? `\n\n## Visual-verification output contract (fix required)\n\nYour previous result violated the visual-verification output contract:\n\n> ${args.contractError.trim()}\n\nRe-emit your FULL result. On \`VERDICT: PASS\` it MUST contain EXACTLY ONE of:\n\n- a \`## Visual verification task\` section whose body is a single fenced \`\`\`json code block holding the \`VerificationTaskV1\` payload, or\n- a single line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <one-line reason>\` when this task has no user-visible UI to verify.\n\nInclude exactly one of those forms (never both, never neither, never a duplicate). Print it as TEXT in your final message — do NOT call \`cyboflow_request_verification\` or park the lane yourself; the controller fires the request from what you print. If a previous attempt already fired a request, still print the contract — the controller reconciles.`
       : '';
+  // Prior-step handoff: the previous AGENT step's final text, for a step that
+  // declares `consumesPriorStepOutput`. A programmatic step is a fresh turn, so
+  // this is the only way a chain like Compound's load → extract carries anything
+  // forward. An unavailable channel says so rather than rendering nothing —
+  // silence would read as "the previous step found nothing".
+  const prior = args.priorStepOutput;
+  const priorText = prior?.text?.trim() ?? '';
+  const priorStepOutput =
+    prior === undefined
+      ? ''
+      : priorText.length > 0
+        ? `\n\n## Previous step output\n\nThe **${prior.name}** step ran before you and returned this. It is your INPUT: this step runs as a fresh turn with no memory of it, and it will not be repeated anywhere else.\n\n${priorText}`
+        : `\n\n## Previous step output\n\nThe **${prior.name}** step ran before you, but its output could not be captured on this substrate — so the summary this step's instructions say you were handed is NOT below. Do not treat that as "the previous step found nothing": re-derive what you need from the repository and the cyboflow database, and say in your result that you did so.`;
   // Visual merge-gate FAIL loopback feedback (§5.3): the re-delegated implement
   // agent is handed WHAT was tested, what failed, and why — verbatim — not merely
   // "a blocking finding exists".
@@ -359,5 +384,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

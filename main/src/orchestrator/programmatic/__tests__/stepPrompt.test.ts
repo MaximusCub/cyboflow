@@ -290,6 +290,40 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('If a previous attempt already fired a request, still print the contract');
   });
 
+  it('renders the previous step output as the consuming step\'s input', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'extract', agent: 'compounder', consumesPriorStepOutput: true }),
+      workflowName: 'compound',
+      attempt: 1,
+      priorStepOutput: { stepId: 'load-sprint', name: 'Load merged work', text: '## Merged work\n\nTwo runs shipped the guard.' },
+    });
+    expect(out).toContain('## Previous step output');
+    expect(out).toContain('**Load merged work**');
+    expect(out).toContain('Two runs shipped the guard.');
+    // Named as INPUT, not background: a fresh turn has no other view of it.
+    expect(out).toContain('It is your INPUT');
+  });
+
+  it('says the channel failed rather than going silent when the prior text is missing', () => {
+    // Silence would read as "the previous step found nothing", which is a
+    // different and wrong conclusion — the substrate simply could not capture
+    // the turn's final text.
+    const out = composeStepPrompt({
+      step: step({ id: 'extract', consumesPriorStepOutput: true }),
+      workflowName: 'compound',
+      attempt: 1,
+      priorStepOutput: { stepId: 'load-sprint', name: 'Load merged work' },
+    });
+    expect(out).toContain('## Previous step output');
+    expect(out).toContain('could not be captured on this substrate');
+    expect(out).toContain('re-derive');
+  });
+
+  it('renders no previous-step section when the step does not consume one', () => {
+    const out = composeStepPrompt({ step: step({ id: 'a' }), workflowName: 'w', attempt: 1 });
+    expect(out).not.toContain('## Previous step output');
+  });
+
   it('renders the visual-verification-failed section when loopbackFeedback is present', () => {
     const out = composeStepPrompt({
       step: step({ id: 'implement', agent: 'implement' }),

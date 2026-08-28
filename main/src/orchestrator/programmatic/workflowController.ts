@@ -238,6 +238,18 @@ export class WorkflowController {
     // this a loopback landing on a still-marked step would be skipped (the jump burns
     // budget as a no-op), and pausing mid-revise then resuming would silently bypass
     // the revisit steps INCLUDING the human gate itself.
+    /**
+     * The most recent AGENT step's identity + captured final text, handed to the
+     * next step that declares `consumesPriorStepOutput`. Run-scoped and updated
+     * only by agent steps, so a human gate between producer and consumer is
+     * transparent — which is what Compound's extract → approve-learnings →
+     * write-back chain needs.
+     *
+     * `text` stays undefined when a turn produced nothing capturable; the entry
+     * is still recorded so the consumer's prompt can say the channel failed
+     * rather than implying the step had nothing to report.
+     */
+    let priorAgentOutput: { stepId: string; name: string; text?: string } | undefined;
     const remainingCompleted = new Set<string>(completedStepIds ?? []);
     // Closing-stage gate (2026-06-22): set true when a fan-out step settles with
     // one or more incomplete/failed lanes (the sprint has blocked tasks). While
@@ -482,7 +494,18 @@ export class WorkflowController {
           }
         }
 
-        const baseCtx = { runId, phaseId: phase.id, stepIndex: i, signal };
+        const baseCtx = {
+          runId,
+          phaseId: phase.id,
+          stepIndex: i,
+          signal,
+          // Prior-step handoff, opt-in per step. Only a step that declares it
+          // receives the previous agent's text; every other step's prompt is
+          // byte-identical to before.
+          ...(step.consumesPriorStepOutput === true && priorAgentOutput !== undefined
+            ? { priorStepOutput: priorAgentOutput }
+            : {}),
+        };
         this.host.reportStep(step.id, 'running');
 
         // ── Pure human gate (no agent work) ──────────────────────────────────
@@ -513,11 +536,13 @@ export class WorkflowController {
         let lastError: string | undefined;
         let ok = false;
         let aborted = false;
+        let okResultText: string | null | undefined;
         while (attempt < maxAttempts) {
           attempt += 1;
           const result = await this.runner.runStep(step, { ...baseCtx, attempt });
           if (result.status === 'ok') {
             ok = true;
+            okResultText = result.resultText;
             break;
           }
           if (result.status === 'aborted') {
@@ -564,6 +589,16 @@ export class WorkflowController {
         }
 
         if (ok) {
+          // Record this turn for the next step that declares
+          // `consumesPriorStepOutput`. Recorded BEFORE the trailing-gate branch
+          // so an agent-then-gate step still hands its output forward.
+          priorAgentOutput = {
+            stepId: step.id,
+            name: step.name ?? step.id,
+            ...(okResultText !== null && okResultText !== undefined && okResultText.trim().length > 0
+              ? { text: okResultText }
+              : {}),
+          };
           // Agent succeeded. If the step ALSO carries a human checkpoint, open the
           // gate now (agent-then-gate); otherwise advance.
           if (hasTrailingGate(step)) {

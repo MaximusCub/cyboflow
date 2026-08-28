@@ -602,6 +602,29 @@ export interface WorkflowStep {
     atype: ArtifactType;
     label: string;
   };
+  /**
+   * When true this step's prompt carries the FINAL TEXT of the most recent
+   * preceding agent step (human gates are skipped when looking back), rendered
+   * by `composeStepPrompt` as a `## Previous step output` section.
+   *
+   * Needed because each PROGRAMMATIC step is a fresh agent turn with no memory
+   * of the last one. On the orchestrated plane a single agent holds every
+   * subagent's return value in its own context, so a chain like Compound's
+   * load → extract works implicitly; run the same chain programmatically and
+   * the load step's summary reaches nobody, while the extract agent's prompt
+   * still says it was handed one. Set this on the CONSUMING step.
+   *
+   * Opt-in per step rather than always-on: most steps re-derive their inputs
+   * from the repo and the database, and prepending the previous agent's prose
+   * to all of them would spend context on text they must not treat as
+   * authoritative.
+   *
+   * Best-effort by design. A substrate that cannot capture a turn's final text
+   * (codex / interactive) yields nothing to forward, and the section then says
+   * so explicitly rather than being silently omitted — the same
+   * channel-unavailable degradation task-verify's verdict channel takes.
+   */
+  consumesPriorStepOutput?: boolean;
 }
 
 /**
@@ -1054,6 +1077,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
+            // The load step's `## Merged work` survey is this step's whole view
+            // of what shipped — including run outcomes and gaps that are not
+            // visible in the diff. Programmatically each step is a fresh turn,
+            // so without this the summary would reach nobody.
+            consumesPriorStepOutput: true,
             outputArtifact: { atype: 'compound-recommendations', label: 'Recommendations' },
             desc: 'Draft durable learnings (quick / doc / task, NEVER findings) plus a discarded list, then publish ONE compound-recommendations doc with an Act on section and a Discarded section — the single surface the gate reviews. Discarded candidates go in the doc, never the review queue.',
           },
@@ -1072,6 +1100,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compound-writeback',
             mcps: ['filesystem'],
             retries: 0,
+            // Carries EXTRACT's learnings across the approve-learnings gate (the
+            // gate is transparent to this channel). The human's approved SUBSET
+            // still arrives through the gate decision itself — this supplies the
+            // learning bodies that subset refers to.
+            consumesPriorStepOutput: true,
             desc: "Apply EVERY approved item in-place (quick fixes AND approved CLAUDE.md/CODE-PATTERNS.md doc edits) + create approved tasks + commit + post a concise summary of what was applied. Emits NO review items — the terminal human-review step is the final gate. NEVER a decision per edit, NEVER per discarded candidate, NEVER kind:'finding'.",
           },
           {

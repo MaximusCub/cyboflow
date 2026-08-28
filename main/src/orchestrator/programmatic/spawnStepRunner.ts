@@ -298,6 +298,10 @@ export class SpawnStepRunner implements StepRunner {
       // composeStepPrompt renders the corresponding section. Absent ⇒ byte-identical.
       ...(ctx.contractError ? { contractError: ctx.contractError } : {}),
       ...(ctx.loopbackFeedback ? { loopbackFeedback: ctx.loopbackFeedback } : {}),
+      // Prior-step handoff: forwarded only for a step whose definition opts in
+      // (`consumesPriorStepOutput`), which is what the controller gates on.
+      // Absent ⇒ byte-identical prompt.
+      ...(ctx.priorStepOutput ? { priorStepOutput: ctx.priorStepOutput } : {}),
     });
     // A step-level runtime override also overrides the render context's
     // provider/runtime so a Codex step gets the compatibility adapter even inside
