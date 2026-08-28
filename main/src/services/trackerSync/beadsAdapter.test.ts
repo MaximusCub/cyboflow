@@ -914,6 +914,15 @@ describe('classifyBdFailure', () => {
   const terminal: Array<[string, Error]> = [
     ['workspace unresolved', execFailure({ code: 1, stderr: 'Error: no beads database found' })],
     [
+      // Live-smoked against bd 1.2.2 (2026-08-27): the `-C`-pinned wording for
+      // the same condition — every adapter spawn pins via `-C`.
+      'workspace unresolved under -C pin',
+      execFailure({
+        code: 1,
+        stderr: 'Error: cannot use -C directory "/tmp/norepo": no beads project found',
+      }),
+    ],
+    [
       'corrupt store (EOF suffix — same 68-char prefix as the retryable one)',
       execFailure({
         code: 1,

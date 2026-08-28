@@ -54,6 +54,13 @@ describe('classifyKeylessDetectFailure', () => {
     expect(classifyKeylessDetectFailure('[beads] Error: no beads database found')).toBe(
       'missing-workspace',
     );
+    // …the `-C`-pinned wording of the same condition (live-smoked, bd 1.2.2 —
+    // every adapter spawn pins via `-C`, so this is the one Detect actually hits)…
+    expect(
+      classifyKeylessDetectFailure(
+        '[beads] Error: cannot use -C directory "/tmp/norepo": no beads project found',
+      ),
+    ).toBe('missing-workspace');
     // …and probeWorkspace's own message when `bd where` answers without a path.
     expect(
       classifyKeylessDetectFailure(

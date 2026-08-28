@@ -343,6 +343,10 @@ const TERMINAL_STDERR_MARKERS: readonly string[] = [
   // Workspace unresolved. Identical text whether `.beads` is missing, renamed,
   // or a `BEADS_DIR` dangles — bd cannot distinguish them.
   'no beads database found',
+  // Same condition when the workspace is pinned via `-C` (which every spawn
+  // here is): bd 1.2.2 says `cannot use -C directory "...": no beads project
+  // found` instead of the walk-up wording above.
+  'no beads project found',
   // Corrupt store: a truncated manifest surfaces as an EOF, or leaks the raw Go
   // parse error. `bd doctor` is a no-op in embedded mode, so this cannot be
   // self-healed.

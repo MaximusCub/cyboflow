@@ -182,6 +182,9 @@ export type KeylessDetectFailure = 'missing-cli' | 'missing-workspace' | 'unknow
 const MISSING_CLI_MARKER = 'was not found on PATH';
 const MISSING_WORKSPACE_MARKERS: readonly string[] = [
   'no beads database found',
+  // bd 1.2.2's wording when the workspace is pinned via `-C` (which every
+  // adapter spawn is): `cannot use -C directory "...": no beads project found`.
+  'no beads project found',
   'no resolvable beads workspace',
 ];
 
