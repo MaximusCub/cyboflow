@@ -27,17 +27,6 @@
  * complete, consistent snapshot regardless of WAL state, without blocking
  * writers, and runs on a background thread.
  *
- * WHY raw_events IS EXCLUDED. `raw_events` is an append-only SDK/tool event
- * log with no retention policy, and it dominates the database — on a real
- * install it was 81% of a 1.8GB `sessions.db`. Backed up verbatim seven times
- * over, every megabyte of it costs seven on disk, which is how the backups
- * directory reached 10GB. It is also the least valuable thing to restore: it
- * is diagnostic replay data, not user state, and a restored database is fully
- * functional without it. So the snapshot is taken whole (for consistency),
- * then the excluded tables are emptied and the copy VACUUMed before it is
- * published. The TABLES survive — only their rows are dropped — so a restored
- * database keeps the exact schema and migration state the live one had.
- *
  * WHY THE .partial RENAME. A crash or force-quit mid-backup must never leave
  * a file that looks like a finished backup — if it did, the next day's tick
  * would treat that day as already covered and silently skip it, and a
@@ -48,7 +37,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../orchestrator/types';
 
 /** How often the tick runs. Cheap once today's backup already exists (see file doc). */
@@ -57,19 +46,8 @@ export const DATABASE_BACKUP_TICK_INTERVAL_MS = 60 * 60 * 1000;
 /** How many daily backup files to keep. */
 export const DATABASE_BACKUP_RETAIN_COUNT = 7;
 
-/**
- * Tables whose ROWS are dropped from each backup (the tables themselves stay).
- * See the file doc for why `raw_events` is here: it is unbounded diagnostic
- * replay data, not user state, and it is the whole reason backups were far
- * larger than they needed to be.
- */
-export const DATABASE_BACKUP_EXCLUDED_TABLES = ['raw_events'] as const;
-
 /** Matches a finished daily backup filename exactly — never a `.partial`. */
 const BACKUP_FILENAME_RE = /^sessions-\d{4}-\d{2}-\d{2}\.db$/;
-
-/** Matches an in-progress backup or a sidecar left beside one. */
-const PARTIAL_FILENAME_RE = /\.partial(-wal|-shm)?$/;
 
 export interface DatabaseBackupServiceOptions {
   /** The live better-sqlite3 connection to snapshot. */
@@ -168,7 +146,6 @@ export class DatabaseBackupService {
       const partialPath = `${targetPath}.partial`;
       try {
         await this.db.backup(partialPath);
-        this.stripExcludedTables(partialPath);
         fs.renameSync(partialPath, targetPath);
         this.logger.info(`[DatabaseBackup] wrote daily backup to ${targetPath}`);
       } catch (err) {
@@ -189,62 +166,6 @@ export class DatabaseBackupService {
     }
   }
 
-  /**
-   * Empty {@link DATABASE_BACKUP_EXCLUDED_TABLES} in the freshly-written backup
-   * copy, then VACUUM it down to size. Operates on the `.partial` file only —
-   * the live database is never opened for writing here.
-   *
-   * FAIL-SOFT, AND DELIBERATELY SO: if this throws, the caller still publishes
-   * the copy. An oversized backup is a complete backup; refusing to publish it
-   * would trade a disk-space optimisation for the loss of the day's snapshot,
-   * which is exactly backwards for a service that exists to prevent data loss.
-   */
-  private stripExcludedTables(backupPath: string): void {
-    let copy: Database.Database | null = null;
-    try {
-      copy = new Database(backupPath);
-      const tableExists = copy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
-      const hasSequence = tableExists.get('sqlite_sequence') !== undefined;
-      const readSeq = hasSequence ? copy.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?') : null;
-      const writeSeq = hasSequence
-        ? copy.prepare('INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES (?, ?)')
-        : null;
-
-      for (const table of DATABASE_BACKUP_EXCLUDED_TABLES) {
-        // A table named here but absent from the schema is skipped rather than
-        // thrown on, so the exclusion list stays safe to edit ahead of (or
-        // behind) a migration that adds or drops the table.
-        if (tableExists.get(table) === undefined) continue;
-
-        // A WHERE-less DELETE takes SQLite's truncate optimisation, which also
-        // drops the table's sqlite_sequence row. Put the high-water mark back:
-        // a database restored from this backup must not re-issue ids the live
-        // one already handed out.
-        const before = readSeq?.get(table) as { seq: number } | undefined;
-        copy.exec(`DELETE FROM ${table}`);
-        if (before !== undefined) writeSeq?.run(table, before.seq);
-      }
-
-      // Deleting rows only moves their pages onto the freelist — the file is
-      // still full size until VACUUM rewrites it, and shrinking the file is
-      // the entire point of this step.
-      copy.exec('VACUUM');
-    } catch (err) {
-      this.logger.error(
-        `[DatabaseBackup] failed to strip excluded tables from ${backupPath}; publishing the full copy`,
-        errorContext(err),
-      );
-    } finally {
-      // Closing checkpoints and removes the `-wal`/`-shm` sidecars this open
-      // created, so the file is a self-contained snapshot before it is renamed.
-      try {
-        copy?.close();
-      } catch {
-        // best-effort only
-      }
-    }
-  }
-
   /** Delete any leftover `*.partial` files in {@link backupsDir}. */
   private sweepStalePartials(): void {
     let entries: string[];
@@ -254,10 +175,7 @@ export class DatabaseBackupService {
       return;
     }
     for (const entry of entries) {
-      // `-wal`/`-shm` too: stripExcludedTables OPENS the partial, so a crash
-      // during that step leaves sidecars beside it that `.partial` alone
-      // would not match, and they would orphan forever.
-      if (!PARTIAL_FILENAME_RE.test(entry)) continue;
+      if (!entry.endsWith('.partial')) continue;
       try {
         fs.unlinkSync(path.join(this.backupsDir, entry));
       } catch (err) {

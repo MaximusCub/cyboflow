@@ -5,7 +5,7 @@
  * rather than a junk file copy.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync, writeFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -14,7 +14,6 @@ import {
   DatabaseBackupService,
   DATABASE_BACKUP_TICK_INTERVAL_MS,
   DATABASE_BACKUP_RETAIN_COUNT,
-  DATABASE_BACKUP_EXCLUDED_TABLES,
 } from '../databaseBackupService';
 
 const FIXED_NOW = () => new Date('2026-08-20T10:00:00');
@@ -37,45 +36,6 @@ function readWidgetNames(path: string): string[] {
       name: string;
     }[];
     return rows.map((r) => r.name);
-  } finally {
-    snapshot.close();
-  }
-}
-
-/**
- * Add a `raw_events` table shaped like the real one — AUTOINCREMENT id, one
- * fat payload column — and fill it with enough bytes that VACUUM has something
- * visible to reclaim.
- */
-function seedRawEvents(target: Database.Database, rows: number): void {
-  target.exec(
-    'CREATE TABLE raw_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, payload_json TEXT NOT NULL)',
-  );
-  const insert = target.prepare('INSERT INTO raw_events (run_id, payload_json) VALUES (?, ?)');
-  const payload = 'x'.repeat(2048);
-  const many = target.transaction((n: number) => {
-    for (let i = 0; i < n; i++) insert.run(`run-${i}`, payload);
-  });
-  many(rows);
-}
-
-function countRows(path: string, table: string): number {
-  const snapshot = new Database(path, { readonly: true, fileMustExist: true });
-  try {
-    const row = snapshot.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
-    return row.n;
-  } finally {
-    snapshot.close();
-  }
-}
-
-function readSequence(path: string, table: string): number | undefined {
-  const snapshot = new Database(path, { readonly: true, fileMustExist: true });
-  try {
-    const row = snapshot.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(table) as
-      | { seq: number }
-      | undefined;
-    return row?.seq;
   } finally {
     snapshot.close();
   }
@@ -241,81 +201,5 @@ describe('DatabaseBackupService', () => {
       // A second stop() must be safe (no throw).
       expect(() => svc.stop()).not.toThrow();
     });
-  });
-});
-
-describe('DatabaseBackupService — excluded tables', () => {
-  it('names raw_events as the excluded table', () => {
-    expect([...DATABASE_BACKUP_EXCLUDED_TABLES]).toEqual(['raw_events']);
-  });
-
-  it('empties raw_events in the backup while keeping every other table intact', async () => {
-    seedRawEvents(db, 200);
-    const logger = makeSpyLogger();
-    const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
-
-    await svc.tick();
-
-    const targetPath = join(backupsDir, 'sessions-2026-08-20.db');
-    // The TABLE survives — a restored database must keep the live schema.
-    expect(countRows(targetPath, 'raw_events')).toBe(0);
-    expect(readWidgetNames(targetPath)).toEqual(['alpha', 'beta']);
-    // ...and the live database is untouched.
-    expect(db.prepare('SELECT COUNT(*) AS n FROM raw_events').get()).toEqual({ n: 200 });
-  });
-
-  it('preserves the AUTOINCREMENT high-water mark so a restore cannot re-issue ids', async () => {
-    seedRawEvents(db, 50);
-    const logger = makeSpyLogger();
-    const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
-
-    await svc.tick();
-
-    const targetPath = join(backupsDir, 'sessions-2026-08-20.db');
-    expect(readSequence(targetPath, 'raw_events')).toBe(50);
-  });
-
-  it('shrinks the backup below the live database it was taken from', async () => {
-    seedRawEvents(db, 2000);
-    db.pragma('wal_checkpoint(TRUNCATE)');
-    const logger = makeSpyLogger();
-    const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
-
-    await svc.tick();
-
-    const targetPath = join(backupsDir, 'sessions-2026-08-20.db');
-    expect(statSync(targetPath).size).toBeLessThan(statSync(dbPath).size / 2);
-  });
-
-  it('leaves no sidecars beside the published backup', async () => {
-    seedRawEvents(db, 20);
-    const logger = makeSpyLogger();
-    const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
-
-    await svc.tick();
-
-    expect(readdirSync(backupsDir)).toEqual(['sessions-2026-08-20.db']);
-  });
-
-  it('publishes the full copy when stripping fails, rather than losing the snapshot', async () => {
-    seedRawEvents(db, 10);
-    // A BEFORE DELETE trigger that raises makes the strip throw deterministically.
-    db.exec(
-      "CREATE TRIGGER raw_events_no_delete BEFORE DELETE ON raw_events BEGIN SELECT RAISE(ABORT, 'nope'); END",
-    );
-    const logger = makeSpyLogger();
-    const svc = new DatabaseBackupService({ db, backupsDir, logger, now: FIXED_NOW });
-
-    await svc.tick();
-
-    const targetPath = join(backupsDir, 'sessions-2026-08-20.db');
-    expect(existsSync(targetPath)).toBe(true);
-    // Fail-soft: an oversized backup is still a complete backup.
-    expect(countRows(targetPath, 'raw_events')).toBe(10);
-    expect(readWidgetNames(targetPath)).toEqual(['alpha', 'beta']);
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.stringContaining('failed to strip excluded tables'),
-      expect.anything(),
-    );
   });
 });
