@@ -106,7 +106,7 @@ export function isProviderOrchestratedUnsupportedError(err: unknown): boolean {
 
 /**
  * The third sibling: an EXPLICIT orchestrated request under a non-`claude`
- * RUNTIME MIX (migration 127 / `docs/plans/workflow-runtime-mix.md` D3).
+ * RUNTIME MIX (migration 128 / `docs/plans/workflow-runtime-mix.md` D3).
  *
  * A mix routes individual agents through `agentConfigs` pins, which only the
  * PROGRAMMATIC step runner honors — the orchestrated plane's overlay writes

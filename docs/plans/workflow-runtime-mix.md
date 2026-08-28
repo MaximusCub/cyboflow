@@ -126,7 +126,7 @@ presets hardcode Claude aliases — a Codex model bump is a one-constant edit
 (which forks spec_hash revisions, same as any preset recalibration). Every
 mapped effort lands inside `CODEX_EFFORT_LEVELS` (`low..xhigh`).
 
-## D2 — Persistence: migration 127, mirroring 124
+## D2 — Persistence: migration 128, mirroring 124
 
 ```sql
 ALTER TABLE workflows
@@ -306,7 +306,7 @@ mix on those surfaces.
    graphs and never include `human`; tier-map table incl. clamps; custom
    explicit-pin precedence; codex-primary writes `claude-sdk` pins on
    verification keys; reconcile truth table.
-2. **Migration 127 + registry** — columns; `WorkflowRow.runtime_mix` required +
+2. **Migration 128 + registry** — columns; `WorkflowRow.runtime_mix` required +
    every SELECT projection; `setRuntimeMix`; createRun per D3 (early resolve,
    reconcile, forcing, symmetric backstop guard, stamp ladder); IPC type parity
    both sides (docs/CODE-PATTERNS.md).

@@ -96,7 +96,7 @@ export interface WorkflowRegistryLike {
    */
   setTuningLevel(workflowId: string, level: TuningLevel): void;
   /**
-   * Stamp the workflow's runtime mix (migration 127) — the second, orthogonal
+   * Stamp the workflow's runtime mix (migration 128) — the second, orthogonal
    * dial. Throws distinguishable Errors: 'not found' / 'invalid runtime mix' /
    * 'not a built-in'. There is no empty-custom-slot arm: the mix transforms
    * whatever graph the level resolves.

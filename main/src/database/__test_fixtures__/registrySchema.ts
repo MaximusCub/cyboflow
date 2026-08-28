@@ -10,7 +10,7 @@
  *   - workflows.tuning_level / workflow_runs.tuning_level:
  *       main/src/database/migrations/124_workflow_tuning_level.sql.
  *   - workflows.runtime_mix / workflow_runs.runtime_mix:
- *       main/src/database/migrations/127_workflow_runtime_mix.sql.
+ *       main/src/database/migrations/128_workflow_runtime_mix.sql.
  * Any column added to those tables at the canonical site MUST be
  * mirrored here too — AND the migration that adds it listed in
  * __tests__/orchestratorTestDb.test.ts's `laterMigrations`, or the
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   -- orchestratorTestDb.test.ts's laterMigrations list.
   tuning_level TEXT NOT NULL DEFAULT 'standard'
     CHECK (tuning_level IN ('efficient','standard','thorough','custom')),
-  -- migration 127: the runtime-mix stamp, projected by the same WorkflowRow
+  -- migration 128: the runtime-mix stamp, projected by the same WorkflowRow
   -- SELECTs and stamped onto every run — inlined for the same reason as
   -- tuning_level above. Kept in parity by listing 127 in
   -- orchestratorTestDb.test.ts's laterMigrations list.
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   -- so the fixture's column set stays in parity with the real schema.
   tuning_level TEXT
     CHECK (tuning_level IS NULL OR tuning_level IN ('efficient','standard','thorough','custom')),
-  -- migration 127: the run's frozen runtime mix. NULL = pre-feature, a variant
+  -- migration 128: the run's frozen runtime mix. NULL = pre-feature, a variant
   -- run, a non-built-in flow, or an omp/pi lane — never read as 'claude'.
   runtime_mix TEXT
     CHECK (runtime_mix IS NULL OR runtime_mix IN ('claude','claude-primary','codex-primary','codex')),

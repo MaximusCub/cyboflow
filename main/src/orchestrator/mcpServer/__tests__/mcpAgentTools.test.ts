@@ -114,8 +114,8 @@ function buildDb(): Database.Database {
   // cyboflow_workflow returns and which spec the edit-workflow CAS hashes.
   apply('124_workflow_tuning_level.sql');
   // ...and workflows.runtime_mix + workflow_runs.runtime_mix, which
-  // readWorkflowRow's projection now names (migration 127).
-  apply('127_workflow_runtime_mix.sql');
+  // readWorkflowRow's projection now names (migration 128).
+  apply('128_workflow_runtime_mix.sql');
 
   // sessions predates the numbered migrations (database.ts inline bootstrap) —
   // hand-rolled with only the columns cyboflow_overview's SELECT touches.

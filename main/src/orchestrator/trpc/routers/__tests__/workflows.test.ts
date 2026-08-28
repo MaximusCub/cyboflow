@@ -492,7 +492,7 @@ describe('cyboflow.workflows.setTuningLevel', () => {
   });
 });
 
-// The mix is the SECOND dial (migration 127). Its mutation mirrors
+// The mix is the SECOND dial (migration 128). Its mutation mirrors
 // setTuningLevel's error mapping exactly, minus the empty-custom-slot arm —
 // the mix transforms whatever graph the level resolves, so an empty slot is the
 // level's problem, not the mix's.

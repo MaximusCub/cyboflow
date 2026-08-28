@@ -1,5 +1,5 @@
 /**
- * WorkflowRegistry.createRun × runtime mixes (migration 127 / plan D3, D6).
+ * WorkflowRegistry.createRun × runtime mixes (migration 128 / plan D3, D6).
  *
  * The mix is a pure transform everywhere EXCEPT here: createRun is the single
  * site where it becomes concrete — a base PROVIDER, a forced execution PLANE, a
@@ -176,7 +176,7 @@ describe('createRun — the claude mix is the identity', () => {
     const stamps = stampsOf(runId);
 
     expect(stamps.mix).toBe('claude');
-    // The exact text the level materialization produced before migration 127 —
+    // The exact text the level materialization produced before migration 128 —
     // `materializeForLevelAndMix` short-circuits 'claude' through it verbatim.
     expect(stamps.specHash).toBe(computeSpecHash(materializeForLevel('sprint', '{}', 'standard')));
     // Untouched by the mix: the plane still floors to orchestrated and the run

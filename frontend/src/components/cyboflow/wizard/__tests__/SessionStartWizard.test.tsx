@@ -76,7 +76,7 @@ vi.mock('../../../../trpc/client', () => ({
         },
         // The Save-as-default companion write for a pending tuning-level pick.
         setTuningLevel: { mutate: vi.fn().mockResolvedValue(undefined) },
-        // …and its runtime-mix sibling (migration 127), the second companion.
+        // …and its runtime-mix sibling (migration 128), the second companion.
         setRuntimeMix: { mutate: vi.fn().mockResolvedValue(undefined) },
       },
       tasks: { list: { query: vi.fn().mockResolvedValue([]) } },

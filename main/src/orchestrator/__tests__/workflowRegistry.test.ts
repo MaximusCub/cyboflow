@@ -1480,7 +1480,7 @@ describe('WorkflowRegistry', () => {
       // Codex HAS the orchestrated pieces (prompt envelope + question bridge),
       // so the guard must be a capability check, not "non-Claude is refused".
       //
-      // Driven through a VARIANT since migration 127: on a BUILT-IN flow an
+      // Driven through a VARIANT since migration 128: on a BUILT-IN flow an
       // explicit codex request reconciles the flow's runtime mix to 'codex',
       // which forces the programmatic plane (see the runtime-mix suite). A
       // variant run is mix-suppressed — its graph is its own — so it is where a
@@ -1832,7 +1832,7 @@ describe('WorkflowRegistry', () => {
           requestedAgentProvider: 'codex',
         });
 
-        // Since migration 127 the request also RECONCILES this built-in flow's
+        // Since migration 128 the request also RECONCILES this built-in flow's
         // runtime mix to 'codex' (runtime-mix plan D3 step 2), which forces the
         // programmatic plane — the only one that honors the per-step tier pins
         // the mix writes. The plane is the one thing that changed here; the

@@ -376,7 +376,7 @@ describe('cancelAndRestartHandler', () => {
     if ('noOp' in result) throw new Error('Expected a real result, got noOp');
 
     // NULL means "pre-feature, a variant run, a non-built-in flow, or an omp/pi
-    // lane" (migration 127) — reading it as 'claude' would attribute a run to a
+    // lane" (migration 128) — reading it as 'claude' would attribute a run to a
     // routing decision nobody made.
     const newRun = db
       .prepare('SELECT runtime_mix FROM workflow_runs WHERE id = ?')

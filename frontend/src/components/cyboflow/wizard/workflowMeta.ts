@@ -99,7 +99,7 @@ export interface WorkflowCardMeta {
    */
   tuningLevel: TuningLevel;
   /**
-   * The workflow's STAMPED runtime mix (migration 127) — `workflows.runtime_mix`,
+   * The workflow's STAMPED runtime mix (migration 128) — `workflows.runtime_mix`,
    * defensively coalesced to {@link DEFAULT_RUNTIME_MIX} for a malformed row.
    * The launch wizard's runtime-mix selector (workflow-runtime-mix.md D4) reads
    * this as the segment tagged "saved default".
