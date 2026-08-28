@@ -50,6 +50,8 @@ import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
+import { hasAttachments, type ComposerAttachments } from './unified/attachments';
+import { composeWithAttachments } from './unified/persistAttachments';
 import { PermissionModePill } from './unified/PermissionModePill';
 import { modelDisplayLabel } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
@@ -303,14 +305,37 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     mode === 'workflow-idle' && !isIdleNudgeable && !isReopenable && !isSdkRunning;
 
   // -- send dispatch --------------------------------------------------------
-  const handleSend = async (): Promise<void> => {
-    if (isDisabled || text.trim().length === 0 || isSending) return;
+  /**
+   * `atts` are the composer-owned image / large-text attachments. Every send path
+   * below is plain TEXT (monitor.send, runs.nudge/reopen/queueInput, the question
+   * gate's other-text, sessions.sendInput), so attachments are persisted to disk
+   * FIRST and their paths folded into the body as an <attachments> block — the
+   * same convention the quick-session composer uses. Composing happens BEFORE the
+   * draft is cleared, and a persistence failure RETHROWS so UnifiedComposer keeps
+   * the attachments (and this keeps the draft) for a retry instead of silently
+   * sending "look at this" with no image behind it.
+   */
+  const handleSend = async (atts: ComposerAttachments): Promise<void> => {
+    if (isDisabled || isSending) return;
+    if (text.trim().length === 0 && !hasAttachments(atts)) return;
+
+    // Artifacts-dir key: the run for every workflow mode, else the quick session.
+    const attachmentOwnerId = runId ?? selectedSessionId;
+    let body = text;
+    if (hasAttachments(atts) && attachmentOwnerId != null) {
+      try {
+        body = await composeWithAttachments(text, atts, attachmentOwnerId);
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Could not save the attachment');
+        throw err;
+      }
+    }
 
     if (mode === 'quick') {
       setIsSending(true);
       setSendError(null);
       try {
-        const result: IPCResponse<void> = await API.sessions.sendInput(selectedSessionId!, text);
+        const result: IPCResponse<void> = await API.sessions.sendInput(selectedSessionId!, body);
         if (result.success) setText('');
         else setSendError(result.error ?? 'Send failed');
       } catch (err: unknown) {
@@ -325,7 +350,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       setIsSending(true);
       setSendError(null);
       try {
-        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text });
+        await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: body });
         await new Promise((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
         await trpc.cyboflow.runs.relayInput.mutate({ runId: runId!, text: '\r' });
         setText('');
@@ -346,7 +371,6 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       // the monitor's reply into the unified stream (rendered from the streamEvents
       // delta), so the pending 'sending' row reconciles away when the user turn
       // lands. Clear instantly; flip to 'failed' if the monitor is gone.
-      const body = text;
       setText('');
       setSendError(null);
       const id = addPending(runId, body, 'sending');
@@ -381,7 +405,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
         console.warn('[ChatInput] workflow-question mode but activeQuestion is null at send time');
         return;
       }
-      setOtherText(activeQuestion.id, text);
+      setOtherText(activeQuestion.id, body);
       setText('');
       return;
     }
@@ -394,7 +418,6 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       // Nudge re-drives the rested run; the follow-up turn re-renders the user's
       // text in the transcript, so the 'sending' row reconciles away. Clear
       // instantly; a no-op reason (blocked / not_idle / …) flips it to 'failed'.
-      const body = text;
       setText('');
       setSendError(null);
       const id = addPending(runId, body, 'sending');
@@ -418,7 +441,6 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
         console.warn('[ChatInput] workflow-idle reopen but runId is null at send time');
         return;
       }
-      const body = text;
       setText('');
       setSendError(null);
       const id = addPending(runId, body, 'sending');
@@ -447,7 +469,6 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       // boundary. The pending row shows 'queued' (distinct, click-to-reopen) and
       // reconciles when the drained turn finally renders the text; a no-op reason
       // (terminal / not_running / …) flips it to 'failed'.
-      const body = text;
       setText('');
       setSendError(null);
       const id = addPending(runId, body, 'queued');
@@ -559,7 +580,12 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       // "Always allow messaging a running flow": while an SDK run executes the
       // message is buffered for its next turn, so the action is QUEUE (not Send).
       primaryLabel={isSdkRunning ? 'Queue' : 'Send'}
-      onSubmit={() => handleSend()}
+      onSubmit={(atts) => handleSend(atts)}
+      // Images / large pasted text ride every SDK send path (monitor, nudge,
+      // reopen, queue, question gate, quick) as on-disk paths. The interactive
+      // PTY relay is excluded: it types the body into a live xterm, where a
+      // multi-line attachments block is a paste hazard, not an attachment.
+      supportsAttachments={!isInteractive}
       onTogglePtyOpen={isInteractive ? () => setPtyOpen((v) => !v) : undefined}
       // Read-only (untoggleable) model pill for the run (see modelLabel above).
       modelLabel={modelLabel}

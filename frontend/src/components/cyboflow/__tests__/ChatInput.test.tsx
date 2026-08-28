@@ -99,6 +99,16 @@ vi.mock('../../../utils/api', () => ({
   },
 }));
 
+// ---------------------------------------------------------------------------
+// Stub the attachment-persistence IPC (sessions:save-images / save-large-text).
+// The run-chat composer folds the returned absolute paths into the message body.
+// ---------------------------------------------------------------------------
+
+const mockSaveImages = vi.fn(async (_ownerId: string, images: Array<{ name: string }>) =>
+  images.map((i) => `/abs/artifacts/${i.name}`),
+);
+const mockSaveLargeText = vi.fn(async () => '/abs/artifacts/pasted.txt');
+
 // Guarded-model availability — mutable per-test so the read-only model pill's
 // fallback-display (a pinned but unavailable model shows its Opus fallback) can be
 // driven. Defaults to all-usable (the optimistic default).
@@ -142,6 +152,11 @@ beforeEach(() => {
   });
 
   mockSendInput.mockClear();
+  mockSaveImages.mockClear();
+  mockSaveLargeText.mockClear();
+  (window as unknown as {
+    electronAPI: { sessions: { saveImages: typeof mockSaveImages; saveLargeText: typeof mockSaveLargeText } };
+  }).electronAPI = { sessions: { saveImages: mockSaveImages, saveLargeText: mockSaveLargeText } };
   mockUpdateAgentPermissionMode.mockClear();
   mockUpdateAgentPermissionMode.mockResolvedValue({ success: true });
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
@@ -1305,5 +1320,151 @@ describe('ChatInput — mode-gating re-renders', () => {
 
     // Rendered nothing
     expect(screen.queryByRole('textbox')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image attachments (feedback on a screenshot is the point of the run chat)
+// ---------------------------------------------------------------------------
+
+describe('ChatInput — image attachments', () => {
+  const RUN_ID = 'run-attach-001';
+  const PROJECT_ID = 21;
+
+  const pngFile = (name: string) => new File(['png-bytes'], name, { type: 'image/png' });
+
+  const activateMonitoredRun = () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: {
+          [PROJECT_ID]: [
+            {
+              id: RUN_ID,
+              workflow_id: 'wf-attach',
+              project_id: PROJECT_ID,
+              status: 'running',
+              substrate: 'sdk',
+              execution_model: 'programmatic',
+              worktree_path: '/Users/me/worktrees/attach',
+              branch_name: 'sprint/attach',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              started_at: null,
+              ended_at: null,
+              stuck_reason: null,
+              permission_mode_snapshot: 'default',
+              workflowName: 'sprint',
+            } as ActiveRunRow,
+          ],
+        },
+      });
+    });
+  };
+
+  const attach = async (name: string) => {
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).not.toBeNull();
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [pngFile(name)] } });
+    });
+    await waitFor(() => {
+      expect(screen.getByAltText(name)).toBeInTheDocument();
+    });
+  };
+
+  it('monitor send: persists the image under the RUN id and folds its path into the text', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    activateMonitoredRun();
+    render(<ChatInput runId={RUN_ID} />);
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+
+    await attach('bug.png');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'fix this padding' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      // Namespaced by the RUN id — a flow run has no session id of its own.
+      expect(mockSaveImages).toHaveBeenCalledWith(RUN_ID, [
+        { name: 'bug.png', dataUrl: expect.stringMatching(/^data:image\/png/), type: 'image/png' },
+      ]);
+    });
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: expect.stringContaining('/abs/artifacts/bug.png'),
+      });
+    });
+    const sent = vi.mocked(trpc.cyboflow.monitor.send.mutate).mock.calls[0][0].text;
+    expect(sent).toContain('fix this padding');
+    expect(sent).toContain('<attachments>');
+  });
+
+  it('queues an image-only message (no text) for a running SDK run', async () => {
+    activateMonitoredRun();
+    render(<ChatInput runId={RUN_ID} />);
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+
+    await attach('shot.png');
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: expect.stringContaining('/abs/artifacts/shot.png'),
+      });
+    });
+  });
+
+  it('keeps the draft + attachment and surfaces the error when persistence fails', async () => {
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    mockSaveImages.mockRejectedValueOnce(new Error('disk full'));
+    activateMonitoredRun();
+    render(<ChatInput runId={RUN_ID} />);
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+
+    await attach('lost.png');
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'see this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('disk full');
+    });
+    // Nothing was sent, and neither the text nor the thumbnail was discarded.
+    expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('see this');
+    expect(screen.getByAltText('lost.png')).toBeInTheDocument();
+  });
+
+  it('offers NO attach affordance for an interactive (PTY relay) run', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: {
+          [PROJECT_ID]: [
+            {
+              id: RUN_ID,
+              workflow_id: 'wf-attach',
+              project_id: PROJECT_ID,
+              status: 'running',
+              substrate: 'interactive',
+              execution_model: 'orchestrated',
+              worktree_path: '/Users/me/worktrees/attach',
+              branch_name: 'sprint/attach',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              started_at: null,
+              ended_at: null,
+              stuck_reason: null,
+              permission_mode_snapshot: 'default',
+              workflowName: 'sprint',
+            } as ActiveRunRow,
+          ],
+        },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+
+    expect(document.querySelector('input[type="file"]')).toBeNull();
   });
 });
