@@ -17,6 +17,7 @@ import {
   addTaskToRun,
   removeTaskFromRun,
   editRunTask,
+  adjustRunTaskForLaneTriage,
   type TaskMutationDeps,
   type TaskMutationLaneStore,
 } from '../taskMutationHandler';
@@ -446,6 +447,119 @@ describe('editRunTask', () => {
     expect(await editRunTask('run-1', { taskRef: 'TASK-1', title: 'x' }, deps)).toMatchObject({
       ok: false,
       reason: 'no_batch',
+    });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// adjustRunTaskForLaneTriage (monitor lane-triage body edit — NOT a chat action)
+// ---------------------------------------------------------------------------
+
+describe('adjustRunTaskForLaneTriage', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('edits the body of an ACTIVE (running) lane via the chokepoint — the queued-only guard does not apply', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'running');
+    const { deps, applySpy } = makeDeps(db);
+
+    const res = await adjustRunTaskForLaneTriage(
+      'run-1',
+      { taskRef: 'TASK-1', body: 'Revised acceptance criteria per triage.' },
+      deps,
+    );
+
+    expect(res).toMatchObject({ ok: true, taskRef: 'TASK-1' });
+    // Routed through the applyTaskChange chokepoint, never a direct UPDATE.
+    expect(applySpy).toHaveBeenCalledTimes(1);
+    const change = applySpy.mock.calls[0][1] as TaskChange;
+    expect(change).toMatchObject({
+      actor: 'orchestrator',
+      runId: 'run-1',
+      entityType: 'task',
+      taskId: 'task-a',
+      fields: { body: 'Revised acceptance criteria per triage.' },
+    });
+    // title/priority are never part of the fields payload — body-only.
+    expect(change.fields).not.toHaveProperty('title');
+    expect(change.fields).not.toHaveProperty('priority');
+    const t = db.prepare('SELECT body FROM tasks WHERE id = ?').get('task-a') as { body: string };
+    expect(t.body).toBe('Revised acceptance criteria per triage.');
+  });
+
+  it('also succeeds against a queued lane (superset of edit_task, not a narrower path)', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'queued');
+    const { deps, applySpy } = makeDeps(db);
+
+    const res = await adjustRunTaskForLaneTriage('run-1', { taskRef: 'TASK-1', body: 'New body' }, deps);
+    expect(res).toMatchObject({ ok: true });
+    expect(applySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('also succeeds against a FAILED lane (the merge-gate revival case, where the row is durably failed at call time)', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'failed');
+    const { deps, applySpy } = makeDeps(db);
+
+    const res = await adjustRunTaskForLaneTriage('run-1', { taskRef: 'TASK-1', body: 'New body' }, deps);
+    expect(res).toMatchObject({ ok: true });
+    expect(applySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses not_found / not_programmatic / no_batch, consistent with the other entry points', async () => {
+    const { deps } = makeDeps(db);
+    expect(await adjustRunTaskForLaneTriage('missing', { taskRef: 'TASK-1', body: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'not_found',
+    });
+
+    seedRun(db, { id: 'orch', batchId: 'b', model: 'orchestrated' });
+    seedBatch(db, 'b');
+    expect(await adjustRunTaskForLaneTriage('orch', { taskRef: 'TASK-1', body: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'not_programmatic',
+    });
+
+    seedRun(db, { id: 'nobatch', batchId: null });
+    expect(await adjustRunTaskForLaneTriage('nobatch', { taskRef: 'TASK-1', body: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'no_batch',
+    });
+  });
+
+  it('refuses an unresolvable task ref as task_not_found', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    const { deps, applySpy } = makeDeps(db);
+
+    expect(await adjustRunTaskForLaneTriage('run-1', { taskRef: 'GHOST', body: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'task_not_found',
+    });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a task with no lane in this batch as not_in_sprint', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    // task-a exists (same project) but was never enrolled as a lane in batch-1.
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    const { deps, applySpy } = makeDeps(db);
+
+    expect(await adjustRunTaskForLaneTriage('run-1', { taskRef: 'TASK-1', body: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'not_in_sprint',
     });
     expect(applySpy).not.toHaveBeenCalled();
   });

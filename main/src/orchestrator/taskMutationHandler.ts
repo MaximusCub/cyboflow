@@ -36,6 +36,13 @@
  * no lane in this batch, or whose lane has already started/finished, is
  * refused rather than silently edited underneath (or unrelated to) the walk.
  *
+ * adjustRunTaskForLaneTriage is a SEPARATE entry point for the monitor's
+ * AUTONOMOUS lane-triage requirements-adjustment (`adjust_and_retry` verdict
+ * from MonitorSession.triageLane, consulted by ProgrammaticRunHost) — not a
+ * chat action, and not a mode of edit_task above. It is body-only and
+ * deliberately BYPASSES edit_task's queued-only lane guard: see its own
+ * docblock for why that is safe.
+ *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/* — every collaborator is injected.
  */
@@ -113,11 +120,11 @@ export interface TaskMutationDeps {
 export type TaskMutationNoOpReason =
   | 'not_found' // no workflow_runs row
   | 'not_programmatic' // orchestrated runs have no monitor-driven backlog edits
-  | 'no_batch' // add/remove need a materialized sprint batch (workflow_runs.batch_id)
-  | 'task_not_found' // remove/edit: the ref/id did not resolve to a task
+  | 'no_batch' // add/remove/edit/lane-triage-adjust need a materialized sprint batch (workflow_runs.batch_id)
+  | 'task_not_found' // remove/edit/lane-triage-adjust: the ref/id did not resolve to a task
   | 'not_eligible' // add: the task could not be made sprint-eligible
-  | 'already_started' // remove/edit: the lane is running/finished — too late
-  | 'not_in_sprint' // edit: the task holds no lane in THIS run's batch
+  | 'already_started' // remove/edit: the lane is running/finished — too late (edit_task ONLY; lane-triage-adjust bypasses this)
+  | 'not_in_sprint' // edit/lane-triage-adjust: the task holds no lane in THIS run's batch
   | 'duplicate' // add: the task is already enrolled in this batch
   | 'nothing_to_change' // edit: no title/body/priority supplied
   | 'lane_error'; // an unexpected SprintLaneStore failure
@@ -438,5 +445,84 @@ export async function editRunTask(
     message: `Updated task ${taskRef ?? input.taskRef}${
       fields.title ? ` (now '${fields.title}')` : ''
     }.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// adjustRunTaskForLaneTriage (monitor lane-triage body edit — NOT a chat action)
+// ---------------------------------------------------------------------------
+
+/**
+ * The monitor's AUTONOMOUS lane-triage requirements-adjustment entry point.
+ * Called only by `ProgrammaticRunHost.triageLaneFailure` when
+ * `MonitorSession.triageLane` returns `adjust_and_retry`: the monitor found
+ * concrete evidence (cited file:line, per the triage prompt contract) that
+ * the task's acceptance criteria conflict with repo reality, and supplies a
+ * full replacement body. Every call is autonomous (no human confirmation)
+ * and is audited by the caller via a non-blocking review-queue finding —
+ * nothing here files that finding; this function only performs the write.
+ *
+ * A SEPARATE exported function rather than an `editRunTask` option flag
+ * (e.g. `allowActiveLane: true`): the two entry points diverge on every axis
+ * that matters —
+ *   - caller: autonomous host-side lane triage vs. a human's in-chat
+ *     edit_task request;
+ *   - input shape: body-only, no title/priority (triage never touches
+ *     those — see the design's "body-only" decision);
+ *   - the lane-status guard: this bypasses the queued-only refusal below.
+ * Branching editRunTask's queued-only invariant behind a flag would risk
+ * that invariant regressing for edit_task's real (chat-action) callers;
+ * keeping the two apart leaves editRunTask's code, and therefore its
+ * existing tests' behavior, untouched BY CONSTRUCTION.
+ *
+ * WHY bypassing the queued-only guard is safe: lane prompts re-read the task
+ * body FRESH at every inner-step spawn (SpawnStepRunner.runStep calls
+ * `taskScope?.()` per dispatch -> buildSeedTasksBlock live-reads bodies), so
+ * writing a new body while the lane is already running (or, in the
+ * merge-gate case, momentarily 'failed' pending revival) is safe: it cannot
+ * retroactively affect a turn already in flight — that turn keeps the body
+ * it started with, by design — and the caller ALWAYS pairs this edit with a
+ * lane rewind back to a not-yet-spawned step, so the very next spawn is
+ * guaranteed to observe the new body. Still requires the task to hold a
+ * lane in THIS run's batch (`not_in_sprint` otherwise, same as edit_task) —
+ * lane triage never reaches outside its own sprint.
+ */
+export async function adjustRunTaskForLaneTriage(
+  runId: string,
+  input: { taskRef: string; body: string },
+  deps: TaskMutationDeps,
+): Promise<TaskMutationResult> {
+  const run = loadRun(deps.db, runId);
+  if (!run) return { ok: false, reason: 'not_found' };
+  if (run.executionModel !== 'programmatic') return { ok: false, reason: 'not_programmatic' };
+  if (!run.batchId) return { ok: false, reason: 'no_batch' };
+  const { projectId, batchId } = run;
+
+  const taskId = resolveTaskId(deps.db, projectId, input.taskRef);
+  if (!taskId) return { ok: false, reason: 'task_not_found', detail: input.taskRef };
+
+  // Scoped to THIS run's batch, same as edit_task — but deliberately NOT
+  // scoped to 'queued': see the docblock above for why an active (or
+  // momentarily merge-gate-failed) lane is safe to edit here.
+  const laneStatus = readLaneStatus(deps.db, batchId, taskId);
+  if (laneStatus === undefined) {
+    return { ok: false, reason: 'not_in_sprint', detail: input.taskRef };
+  }
+
+  await deps.applyTaskChange(projectId, {
+    actor: 'orchestrator',
+    runId,
+    entityType: 'task',
+    taskId,
+    fields: { body: input.body },
+    kind: 'lane-triage-adjusted',
+  });
+
+  const taskRef = readTaskRef(deps.db, taskId);
+  return {
+    ok: true,
+    taskId,
+    taskRef,
+    message: `Adjusted task ${taskRef ?? input.taskRef}'s requirements per monitor lane triage.`,
   };
 }
