@@ -47,7 +47,9 @@ import {
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import { TUNING_LEVELS, isTuningLevel, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
-import { isRuntimeMix, type RuntimeMix } from '../../../../../shared/tuning/runtimeMix';
+import { RUNTIME_MIXES, isRuntimeMix, type RuntimeMix } from '../../../../../shared/tuning/runtimeMix';
+import { isRuntimeMixOverrideError } from '../../../../../shared/tuning/workflowTuningErrors';
+import { isRuntimeMixOrchestratedError } from '../../../../../shared/types/executionModelErrors';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
@@ -375,12 +377,15 @@ export interface RunLauncherLike {
    * workflow_runs.seed_prompt, only valid when the workflow's name === 'launch'.
    * When omitted the run is not prompt-seeded.
    * `launchOptions.tuningLevel` (migration 122) is the per-run tuning-level
-   * override: it forces the baseline arm and is materialized + stamped by
-   * createRun. `launchOptions.frozenSpec` is the restart-provenance replay pair
-   * (the failed run's exact frozen spec + the level it was stamped with) — set
-   * only by runs.restart, never reachable from a tRPC input.
+   * override: it redirects rotation at that level's variant pool and is
+   * materialized + stamped by createRun. `launchOptions.runtimeMix` (migration
+   * 127) is its routing sibling — it DOES force the baseline arm, since variants
+   * carry no mix scoping for rotation to redirect into.
+   * `launchOptions.frozenSpec` is the restart-provenance replay triple (the
+   * failed run's exact frozen spec plus the level and mix it was stamped with) —
+   * set only by runs.restart, never reachable from a tRPC input.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string; originIdeaId?: string; tuningLevel?: TuningLevel; frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null } }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string; originIdeaId?: string; tuningLevel?: TuningLevel; runtimeMix?: RuntimeMix; frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null } }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -464,7 +469,7 @@ export function setSprintLaneDeps(deps: SprintLaneDeps): void {
 // by main/src/index.ts via setRelayDeps(), backed by SubstrateDispatchFacade's
 // relayInput/relayResize (which route to the interactive manager's live PTY and
 // NO-OP for the SDK substrate). Function-reference shape (mirrors
-// CancelAndRestartDeps.claudeManagerStop) keeps the router free of any
+// CancelAndRestartDeps.managerStop) keeps the router free of any
 // services/* import (standalone-typecheck invariant). Until wired, the relay
 // mutations throw METHOD_NOT_SUPPORTED — same stub pattern as the other dep-bags.
 // ---------------------------------------------------------------------------
@@ -1221,6 +1226,16 @@ export const runsRouter = router({
       // Omitted = no override → the workflow's own stamped level decides. The
       // workflows row is never written by this path.
       tuningLevel: z.enum(TUNING_LEVELS).optional(),
+      // Optional PER-RUN runtime-mix override (migration 127 / runtime-mix plan
+      // D3) — the launch wizard's "run this once with THIS routing". Rides the
+      // same trailing launchOptions bag as tuningLevel. Unlike the level it
+      // FORCES the baseline arm in RunLauncher: variants carry no mix scoping,
+      // so rotation must not assign one underneath an explicit routing choice.
+      // createRun then resolves it before the provider/execution ladders,
+      // materializes the run's spec from it, and stamps
+      // workflow_runs.runtime_mix. Omitted = no override → the workflow's own
+      // stamped mix decides. The workflows row is never written by this path.
+      runtimeMix: z.enum(RUNTIME_MIXES).optional(),
     }).refine((v) => !(v.taskId !== undefined && v.taskIds !== undefined), {
       // Fix 6a — a single run must not carry BOTH a direct task link (taskId) and a
       // sprint batch (taskIds): the run would appear in gatherTaskRuns twice (once
@@ -1258,6 +1273,20 @@ export const runsRouter = router({
           code: 'BAD_REQUEST',
           message:
             'tuningLevel and variantId are mutually exclusive — a variant runs its own frozen definition, so pick one or the other',
+        });
+      }
+      // Runtime-mix override × explicit variant pin, same shape and the same
+      // reason (runtime-mix plan D3/D5) — but with no containment model to fall
+      // back on: migration 126 scoped variants to a LEVEL, never to a mix, and a
+      // variant run stamps a NULL mix, so a mix asked for alongside one could be
+      // neither honoured nor recorded. createRun is again the authoritative
+      // chokepoint; this restatement only turns a contradictory payload into a
+      // 400 instead of the INTERNAL_SERVER_ERROR tRPC wraps a registry throw in.
+      if (input.runtimeMix !== undefined && input.variantId !== undefined) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message:
+            'runtimeMix and variantId are mutually exclusive — a variant runs its own frozen definition and its runs are mix-unattributed, so pick one or the other',
         });
       }
       const project = startRunDeps.sessionManager.getProjectById(input.projectId);
@@ -1464,7 +1493,8 @@ export const runsRouter = router({
         input.ideaIds !== undefined ||
         input.seedPrompt !== undefined ||
         input.originIdeaId !== undefined ||
-        input.tuningLevel !== undefined
+        input.tuningLevel !== undefined ||
+        input.runtimeMix !== undefined
           ? {
               ...(input.variantId !== undefined
                 ? { requestedVariantId: input.variantId }
@@ -1475,47 +1505,70 @@ export const runsRouter = router({
               ...(input.seedPrompt !== undefined ? { seedPrompt: input.seedPrompt } : {}),
               ...(input.originIdeaId !== undefined ? { originIdeaId: input.originIdeaId } : {}),
               ...(input.tuningLevel !== undefined ? { tuningLevel: input.tuningLevel } : {}),
+              ...(input.runtimeMix !== undefined ? { runtimeMix: input.runtimeMix } : {}),
             }
           : undefined;
-      const { runId, worktreePath, branchName } = launchWithAgentSelection
-        ? await startRunDeps.runLauncher.launch(
-            input.workflowId,
-            project.path,
-            launchSubstrate,
-            input.taskId,
-            input.ideaId,
-            input.sessionId,
-            input.permissionMode,
-            undefined,
-            input.taskIds,
-            input.projectId,
-            input.executionModel,
-            input.findingIds,
-            input.model,
-            input.evalEnabled,
-            input.verifyEnabled,
-            launchOptions,
-            input.agentProvider,
-            input.agentRuntime,
-          )
-        : await startRunDeps.runLauncher.launch(
-            input.workflowId,
-            project.path,
-            launchSubstrate,
-            input.taskId,
-            input.ideaId,
-            input.sessionId,
-            input.permissionMode,
-            undefined,
-            input.taskIds,
-            input.projectId,
-            input.executionModel,
-            input.findingIds,
-            input.model,
-            input.evalEnabled,
-            input.verifyEnabled,
-           launchOptions,
-         );
+      // The two RUNTIME-MIX guards createRun raises are user-reachable input
+      // errors, not crashes: a mix asked for alongside a variant / on a
+      // non-built-in flow, and an EXPLICITLY orchestrated request under a
+      // non-claude mix. Remapped here so the wire answers them with a 400
+      // instead of the INTERNAL_SERVER_ERROR tRPC wraps a bare registry throw
+      // in. Every other launch failure is rethrown VERBATIM — the wizard's
+      // mixed-provider prompt detects `MixedProviderOrchestratedError` by the
+      // message substring that survives that rewrap, and re-coding it here would
+      // change nothing for the renderer while broadening this catch's blast
+      // radius (see shared/types/executionModelErrors.ts, tRPC boundary note).
+      let launched: { runId: string; worktreePath: string; branchName: string };
+      try {
+        launched = launchWithAgentSelection
+          ? await startRunDeps.runLauncher.launch(
+              input.workflowId,
+              project.path,
+              launchSubstrate,
+              input.taskId,
+              input.ideaId,
+              input.sessionId,
+              input.permissionMode,
+              undefined,
+              input.taskIds,
+              input.projectId,
+              input.executionModel,
+              input.findingIds,
+              input.model,
+              input.evalEnabled,
+              input.verifyEnabled,
+              launchOptions,
+              input.agentProvider,
+              input.agentRuntime,
+            )
+          : await startRunDeps.runLauncher.launch(
+              input.workflowId,
+              project.path,
+              launchSubstrate,
+              input.taskId,
+              input.ideaId,
+              input.sessionId,
+              input.permissionMode,
+              undefined,
+              input.taskIds,
+              input.projectId,
+              input.executionModel,
+              input.findingIds,
+              input.model,
+              input.evalEnabled,
+              input.verifyEnabled,
+              launchOptions,
+            );
+      } catch (err) {
+        if (isRuntimeMixOverrideError(err) || isRuntimeMixOrchestratedError(err)) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        throw err;
+      }
+      const { runId, worktreePath, branchName } = launched;
       return { runId, worktreePath, branchName };
     }),
 
@@ -2489,7 +2542,7 @@ export const runsRouter = router({
    *   inspect.  v2 can add an explicit "Cancel and discard worktree" variant.
    *
    * Standalone-typecheck invariant: the real collaborators (db, approvalRouter,
-   * runQueues, claudeManagerStop) are injected via setCancelAndRestartDeps().
+   * runQueues, managerStop) are injected via setCancelAndRestartDeps().
    * Until that is called the mutation throws METHOD_NOT_SUPPORTED.
    */
   cancelAndRestart: protectedProcedure

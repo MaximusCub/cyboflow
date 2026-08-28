@@ -4926,7 +4926,13 @@ app.whenReady().then(async () => {
       approvalRouter: ApprovalRouter.getInstance(),
       questionRouter: QuestionRouter.getInstance(),
       runQueues,
-      claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
+      // Provider-neutral stop (runtime-mix plan D6): route through the SAME
+      // SubstrateDispatchFacade.abort seam runs.cancel uses below, which resolves
+      // the manager that actually spawned the run's panel. The previous
+      // defaultCliManager.stopPanel binding was Claude-only, so a codex-primary
+      // (or interactive) run's process survived the cancel half of
+      // cancel-and-restart while the row was replaced underneath it.
+      managerStop: (runId: string) => substrateFacade.abort(runId),
       // F5: sweep the OLD run's pending drafts after it flips 'canceled'.
       deletePendingDraftsForRun,
       // Migration 066: the OLD run flips 'canceled' but the replacement run carries

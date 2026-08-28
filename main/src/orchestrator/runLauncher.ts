@@ -387,6 +387,19 @@ export class RunLauncher {
       // pool (see resolveEffectiveTuningLevel at the launch site below); it no
       // longer forces the baseline arm.
       tuningLevel?: TuningLevel;
+      // Per-run RUNTIME MIX override (migration 127 / runtime-mix plan D3) — the
+      // launch wizard's "run this once with THIS routing", threaded into
+      // WorkflowRegistry.createRun, which validates it, materializes the run's
+      // spec from it, and stamps workflow_runs.runtime_mix. Never writes the
+      // workflows row.
+      //
+      // Unlike tuningLevel it FORCES THE BASELINE ARM. Since migration 126 a
+      // variant belongs to one LEVEL's pool, so a level override has somewhere to
+      // redirect rotation to; there is no mix-scoped pool for a mix override to
+      // redirect into, and createRun rejects a mix paired with ANY variant
+      // (`variant_conflict`). Letting rotation assign one underneath the override
+      // would therefore turn an explicit routing choice into a launch failure.
+      runtimeMix?: RuntimeMix;
       // INTERNAL restart provenance (plan D4) — set only by runs.restart, never
       // by a tRPC input. Carries the failed run's EXACT frozen spec (recovered
       // from workflow_revisions by its spec_hash) plus the level it was stamped
@@ -569,7 +582,15 @@ export class RunLauncher {
     // system), resolved through the registry so this and createRun cannot drift.
     // An explicit variant PIN still survives into createRun, which rejects it only
     // when it belongs to a DIFFERENT level than an explicit override.
+    //
+    // A RUNTIME-MIX override (migration 127) is the exception that still forces
+    // the baseline: variants are scoped to a level, never to a mix, so there is
+    // no mix pool to redirect rotation into — and createRun rejects a mix paired
+    // with ANY variant, so a rotation pick underneath one would turn the launch
+    // into a `variant_conflict` failure. Composed with (not replacing) the
+    // caller's explicit baseline pin.
     const tuningLevel = launchOptions?.tuningLevel;
+    const runtimeMix = launchOptions?.runtimeMix;
     const poolTuningLevel = this.workflowRegistry.resolveEffectiveTuningLevel(
       workflowId,
       tuningLevel,
@@ -579,7 +600,7 @@ export class RunLauncher {
         workflowId,
         poolTuningLevel,
         launchOptions?.requestedVariantId,
-        { baseline: launchOptions?.baseline },
+        { baseline: runtimeMix !== undefined ? true : launchOptions?.baseline },
       ) ?? null;
     // Provenance split (phase 2): the resolved variant is folded as before, and a
     // GENUINE weighted rotation pick (source==='rotation') additionally stamps the
@@ -621,6 +642,7 @@ export class RunLauncher {
       requestedAgentProvider !== undefined ||
       requestedAgentRuntime !== undefined ||
       tuningLevel !== undefined ||
+      runtimeMix !== undefined ||
       launchOptions?.frozenSpec !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
@@ -647,6 +669,7 @@ export class RunLauncher {
             ...(requestedAgentProvider !== undefined ? { requestedAgentProvider } : {}),
             ...(requestedAgentRuntime !== undefined ? { requestedAgentRuntime } : {}),
             ...(tuningLevel !== undefined ? { tuningLevel } : {}),
+            ...(runtimeMix !== undefined ? { runtimeMix } : {}),
             ...(launchOptions?.frozenSpec !== undefined
               ? { frozenSpec: launchOptions.frozenSpec }
               : {}),

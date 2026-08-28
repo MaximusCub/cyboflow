@@ -492,6 +492,77 @@ describe('cyboflow.workflows.setTuningLevel', () => {
   });
 });
 
+// The mix is the SECOND dial (migration 127). Its mutation mirrors
+// setTuningLevel's error mapping exactly, minus the empty-custom-slot arm —
+// the mix transforms whatever graph the level resolves, so an empty slot is the
+// level's problem, not the mix's.
+describe('cyboflow.workflows.setRuntimeMix', () => {
+  it('stamps the mix and returns { ok: true }', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'wf-1-sprint', mix: 'codex-primary' }),
+    ).resolves.toEqual({ ok: true });
+    expect(registry.getById('wf-1-sprint')?.runtime_mix).toBe('codex-primary');
+  });
+
+  it('leaves the tuning level untouched — the two dials are orthogonal', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+    registry.setTuningLevel('wf-1-sprint', 'thorough');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'wf-1-sprint', mix: 'codex' });
+
+    expect(registry.getById('wf-1-sprint')?.tuning_level).toBe('thorough');
+    expect(registry.getById('wf-1-sprint')?.runtime_mix).toBe('codex');
+  });
+
+  it('maps a missing row to NOT_FOUND', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    await expect(
+      caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'nope', mix: 'codex' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('maps a non-built-in flow to BAD_REQUEST', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-custom-abc12345', 1, 'My Custom Flow', JSON.stringify(makeDefinition('mine')));
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'wf-1-custom-abc12345', mix: 'codex' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('refuses a value outside the RuntimeMix union at the zod boundary', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-sprint', 1, 'sprint');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      // @ts-expect-error — deliberately outside the RuntimeMix union.
+      caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'wf-1-sprint', mix: 'gemini' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('throws PRECONDITION_FAILED when workflowRegistry is not wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.workflows.setRuntimeMix({ workflowId: 'any', mix: 'claude' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+});
+
 describe('cyboflow.workflows.updateSpec', () => {
   it('persists the definition and returns { ok: true }', async () => {
     const rawDb = createWorkflowTestDb();

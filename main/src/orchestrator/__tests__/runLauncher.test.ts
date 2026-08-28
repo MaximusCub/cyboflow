@@ -2664,4 +2664,52 @@ describe('RunLauncher.launch tuningLevel override', () => {
       expect(createRunSpy.mock.calls[0][4]).toMatchObject({ frozenSpec });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Per-run RUNTIME-MIX override (migration 127 / runtime-mix plan D3).
+  //
+  // The launcher's half here is the OPPOSITE of the level's: a mix override
+  // FORCES the baseline arm. Variants are scoped to a level (migration 126),
+  // never to a mix, so there is no mix pool for rotation to redirect into — and
+  // createRun rejects a mix paired with ANY variant, so a rotation pick
+  // underneath the override would turn the launch into a variant_conflict.
+  // -------------------------------------------------------------------------
+
+  it('forces the baseline arm under a runtimeMix override and threads it into createRun', async () => {
+    await withTempDir('runlauncher-mix-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, { runtimeMix: 'codex-primary' });
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'standard', undefined, {
+        baseline: true,
+      });
+      expect(createRunSpy.mock.calls[0][4]).toMatchObject({ runtimeMix: 'codex-primary' });
+    });
+  });
+
+  it('keeps the level pool redirect while still forcing baseline when both dials are set', async () => {
+    await withTempDir('runlauncher-mix-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, {
+        tuningLevel: 'efficient',
+        runtimeMix: 'claude-primary',
+      });
+      // The level still picks the pool (its own contract is unchanged); the mix
+      // only pins the arm inside it to baseline.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'efficient', undefined, {
+        baseline: true,
+      });
+      expect(createRunSpy.mock.calls[0][4]).toMatchObject({
+        tuningLevel: 'efficient',
+        runtimeMix: 'claude-primary',
+      });
+    });
+  });
+
+  it('leaves rotation alone when no runtimeMix override is supplied', async () => {
+    await withTempDir('runlauncher-mix-', async (tmpDir) => {
+      const { createRunSpy, resolveSpy } = await launchWith(tmpDir, undefined);
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'standard', undefined, {
+        baseline: undefined,
+      });
+      expect(createRunSpy.mock.calls[0][4]).not.toHaveProperty('runtimeMix');
+    });
+  });
 });

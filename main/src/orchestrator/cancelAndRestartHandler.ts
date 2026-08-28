@@ -21,6 +21,11 @@ import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import {
   TERMINAL_RUN_STATUSES,
 } from '../../../shared/types/cyboflow';
+import {
+  DEFAULT_AGENT_PROVIDER,
+  DEFAULT_WORKFLOW_AGENT_RUNTIME,
+} from '../../../shared/types/agentRuntime';
+import { DEFAULT_EXECUTION_MODEL } from '../../../shared/types/executionModel';
 
 // ---------------------------------------------------------------------------
 // Dependency bag
@@ -32,14 +37,21 @@ export interface CancelAndRestartDeps {
   questionRouter: Pick<QuestionRouter, 'clearPendingForRun'>;
   runQueues: RunQueueRegistry;
   /**
-   * Stops the Claude SDK run identified by the given key.
+   * Stops the run identified by the given key, WHATEVER PROVIDER IT IS ON.
    *
-   * For workflow runs, the key is the runId (ClaudeCodeManager keys sdkRuns
-   * by panelId which equals runId for cyboflow workflow runs).
-   * Injection decouples this handler from ClaudeCodeManager's concrete class,
-   * preserving the standalone-typecheck invariant.
+   * For workflow runs, the key is the runId (managers key their live panels by
+   * panelId, which equals runId for cyboflow workflow runs). Injection decouples
+   * this handler from any concrete manager class, preserving the
+   * standalone-typecheck invariant.
+   *
+   * The implementation MUST resolve the run's own manager rather than assume
+   * Claude (index.ts wires it through `SubstrateDispatchFacade.abort`, the same
+   * universal-cancel seam `runs.cancel` uses). Load-bearing since the runtime
+   * mix landed: a codex-primary run is stopped by the Codex manager, and a
+   * Claude-only stop would leave its process alive while this handler cancels
+   * the row and inserts a replacement.
    */
-  claudeManagerStop: (sessionId: string) => Promise<void>;
+  managerStop: (runId: string) => Promise<void>;
   /**
    * Q1 GUARD (F5): drop the OLD run's PENDING draft entities after it is flipped
    * terminal.  The SAME sweep index.ts wires into cancelRunHandler
@@ -64,7 +76,7 @@ export interface CancelAndRestartDeps {
   recomputeTasksForBatch?: (batchId: string) => Promise<void>;
   recomputeTask?: (taskId: string) => Promise<void>;
   /**
-   * Optional structured logger.  When provided, errors from `claudeManagerStop`
+   * Optional structured logger.  When provided, errors from `managerStop`
    * are logged as `[cancelAndRestart]` entries before the handler proceeds to
    * the DB writes (the run is conceptually canceled regardless of PTY teardown
    * success).  When omitted, errors are silently swallowed.
@@ -109,9 +121,9 @@ interface WorkflowRunRow {
   eval_enabled: number | null;
   /**
    * The frozen definition address (spec_hash mig 026) + the tuning level it was
-   * materialized at (mig 122). Copied verbatim for the same reason as the
-   * columns above: the replacement run must execute the SAME definition the
-   * canceled one was executing.
+   * materialized at (mig 122) and the runtime mix it was routed under (mig 127).
+   * Copied verbatim for the same reason as the columns above: the replacement
+   * run must execute the SAME definition the canceled one was executing.
    *
    * Load-bearing since the tuning dial landed. A preset level's graph is written
    * down NOWHERE but the run's own `workflow_revisions` row — the dial never
@@ -126,6 +138,23 @@ interface WorkflowRunRow {
    */
   spec_hash: string | null;
   tuning_level: string | null;
+  runtime_mix: string | null;
+  /**
+   * The immutable ROUTING stamps (provider/runtime mig 059-064, execution model
+   * mig 031) — copied verbatim alongside the spec address for the same reason,
+   * and load-bearing since the runtime mix landed (runtime-mix plan D6).
+   *
+   * A mixed run's per-step provider lives in `agentConfigs` pins inside the
+   * frozen spec this handler copies, and those pins are honored ONLY by the
+   * programmatic runner. Leaving the replacement row on the column defaults
+   * would restart a codex-primary programmatic run as a claude/orchestrated one
+   * still carrying every Codex pin — the exact silent degradation the
+   * mixed-provider guard exists to prevent, arrived at without ever passing
+   * through that guard (this handler INSERTs directly, bypassing createRun).
+   */
+  agent_provider: string | null;
+  agent_runtime: string | null;
+  execution_model: string | null;
   /**
    * Task/batch links (migration 066). Read so the OLD run's tasks can revert off
    * 'In development' after it flips 'canceled'. Deliberately NOT copied to the
@@ -151,7 +180,7 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
  *   1. Fetch the run row.  If already terminal → return noOp.
  *   2. `approvalRouter.clearPendingForRun(runId)` — send deny replies on the
  *      socket for every pending approval BEFORE killing the PTY.
- *   3. `claudeManagerStop(runId)` — abort the in-flight Claude SDK run.
+ *   3. `managerStop(runId)` — abort the in-flight run on its own substrate.
  *   4. UPDATE old run status → 'canceled'.
  *   5. INSERT new run row (same workflow_id / project_id / worktree_path /
  *      policy_json) with status 'queued'.
@@ -171,7 +200,7 @@ export async function cancelAndRestartHandler(
     approvalRouter,
     questionRouter,
     runQueues,
-    claudeManagerStop,
+    managerStop,
     deletePendingDraftsForRun,
     recomputeTasksForBatch,
     recomputeTask,
@@ -185,6 +214,7 @@ export async function cancelAndRestartHandler(
     const row = db.prepare(
       `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
               substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
+              runtime_mix, agent_provider, agent_runtime, execution_model,
               task_id, batch_id
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
@@ -214,15 +244,15 @@ export async function cancelAndRestartHandler(
       { runId },
     );
 
-    // Step 3: Kill the Claude SDK run.
+    // Step 3: Kill the live agent, whichever provider/substrate is running it.
     // Wrapped in try/catch so a rejection here does NOT leave the run stuck
     // forever — the DB writes in steps 4+5 still apply.  The run is
     // conceptually canceled from the user's perspective regardless of whether
     // PTY teardown succeeded.
     try {
-      await claudeManagerStop(runId);
+      await managerStop(runId);
     } catch (err: unknown) {
-      logger?.error('[cancelAndRestart] claudeManagerStop rejected — proceeding to DB writes', {
+      logger?.error('[cancelAndRestart] managerStop rejected — proceeding to DB writes', {
         runId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -254,12 +284,17 @@ export async function cancelAndRestartHandler(
       // Worktree is PRESERVED — no worktreeManager.remove call.
       // session_id is copied verbatim (may be null for a legacy parentless run)
       // so the restarted run stays nested under the same owning session.
+      // The routing stamps ride along with the spec address (see WorkflowRunRow):
+      // they are NOT NULL columns in the real schema, so a legacy row that
+      // somehow reads NULL falls back to the SAME column defaults rather than
+      // failing the INSERT and stranding the just-canceled run.
       db.prepare(
         `INSERT INTO workflow_runs
            (id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
             substrate, permission_mode_snapshot, model, eval_enabled, spec_hash, tuning_level,
+            runtime_mix, agent_provider, agent_runtime, execution_model,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newRunId,
         row.workflow_id,
@@ -273,6 +308,10 @@ export async function cancelAndRestartHandler(
         row.eval_enabled,
         row.spec_hash,
         row.tuning_level,
+        row.runtime_mix,
+        row.agent_provider ?? DEFAULT_AGENT_PROVIDER,
+        row.agent_runtime ?? DEFAULT_WORKFLOW_AGENT_RUNTIME,
+        row.execution_model ?? DEFAULT_EXECUTION_MODEL,
         now,
         now,
       );

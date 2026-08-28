@@ -18,6 +18,7 @@ import { buildBuiltInWorkflows } from '../../workflows/builtInWorkflows';
 import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
+import { RUNTIME_MIXES } from '../../../../../shared/tuning/runtimeMix';
 
 export const workflowsRouter = router({
   /**
@@ -132,6 +133,36 @@ export const workflowsRouter = router({
       }
       try {
         ctx.workflowRegistry.setTuningLevel(input.workflowId, input.level);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = message.includes('not found') ? 'NOT_FOUND' : 'BAD_REQUEST';
+        throw new TRPCError({ code, message });
+      }
+      return { ok: true };
+    }),
+
+  /**
+   * Stamp the workflow's runtime mix (migration 127) — the second dial.
+   *
+   * Orthogonal to {@link setTuningLevel} and just as cheap: neither `spec_json`
+   * nor the level is touched, so flipping the routing is lossless. Maps the
+   * registry's distinguishable guard errors:
+   *   - 'not found' → NOT_FOUND
+   *   - otherwise   → BAD_REQUEST (not a built-in flow — a "save as new" flow
+   *     has no execution/verification split to route — or an invalid mix that
+   *     slipped past the enum)
+   */
+  setRuntimeMix: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1), mix: z.enum(RUNTIME_MIXES) }))
+    .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      try {
+        ctx.workflowRegistry.setRuntimeMix(input.workflowId, input.mix);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const code = message.includes('not found') ? 'NOT_FOUND' : 'BAD_REQUEST';

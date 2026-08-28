@@ -18,7 +18,7 @@
  * Test strategy:
  *   - Real in-memory better-sqlite3 DB with migrations 006 + 007 applied.
  *   - Mocked ApprovalRouter (clearPendingForRun is a no-op spy).
- *   - Mocked claudeManagerStop (a vi.fn() that resolves immediately).
+ *   - Mocked managerStop (a vi.fn() that resolves immediately).
  *   - Mocked worktreeManager.remove (vi.fn() asserted never-called).
  *   - The mutation body is exercised via the cancelAndRestartHandler()
  *     extracted helper (tested directly, without the tRPC wrapper, to avoid
@@ -68,7 +68,7 @@ interface OrderSpy {
   calls: string[];
   clearPendingForRun: ReturnType<typeof vi.fn>;       // approvalRouter
   clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
-  claudeManagerStop: ReturnType<typeof vi.fn>;
+  managerStop: ReturnType<typeof vi.fn>;
   worktreeRemove: ReturnType<typeof vi.fn>;
   deletePendingDraftsForRun: ReturnType<typeof vi.fn>; // F5 sweep
 }
@@ -84,8 +84,8 @@ function makeOrderSpy(): OrderSpy {
     calls.push('clearQuestionsForRun');
   });
 
-  const claudeManagerStop = vi.fn(async (_sessionId: string) => {
-    calls.push('claudeManagerStop');
+  const managerStop = vi.fn(async (_runId: string) => {
+    calls.push('managerStop');
   });
 
   const worktreeRemove = vi.fn(async (_path: string) => {
@@ -96,7 +96,7 @@ function makeOrderSpy(): OrderSpy {
     calls.push('deletePendingDraftsForRun');
   });
 
-  return { calls, clearPendingForRun, clearQuestionsForRun, claudeManagerStop, worktreeRemove, deletePendingDraftsForRun };
+  return { calls, clearPendingForRun, clearQuestionsForRun, managerStop, worktreeRemove, deletePendingDraftsForRun };
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ function makeDeps(
     approvalRouter: { clearPendingForRun: spy.clearPendingForRun } as unknown as import('../approvalRouter').ApprovalRouter,
     questionRouter: { clearPendingForRun: spy.clearQuestionsForRun },
     runQueues: registry,
-    claudeManagerStop: spy.claudeManagerStop,
+    managerStop: spy.managerStop,
     deletePendingDraftsForRun: spy.deletePendingDraftsForRun,
   };
 }
@@ -152,17 +152,17 @@ describe('cancelAndRestartHandler', () => {
   // AC5: deny BEFORE PTY kill
   // -------------------------------------------------------------------------
 
-  it('calls clearPendingForRun BEFORE claudeManagerStop (AC5: deny before kill)', async () => {
+  it('calls clearPendingForRun BEFORE managerStop (AC5: deny before kill)', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
 
     await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
 
     expect(spy.calls[0]).toBe('clearPendingForRun');
-    expect(spy.calls.indexOf('claudeManagerStop')).toBeGreaterThan(spy.calls.indexOf('clearPendingForRun'));
+    expect(spy.calls.indexOf('managerStop')).toBeGreaterThan(spy.calls.indexOf('clearPendingForRun'));
   });
 
-  it('calls approvalRouter.clearPendingForRun → questionRouter.clearPendingForRun → claudeManagerStop in that order', async () => {
+  it('calls approvalRouter.clearPendingForRun → questionRouter.clearPendingForRun → managerStop in that order', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
 
@@ -170,7 +170,7 @@ describe('cancelAndRestartHandler', () => {
 
     expect(spy.calls[0]).toBe('clearPendingForRun');       // approvalRouter
     expect(spy.calls[1]).toBe('clearQuestionsForRun');     // questionRouter (NEW)
-    expect(spy.calls[2]).toBe('claudeManagerStop');
+    expect(spy.calls[2]).toBe('managerStop');
   });
 
   it('calls questionRouter.clearPendingForRun with the correct runId', async () => {
@@ -206,7 +206,7 @@ describe('cancelAndRestartHandler', () => {
     expect(spy.deletePendingDraftsForRun).toHaveBeenCalledWith(runId);
     // The sweep runs AFTER the cancel/insert (kill first, then flip terminal, then sweep).
     expect(spy.calls.indexOf('deletePendingDraftsForRun')).toBeGreaterThan(
-      spy.calls.indexOf('claudeManagerStop'),
+      spy.calls.indexOf('managerStop'),
     );
     const oldRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
     expect(oldRun.status).toBe('canceled');
@@ -330,6 +330,60 @@ describe('cancelAndRestartHandler', () => {
     expect(newRun).toEqual({ spec_hash: 'deadbeef', tuning_level: 'efficient' });
   });
 
+  it('copies the immutable routing stamps (provider/runtime/plane/mix) onto the restarted run', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-routing');
+    db.prepare(
+      `UPDATE workflow_runs
+          SET agent_provider = 'codex', agent_runtime = 'codex-sdk',
+              execution_model = 'programmatic', runtime_mix = 'codex-primary',
+              spec_hash = 'c0ffee'
+        WHERE id = ?`,
+    ).run(runId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    // The per-step provider pins live inside the frozen spec this handler copies
+    // by address, and only the PROGRAMMATIC runner honours them. Dropping these
+    // four columns would restart a codex-primary programmatic run as a
+    // claude/orchestrated one still carrying every Codex pin — silently ignoring
+    // half its own routing, and without ever passing the mixed-provider guard
+    // (this handler INSERTs directly, bypassing createRun).
+    const newRun = db
+      .prepare(
+        'SELECT agent_provider, agent_runtime, execution_model, runtime_mix FROM workflow_runs WHERE id = ?',
+      )
+      .get(result.newRunId) as {
+      agent_provider: string | null;
+      agent_runtime: string | null;
+      execution_model: string | null;
+      runtime_mix: string | null;
+    };
+    expect(newRun).toEqual({
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+      execution_model: 'programmatic',
+      runtime_mix: 'codex-primary',
+    });
+  });
+
+  it('leaves the replacement mix NULL for a run that carried none (never defaulted to claude)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-nomix');
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    // NULL means "pre-feature, a variant run, a non-built-in flow, or an omp/pi
+    // lane" (migration 127) — reading it as 'claude' would attribute a run to a
+    // routing decision nobody made.
+    const newRun = db
+      .prepare('SELECT runtime_mix FROM workflow_runs WHERE id = ?')
+      .get(result.newRunId) as { runtime_mix: string | null };
+    expect(newRun.runtime_mix).toBeNull();
+  });
+
   it('copies the original run session_id onto the restarted run (run stays nested under its session)', async () => {
     const runId = randomUUID();
     const sessionId = `session-${randomUUID()}`;
@@ -395,7 +449,7 @@ describe('cancelAndRestartHandler', () => {
 
     expect('noOp' in result && result.noOp).toBe(true);
     expect(spy.clearPendingForRun).not.toHaveBeenCalled();
-    expect(spy.claudeManagerStop).not.toHaveBeenCalled();
+    expect(spy.managerStop).not.toHaveBeenCalled();
   });
 
   it('returns noOp for a completed run', async () => {
@@ -446,16 +500,16 @@ describe('cancelAndRestartHandler', () => {
   });
 
   // -------------------------------------------------------------------------
-  // claudeManagerStop rejection — run still canceled, new run still inserted
+  // managerStop rejection — run still canceled, new run still inserted
   // -------------------------------------------------------------------------
 
-  it('still marks run as canceled and inserts new run when claudeManagerStop rejects', async () => {
+  it('still marks run as canceled and inserts new run when managerStop rejects', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
 
-    // Make claudeManagerStop reject.
+    // Make managerStop reject.
     const rejectingSpy = makeOrderSpy();
-    rejectingSpy.claudeManagerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
+    rejectingSpy.managerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
 
     const loggerErrors: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
     const testLogger = {
@@ -551,12 +605,12 @@ describe('cancelAndRestartHandler', () => {
     expect(loggerDebugs.length).toBe(0);
   });
 
-  it('still works without a logger when claudeManagerStop rejects', async () => {
+  it('still works without a logger when managerStop rejects', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
 
     const rejectingSpy = makeOrderSpy();
-    rejectingSpy.claudeManagerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
+    rejectingSpy.managerStop.mockRejectedValueOnce(new Error('PTY teardown failed'));
 
     // No logger provided
     const deps: HandlerDeps = makeDeps(db, rejectingSpy, runQueues);
@@ -573,18 +627,18 @@ describe('cancelAndRestartHandler', () => {
   });
 
   // -------------------------------------------------------------------------
-  // SDK-substrate regression pin (teardown-gaps fix): cancelAndRestart is wired
-  // via a DIFFERENT, facade-bypassing seam than runs.cancel/pause/handover
-  // (index.ts wires claudeManagerStop -> defaultCliManager.stopPanel(sessionId)
-  // directly, not SubstrateDispatchFacade.abort). This handler does not branch
-  // on substrate — it always calls claudeManagerStop(runId) — but that is
-  // exactly what makes this seam a silent-divergence risk under SDK-process
-  // persistence: a future refactor that made claudeManagerStop conditional on
-  // substrate could quietly stop reaching a warm SDK run's process. Pin the
-  // seam explicitly against an SDK-substrate run row.
+  // SDK-substrate regression pin (teardown-gaps fix): cancelAndRestart now stops
+  // through the SAME SubstrateDispatchFacade.abort seam runs.cancel/pause/
+  // handover use (runtime-mix plan D6 — the old defaultCliManager.stopPanel
+  // binding was Claude-only, so a codex-primary run survived the cancel). This
+  // handler still does not branch on substrate — it always calls
+  // managerStop(runId) and lets the facade resolve the spawning manager — so the
+  // pin is that the call is UNCONDITIONAL: a future refactor that made it
+  // conditional on substrate could quietly stop reaching a warm SDK run's
+  // process. Pin the seam explicitly against an SDK-substrate run row.
   // -------------------------------------------------------------------------
 
-  it('calls the injected claudeManagerStop for an SDK-substrate run (facade-bypassing seam stays reachable)', async () => {
+  it('calls the injected managerStop for an SDK-substrate run (the stop seam stays unconditional)', async () => {
     const runId = randomUUID();
     seedWorkflowAndRun(db, runId, 'stuck');
     db.prepare(`UPDATE workflow_runs SET substrate = 'sdk' WHERE id = ?`).run(runId);
@@ -592,8 +646,8 @@ describe('cancelAndRestartHandler', () => {
     const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
     if ('noOp' in result) throw new Error('Expected a real result, got noOp');
 
-    expect(spy.claudeManagerStop).toHaveBeenCalledOnce();
-    expect(spy.claudeManagerStop).toHaveBeenCalledWith(runId);
+    expect(spy.managerStop).toHaveBeenCalledOnce();
+    expect(spy.managerStop).toHaveBeenCalledWith(runId);
   });
 
   // -------------------------------------------------------------------------
@@ -650,7 +704,7 @@ describe('cancelAndRestartHandler', () => {
       approvalRouter: { clearPendingForRun: spy.clearPendingForRun } as unknown as import('../approvalRouter').ApprovalRouter,
       questionRouter: { clearPendingForRun: spy.clearQuestionsForRun },
       runQueues,
-      claudeManagerStop: spy.claudeManagerStop,
+      managerStop: spy.managerStop,
     };
 
     // The transaction guard must throw.

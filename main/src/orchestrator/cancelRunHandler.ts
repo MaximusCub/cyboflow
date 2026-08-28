@@ -44,7 +44,7 @@ export interface CancelRunDeps {
    * interactive manager inherits it to kill the PTY tree). NOT
    * defaultCliManager.stopPanel (SDK-only — would silently orphan an interactive
    * run's PTY) and NOT killSession (interactive-only — a strict no-op for SDK).
-   * Injection (function-ref shape, mirroring CancelAndRestartDeps.claudeManagerStop)
+   * Injection (function-ref shape, mirroring CancelAndRestartDeps.managerStop)
    * keeps this handler free of any services/* import.
    */
   stopLiveRun: (runId: string) => Promise<void>;

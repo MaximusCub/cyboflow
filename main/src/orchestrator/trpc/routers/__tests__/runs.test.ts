@@ -79,6 +79,8 @@ import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
+import { runtimeMixOverrideRejection } from '../../../../../../shared/tuning/workflowTuningErrors';
+import { RuntimeMixOrchestratedError } from '../../../../../../shared/types/executionModelErrors';
 
 // ---------------------------------------------------------------------------
 // Seed helpers (inlined — small, out of scope to extract to shared fixture)
@@ -704,6 +706,193 @@ describe('cyboflow.runs.start', () => {
         tuningLevel: 'turbo',
       }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
+  // -------------------------------------------------------------------------
+  // (a8e) runtimeMix supplied (migration 127 / runtime-mix plan D3) — the level's
+  // routing sibling. Rides the SAME trailing launchOptions bag; the launcher
+  // reads it there to force the baseline arm before handing it to createRun.
+  // -------------------------------------------------------------------------
+  it('(a8e) runtimeMix=codex-primary → forwards it in the trailing launchOptions bag', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-mix',
+      worktreePath: '/tmp/wt/mix',
+      branchName: 'cyboflow/sprint/mix12345',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        runtimeMix: 'codex-primary',
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      // The 16th slot is the launchOptions bag.
+      expect(launchMock.mock.calls[0][15]).toEqual({ runtimeMix: 'codex-primary' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8f) runtimeMix travels alongside tuningLevel — the two dials are orthogonal', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-both',
+      worktreePath: '/tmp/wt/both',
+      branchName: 'cyboflow/sprint/both1234',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        tuningLevel: 'thorough',
+        runtimeMix: 'claude-primary',
+      });
+
+      expect(launchMock.mock.calls[0][15]).toEqual({
+        tuningLevel: 'thorough',
+        runtimeMix: 'claude-primary',
+      });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8g) runtimeMix + variantId → BAD_REQUEST, and nothing is launched', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          runtimeMix: 'codex',
+          variantId: 'wfv_1',
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8h) an unknown runtimeMix is refused at the zod boundary', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        // @ts-expect-error — deliberately outside the RuntimeMix union.
+        runtimeMix: 'gemini-primary',
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
+  // The registry's two runtime-mix guards are user-reachable INPUT errors, so
+  // the wire answers them 400 instead of letting tRPC rewrap a bare registry
+  // throw as INTERNAL_SERVER_ERROR. Everything else out of launch is rethrown
+  // verbatim — the wizard's mixed-provider prompt still detects its own error by
+  // the message substring that survives that rewrap.
+  it('(a8i) maps a RuntimeMixOverrideError out of createRun to BAD_REQUEST', async () => {
+    const launchMock = vi
+      .fn()
+      .mockRejectedValue(runtimeMixOverrideRejection('not_built_in', 'codex', 'My Custom Flow'));
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-custom',
+          projectId: 1,
+          sessionId: 'sess-1',
+          runtimeMix: 'codex',
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8j) maps a RuntimeMixOrchestratedError out of createRun to BAD_REQUEST', async () => {
+    const launchMock = vi.fn().mockRejectedValue(new RuntimeMixOrchestratedError('codex-primary'));
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          runtimeMix: 'codex-primary',
+          executionModel: 'orchestrated',
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('(a8k) rethrows an unrelated launch failure verbatim (no BAD_REQUEST rewrite)', async () => {
+    const launchMock = vi.fn().mockRejectedValue(new Error('worktree creation failed'));
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1' }),
+      ).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR', message: 'worktree creation failed' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
   });
 
   // -------------------------------------------------------------------------

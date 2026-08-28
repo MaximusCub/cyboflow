@@ -436,6 +436,24 @@ describe('cyboflow.runs.restart', () => {
     });
   });
 
+  it('(t4b) a MIXED run replays its spec with the mix it was routed under', async () => {
+    // The mix stamp travels with the spec for the same reason the level does,
+    // and one step further (runtime-mix plan D6): it OUTRANKS the workflow's
+    // current stamp for the replay's provider/plane derivation. Flip the flow to
+    // 'claude' after the freeze — what goes out is still codex-primary.
+    const { runId, workflowId } = seedFrozenFailedRun('run-mixed', EFFICIENT_SPEC, 'efficient');
+    db.prepare("UPDATE workflow_runs SET runtime_mix = 'codex-primary' WHERE id = ?").run(runId);
+    db.prepare("UPDATE workflows SET runtime_mix = 'claude' WHERE id = ?").run(workflowId);
+    expect(await restartAndCaptureOptions(runId)).toEqual({
+      baseline: true,
+      frozenSpec: {
+        specJson: EFFICIENT_SPEC,
+        tuningLevel: 'efficient',
+        runtimeMix: 'codex-primary',
+      },
+    });
+  });
+
   it('(t5) a pre-feature run replays its spec with a NULL stamp', async () => {
     const { runId } = seedFrozenFailedRun('run-legacy', '{}', null);
     expect(await restartAndCaptureOptions(runId)).toEqual({

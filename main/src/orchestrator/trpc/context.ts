@@ -14,6 +14,7 @@ import type { NativeGrantProbe, VerificationModality } from '../../../../shared/
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
+import type { RuntimeMix } from '../../../../shared/tuning/runtimeMix';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { OmpControlPlaneAdapter } from '../../../../shared/types/omp';
 import type { OmpCommandAdapter, OmpPrincipal } from '../../../../shared/types/ompCommand';
@@ -94,6 +95,13 @@ export interface WorkflowRegistryLike {
    * 'empty custom slot'.
    */
   setTuningLevel(workflowId: string, level: TuningLevel): void;
+  /**
+   * Stamp the workflow's runtime mix (migration 127) — the second, orthogonal
+   * dial. Throws distinguishable Errors: 'not found' / 'invalid runtime mix' /
+   * 'not a built-in'. There is no empty-custom-slot arm: the mix transforms
+   * whatever graph the level resolves.
+   */
+  setRuntimeMix(workflowId: string, mix: RuntimeMix): void;
   /**
    * Create a brand-new custom workflow row (migration 030). `projectId === null`
    * mints a GLOBAL custom flow; a number mints a project-scoped copy. `specJson`
