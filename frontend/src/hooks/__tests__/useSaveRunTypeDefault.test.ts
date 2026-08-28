@@ -18,7 +18,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useSaveRunTypeDefault, SAVE_DEFAULT_TOAST_MS } from '../useSaveRunTypeDefault';
+import {
+  useSaveRunTypeDefault,
+  combineSaveCompanions,
+  SAVE_DEFAULT_TOAST_MS,
+} from '../useSaveRunTypeDefault';
 import { useConfigStore } from '../../stores/configStore';
 import type { ApplyRunTypeDefaultResult } from '../../stores/configStore';
 import type {
@@ -300,5 +304,58 @@ describe('useSaveRunTypeDefault — toast lifecycle', () => {
 
   it('owns the 9s undo window in one place', () => {
     expect(SAVE_DEFAULT_TOAST_MS).toBe(9000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// combineSaveCompanions — the wizard saves TWO workflow-row stamps (tuning
+// level + runtime mix) through the ONE companion slot `save` offers, so the
+// fold has to preserve the slot's all-or-nothing contract by itself.
+// ---------------------------------------------------------------------------
+describe('combineSaveCompanions', () => {
+  function companion(write: () => Promise<boolean>, undo: () => Promise<boolean>) {
+    return { write: vi.fn(write), undo: vi.fn(undo) };
+  }
+  const ok = async (): Promise<boolean> => true;
+  const fail = async (): Promise<boolean> => false;
+
+  it('is undefined for nothing, and the companion ITSELF for exactly one', () => {
+    const only = companion(ok, ok);
+    expect(combineSaveCompanions([])).toBeUndefined();
+    expect(combineSaveCompanions([undefined, undefined])).toBeUndefined();
+    expect(combineSaveCompanions([undefined, only])).toBe(only);
+  });
+
+  it('writes every companion in order and reports success', async () => {
+    const order: string[] = [];
+    const first = companion(async () => (order.push('a'), true), ok);
+    const second = companion(async () => (order.push('b'), true), ok);
+
+    const combined = combineSaveCompanions([first, second]);
+    await expect(combined?.write()).resolves.toBe(true);
+    expect(order).toEqual(['a', 'b']);
+  });
+
+  it('rolls back the writes that already landed when a later one fails', async () => {
+    // The defect this guards: a half-saved default — the level stamped, the mix
+    // not, and no record that the pair ever diverged.
+    const first = companion(ok, ok);
+    const second = companion(fail, ok);
+
+    const combined = combineSaveCompanions([first, second]);
+    await expect(combined?.write()).resolves.toBe(false);
+    expect(first.undo).toHaveBeenCalledTimes(1);
+    // The FAILED write is never undone — it never landed.
+    expect(second.undo).not.toHaveBeenCalled();
+  });
+
+  it('undo replays every companion and reports failure if any fails', async () => {
+    const first = companion(ok, fail);
+    const second = companion(ok, ok);
+
+    const combined = combineSaveCompanions([first, second]);
+    await expect(combined?.undo()).resolves.toBe(false);
+    // A failing revert does not abort the rest — the other stamp still reverts.
+    expect(second.undo).toHaveBeenCalledTimes(1);
   });
 });

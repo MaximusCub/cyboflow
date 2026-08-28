@@ -76,6 +76,8 @@ vi.mock('../../../../trpc/client', () => ({
         },
         // The Save-as-default companion write for a pending tuning-level pick.
         setTuningLevel: { mutate: vi.fn().mockResolvedValue(undefined) },
+        // …and its runtime-mix sibling (migration 127), the second companion.
+        setRuntimeMix: { mutate: vi.fn().mockResolvedValue(undefined) },
       },
       tasks: { list: { query: vi.fn().mockResolvedValue([]) } },
       events: {
@@ -365,6 +367,23 @@ const COMPOUND_THOROUGH_ROW: WorkflowRow = {
   spec_json: '{}',
   tuning_level: 'thorough',
   runtime_mix: 'claude',
+  permission_mode: 'default',
+  created_at: '',
+  archived_at: null,
+};
+/**
+ * Sprint row stamped with the CROSS-provider mix — the runtime-mix tests that
+ * need the two `-primary` segments live (sprint has a non-empty verification
+ * class, unlike compound/verify-setup).
+ */
+const SPRINT_CLAUDE_PRIMARY_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'sprint',
+  workflow_path: null,
+  spec_json: '{}',
+  tuning_level: 'standard',
+  runtime_mix: 'claude-primary',
   permission_mode: 'default',
   created_at: '',
   archived_at: null,
@@ -3810,6 +3829,287 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
     expect(screen.queryByTestId('wizard-tuning-level')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime-mix override (workflow-runtime-mix.md D4)
+//
+// The mix row is COUPLED to the Runtime row in both directions — `agentRuntime`
+// drives host-session creation, the launch payload and the async model-family
+// coercion — so most of these assert the pair, not the segment alone.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — runtime-mix override (D4)', () => {
+  const mockVariantsList = vi.mocked(trpc.cyboflow.variants.list.query);
+  const mockSetRuntimeMix = vi.mocked(trpc.cyboflow.workflows.setRuntimeMix.mutate);
+
+  beforeEach(() => {
+    mockVariantsList.mockResolvedValue([]);
+    mockSetRuntimeMix.mockClear();
+    act(() => {
+      useVariantsStore.setState({
+        byWorkflowId: {},
+        baselineByWorkflowId: {},
+        loadedWorkflowIds: {},
+        loading: {},
+        error: {},
+      });
+    });
+  });
+
+  /** Click one of the four mix segments on ③. */
+  async function chooseMix(mix: string): Promise<void> {
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(`wizard-runtime-mix-${mix}`));
+    });
+  }
+
+  it('defaults to the stamped mix and omits runtimeMix from the launch payload', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    expect(screen.getByTestId('wizard-runtime-mix-claude')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('wizard-runtime-mix-desc')).toHaveTextContent('saved default');
+    // Compound's verification class is empty — the two cross segments are inert.
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toBeDisabled();
+    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ runtimeMix: expect.anything() }),
+    );
+  });
+
+  it('(a) picking CODEX only moves the Runtime row and threads runtimeMix into the payload', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    await chooseMix('codex');
+
+    // The mix pick routes through setAgentRuntimeByUser, so the Runtime row —
+    // and with it the family coercion that swaps in the Codex model — follows.
+    expect(runtimeValue()).toBe('codex-sdk');
+    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex only');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeMix: 'codex', agentRuntime: 'codex-sdk' }),
+    );
+  });
+
+  it('(b) picking the stamped mix back clears the override (omits runtimeMix)', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseMix('codex');
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+
+    await chooseMix('claude');
+    expect(screen.getByTestId('wizard-runtime-mix-desc')).toHaveTextContent('saved default');
+    expect(runtimeValue()).toBe('claude-sdk');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ runtimeMix: expect.anything() }),
+    );
+  });
+
+  it('(c) a pinned variant disables the row and clears a pending override', async () => {
+    // runtimeMix and variantId are mutually exclusive at runs.start, so the pin
+    // has to CLEAR the override rather than have the launch silently drop it.
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    mockVariantsList.mockResolvedValue([
+      makeVariantRow({ id: 'wfv_thorough', label: 'Thorough A', tuning_level: 'thorough' }),
+    ]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseMix('codex');
+    expect(screen.getByTestId('wizard-runtime-mix-codex')).toHaveAttribute('aria-checked', 'true');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await screen.findByLabelText('Select workflow variant');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select workflow variant'), {
+        target: { value: 'wfv_thorough' },
+      });
+    });
+
+    // Whole row greyed, note in place of the description, override gone (the
+    // stamp is shown again).
+    for (const mix of ['claude', 'claude-primary', 'codex-primary', 'codex']) {
+      expect(screen.getByTestId(`wizard-runtime-mix-${mix}`)).toBeDisabled();
+    }
+    expect(screen.getByTestId('wizard-runtime-mix-note')).toHaveTextContent(/pinned variant/i);
+    expect(screen.getByTestId('wizard-runtime-mix-claude')).toHaveAttribute('aria-checked', 'true');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ runtimeMix: expect.anything() }),
+    );
+  });
+
+  it('(d) a Runtime-row click swaps the mix primary and KEEPS the cross aspect', async () => {
+    // The other half of the coupling: `reconcileMixWithProvider` — the same
+    // helper createRun uses — so a manual provider flip cannot leave the mix
+    // describing the provider the user just left.
+    mockWorkflowsList.mockResolvedValue([SPRINT_CLAUDE_PRIMARY_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // Sprint HAS a verification class, so the cross segments are live here.
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).not.toBeDisabled();
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-substrate-provider-codex'));
+    });
+
+    // claude-primary + codex -> codex-primary (cross aspect kept), and it is a
+    // divergence from the stamp, so the Save-as-default CTA appears.
+    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    expect(screen.getByTestId('wizard-runtime-mix-desc')).not.toHaveTextContent('saved default');
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+
+    // Back to Claude and the override folds away again (it equals the stamp).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-substrate-provider-claude'));
+    });
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    expect(screen.getByTestId('wizard-runtime-mix-desc')).toHaveTextContent('saved default');
+  });
+
+  it('(e) an OMP lane disables the row and omits runtimeMix from the payload', async () => {
+    mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: false });
+    act(() => {
+      useConfigStore.setState({
+        config: { agentProviderAccess: { claude: true, codex: true, omp: true } } as unknown as AppConfig,
+      });
+    });
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // Diverge first, so the omission below proves the LANE suppressed the mix
+    // rather than there being nothing to send.
+    await chooseMix('codex');
+    expect(screen.getByTestId('wizard-runtime-mix-codex')).toHaveAttribute('aria-checked', 'true');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-substrate-provider-omp'));
+    });
+
+    for (const mix of ['claude', 'claude-primary', 'codex-primary', 'codex']) {
+      expect(screen.getByTestId(`wizard-runtime-mix-${mix}`)).toBeDisabled();
+    }
+    expect(screen.getByTestId('wizard-runtime-mix-note')).toHaveTextContent(
+      /the runtime mix does not apply/i,
+    );
+    expect(screen.getByTestId('wizard-launch-summary')).not.toHaveTextContent('Runtime mix');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ runtimeMix: expect.anything() }),
+    );
+  });
+
+  it('(f) hides the Advanced Orchestration row under a non-claude mix', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    // The claude mix leaves the plane a real choice.
+    expect(screen.getByTestId('wizard-execmodel-inherit')).toBeInTheDocument();
+
+    await chooseMix('codex');
+    // A non-claude mix is forced programmatic at createRun — nothing to choose.
+    expect(screen.queryByTestId('wizard-execmodel-inherit')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('wizard-execmodel-programmatic')).not.toBeInTheDocument();
+
+    await chooseMix('claude');
+    expect(screen.getByTestId('wizard-execmodel-inherit')).toBeInTheDocument();
+  });
+
+  it('(g) Save as default stamps the picked mix on the workflow and clears the pending pick', async () => {
+    const mockApply = vi.fn(async () => ({ ok: true as const, previous: null }));
+    act(() => {
+      useConfigStore.setState({ applyRunTypeDefault: mockApply });
+    });
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseMix('codex');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-save-default'));
+    });
+
+    // The companion stamped the WORKFLOW row…
+    expect(mockSetRuntimeMix).toHaveBeenCalledWith({ workflowId: 'wf-compound', mix: 'codex' });
+    // …the run-type write still ran alongside it…
+    expect(mockApply).toHaveBeenCalled();
+    // …and the pending pick cleared, so the launch no longer carries an override.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.not.objectContaining({ runtimeMix: expect.anything() }),
+    );
+  });
+
+  it('threads the override through the SPRINT batch launch too', async () => {
+    // launchBatch builds its own payload — the field has to be spread there as
+    // well, not just in launchRun.
+    mockWorkflowsList.mockResolvedValue([SPRINT_CLAUDE_PRIMARY_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await chooseMix('codex-primary');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('mock-batch-pick'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeMix: 'codex-primary', taskIds: ['IDEA-1', 'IDEA-2'] }),
+    );
+  });
+
+  it('hides the control entirely for a non-built-in flow', async () => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    expect(screen.queryByTestId('wizard-runtime-mix')).not.toBeInTheDocument();
   });
 });
 

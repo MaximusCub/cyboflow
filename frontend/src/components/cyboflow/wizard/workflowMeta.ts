@@ -22,6 +22,11 @@ import {
   resolveEffectiveDefinition,
   type TuningLevel,
 } from '../../../../../shared/tuning/workflowTuning';
+import {
+  DEFAULT_RUNTIME_MIX,
+  isRuntimeMix,
+  type RuntimeMix,
+} from '../../../../../shared/tuning/runtimeMix';
 import { hasCustomSpecSlot, isCyboflowWorkflowName } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +98,13 @@ export interface WorkflowCardMeta {
    * "SessionStartWizard") reads this as the segment tagged "saved default".
    */
   tuningLevel: TuningLevel;
+  /**
+   * The workflow's STAMPED runtime mix (migration 127) — `workflows.runtime_mix`,
+   * defensively coalesced to {@link DEFAULT_RUNTIME_MIX} for a malformed row.
+   * The launch wizard's runtime-mix selector (workflow-runtime-mix.md D4) reads
+   * this as the segment tagged "saved default".
+   */
+  runtimeMix: RuntimeMix;
   /**
    * Whether `spec_json` holds a real Advanced-edited definition
    * ({@link hasCustomSpecSlot}) — gates the tuning selector's Custom segment.
@@ -237,6 +249,7 @@ export function buildWorkflowMeta(
       phaseCount,
       lastUsedAt,
       tuningLevel: isTuningLevel(row.tuning_level) ? row.tuning_level : DEFAULT_TUNING_LEVEL,
+      runtimeMix: isRuntimeMix(row.runtime_mix) ? row.runtime_mix : DEFAULT_RUNTIME_MIX,
       hasCustomSlot: hasCustomSpecSlot(row.spec_json),
       isBuiltIn: isCyboflowWorkflowName(row.name),
     };

@@ -34,6 +34,7 @@ function meta(lastUsedAt: string | null): WorkflowCardMeta {
     phaseCount: 2,
     lastUsedAt,
     tuningLevel: 'standard',
+    runtimeMix: 'claude',
     hasCustomSlot: false,
     isBuiltIn: true,
   };

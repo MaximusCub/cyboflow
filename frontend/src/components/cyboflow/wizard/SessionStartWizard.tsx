@@ -25,8 +25,11 @@
  *     pin (default Opus, threaded into runs.start → workflow_runs.model) + a
  *     per-run tuning-level override (BUILT-IN flows only, TuningLevelSelector —
  *     workflow-tuning-levels.md D4; mutually exclusive with pinning a specific
- *     A/B variant, see the effects near `selectedWorkflowId`) + the A/B variant
- *     picker + workflow blueprint editor access + a launch summary.
+ *     A/B variant, see the effects near `selectedWorkflowId`) + a per-run
+ *     runtime-mix override (same gate, RuntimeMixSelector —
+ *     workflow-runtime-mix.md D4; two-way coupled with the Runtime row, see
+ *     `effectiveRuntimeMix` and its two handlers) + the A/B variant picker +
+ *     workflow blueprint editor access + a launch summary.
  *   - quick: agent-permission override + agent runtime (+ caveats) + model pin
  *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
  *     edit, so the blueprint editor is omitted).
@@ -91,6 +94,7 @@ import { useDesignLaunch } from '../../../hooks/useDesignLaunch';
 import { useSeededSelection } from '../../../hooks/useSeededSelection';
 import {
   useSaveRunTypeDefault,
+  combineSaveCompanions,
   SAVE_DEFAULT_TOAST_MS,
 } from '../../../hooks/useSaveRunTypeDefault';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
@@ -105,7 +109,16 @@ import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
 import { TuningLevelSelector } from './TuningLevelSelector';
+import { RuntimeMixSelector } from './RuntimeMixSelector';
 import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
+import {
+  DEFAULT_RUNTIME_MIX,
+  RUNTIME_MIX_LABELS,
+  VERIFICATION_AGENT_KEYS,
+  primaryProviderForMix,
+  reconcileMixWithProvider,
+  type RuntimeMix,
+} from '../../../../../shared/tuning/runtimeMix';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import {
   effortLevelsForProvider,
@@ -134,6 +147,7 @@ import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared
 import {
   AGENT_RUNTIME_LABELS,
   DEFAULT_SESSION_AGENT_RUNTIME,
+  PROVIDER_DEFAULT_RUNTIME,
   claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
@@ -163,6 +177,7 @@ import type { QuickSessionWorktreeMode } from '../../../../../shared/types/workt
 import { trackEvent } from '../../../utils/telemetry';
 import {
   CYBOFLOW_WORKFLOW_NAMES,
+  isCyboflowWorkflowName,
   type PermissionMode,
 } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
@@ -257,6 +272,25 @@ function tuningLevelPayload(
   if (override !== null) return { tuningLevel: override };
   if (variantSelection.mode !== 'variant') return {};
   return meta?.isBuiltIn === true ? { tuningLevel: meta.tuningLevel } : {};
+}
+
+/**
+ * The `runtimeMix` field a workflow launch payload carries (migration 127).
+ *
+ * Deliberately WITHOUT `tuningLevelPayload`'s pinned-variant arm: `runtimeMix`
+ * and `variantId` are mutually exclusive at `runs.start` (a variant runs its own
+ * frozen definition and its runs are mix-unattributed), so a pin makes the field
+ * absent rather than load-bearing. `effective` is the wizard's one derived
+ * launch route (plan D4) and carries that case — plus a single-provider OMP/Pi
+ * lane, and a non-built-in flow — as a single `null`, so only a genuine
+ * divergence from the workflow's stamp is ever sent.
+ */
+function runtimeMixPayload(
+  override: RuntimeMix | null,
+  effective: RuntimeMix | null,
+): { runtimeMix?: RuntimeMix } {
+  if (override === null || effective === null) return {};
+  return { runtimeMix: override };
 }
 
 function SummaryRow({ label, value }: { label: string; value: string }): React.JSX.Element {
@@ -683,6 +717,14 @@ export default function SessionStartWizard(): React.JSX.Element {
   // below). Reset alongside `variantSelection` whenever the selected workflow
   // changes so a prior flow's override never bleeds onto a different launch.
   const [tuningLevelOverride, setTuningLevelOverride] = useState<TuningLevel | null>(null);
+  // Advanced (Configure ③, WORKFLOW only): per-run runtime-mix override
+  // (workflow-runtime-mix.md D4), the exact sibling of `tuningLevelOverride`.
+  // `null` = no override — the run uses the workflow's stamped `runtime_mix`; a
+  // non-null value is a per-run pick that DIFFERS from the stamp (picking the
+  // stamp back through RuntimeMixSelector's onChange clears it to null again).
+  // Reset alongside the level whenever the selected workflow changes, and
+  // whenever a variant is pinned (a variant run is mix-unattributed).
+  const [runtimeMixOverride, setRuntimeMixOverride] = useState<RuntimeMix | null>(null);
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -726,7 +768,101 @@ export default function SessionStartWizard(): React.JSX.Element {
   useEffect(() => {
     setVariantSelection({ mode: 'rotation' });
     setTuningLevelOverride(null);
+    setRuntimeMixOverride(null);
   }, [selectedWorkflowId]);
+
+  /** The card model of the selected workflow, or undefined for any other card kind. */
+  const selectedMeta: WorkflowCardMeta | undefined =
+    selectedWorkflowId === null
+      ? undefined
+      : workflowMetas.find((m) => m.id === selectedWorkflowId);
+
+  // ── The derived launch route (workflow-runtime-mix.md D4) ────────────────
+  // ONE derivation feeding the selector, the Runtime-row reconcile, the Mode
+  // row's visibility, the summary and BOTH launch payloads — the Runtime row is
+  // not cosmetic (`agentRuntime` drives host-session creation, the payload and
+  // the async model-family coercion), so a second, subtly different notion of
+  // "the mix this launch runs under" is exactly the drift to avoid.
+
+  // A pinned variant runs its own frozen definition and its runs are
+  // mix-unattributed, so the override cannot ride along; clear it the moment a
+  // pin lands rather than silently dropping it at launch.
+  useEffect(() => {
+    if (variantSelection.mode === 'variant') setRuntimeMixOverride(null);
+  }, [variantSelection.mode]);
+
+  /** The workflow's stamped mix — the segment the selector tags "saved default". */
+  const savedRuntimeMix: RuntimeMix = selectedMeta?.runtimeMix ?? DEFAULT_RUNTIME_MIX;
+  /** What the selector shows as selected: the override when one is active, else the stamp. */
+  const displayedRuntimeMix: RuntimeMix = runtimeMixOverride ?? savedRuntimeMix;
+  /**
+   * A flow with an EMPTY verification class (compound, verify-setup) has nothing
+   * to cross between providers, so only its two cross-provider segments are
+   * inert — `claude`/`codex` stay meaningful as a whole-flow provider choice.
+   */
+  const mixedRuntimeDisabled =
+    selectedMeta !== undefined &&
+    isCyboflowWorkflowName(selectedMeta.name) &&
+    VERIFICATION_AGENT_KEYS[selectedMeta.name].size === 0;
+  /**
+   * The whole row is inert on a launch the mix cannot describe: a pinned variant
+   * (mutually exclusive with `runtimeMix` at runs.start), or a lane with no
+   * Claude↔Codex split to route at all (OMP/Pi).
+   */
+  const singleProviderLane =
+    selectedWorkflowId !== null &&
+    providerForRuntime(agentRuntime) !== 'claude' &&
+    providerForRuntime(agentRuntime) !== 'codex';
+  const runtimeMixRowDisabled = variantSelection.mode === 'variant' || singleProviderLane;
+  const runtimeMixDisabledNote = singleProviderLane
+    ? 'Single-provider lane — the runtime mix does not apply.'
+    : 'A pinned variant runs its own frozen definition — the runtime mix does not apply.';
+  /** The mix this launch actually runs under, or null when it carries none. */
+  const effectiveRuntimeMix: RuntimeMix | null =
+    selectedMeta?.isBuiltIn !== true || runtimeMixRowDisabled ? null : displayedRuntimeMix;
+
+  /**
+   * The Runtime row's onChange. Beyond setting the runtime it RECONCILES a live
+   * mix with the provider just chosen, through the same shared helper
+   * `createRun` uses, so the wizard and the server cannot drift: the primary
+   * swaps and the same/cross aspect is kept (`claude` + Codex → `codex`;
+   * `codex-primary` + Claude → `claude-primary`).
+   *
+   * Wrapping the existing handler rather than forking a second path also covers
+   * SubstrateSelector's OWN programmatic writes (the CLI-only lock, snapping off
+   * a provider switched off in Settings) — those change the launching provider
+   * exactly as much as a click does.
+   */
+  const handleAgentRuntimeChange = useCallback(
+    (runtime: LaunchAgentRuntime): void => {
+      setAgentRuntimeByUser(runtime);
+      if (effectiveRuntimeMix === null) return;
+      const provider = providerForRuntime(runtime);
+      if (provider !== 'claude' && provider !== 'codex') return;
+      const next = reconcileMixWithProvider(effectiveRuntimeMix, provider);
+      setRuntimeMixOverride(next === savedRuntimeMix ? null : next);
+    },
+    [setAgentRuntimeByUser, effectiveRuntimeMix, savedRuntimeMix],
+  );
+
+  /**
+   * The mix row's onChange — the other half of the same coupling. Picking the
+   * stamp back clears the override (only a genuine divergence is one), and the
+   * implied provider is routed through the SAME `setAgentRuntimeByUser` path a
+   * manual Runtime click takes, so the family coercion and every downstream
+   * consumer of `agentRuntime` stay correct. A pick whose primary already
+   * matches leaves the runtime alone, so a deliberate `claude-interactive`
+   * choice survives a Claude-side mix change.
+   */
+  const handleRuntimeMixChange = useCallback(
+    (mix: RuntimeMix): void => {
+      setRuntimeMixOverride(mix === savedRuntimeMix ? null : mix);
+      const provider = primaryProviderForMix(mix);
+      if (providerForRuntime(agentRuntime) === provider) return;
+      setAgentRuntimeByUser(PROVIDER_DEFAULT_RUNTIME[provider]);
+    },
+    [savedRuntimeMix, agentRuntime, setAgentRuntimeByUser],
+  );
 
   /**
    * Per-level token estimates for the tuning-level control (plan D8), fetched
@@ -1123,6 +1259,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           // user diverged from the stamp, else the displayed level whenever a
           // variant is pinned. See tuningLevelPayload.
           ...tuningLevelPayload(meta, tuningLevelOverride, variantSelection),
+          // Per-run runtime mix (D4 + migration 127) — see runtimeMixPayload.
+          ...runtimeMixPayload(runtimeMixOverride, effectiveRuntimeMix),
           ...variantSelectionToStartInput(variantSelection),
         });
         // Nest the run under its session so the close-out + panels resolve
@@ -1165,7 +1303,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1234,6 +1372,8 @@ export default function SessionStartWizard(): React.JSX.Element {
             tuningLevelOverride,
             variantSelection,
           ),
+          // Per-run runtime mix (D4 + migration 127) — see launchRun's identical spread.
+          ...runtimeMixPayload(runtimeMixOverride, effectiveRuntimeMix),
           ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -1265,7 +1405,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1517,10 +1657,6 @@ export default function SessionStartWizard(): React.JSX.Element {
         : agentRuntime;
   const effectiveProvider = providerForRuntime(effectiveRuntime);
   const effectiveSubstrate = substrateForRuntime(effectiveRuntime);
-  const selectedMeta =
-    selection?.kind === 'workflow'
-      ? workflowMetas.find((m) => m.id === selection.workflowId)
-      : undefined;
   // The tuning level this launch will actually run at — the pool its variant
   // choice is drawn from (migration 126). Variants are scoped to a level, so the
   // LEVEL PICKS THE POOL and the variant control picks inside it; the two are no
@@ -1610,6 +1746,36 @@ export default function SessionStartWizard(): React.JSX.Element {
           })()
         : undefined;
 
+    // The runtime-mix pick rides the same gesture, as its own companion write
+    // against the same workflow row (a second, orthogonal column — migration
+    // 127). combineSaveCompanions keeps the pair all-or-nothing: a failed second
+    // stamp rolls the first back rather than leaving a half-saved default.
+    const runtimeMixCompanion =
+      selection?.kind === 'workflow' && runtimeMixOverride !== null && selectedMeta !== undefined
+        ? (() => {
+            const workflowId = selection.workflowId;
+            const nextMix = runtimeMixOverride;
+            const prevMix = selectedMeta.runtimeMix;
+            const stamp = async (mix: RuntimeMix): Promise<boolean> => {
+              try {
+                await trpc.cyboflow.workflows.setRuntimeMix.mutate({ workflowId, mix });
+              } catch {
+                return false;
+              }
+              await loadWorkflows(workflowId);
+              return true;
+            };
+            return {
+              write: async () => {
+                if (!(await stamp(nextMix))) return false;
+                setRuntimeMixOverride(null);
+                return true;
+              },
+              undo: () => stamp(prevMix),
+            };
+          })()
+        : undefined;
+
     saveDefault({
       model,
       permissionMode,
@@ -1629,8 +1795,8 @@ export default function SessionStartWizard(): React.JSX.Element {
       // user never chose. A workflow's per-agent effort lives in the step
       // inspector. Variant and quick worktree mode are out of scope for v1.
       ...(selection?.kind === 'quick' ? { reasoningEffort: reasoningEffort ?? null } : {}),
-    }, tuningCompanion);
-  }, [saveDefault, selection, selectedMeta, tuningLevelOverride, loadWorkflows, model, permissionMode, effectiveRuntime, reasoningEffort]);
+    }, combineSaveCompanions([tuningCompanion, runtimeMixCompanion]));
+  }, [saveDefault, selection, selectedMeta, tuningLevelOverride, runtimeMixOverride, loadWorkflows, model, permissionMode, effectiveRuntime, reasoningEffort]);
 
   /**
    * The value the reasoning-effort control was SEEDED with, restated exactly as
@@ -1679,7 +1845,9 @@ export default function SessionStartWizard(): React.JSX.Element {
     // genuinely diverges from the workflow's stamped level — the selector's
     // onChange clears it when the user picks the stamp back, and a successful
     // save clears it after re-stamping, so the CTA self-hides both ways.
-    tuningLevelOverride !== null;
+    tuningLevelOverride !== null ||
+    // Same for a pending runtime-mix pick — its own companion write, same CTA.
+    runtimeMixOverride !== null;
 
   const combinedError = launchError ?? quickError ?? designLaunchError;
 
@@ -1932,8 +2100,10 @@ export default function SessionStartWizard(): React.JSX.Element {
                 <SubstrateSelector
                   value={agentRuntime}
                   // A real per-launch pick — latches THIS key touched, so the
-                  // card's stored/global default stops re-seeding it (and only it).
-                  onChange={setAgentRuntimeByUser}
+                  // card's stored/global default stops re-seeding it (and only
+                  // it) — and reconciles a live runtime mix with the provider
+                  // just chosen (see handleAgentRuntimeChange).
+                  onChange={handleAgentRuntimeChange}
                   id="wizard-substrate"
                   caveatsTestId="wizard-substrate-caveats"
                   runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
@@ -2052,6 +2222,23 @@ export default function SessionStartWizard(): React.JSX.Element {
                 }}
                 id="wizard-tuning-level"
                 estimateLabels={tuningEstimateLabels}
+              />
+            )}
+
+            {/* Per-run runtime-mix override (workflow-runtime-mix.md D4), under
+                the level segments and behind the same built-in gate: the mix
+                routes a flow's execution/verification split, which a "save as
+                new" custom flow does not have. Picking a segment also moves the
+                Runtime row (and vice versa) — see handleRuntimeMixChange. */}
+            {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
+              <RuntimeMixSelector
+                value={displayedRuntimeMix}
+                savedMix={savedRuntimeMix}
+                mixedDisabled={mixedRuntimeDisabled}
+                disabled={runtimeMixRowDisabled}
+                disabledNote={runtimeMixDisabledNote}
+                onChange={handleRuntimeMixChange}
+                id="wizard-runtime-mix"
               />
             )}
 
@@ -2296,41 +2483,50 @@ export default function SessionStartWizard(): React.JSX.Element {
                         (inherit Settings → Workflow Orchestration / env / the
                         'orchestrated' floor). Interactive-PTY runs hard-pin
                         orchestrated in the resolver, so an explicit 'Programmatic'
-                        only takes effect on the SDK substrate. */}
-                    <div className="mt-1 flex flex-col gap-0.5">
-                      <span className="text-sm font-medium text-text-primary">Orchestration</span>
-                      <span className="text-xs text-text-tertiary">
-                        Who walks this run's steps — SDK runs only; the terminal substrate is always orchestrated
-                      </span>
-                    </div>
-                    <div
-                      className="flex gap-1.5"
-                      role="radiogroup"
-                      aria-label="Orchestration"
-                    >
-                      {([
-                        { value: 'inherit', label: 'Use global setting' },
-                        { value: 'orchestrated', label: 'Orchestrated' },
-                        { value: 'programmatic', label: 'Programmatic' },
-                      ] as const).map(({ value, label }) => (
-                        <button
-                          key={value}
-                          type="button"
-                          role="radio"
-                          aria-checked={executionModelOverride === value}
-                          onClick={() => setExecutionModelOverride(value)}
-                          data-testid={`wizard-execmodel-${value}`}
-                          className={cn(
-                            'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
-                            executionModelOverride === value
-                              ? 'border-interactive bg-interactive-surface text-text-primary'
-                              : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
-                          )}
+                        only takes effect on the SDK substrate.
+
+                        Hidden entirely under a non-`claude` runtime mix
+                        (workflow-runtime-mix.md D4): createRun forces such a run
+                        programmatic, so the control would offer a choice the
+                        launch overrules. */}
+                    {(effectiveRuntimeMix === null || effectiveRuntimeMix === 'claude') && (
+                      <>
+                        <div className="mt-1 flex flex-col gap-0.5">
+                          <span className="text-sm font-medium text-text-primary">Orchestration</span>
+                          <span className="text-xs text-text-tertiary">
+                            Who walks this run's steps — SDK runs only; the terminal substrate is always orchestrated
+                          </span>
+                        </div>
+                        <div
+                          className="flex gap-1.5"
+                          role="radiogroup"
+                          aria-label="Orchestration"
                         >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
+                          {([
+                            { value: 'inherit', label: 'Use global setting' },
+                            { value: 'orchestrated', label: 'Orchestrated' },
+                            { value: 'programmatic', label: 'Programmatic' },
+                          ] as const).map(({ value, label }) => (
+                            <button
+                              key={value}
+                              type="button"
+                              role="radio"
+                              aria-checked={executionModelOverride === value}
+                              onClick={() => setExecutionModelOverride(value)}
+                              data-testid={`wizard-execmodel-${value}`}
+                              className={cn(
+                                'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
+                                executionModelOverride === value
+                                  ? 'border-interactive bg-interactive-surface text-text-primary'
+                                  : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                              )}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2390,6 +2586,14 @@ export default function SessionStartWizard(): React.JSX.Element {
                   label="Model"
                   value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
                 />
+              )}
+
+              {/* Which provider runs what (workflow-runtime-mix.md D4) — shown
+                  only when this launch actually carries a mix, so a pinned
+                  variant or an OMP/Pi lane says nothing rather than something
+                  untrue. */}
+              {effectiveRuntimeMix !== null && (
+                <SummaryRow label="Runtime mix" value={RUNTIME_MIX_LABELS[effectiveRuntimeMix]} />
               )}
 
               {selection.kind === 'quick' && runtimeSupportsFastMode(effectiveRuntime) && isOpusModel(model) && (

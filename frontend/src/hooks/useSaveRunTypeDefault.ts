@@ -64,6 +64,46 @@ export interface SaveCompanion {
   undo: () => Promise<boolean>;
 }
 
+/**
+ * Fold several companions into the ONE `save` accepts, preserving its
+ * all-or-nothing contract: they write in order, and the first failure rolls back
+ * whichever already landed before reporting `false`, so a save can never leave
+ * half its companion writes standing. Undo replays every companion's revert and
+ * reports failure if any of them fails.
+ *
+ * `undefined` for an empty list (the shape `save` wants for "no companion"), and
+ * the single companion itself for a list of one — so a caller with one pending
+ * write is byte-identical to passing it directly.
+ */
+export function combineSaveCompanions(
+  companions: readonly (SaveCompanion | undefined)[],
+): SaveCompanion | undefined {
+  const present = companions.filter((c): c is SaveCompanion => c !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  return {
+    write: async () => {
+      const landed: SaveCompanion[] = [];
+      for (const companion of present) {
+        if (await companion.write()) {
+          landed.push(companion);
+          continue;
+        }
+        for (const applied of landed.reverse()) await applied.undo();
+        return false;
+      }
+      return true;
+    },
+    undo: async () => {
+      let ok = true;
+      for (const companion of present) {
+        if (!(await companion.undo())) ok = false;
+      }
+      return ok;
+    },
+  };
+}
+
 export interface UseSaveRunTypeDefaultReturn {
   save: (patch: RunTypeDefaultsPatch, companion?: SaveCompanion) => void;
   undo: () => void;
