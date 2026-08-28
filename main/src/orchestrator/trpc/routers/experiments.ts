@@ -65,6 +65,7 @@ import {
   QUICK_ARM_SENTINEL,
 } from '../../../../../shared/types/experiments';
 import type { RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
+import { assertTransitionAllowed } from '../../../../../shared/workflows/runStateMachine';
 import { ALL_EFFORT_LEVELS } from '../../../../../shared/types/reasoningEffort';
 import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { displayRationaleForVerdict } from '../../eval/pairwiseScoring';
@@ -1742,8 +1743,11 @@ export function settleQuickArm(
       }
     }
     // Same guarded UPDATE shape as transitionRunningToAwaitingReview
-    // (main/src/services/cyboflow/transitions.ts), inlined here to keep this
-    // router import-light (no main/src/services/* imports).
+    // (main/src/services/cyboflow/transitions.ts), inlined here because that
+    // helper is db-coupled SERVICES code this router may not import at runtime.
+    // The VALIDATION is not inlined: ALLOWED_TRANSITIONS lives in shared/, so the
+    // edge is asserted here exactly as the helper asserts it.
+    assertTransitionAllowed('running', 'awaiting_review', runId);
     const result = db
       .prepare(
         `UPDATE workflow_runs
@@ -1762,7 +1766,7 @@ export function settleQuickArm(
     return { experimentId, arm, runId, status: fresh, changed: false };
   }
   // Any other transient status (starting/awaiting_input/stuck/paused/queued) has
-  // no legal direct edge to awaiting_review per stateMachine.ts's
+  // no legal direct edge to awaiting_review per runStateMachine.ts's
   // ALLOWED_TRANSITIONS — guard + defer rather than forcing an illegal transition.
   throw new TRPCError({
     code: 'PRECONDITION_FAILED',

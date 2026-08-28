@@ -14,6 +14,7 @@ import { EventEmitter } from 'node:events';
 import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { StuckReason, StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import { emitSeamError } from './telemetrySink';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -157,6 +158,12 @@ export class StuckDetector {
          )
        LIMIT 1`,
     );
+    // Validated once at prepare time, not per row: the statement's source and
+    // target are both literals, so the edge cannot vary between executions.
+    // Cheaper than an assert inside the scan loop and it fails at construction —
+    // the moment the table stops permitting awaiting_review -> stuck — rather
+    // than on whichever scan first finds a stale approval.
+    assertTransitionAllowed('awaiting_review', 'stuck');
     this.stmtTransitionToStuck = this.db.prepare(
       `UPDATE workflow_runs
        SET status = 'stuck', stuck_reason = ?, stuck_detected_at = ?

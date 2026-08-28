@@ -102,6 +102,19 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
        FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id
       WHERE r.id = ?`,
   );
+  // ⚠️ UNVALIDATED, and deliberately so: this is `queued` -> `running`, an edge
+  // ALLOWED_TRANSITIONS does NOT contain — and does not merely omit by accident.
+  // `shared/workflows/__tests__/runStateMachine.test.ts` asserts it is forbidden
+  // ("must go through starting first"), and the OTHER quick-session path does
+  // exactly that (createQuickSessionCore stamps 'starting', then
+  // transitions.transitionToRunning moves it on). This mint path skips 'starting'
+  // instead, so asserting here would throw on every chat-sentinel mint.
+  //
+  // Which side is wrong — the sentinel jumping the intermediate state, or the
+  // table refusing an edge production performs — is a product decision, not a
+  // mechanical one, so this site is left raw and frozen as an exemption in
+  // main/src/orchestrator/__tests__/runStatusWriteChokepoint.test.ts. The write
+  // is still guarded on `status = 'queued'`, so it cannot disturb a live run.
   const advanceRun = db.prepare(
     `UPDATE workflow_runs
         SET status = 'running',

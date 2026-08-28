@@ -1,4 +1,4 @@
-import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
+import type { WorkflowRunStatus } from '../types/cyboflow';
 
 /**
  * Allowed state transitions for `workflow_runs.status`, per
@@ -13,17 +13,34 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
  * values" but cannot enforce "this transition from A to B is legal".
  * This table is the in-process source of truth.
  *
- * `failed` is terminal to THIS state machine — but four sanctioned recovery
- * paths revive a failed (or, for retry, a resting awaiting_review) run
+ * `failed` is terminal to THIS state machine — but six sanctioned recovery
+ * paths revive a failed (or, for retry/rewind, a resting awaiting_review) run
  * anyway, via a guarded raw `UPDATE workflow_runs SET status = ...` that
  * deliberately bypasses `assertTransitionAllowed` rather than widening the
- * table above: (1) runRecovery.recoverActiveStateOrphans (boot sweep, resets
- * stranded programmatic runs to 'starting'), (2) reopenRunHandler (SDK-only
- * failed -> running via --resume), (3) reviveQuickRunToRunning
- * (transitions.ts — quick-session sentinel run repair), and (4)
- * retryRunHandler (failed/resting-awaiting_review -> starting at a chosen
- * step, programmatic-only). Each is a narrow, explicitly-reasoned escape
- * hatch, not a general exception to terminality.
+ * table above:
+ *   1. runRecovery.recoverActiveStateOrphans — boot sweep, resets stranded
+ *      programmatic runs to 'starting'.
+ *   2. reopenRunHandler — SDK-only failed -> running via --resume.
+ *   3. reviveQuickRunToRunning (services/cyboflow/transitions.ts) —
+ *      quick-session sentinel run repair, any status -> running.
+ *   4. retryRunHandler — failed / resting-awaiting_review -> starting at a
+ *      chosen step, programmatic-only.
+ *   5. rewindRunHandler — running / awaiting_review / failed / paused ->
+ *      starting at an EARLIER step, aborting a live walk first.
+ *   6. chatSentinelProvider's `reviveChatSentinel` — the inlined orchestrator
+ *      MIRROR of (3), kept in lockstep with it. It is the seam BOTH substrates
+ *      funnel through (the interactive REPL has no revive seam of its own), so
+ *      it is a distinct bypass site, not a duplicate of the transitions.ts one.
+ * Each is a narrow, explicitly-reasoned escape hatch, not a general exception
+ * to terminality.
+ *
+ * Every OTHER production write to `workflow_runs.status` must validate against
+ * this table — either through a guarded helper in
+ * `main/src/services/cyboflow/transitions.ts` (services-side callers) or, for
+ * `main/src/orchestrator/**` code that may not import services at runtime, by
+ * calling `assertTransitionAllowed` immediately before its raw UPDATE. The
+ * surviving raw sites are frozen by
+ * `main/src/orchestrator/__tests__/runStatusWriteChokepoint.test.ts`.
  */
 export const ALLOWED_TRANSITIONS: Record<
   WorkflowRunStatus,
@@ -114,4 +131,60 @@ export function assertTransitionAllowed(
   if (!isTransitionAllowed(from, to)) {
     throw new IllegalTransitionError(from, to, runId);
   }
+}
+
+/**
+ * Assert a MULTI-SOURCE write: one `UPDATE ... WHERE status IN (a, b, c)` whose
+ * SQL guard admits several source states. Every listed source must have a legal
+ * edge to `to`.
+ *
+ * `from === to` entries are SKIPPED rather than rejected. Such a member is not a
+ * transition at all — it is an idempotent RE-STAMP of the status the row already
+ * holds, which several writers rely on (the approval-decision restore accepts a
+ * run already back in 'running'; humanStepManager re-parks a run already in
+ * 'awaiting_review' for a back-to-back gate). The terminal lockdown is unaffected:
+ * a terminal source with a DIFFERENT target still throws, and no writer lists a
+ * terminal status in an `IN (...)` guard whose target is that same status.
+ */
+export function assertTransitionAllowedFromAny(
+  froms: readonly WorkflowRunStatus[],
+  to: WorkflowRunStatus,
+  runId?: string,
+): void {
+  for (const from of froms) {
+    if (from === to) continue;
+    assertTransitionAllowed(from, to, runId);
+  }
+}
+
+/**
+ * Every source state with a legal edge to `to` — the table read backwards.
+ *
+ * This is what a writer that cannot name a single `fromStatus` should guard on:
+ * a close-out `UPDATE ... SET status='completed'` wants "the states completion is
+ * reachable from", not a hand-maintained `NOT IN (terminal)` list that silently
+ * admits 'queued' and 'starting'. Deriving it here keeps the guard and the table
+ * from drifting apart.
+ */
+export function allowedSourcesFor(to: WorkflowRunStatus): readonly WorkflowRunStatus[] {
+  return (Object.keys(ALLOWED_TRANSITIONS) as WorkflowRunStatus[]).filter(from =>
+    ALLOWED_TRANSITIONS[from].includes(to),
+  );
+}
+
+/**
+ * {@link allowedSourcesFor} rendered as a SQL `IN` list — `('a', 'b')` — for
+ * inlining into a guarded `UPDATE ... WHERE status IN ...`.
+ *
+ * Safe to interpolate: every element is a `WorkflowRunStatus` key of the table
+ * above, never caller input. Throws for a target no state can reach, so a typo'd
+ * call can never render `IN ()` (a SQL syntax error at prepare time in some
+ * builds, and a silently-never-matching guard in others).
+ */
+export function allowedSourcesSqlIn(to: WorkflowRunStatus): string {
+  const sources = allowedSourcesFor(to);
+  if (sources.length === 0) {
+    throw new Error(`No workflow_run status has a legal edge to '${to}'`);
+  }
+  return `(${sources.map(s => `'${s}'`).join(', ')})`;
 }

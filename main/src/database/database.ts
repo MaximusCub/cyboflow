@@ -7,6 +7,10 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
 import { reconcileSessionsPluginsColumn } from './reconcileSessionsPluginsColumn';
 import { splitSqlStatements, stripLeadingSqlComments } from './splitSqlStatements';
+import {
+  IllegalSessionTransitionError,
+  isSessionTransitionAllowed,
+} from '../../../shared/workflows/sessionStateMachine';
 
 /**
  * A .sql migration file did not apply. Thrown by runFileBasedMigrations() and
@@ -2570,6 +2574,43 @@ export class DatabaseService {
     return result !== undefined;
   }
 
+  /**
+   * Validate a `sessions.status` write against SESSION_ALLOWED_TRANSITIONS —
+   * the session half of the state-machine enforcement that
+   * `shared/workflows/runStateMachine.ts` gives workflow runs.
+   *
+   * TWO MODES, on purpose:
+   *   - under a TEST RUNNER (VITEST set, or NODE_ENV === 'test') this THROWS,
+   *     so CI fails loudly the first time a caller introduces an edge the table
+   *     does not have (today that means: a status outside the five-value union —
+   *     see the table's doc comment for why the graph itself is total).
+   *   - everywhere else it LOGS AND PROCEEDS. This funnel is on the path of
+   *     every chat turn, every spawn-failure revert and the boot sweep;
+   *     throwing here would leave a user's session wedged in whatever status it
+   *     already held, with a dead Stop button and a "thinking" placeholder over
+   *     an idle chat. A mis-stamped status is recoverable by the next turn — a
+   *     funnel that refuses to write is not. The gate deliberately does NOT key
+   *     on `NODE_ENV !== 'production'`: the packaged app detects itself via
+   *     `app.isPackaged` (main/src/index.ts) and may run with NODE_ENV unset,
+   *     which that spelling would misread as "safe to throw".
+   *
+   * Reported with `console.warn`, the pattern the rest of this file uses. It is
+   * NOT routed to `captureSeamError`: `main/src/database` has no import edge to
+   * `main/src/services` today, and this warning does not justify minting one.
+   */
+  private validateSessionStatusTransition(id: string, to: Session['status']): void {
+    const row = this.db.prepare('SELECT status FROM sessions WHERE id = ?').get(id) as
+      | { status?: unknown }
+      | undefined;
+    // No row (the caller is about to no-op) or a NULL status (pre-schema row):
+    // nothing to validate against.
+    if (row === undefined || typeof row.status !== 'string') return;
+    if (isSessionTransitionAllowed(row.status, to)) return;
+    const err = new IllegalSessionTransitionError(row.status, to, id);
+    if (process.env.VITEST !== undefined || process.env.NODE_ENV === 'test') throw err;
+    console.warn(`[Database] ${err.message} — writing it anyway (see validateSessionStatusTransition)`);
+  }
+
   updateSession(id: string, data: UpdateSessionData): Session | undefined {
     console.log(`[Database] Updating session ${id} with data:`, data);
     
@@ -2581,6 +2622,7 @@ export class DatabaseService {
       values.push(data.name);
     }
     if (data.status !== undefined) {
+      this.validateSessionStatusTransition(id, data.status);
       updates.push('status = ?');
       values.push(data.status);
       // Stamp/clear the last-activity clock in the SAME statement, so it can
@@ -2915,9 +2957,18 @@ export class DatabaseService {
     return this.db.prepare("SELECT * FROM sessions WHERE status IN ('running', 'pending')").all() as Session[];
   }
 
+  /**
+   * Boot sweep: stamp the sessions that were live when the app died as
+   * `stopped`. An EXPLICIT BYPASS of `updateSession`'s transition validation —
+   * it is a set-wide UPDATE with no single source status to validate, and it is
+   * a RECOVERY write by construction (the same role runRecovery's boot sweep
+   * plays for `workflow_runs`). Pinned as the sole sanctioned bypass by
+   * `main/src/database/__tests__/sessionStatusTransition.test.ts`; the
+   * runStatusWriteChokepoint ratchet covers `workflow_runs` only.
+   */
   markSessionsAsStopped(sessionIds: string[]): void {
     if (sessionIds.length === 0) return;
-    
+
     const placeholders = sessionIds.map(() => '?').join(',');
     // idle_since = COALESCE(idle_since, updated_at) — the sweep stamps LAST KNOWN
     // ACTIVITY, not boot time. These rows were `running`/`pending` when the app

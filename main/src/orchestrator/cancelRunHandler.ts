@@ -19,9 +19,9 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import {
   TERMINAL_RUN_STATUSES,
-  TERMINAL_RUN_STATUSES_SQL_IN,
 } from '../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
@@ -314,9 +314,14 @@ export async function cancelRunHandler(
     const cancelTx = db.transaction(() => {
       const updateResult = db
         .prepare(
+          // The guard is DERIVED from ALLOWED_TRANSITIONS rather than spelled as
+          // "not terminal", so it cannot drift from the table: cancel is legal
+          // from every non-terminal state today, and if that ever narrows this
+          // UPDATE narrows with it. Same reasoning transitionToCanceled records
+          // for skipping a per-edge assert — the SQL guard IS the validation.
           `UPDATE workflow_runs
               SET status = 'canceled', ended_at = ?, updated_at = ?
-            WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+            WHERE id = ? AND status IN ${allowedSourcesSqlIn('canceled')}`,
         )
         .run(now, now, runId) as { changes: number };
 

@@ -12,7 +12,7 @@
  *
  * This is the FOURTH sanctioned path that revives a run out of a state the
  * state machine calls terminal/resting via a guarded raw UPDATE (see
- * services/cyboflow/stateMachine.ts's ALLOWED_TRANSITIONS comment and
+ * shared/workflows/runStateMachine.ts's ALLOWED_TRANSITIONS comment and
  * transitions.ts:186-188's note on reviveQuickRunToRunning) — joining:
  *   1. runRecovery.recoverActiveStateOrphans (boot sweep: reset stranded
  *      starting/running/awaiting_review programmatic runs to 'starting').

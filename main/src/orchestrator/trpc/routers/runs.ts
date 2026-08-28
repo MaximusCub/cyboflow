@@ -14,6 +14,13 @@ import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/wo
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { DatabaseLike } from '../../types';
+import type { WorkflowRunStatus } from '../../../../../shared/types/cyboflow';
+import { TERMINAL_RUN_STATUSES } from '../../../../../shared/types/cyboflow';
+import {
+  allowedSourcesSqlIn,
+  assertTransitionAllowed,
+  isTransitionAllowed,
+} from '../../../../../shared/workflows/runStateMachine';
 import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
@@ -784,6 +791,43 @@ function resolveRunForCloseout(
     projectId: row.project_id,
     sessionId: row.session_id,
   };
+}
+
+/**
+ * Refuse a close-out whose terminal STATUS WRITE would be an illegal transition.
+ *
+ * The close-out UPDATEs used to guard only `status NOT IN (terminal)`, which
+ * admitted states ALLOWED_TRANSITIONS has no edge from: a `queued` or `starting`
+ * run — one that never produced an artifact — could be merged straight to
+ * `completed`. The UPDATEs now guard on `allowedSourcesSqlIn(to)`, so such a run
+ * would silently no-op its status write AFTER the git work had already happened.
+ * This surfaces it as a precondition instead, in the same style as the router's
+ * other close-out preconditions, and BEFORE anything destructive runs.
+ *
+ * A TERMINAL run is deliberately exempt: closing one out is the cleanup path
+ * (merge the work of a run that failed at the end, dismiss a canceled run to
+ * reclaim its worktree). Those already no-op the status write today — the git
+ * work and the `outcome` stamp are the point — and that behavior is preserved.
+ */
+function assertCloseoutTransitionLegal(
+  db: DatabaseLike,
+  runId: string,
+  to: WorkflowRunStatus,
+): void {
+  const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as
+    | { status?: string }
+    | undefined;
+  const from = row?.status;
+  if (from === undefined) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${runId} not found` });
+  }
+  if ((TERMINAL_RUN_STATUSES as readonly string[]).includes(from)) return;
+  if (!isTransitionAllowed(from as WorkflowRunStatus, to)) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `Run ${runId} cannot be closed out from status '${from}' (no '${from}' -> '${to}' transition)`,
+    });
+  }
 }
 
 /**
@@ -2139,6 +2183,7 @@ export const runsRouter = router({
         return { noOp: true, reason: 'blocking_items_pending' };
       }
 
+      assertTransitionAllowed('awaiting_review', 'completed', input.runId);
       const info = db
         .prepare(
           `UPDATE workflow_runs
@@ -2906,6 +2951,8 @@ export const runsRouter = router({
       // Close-out safety guard (Phase 1): a session-hosted run must NEVER merge or
       // remove the shared session worktree — that is the session's job (Phase 3).
       assertNotSessionHosted(input.runId, sessionId);
+      // Refuse BEFORE the merge + worktree removal, not after (see the helper).
+      assertCloseoutTransitionLegal(ctx.db, input.runId, 'completed');
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -2975,9 +3022,15 @@ export const runsRouter = router({
       await reapArtifactsForRunSafe(projectId, input.runId);
       ctx.db
         .prepare(
+          // Source set DERIVED from ALLOWED_TRANSITIONS, not a hand-written
+          // "not terminal" list: completion is only reachable from running /
+          // awaiting_review / stuck, so a queued or starting run no longer flips
+          // to 'completed' here. assertCloseoutTransitionLegal above has already
+          // refused that case for a NON-terminal run; this guard is what keeps a
+          // TERMINAL run's close-out a status no-op, exactly as before.
           `UPDATE workflow_runs
               SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+            WHERE id = ? AND status IN ${allowedSourcesSqlIn('completed')}`,
         )
         .run(input.runId);
       // DB-canonical merge signal + task derivation (-> Done). NO git probe: the
@@ -3000,9 +3053,10 @@ export const runsRouter = router({
    * The local worktree is removed (idempotent) since the branch now lives on
    * origin; this matches the session flow's post-PR session deletion.
    *
-   * Completion is a guarded UPDATE (`WHERE status NOT IN (terminal)`) so it works
-   * from the run's CURRENT status (awaiting_review / stuck / running) and no-ops
-   * if the run already reached a terminal state.
+   * Completion is a guarded UPDATE over the source states ALLOWED_TRANSITIONS
+   * permits into 'completed' (awaiting_review / stuck / running), so it works from
+   * the run's CURRENT status and no-ops if the run already reached a terminal
+   * state. A run that has not started (queued / starting) is refused up front.
    */
   createPr: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -3015,6 +3069,8 @@ export const runsRouter = router({
       // Close-out safety guard (Phase 1): a session-hosted run must NEVER push or
       // remove the shared session worktree — that is the session's job (Phase 3).
       assertNotSessionHosted(input.runId, sessionId);
+      // Refuse BEFORE the push + worktree removal, not after (see the helper).
+      assertCloseoutTransitionLegal(ctx.db, input.runId, 'completed');
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
@@ -3051,9 +3107,15 @@ export const runsRouter = router({
       await reapArtifactsForRunSafe(projectId, input.runId);
       ctx.db
         .prepare(
+          // Source set DERIVED from ALLOWED_TRANSITIONS, not a hand-written
+          // "not terminal" list: completion is only reachable from running /
+          // awaiting_review / stuck, so a queued or starting run no longer flips
+          // to 'completed' here. assertCloseoutTransitionLegal above has already
+          // refused that case for a NON-terminal run; this guard is what keeps a
+          // TERMINAL run's close-out a status no-op, exactly as before.
           `UPDATE workflow_runs
               SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+            WHERE id = ? AND status IN ${allowedSourcesSqlIn('completed')}`,
         )
         .run(input.runId);
       // outcome='pr_open' keeps the task at Ready to merge (the chokepoint
@@ -3117,9 +3179,15 @@ export const runsRouter = router({
       await reapPrototypeServersSafe(deps!, input.runId);
       ctx.db
         .prepare(
+          // Source set DERIVED from ALLOWED_TRANSITIONS. Cancel is legal from
+          // every non-terminal state, so this is byte-equivalent to the old
+          // hand-written "not terminal" guard today — sourced from the table so
+          // it cannot drift from it. Dismiss deliberately has NO
+          // assertCloseoutTransitionLegal precondition: dismissing an
+          // already-terminal run is the reclaim-the-worktree path.
           `UPDATE workflow_runs
               SET status = 'canceled', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+            WHERE id = ? AND status IN ${allowedSourcesSqlIn('canceled')}`,
         )
         .run(input.runId);
       // outcome='dismissed' + recompute reverts the task to its entry (planning)

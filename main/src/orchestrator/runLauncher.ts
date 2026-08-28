@@ -42,6 +42,7 @@ import {
   type SessionAgentPermissionModeDeps,
 } from './sessionPermissionMode';
 import { assertIdeaNotBusy } from './ideaBusy';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 
 /**
  * Provides the Unix socket path that the orchestrator IPC server listens on.
@@ -682,11 +683,38 @@ export class RunLauncher {
         });
       }
 
+      // Worktree columns first, UNGUARDED: they describe where the run's work
+      // lives and stay true whatever the row's status is, so a run canceled during
+      // the await above still records them for its own close-out.
       this.db
         .prepare(
-          'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          'UPDATE workflow_runs SET worktree_path = ?, branch_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         )
-        .run(worktreePath, branchName, 'starting', runId);
+        .run(worktreePath, branchName, runId);
+      // The status flip is SEPARATE and GUARDED. createRun INSERTs 'queued' a few
+      // lines above, so 'queued' is the only legal source — but the worktree build
+      // is awaited in between, and a cancel landing in that window (session dismiss
+      // reaches cancelHostedRuns for a queued run) used to be overwritten: this
+      // UPDATE carried no status guard at all and forced a canceled run back to
+      // 'starting', where the executor would then drive a run the user had killed.
+      assertTransitionAllowed('queued', 'starting', runId);
+      const started = this.db
+        .prepare(
+          `UPDATE workflow_runs SET status = 'starting', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'queued'`,
+        )
+        .run(runId) as { changes: number };
+      // 0 rows = the run left 'queued' while the worktree was being built. Do NOT
+      // resurrect it; skip the executor enqueue below so no agent is spawned for a
+      // run that is already terminal. The caller still gets its worktree tuple —
+      // the worktree exists and close-out needs the path.
+      const launchAborted = started.changes === 0;
+      if (launchAborted) {
+        this.logger.warn('RunLauncher: run left queued during worktree build — not starting it', {
+          runId,
+          worktreePath,
+        });
+      }
 
       // Session-hosted finalization (session<->run restructure, Phase 1).
       // Snapshot the session worktree's HEAD as base_sha and dual-write the
@@ -867,7 +895,7 @@ export class RunLauncher {
       // Enqueue the RunExecutor onto the per-run PQueue (fire-and-forget).
       // The void prefix and inner try/catch are load-bearing: launch() must
       // not block on the SDK run, and errors must not propagate to the caller.
-      if (this.runExecutor && this.runQueueRegistry) {
+      if (this.runExecutor && this.runQueueRegistry && !launchAborted) {
         const executor = this.runExecutor;
         const queue = this.runQueueRegistry.getOrCreate(runId);
         void queue.add(async () => {

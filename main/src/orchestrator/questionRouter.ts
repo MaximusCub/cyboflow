@@ -53,6 +53,7 @@ import {
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 import { emitSeamError } from './telemetrySink';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { runStatusEvents } from './trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
@@ -540,6 +541,7 @@ export class QuestionRouter extends EventEmitter {
       // running→awaiting_input guard miss the transaction either throws (the run
       // moved on) or self-heals a dead/stale gate in place (see method doc).
       const txn = this.db.transaction(() => {
+        assertTransitionAllowed('running', 'awaiting_input', runId);
         const updateStmt = this.db.prepare(
           `UPDATE workflow_runs SET status = 'awaiting_input', updated_at = ?
            WHERE id = ? AND status = 'running'`,
@@ -743,6 +745,7 @@ export class QuestionRouter extends EventEmitter {
       // Fold any attachment file paths into the answer text the agent receives.
       const effectiveAnswer = embedAttachmentsIntoAnswer(answer);
 
+      assertTransitionAllowed('awaiting_input', 'running', request.runId);
       const updateStmt = this.db.prepare(
         `UPDATE workflow_runs SET status = 'running', updated_at = ?
          WHERE id = ? AND status = 'awaiting_input'`,
@@ -1255,6 +1258,7 @@ export class QuestionRouter extends EventEmitter {
       if (countPendingBlockingReviewItems(this.db, runId) > 0) return;
 
       const now = new Date().toISOString();
+      assertTransitionAllowed('running', 'completed', runId);
       const info = this.db
         .prepare(
           `UPDATE workflow_runs SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = ?

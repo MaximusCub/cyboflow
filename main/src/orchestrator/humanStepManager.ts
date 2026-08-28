@@ -42,6 +42,10 @@ import { handleEntityWrite } from './autoMintArtifacts';
 import { composePartialSprintGateBody } from './partialSprintGateSummary';
 import { listApproveIdeasBatchRows } from './runEntityOwnership';
 import { runStatusEvents } from './trpc/routers/events';
+import {
+  assertTransitionAllowed,
+  assertTransitionAllowedFromAny,
+} from '../../../shared/workflows/runStateMachine';
 
 /** Provenance source stamped on a human-gate decision review_item. */
 const HUMAN_GATE_SOURCE = 'gate:human-step';
@@ -154,6 +158,9 @@ export class HumanStepManager {
         // is correct (the run IS still gated). Terminal states (completed/failed/
         // canceled) are still refused (→ null). The per-step idempotency guard
         // above prevents a duplicate gate for the SAME step.
+        // 'awaiting_review' in the IN-list is the re-park no-op the comment above
+        // describes, not an edge; 'running' -> 'awaiting_review' is the real one.
+        assertTransitionAllowedFromAny(['running', 'awaiting_review'], 'awaiting_review', runId);
         const info = this.db
           .prepare(
             `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
@@ -232,6 +239,7 @@ export class HumanStepManager {
 
         // Aggregate-unblock: resume ONLY when no other blocking item is pending.
         if (countPendingBlockingReviewItems(this.db, runId) === 0) {
+          assertTransitionAllowed('awaiting_review', 'running', runId);
           const info = this.db
             .prepare(
               `UPDATE workflow_runs SET status = 'running', updated_at = ?
@@ -290,6 +298,7 @@ export class HumanStepManager {
       // whose blocking items cleared between the caller's check and this task).
       if (countPendingBlockingReviewItems(this.db, runId) === 0) return false;
       const now = new Date().toISOString();
+      assertTransitionAllowed('running', 'awaiting_review', runId);
       const info = this.db
         .prepare(
           `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
@@ -323,6 +332,7 @@ export class HumanStepManager {
     return (await this.getQueue(runId).add(() => {
       if (countPendingBlockingReviewItems(this.db, runId) > 0) return false;
       const now = new Date().toISOString();
+      assertTransitionAllowed('awaiting_review', 'running', runId);
       const info = this.db
         .prepare(
           `UPDATE workflow_runs SET status = 'running', updated_at = ?

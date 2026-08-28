@@ -23,7 +23,7 @@ import {
   reviveQuickRunToRunning,
   TransitionRejectedError,
 } from '../transitions';
-import { IllegalTransitionError } from '../stateMachine';
+import { IllegalTransitionError } from '../../../../../shared/workflows/runStateMachine';
 import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
 import { seedApproval } from '../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
@@ -203,7 +203,7 @@ describe('transitions', () => {
     // -----------------------------------------------------------------------
 
     it('(g) in-process guard: throws IllegalTransitionError before SQL UPDATE when assertTransitionAllowed rejects', async () => {
-      const stateMachine = await import('../stateMachine');
+      const stateMachine = await import('../../../../../shared/workflows/runStateMachine');
       const guardSpy = vi.spyOn(stateMachine, 'assertTransitionAllowed').mockImplementationOnce(
         (from, to, runId) => {
           throw new IllegalTransitionError(from, to, runId);
@@ -415,7 +415,7 @@ describe('transitions', () => {
     // -----------------------------------------------------------------------
 
     it('(h) in-process guard: throws IllegalTransitionError before SQL UPDATE when assertTransitionAllowed rejects', async () => {
-      const stateMachine = await import('../stateMachine');
+      const stateMachine = await import('../../../../../shared/workflows/runStateMachine');
       const guardSpy = vi.spyOn(stateMachine, 'assertTransitionAllowed').mockImplementationOnce(
         (from, to, runId) => {
           throw new IllegalTransitionError(from, to, runId);

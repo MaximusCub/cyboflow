@@ -619,8 +619,11 @@ describe('cancelAndRestartHandler', () => {
     const racingDb: DatabaseLike = {
       prepare: (sql: string) => {
         const realStmt = db.prepare(sql);
-        // Intercept only the guarded UPDATE (identified by its NOT IN clause).
-        if (!updateIntercepted && sql.includes("status NOT IN ('canceled'")) {
+        // Intercept only the guarded UPDATE. Its source-status guard is now
+        // DERIVED from ALLOWED_TRANSITIONS (allowedSourcesSqlIn('canceled')), so
+        // it reads `AND status IN ('queued', ...)` rather than the old
+        // hand-written `status NOT IN ('canceled', ...)`. Same set, new spelling.
+        if (!updateIntercepted && sql.includes("SET status = 'canceled'") && sql.includes('AND status IN')) {
           updateIntercepted = true;
           return {
             run: (...params: unknown[]) => {

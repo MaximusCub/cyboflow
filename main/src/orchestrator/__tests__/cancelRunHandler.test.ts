@@ -260,12 +260,14 @@ describe('cancelRunHandler (git-neutral run Cancel — Phase 4a)', () => {
     const { runId } = seedRun(db, { status: 'running' });
 
     // Wrap the real db but, on the guarded UPDATE, pre-cancel the run first so
-    // the status-NOT-IN-terminal WHERE clause matches 0 rows.
+    // its status-IN-allowed-sources WHERE clause matches 0 rows. (The guard used
+    // to be spelled `status NOT IN (terminal)`; it is now derived from
+    // ALLOWED_TRANSITIONS via allowedSourcesSqlIn('canceled') — the same set.)
     let intercepted = false;
     const racingDb: DatabaseLike = {
       prepare: (sql: string) => {
         const realStmt = db.prepare(sql);
-        if (!intercepted && sql.includes("SET status = 'canceled'") && sql.includes('status NOT IN')) {
+        if (!intercepted && sql.includes("SET status = 'canceled'") && sql.includes('AND status IN')) {
           intercepted = true;
           return {
             run: (...params: unknown[]) => {

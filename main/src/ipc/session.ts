@@ -33,7 +33,7 @@ import type { QuickSessionRow, QuickSessionGitSnapshot } from '../../../shared/t
 import type { SessionOutput, Session as SessionType } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
-import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import {
   createQuickSessionCore,
   stampQuickSessionRuntimeConfig,

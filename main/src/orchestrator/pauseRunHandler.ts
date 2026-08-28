@@ -43,6 +43,7 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { AgentInvocationStore } from './agentInvocationStore';
+import { assertTransitionAllowedFromAny } from '../../../shared/workflows/runStateMachine';
 
 // ---------------------------------------------------------------------------
 // Dependency bag
@@ -271,6 +272,11 @@ export async function pauseRunHandler(
   // the run out of a pausable state.
   const result = await runQueues.getOrCreate(runId).add(async (): Promise<PauseRunResult> => {
     const pauseTx = db.transaction(() => {
+      // The raw UPDATE stays inlined because transitions.ts is db-coupled SERVICES
+      // code this module may not import at runtime — but VALIDATION no longer needs
+      // that exemption: ALLOWED_TRANSITIONS lives in shared/, which every layer can
+      // reach, so the edge is checked here exactly as transitionToPaused checks it.
+      assertTransitionAllowedFromAny(['running', 'awaiting_review'], 'paused', runId);
       return db
         .prepare(
           `UPDATE workflow_runs

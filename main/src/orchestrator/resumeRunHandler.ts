@@ -47,6 +47,7 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { AgentInvocationStore } from './agentInvocationStore';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -196,6 +197,12 @@ export async function resumeRunHandler(
     // transition (cancel / fail) that already moved the run loses cleanly here
     // (changes === 0 → race). paused → running is in ALLOWED_TRANSITIONS.
     const flip = db.transaction(() => {
+      // The raw UPDATE stays inlined because transitions.ts is db-coupled SERVICES
+      // code this module may not import at runtime — but VALIDATION no longer needs
+      // that exemption: ALLOWED_TRANSITIONS lives in shared/, reachable from every
+      // layer, so the edge is asserted here exactly as transitionPausedToRunning
+      // asserts it.
+      assertTransitionAllowed('paused', 'running', runId);
       return db
         .prepare(
           `UPDATE workflow_runs

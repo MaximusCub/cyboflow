@@ -21,7 +21,7 @@
  * ───────────────────────────────────────────────────────────────────────────
  * This is the FIFTH sanctioned path that revives a run out of a state the state
  * machine calls terminal/resting via a guarded raw UPDATE (see
- * services/cyboflow/stateMachine.ts's ALLOWED_TRANSITIONS comment) — joining the
+ * shared/workflows/runStateMachine.ts's ALLOWED_TRANSITIONS comment) — joining the
  * four retryRunHandler enumerates:
  *   1. runRecovery.recoverActiveStateOrphans (boot sweep).
  *   2. reopenRunHandler (SDK-only failed -> running via --resume).

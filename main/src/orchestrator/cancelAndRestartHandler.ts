@@ -17,9 +17,9 @@ import type { DatabaseLike, LoggerLike } from './types';
 import type { ApprovalRouter } from './approvalRouter';
 import type { QuestionRouter } from './questionRouter';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import {
   TERMINAL_RUN_STATUSES,
-  TERMINAL_RUN_STATUSES_SQL_IN,
 } from '../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
@@ -236,10 +236,12 @@ export async function cancelAndRestartHandler(
     const newRunId = randomUUID();
     const cancelAndInsertTx = db.transaction(() => {
       // Step 4: Mark the old run as canceled.
+      // Guard DERIVED from ALLOWED_TRANSITIONS (see cancelRunHandler for the
+      // reasoning) — today's cancel-from-any-non-terminal, sourced from the table.
       const updateResult = db.prepare(
         `UPDATE workflow_runs
            SET status = 'canceled', ended_at = ?, updated_at = ?
-         WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+         WHERE id = ? AND status IN ${allowedSourcesSqlIn('canceled')}`,
       ).run(now, now, runId) as { changes: number };
 
       if (updateResult.changes === 0) {

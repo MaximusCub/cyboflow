@@ -29,7 +29,7 @@ import {
   type WorkflowRunStorableRuntime,
 } from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
-import { assertTransitionAllowed } from './cyboflow/stateMachine';
+import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { isPtyLane } from './panelLane';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */

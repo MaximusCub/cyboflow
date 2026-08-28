@@ -21,6 +21,7 @@ import { AgentInvocationStore } from './agentInvocationStore';
 import { hasReviewItemsTable, resolveReviewItemById } from './reviewItemListing';
 import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter';
 import { DELIVERED_RUN_OUTCOMES_SQL_IN } from '../../../shared/types/cyboflow';
+import { allowedSourcesSqlIn } from '../../../shared/workflows/runStateMachine';
 import { selectRunUsageRollupsFromRawEvents } from './insightsQueries';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
@@ -786,9 +787,17 @@ export function stampSessionRunsCompleted(db: DatabaseLike, sessionId: string): 
  * cancel a no-op instead of overwriting the run to `status='canceled',
  * outcome='canceled'` — the bug where a successful Create-PR showed CANCELED.
  *
- * The `status NOT IN (terminal)` guard means a run that already reached a
- * terminal state (incl. its own recorded outcome) is left untouched. Returns
+ * The source-status guard is DERIVED from ALLOWED_TRANSITIONS (the states with a
+ * legal edge into 'completed': running / awaiting_review / stuck) rather than
+ * spelled as "not terminal". A run that already reached a terminal state is left
+ * untouched as before; a run that never started (queued / starting) or is parked
+ * where completion is not reachable (awaiting_input / paused) is now ALSO left
+ * untouched, and the Create-PR dialog's follow-up `sessions:delete` cancels it —
+ * the correct outcome, since such a run contributed nothing to the push. Returns
  * the number of rows completed so callers can log it.
+ *
+ * This is a SET-wide UPDATE, so the SQL guard is the validation: there is no
+ * single source status to hand `assertTransitionAllowed`.
  */
 export function stampSessionRunsPrOpen(db: DatabaseLike, sessionId: string): number {
   const info = db
@@ -798,7 +807,7 @@ export function stampSessionRunsPrOpen(db: DatabaseLike, sessionId: string): num
               outcome = 'pr_open',
               ended_at = CURRENT_TIMESTAMP,
               updated_at = CURRENT_TIMESTAMP
-        WHERE session_id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        WHERE session_id = ? AND status IN ${allowedSourcesSqlIn('completed')}`,
     )
     .run(sessionId) as { changes: number };
   return info.changes;

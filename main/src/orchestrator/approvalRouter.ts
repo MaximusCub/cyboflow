@@ -57,6 +57,10 @@ import {
   setPermissionReviewItemBlocking,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
+import {
+  assertTransitionAllowed,
+  assertTransitionAllowedFromAny,
+} from '../../../shared/workflows/runStateMachine';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -305,6 +309,7 @@ export class ApprovalRouter extends EventEmitter {
         // The txn returns true if it grabbed the gate, false if changes=0 (in
         // which case it leaves the DB untouched — INSERT/fold never run).
         const txn = this.db.transaction(() => {
+          assertTransitionAllowed('running', 'awaiting_review', runId);
           const updateStmt = this.db.prepare(
             `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
              WHERE id = ? AND status = 'running'`,
@@ -513,6 +518,13 @@ export class ApprovalRouter extends EventEmitter {
         // after ~6 minutes had the human's YES converted into a synthetic deny.
         // Observed live on 2026-08-21: run marked stuck (cross_run_deadlock) at
         // 5m23s, approved at 6m14s, recorded 'rejected' by 'auto-policy'.
+        // 'running' in the IN-list is the idempotent re-stamp of an orphaned ask
+        // whose run was already restored; the other two are real edges.
+        assertTransitionAllowedFromAny(
+          ['awaiting_review', 'running', 'stuck'],
+          'running',
+          request.runId,
+        );
         const updateStmt = this.db.prepare(
           `UPDATE workflow_runs
               SET status = 'running', updated_at = ?,
@@ -561,6 +573,7 @@ export class ApprovalRouter extends EventEmitter {
         // wins — if the run is terminal, it stays where it is. 'stuck' revives
         // for the same reason it does on the allow path above: the human just
         // answered, which is the event that unblocks it.
+        assertTransitionAllowedFromAny(['awaiting_review', 'stuck'], 'running', request.runId);
         this.db.prepare(
           `UPDATE workflow_runs
               SET status = 'running', updated_at = ?,
@@ -716,6 +729,7 @@ export class ApprovalRouter extends EventEmitter {
     // concurrently went canceled/completed/failed is never revived, and a DB
     // error must not propagate into the socket-disconnect handler calling us.
     try {
+      assertTransitionAllowed('awaiting_review', 'running', runId);
       this.db.prepare(
         `UPDATE workflow_runs SET status = 'running', updated_at = ?
          WHERE id = ? AND status = 'awaiting_review'`,
@@ -867,6 +881,7 @@ export class ApprovalRouter extends EventEmitter {
     // concurrent cancel/complete/fail wins. Fail-soft: a DB error here must not
     // propagate into the socket-disconnect handler that called us.
     try {
+      assertTransitionAllowed('awaiting_review', 'running', runId);
       this.db.prepare(
         `UPDATE workflow_runs SET status = 'running', updated_at = ?
          WHERE id = ? AND status = 'awaiting_review'`,

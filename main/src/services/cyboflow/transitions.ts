@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { ApprovalStatus, WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../shared/types/cyboflow';
-import { assertTransitionAllowed } from './stateMachine';
+import { assertTransitionAllowed } from '../../../../shared/workflows/runStateMachine';
 import { emitUsage } from '../../orchestrator/telemetrySink';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';

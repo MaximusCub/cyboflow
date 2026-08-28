@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import type { WorkflowRunStatus } from '../../../../../shared/types/cyboflow';
+import type { WorkflowRunStatus } from '../../types/cyboflow';
 import {
   ALLOWED_TRANSITIONS,
   isTransitionAllowed,
   assertTransitionAllowed,
+  assertTransitionAllowedFromAny,
+  allowedSourcesFor,
+  allowedSourcesSqlIn,
   IllegalTransitionError,
-} from '../stateMachine';
+} from '../runStateMachine';
 
 // All 10 statuses — used for the terminal-state lockdown sweep.
 const ALL_STATUSES: readonly WorkflowRunStatus[] = [
@@ -354,5 +357,93 @@ describe('(e) P4 review-item fold reuses existing review states (no new review s
 
   it('awaiting_input -> running (question resolve auto-resume) is legal', () => {
     expect(isTransitionAllowed('awaiting_input', 'running')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) Multi-source + derived-source helpers — the shapes the raw UPDATE sites
+//     across main/src/orchestrator use to validate against this table.
+// ---------------------------------------------------------------------------
+
+describe('(f) assertTransitionAllowedFromAny', () => {
+  it('accepts a list whose every member has a legal edge to the target', () => {
+    // ApprovalRouter's deny path: WHERE status IN ('awaiting_review', 'stuck').
+    expect(() =>
+      assertTransitionAllowedFromAny(['awaiting_review', 'stuck'], 'running'),
+    ).not.toThrow();
+  });
+
+  it('SKIPS a from === to member (an idempotent re-stamp is not a transition)', () => {
+    // ApprovalRouter's allow path lists 'running' alongside two real sources so an
+    // already-restored orphan re-stamps cleanly; humanStepManager lists
+    // 'awaiting_review' for the back-to-back gate re-park. Neither is an edge, and
+    // neither is in the table (running -> running is absent).
+    expect(isTransitionAllowed('running', 'running')).toBe(false);
+    expect(() =>
+      assertTransitionAllowedFromAny(['awaiting_review', 'running', 'stuck'], 'running'),
+    ).not.toThrow();
+    expect(() =>
+      assertTransitionAllowedFromAny(['running', 'awaiting_review'], 'awaiting_review'),
+    ).not.toThrow();
+  });
+
+  it('throws IllegalTransitionError naming the OFFENDING member, not the first one', () => {
+    // 'awaiting_input' -> 'stuck' is deliberately absent (IDEA-025 Q2).
+    let caught: unknown;
+    try {
+      assertTransitionAllowedFromAny(['awaiting_review', 'awaiting_input'], 'stuck', 'run-1');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(IllegalTransitionError);
+    expect((caught as IllegalTransitionError).from).toBe('awaiting_input');
+    expect((caught as IllegalTransitionError).runId).toBe('run-1');
+  });
+
+  it('still rejects a TERMINAL source whose target differs from it', () => {
+    expect(() => assertTransitionAllowedFromAny(['running', 'failed'], 'completed')).toThrow(
+      IllegalTransitionError,
+    );
+  });
+
+  it('is a no-op for an empty list (nothing to validate)', () => {
+    expect(() => assertTransitionAllowedFromAny([], 'completed')).not.toThrow();
+  });
+});
+
+describe('(f) allowedSourcesFor / allowedSourcesSqlIn read the table backwards', () => {
+  it('completion is reachable ONLY from running / awaiting_review / stuck', () => {
+    // This is the set the close-out UPDATEs in trpc/routers/runs.ts and
+    // runRecovery.stampSessionRunsPrOpen now guard on. A `queued` or `starting`
+    // run — one that never produced an artifact — must NOT be in it.
+    expect([...allowedSourcesFor('completed')].sort()).toEqual(
+      ['awaiting_review', 'running', 'stuck'].sort(),
+    );
+  });
+
+  it('cancel is reachable from EVERY non-terminal status', () => {
+    // cancelRunHandler / cancelAndRestartHandler / runs.dismiss guard on this; it
+    // must stay equivalent to the "not terminal" list they used to hardcode.
+    const nonTerminal = ALL_STATUSES.filter(s => !['completed', 'failed', 'canceled'].includes(s));
+    expect([...allowedSourcesFor('canceled')].sort()).toEqual([...nonTerminal].sort());
+  });
+
+  it('no terminal status is ever a source', () => {
+    for (const to of ALL_STATUSES) {
+      for (const terminal of ['completed', 'failed', 'canceled'] as const) {
+        expect(allowedSourcesFor(to)).not.toContain(terminal);
+      }
+    }
+  });
+
+  it('renders a quoted SQL IN list in table order', () => {
+    expect(allowedSourcesSqlIn('completed')).toBe("('running', 'awaiting_review', 'stuck')");
+  });
+
+  it('throws rather than rendering an empty IN list for an unreachable target', () => {
+    // 'queued' is the INSERT's status; nothing transitions INTO it. An `IN ()`
+    // would be a silently-never-matching guard, so the render must refuse.
+    expect(allowedSourcesFor('queued')).toEqual([]);
+    expect(() => allowedSourcesSqlIn('queued')).toThrow(/no workflow_run status/i);
   });
 });
