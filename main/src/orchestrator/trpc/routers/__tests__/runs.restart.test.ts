@@ -398,7 +398,7 @@ describe('cyboflow.runs.restart', () => {
     const { runId } = seedFrozenFailedRun('run-efficient', EFFICIENT_SPEC, 'efficient');
     expect(await restartAndCaptureOptions(runId)).toEqual({
       baseline: true,
-      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient' },
+      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient', runtimeMix: null },
     });
   });
 
@@ -415,7 +415,7 @@ describe('cyboflow.runs.restart', () => {
     );
     expect(await restartAndCaptureOptions(runId)).toEqual({
       baseline: true,
-      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient' },
+      frozenSpec: { specJson: EFFICIENT_SPEC, tuningLevel: 'efficient', runtimeMix: null },
     });
   });
 
@@ -423,7 +423,7 @@ describe('cyboflow.runs.restart', () => {
     const { runId } = seedFrozenFailedRun('run-standard', '{}', 'standard');
     expect(await restartAndCaptureOptions(runId)).toEqual({
       baseline: true,
-      frozenSpec: { specJson: '{}', tuningLevel: 'standard' },
+      frozenSpec: { specJson: '{}', tuningLevel: 'standard', runtimeMix: null },
     });
   });
 
@@ -432,7 +432,7 @@ describe('cyboflow.runs.restart', () => {
     const { runId } = seedFrozenFailedRun('run-custom', slot, 'custom');
     expect(await restartAndCaptureOptions(runId)).toEqual({
       baseline: true,
-      frozenSpec: { specJson: slot, tuningLevel: 'custom' },
+      frozenSpec: { specJson: slot, tuningLevel: 'custom', runtimeMix: null },
     });
   });
 
@@ -440,7 +440,7 @@ describe('cyboflow.runs.restart', () => {
     const { runId } = seedFrozenFailedRun('run-legacy', '{}', null);
     expect(await restartAndCaptureOptions(runId)).toEqual({
       baseline: true,
-      frozenSpec: { specJson: '{}', tuningLevel: null },
+      frozenSpec: { specJson: '{}', tuningLevel: null, runtimeMix: null },
     });
   });
 

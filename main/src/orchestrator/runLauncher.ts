@@ -34,6 +34,7 @@ import type { TaskChange } from './taskChangeRouter';
 import type { VariantResolver } from './variantResolver';
 import type { ExperimentArm } from '../../../shared/types/experiments';
 import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
+import type { RuntimeMix } from '../../../shared/tuning/runtimeMix';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { emitSeamError } from './telemetrySink';
 import { classifyErrorPattern } from './programmatic/systemicError';
@@ -390,8 +391,11 @@ export class RunLauncher {
       // by a tRPC input. Carries the failed run's EXACT frozen spec (recovered
       // from workflow_revisions by its spec_hash) plus the level it was stamped
       // with, so the restart replays what actually ran instead of re-deriving it
-      // from a since-recalibrated preset or a since-edited slot.
-      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null };
+      // from a since-recalibrated preset or a since-edited slot. `runtimeMix`
+      // (migration 127) travels in the same triple and additionally OUTRANKS the
+      // workflow's current stamp for provider/plane derivation — a mix flipped
+      // between failure and restart must not re-route a verbatim replay.
+      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null };
     },
     // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
     // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime

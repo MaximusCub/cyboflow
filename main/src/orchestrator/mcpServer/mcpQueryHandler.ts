@@ -7106,7 +7106,7 @@ export class McpQueryHandler {
   private readWorkflowRow(workflowId: string): WorkflowRow | null {
     const row = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
            FROM workflows WHERE id = ?`,
       )
       .get(workflowId) as WorkflowRow | undefined;
@@ -7390,7 +7390,7 @@ export class McpQueryHandler {
     }
     const rows = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
            FROM workflows
           WHERE ${clauses.join(' AND ')}
           ORDER BY name`,

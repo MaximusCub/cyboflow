@@ -47,6 +47,7 @@ import {
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import { TUNING_LEVELS, isTuningLevel, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
+import { isRuntimeMix, type RuntimeMix } from '../../../../../shared/tuning/runtimeMix';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
@@ -379,7 +380,7 @@ export interface RunLauncherLike {
    * (the failed run's exact frozen spec + the level it was stamped with) — set
    * only by runs.restart, never reachable from a tRPC input.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string; originIdeaId?: string; tuningLevel?: TuningLevel; frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null } }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[]; seedPrompt?: string; originIdeaId?: string; tuningLevel?: TuningLevel; frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null } }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowLaunchableRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -1668,20 +1669,28 @@ export const runsRouter = router({
       // (requestedVariantId below), whose own frozen `definition_json` is the
       // authoritative spec — and createRun treats a variant spec as the winner
       // over a replay anyway.
-      let frozenSpec: { specJson: string; tuningLevel: TuningLevel | null } | undefined;
+      let frozenSpec:
+        | { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null }
+        | undefined;
       if (row.variant_id === null) {
         let specHash: string | null = null;
         let stampedLevel: TuningLevel | null = null;
+        let stampedMix: RuntimeMix | null = null;
         try {
           const stamp = ctx.db
             .prepare(
-              'SELECT spec_hash AS specHash, tuning_level AS tuningLevel FROM workflow_runs WHERE id = ?',
+              'SELECT spec_hash AS specHash, tuning_level AS tuningLevel, runtime_mix AS runtimeMix FROM workflow_runs WHERE id = ?',
             )
-            .get(input.runId) as { specHash?: unknown; tuningLevel?: unknown } | undefined;
+            .get(input.runId) as
+            | { specHash?: unknown; tuningLevel?: unknown; runtimeMix?: unknown }
+            | undefined;
           specHash = typeof stamp?.specHash === 'string' ? stamp.specHash : null;
           stampedLevel = isTuningLevel(stamp?.tuningLevel) ? stamp.tuningLevel : null;
+          // NULL (or a pre-127 row) replays UNATTRIBUTED, which is also what the
+          // run itself did — never defaulted to 'claude', which would be a claim.
+          stampedMix = isRuntimeMix(stamp?.runtimeMix) ? stamp.runtimeMix : null;
         } catch {
-          // Pre-026 / pre-122 schema — no frozen address to replay.
+          // Pre-026 / pre-122 / pre-127 schema — no frozen address to replay.
           specHash = null;
         }
         if (specHash !== null) {
@@ -1692,7 +1701,11 @@ export const runsRouter = router({
               )
               .get(row.workflow_id, specHash) as { specJson?: unknown } | undefined;
             if (typeof revision?.specJson === 'string') {
-              frozenSpec = { specJson: revision.specJson, tuningLevel: stampedLevel };
+              frozenSpec = {
+                specJson: revision.specJson,
+                tuningLevel: stampedLevel,
+                runtimeMix: stampedMix,
+              };
             }
           } catch {
             // No workflow_revisions table (pre-026) — degrade, don't fail.

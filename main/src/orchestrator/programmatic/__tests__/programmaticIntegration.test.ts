@@ -80,6 +80,7 @@ function ctxFor(runId: string): ProgrammaticRunContext {
     permission_mode: 'default',
     spec_json: '{}',
     tuning_level: 'standard',
+    runtime_mix: 'claude',
     created_at: 'now',
     archived_at: null,
   };
@@ -192,6 +193,7 @@ function fanOutCtx(runId: string, specJson: string, batchId: string | null): Pro
     permission_mode: 'default',
     spec_json: specJson,
     tuning_level: 'standard',
+    runtime_mix: 'claude',
     created_at: 'now',
     archived_at: null,
   };

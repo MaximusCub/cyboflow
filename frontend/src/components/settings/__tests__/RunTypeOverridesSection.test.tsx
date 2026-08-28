@@ -39,6 +39,7 @@ function wfRow(over: Partial<WorkflowRow> & Pick<WorkflowRow, 'id' | 'name'>): W
     permission_mode: 'default',
     spec_json: '{}',
     tuning_level: 'standard',
+    runtime_mix: 'claude',
     created_at: '2026-01-01T00:00:00Z',
     archived_at: null,
     ...over,

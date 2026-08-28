@@ -2655,7 +2655,11 @@ describe('RunLauncher.launch tuningLevel override', () => {
 
   it('threads a restart frozenSpec replay pair through to createRun', async () => {
     await withTempDir('runlauncher-tuning-', async (tmpDir) => {
-      const frozenSpec = { specJson: '{"id":"frozen","phases":[]}', tuningLevel: 'thorough' as const };
+      const frozenSpec = {
+        specJson: '{"id":"frozen","phases":[]}',
+        tuningLevel: 'thorough' as const,
+        runtimeMix: null,
+      };
       const { createRunSpy } = await launchWith(tmpDir, { baseline: true, frozenSpec });
       expect(createRunSpy.mock.calls[0][4]).toMatchObject({ frozenSpec });
     });

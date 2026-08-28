@@ -17,6 +17,7 @@
  * router-side catch that wants a real 400).
  */
 import type { TuningLevel } from './workflowTuning';
+import type { RuntimeMix } from './runtimeMix';
 
 /** Machine-readable prefix embedded in every {@link TuningOverrideError} message. */
 export const TUNING_OVERRIDE_CODE = 'TUNING_OVERRIDE_REJECTED';
@@ -90,5 +91,70 @@ export function tuningOverrideRejection(
       );
     case 'invalid_level':
       return new TuningOverrideError(reason, `invalid tuning level '${String(level)}'`);
+  }
+}
+
+// ─── The runtime-mix sibling (migration 127 / runtime-mix plan D3) ───────────
+
+/**
+ * Machine-readable prefix embedded in every {@link RuntimeMixOverrideError}
+ * message — see the module doc above for why the code lives in the MESSAGE.
+ */
+export const RUNTIME_MIX_OVERRIDE_CODE = 'RUNTIME_MIX_OVERRIDE_REJECTED';
+
+/**
+ * Why a per-run runtime-mix override was refused.
+ *
+ *   `variant_conflict` — the launch ALSO pins an A/B variant. A variant carries
+ *                        its own frozen graph and its runs stamp a NULL mix
+ *                        (plan D5), so a mix asked for alongside one could not
+ *                        be honoured OR recorded. Unlike the tuning level there
+ *                        is no containment model to fall back on: variants are
+ *                        scoped to a LEVEL (migration 126), never to a mix.
+ *   `not_built_in`     — a "save as new" flow has no role-class table, so there
+ *                        is nothing to split into execution vs. verification;
+ *                        it is outside the mix system entirely (runs stamp NULL).
+ *   `invalid_mix`      — the value is not a `RuntimeMix` at all.
+ */
+export type RuntimeMixOverrideRejection = 'variant_conflict' | 'not_built_in' | 'invalid_mix';
+
+export class RuntimeMixOverrideError extends Error {
+  readonly code = RUNTIME_MIX_OVERRIDE_CODE;
+
+  constructor(
+    readonly reason: RuntimeMixOverrideRejection,
+    detail: string,
+  ) {
+    super(`[${RUNTIME_MIX_OVERRIDE_CODE}:${reason}] ${detail}`);
+    this.name = 'RuntimeMixOverrideError';
+  }
+}
+
+/** Matches an error that crossed the tRPC boundary as a {@link RuntimeMixOverrideError}. */
+export function isRuntimeMixOverrideError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(RUNTIME_MIX_OVERRIDE_CODE);
+}
+
+/** The three rejections, spelled as the messages the chokepoint throws. */
+export function runtimeMixOverrideRejection(
+  reason: RuntimeMixOverrideRejection,
+  mix: RuntimeMix | string,
+  workflowName: string,
+): RuntimeMixOverrideError {
+  switch (reason) {
+    case 'variant_conflict':
+      return new RuntimeMixOverrideError(
+        reason,
+        `a per-run runtime mix ('${String(mix)}') cannot be combined with an A/B variant — ` +
+          'a variant runs its own frozen definition and its runs are mix-unattributed, ' +
+          'so drop one of the two',
+      );
+    case 'not_built_in':
+      return new RuntimeMixOverrideError(
+        reason,
+        `workflow '${workflowName}' is not a built-in flow, so it has no execution/verification split to route`,
+      );
+    case 'invalid_mix':
+      return new RuntimeMixOverrideError(reason, `invalid runtime mix '${String(mix)}'`);
   }
 }

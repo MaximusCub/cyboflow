@@ -26,15 +26,26 @@ import {
 import {
   getTuningPreset,
   isTuningLevel,
-  materializeForLevel,
   resolveEffectiveDefinition,
   serializeDefinition,
   type TuningLevel,
 } from '../../../shared/tuning/workflowTuning';
-import { tuningOverrideRejection } from '../../../shared/tuning/workflowTuningErrors';
+import {
+  runtimeMixOverrideRejection,
+  tuningOverrideRejection,
+} from '../../../shared/tuning/workflowTuningErrors';
+import {
+  DEFAULT_RUNTIME_MIX,
+  isRuntimeMix,
+  materializeForLevelAndMix,
+  primaryProviderForMix,
+  reconcileMixWithProvider,
+  type RuntimeMix,
+} from '../../../shared/tuning/runtimeMix';
 import {
   MixedProviderOrchestratedError,
   ProviderOrchestratedUnsupportedError,
+  RuntimeMixOrchestratedError,
 } from '../../../shared/types/executionModelErrors';
 import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
@@ -371,7 +382,7 @@ export class WorkflowRegistry {
    */
   getById(workflowId: string): WorkflowRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at FROM workflows WHERE id = ?',
+      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at FROM workflows WHERE id = ?',
     );
     const row = stmt.get(workflowId) as WorkflowRow | undefined;
     return row ?? null;
@@ -447,6 +458,47 @@ export class WorkflowRegistry {
     const stmt = this.db.prepare('UPDATE workflows SET tuning_level = ? WHERE id = ?');
     const tx = this.db.transaction(() => {
       stmt.run(level, workflowId);
+    });
+    tx();
+  }
+
+  /**
+   * Stamp a workflow's RUNTIME MIX (migration 128) — the second dial, deciding
+   * which provider runs each step. ONE cheap write, exactly like
+   * {@link setTuningLevel}: `spec_json` is never touched, and neither is the
+   * level. The two dials are orthogonal and compose at `createRun`.
+   *
+   * Guards (each a distinguishable Error the routers map to a TRPCError):
+   *   - Not a RuntimeMix → 'invalid runtime mix' (→ BAD_REQUEST).
+   *   - Missing row → 'not found' (→ NOT_FOUND).
+   *   - A non-built-in ("save as new") flow → 'not a built-in' (→ BAD_REQUEST).
+   *     Those flows have no verification-class table, so there is nothing to
+   *     split between providers; the selector is hidden for them and their runs
+   *     stamp a NULL mix.
+   *
+   * There is deliberately no `empty_custom_slot` analogue: the mix transforms
+   * whatever graph the level resolves, so an empty slot is the level's problem.
+   *
+   * Idempotent: re-stamping the mix a row already carries is a no-op UPDATE.
+   */
+  setRuntimeMix(workflowId: string, mix: RuntimeMix): void {
+    if (!isRuntimeMix(mix)) {
+      throw new Error(
+        `WorkflowRegistry.setRuntimeMix: invalid runtime mix '${String(mix)}' for workflow ${workflowId}`,
+      );
+    }
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.setRuntimeMix: workflow ${workflowId} not found`);
+    }
+    if (!isCyboflowWorkflowName(row.name)) {
+      throw new Error(
+        `WorkflowRegistry.setRuntimeMix: workflow ${workflowId} is not a built-in flow, so it has no runtime mix to route`,
+      );
+    }
+    const stmt = this.db.prepare('UPDATE workflows SET runtime_mix = ? WHERE id = ?');
+    const tx = this.db.transaction(() => {
+      stmt.run(mix, workflowId);
     });
     tx();
   }
@@ -1173,7 +1225,7 @@ export class WorkflowRegistry {
     const placeholders = excluded.map(() => '?').join(', ');
     const archivedClause = includeArchived ? '' : ' AND archived_at IS NULL';
     const stmt = this.db.prepare(
-      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, created_at, archived_at
+      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
        FROM workflows
        WHERE (project_id = ? OR project_id IS NULL) AND name NOT IN (${placeholders})${archivedClause}
        ORDER BY name`,
@@ -1255,6 +1307,12 @@ export class WorkflowRegistry {
    * dial existed), and a preset level freezes its serialized transform. The level
    * that produced it is stamped alongside on `workflow_runs.tuning_level`, NULL
    * for a variant run or a non-built-in flow.
+   *
+   * The RUNTIME MIX (migration 128) composes on top: it is resolved before the
+   * provider/execution ladders (it decides the base provider and forces the
+   * programmatic plane), applied to the level's graph in the same freeze via
+   * `materializeForLevelAndMix`, and stamped on `workflow_runs.runtime_mix` with
+   * the same NULL-is-unattributed ladder.
    *
    * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL:
    * when supplied it links the run to the owning chat session at INSERT time so a
@@ -1375,6 +1433,16 @@ export class WorkflowRegistry {
        */
       tuningLevel?: TuningLevel;
       /**
+       * PER-RUN runtime-mix override (migration 128 / runtime-mix plan D3) — the
+       * launch wizard's "run this once with THIS routing", threaded runs.start ->
+       * RunLauncher.launch -> here. Undefined = no override, the workflow's own
+       * `runtime_mix` stamp decides. It never writes the workflows row.
+       *
+       * Validated here (the chokepoint): rejected for a non-built-in flow and in
+       * combination with a variant — see `shared/tuning/workflowTuningErrors.ts`.
+       */
+      runtimeMix?: RuntimeMix;
+      /**
        * INTERNAL restart provenance (plan D4) — NOT reachable from the tRPC
        * input. `runs.restart` recovers the failed run's EXACT frozen spec from
        * `workflow_revisions` (keyed by its `spec_hash`) and replays it verbatim
@@ -1384,9 +1452,13 @@ export class WorkflowRegistry {
        * the spec without its stamp would file the run under the wrong level.
        *
        * `tuningLevel: null` is meaningful (a pre-feature or non-built-in run
-       * restarts unattributed, exactly as it ran).
+       * restarts unattributed, exactly as it ran). `runtimeMix` travels in the
+       * same triple for the same reason and additionally has PRECEDENCE over the
+       * workflow's current stamp for provider/plane derivation (runtime-mix plan
+       * D6): a mix changed between failure and restart must not re-route a spec
+       * that is being replayed verbatim.
        */
-      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null };
+      frozenSpec?: { specJson: string; tuningLevel: TuningLevel | null; runtimeMix: RuntimeMix | null };
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1517,12 +1589,104 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is disabled in Settings → Integrations`,
       );
     }
-    // The provider this run actually resolves onto. An UNREQUESTED run whose
-    // default route (Claude) is switched off reroutes to Codex; every other
-    // provider is absent⇒disabled, so reaching it always takes an explicit
-    // request and it is never a reroute target.
+    // ── Runtime mix: resolve, reconcile, derive a provider (migration 128 /
+    //    runtime-mix plan D3)
+    //
+    // Resolved HERE — after the provider REQUEST is known but before the
+    // provider/runtime ladder, the substrate and `resolveExecutionModel` —
+    // because it feeds all three: the mix's primary is the run's base provider,
+    // and a non-claude mix forces the programmatic plane (only that plane honors
+    // the per-agent `agentConfigs` pins the mix writes).
+    //
+    // A non-built-in ("save as new") flow has no verification class to split, so
+    // it is outside the mix system entirely and stamps NULL. The `__quick__`
+    // sentinel lands there too, which is correct — a quick chat has no DAG to
+    // route. Hoisted above the tuning block below, which reads the same predicate.
+    const isBuiltInFlow = isCyboflowWorkflowName(workflow.name);
+    const overrideMix = opts?.runtimeMix;
+    if (overrideMix !== undefined) {
+      if (!isRuntimeMix(overrideMix)) {
+        throw runtimeMixOverrideRejection('invalid_mix', overrideMix, workflow.name);
+      }
+      if (!isBuiltInFlow) {
+        throw runtimeMixOverrideRejection('not_built_in', overrideMix, workflow.name);
+      }
+      // No containment model to fall back on (contrast the tuning level, whose
+      // variants are level-scoped since migration 126): a variant is its own
+      // frozen graph and its runs stamp a NULL mix, so a mix asked for alongside
+      // one could neither be applied nor recorded.
+      if (opts?.variantId !== undefined || opts?.variantSpecJson !== undefined) {
+        throw runtimeMixOverrideRejection('variant_conflict', overrideMix, workflow.name);
+      }
+    }
+    // Every arm that voids the mix. A VARIANT (including a rotation pick, not
+    // just an explicit pin) runs its own graph off the variant/legacy ladders;
+    // demo mode never dispatches to a real provider; a single-provider lane
+    // (omp/pi today — anything the mix vocabulary cannot name) has no
+    // execution/verification split to route, so the stamp is ignored rather than
+    // half-honoured.
+    const mixSuppressed =
+      opts?.variantId !== undefined ||
+      opts?.variantSpecJson !== undefined ||
+      demoMode ||
+      !isBuiltInFlow ||
+      (explicitProvider !== undefined &&
+        explicitProvider !== 'claude' &&
+        explicitProvider !== 'codex');
+    // A drifted column value cannot reroute a run: an unreadable mix reads as the
+    // identity, exactly as an absent column would.
+    const savedMix: RuntimeMix = isRuntimeMix(workflow.runtime_mix)
+      ? workflow.runtime_mix
+      : DEFAULT_RUNTIME_MIX;
+    const resolvedMix: RuntimeMix | null = mixSuppressed
+      ? null
+      : opts?.frozenSpec !== undefined
+        ? // Restart precedence (plan D6): the replayed spec was materialized under
+          // THIS mix, so re-deriving from the workflow's current stamp would route
+          // a graph that no longer matches it.
+          opts.frozenSpec.runtimeMix
+        : overrideMix ?? savedMix;
+    // Reconcile rather than reject (plan D3 step 2): the wizard is not the only
+    // launch surface — the top-bar picker, the in-session launcher, the backlog
+    // launchers and "Run with modifications" all send their own provider or omit
+    // it, and a hard mismatch rejection would break every one of them the moment
+    // a workflow saves a non-claude default. An explicit provider therefore SWAPS
+    // the mix's primary while preserving the same/cross aspect — the exact
+    // semantics of the wizard's derived Runtime row, applied at the chokepoint via
+    // the shared helper both surfaces call.
+    const effectiveMix: RuntimeMix | null =
+      resolvedMix !== null && (explicitProvider === 'claude' || explicitProvider === 'codex')
+        ? reconcileMixWithProvider(resolvedMix, explicitProvider)
+        : resolvedMix;
+    // The provider a SAVED mix puts the run on when the launch named none. Gated
+    // like an explicit request: a codex mix saved before the toggle flipped must
+    // fail closed, not spawn a provider the user switched off in Settings.
+    const mixDerivedProvider: AgentProvider | undefined =
+      effectiveMix !== null &&
+      explicitProvider === undefined &&
+      primaryProviderForMix(effectiveMix) === 'codex'
+        ? 'codex'
+        : undefined;
+    if (
+      mixDerivedProvider !== undefined &&
+      !isAgentProviderEnabled(providerAccess, mixDerivedProvider)
+    ) {
+      throw new Error(
+        `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[mixDerivedProvider]} provider is disabled in Settings → Integrations`,
+      );
+    }
+
+    // The provider this run actually resolves onto: the explicit request, else
+    // the saved mix's primary, else the reroute. An UNREQUESTED run whose default
+    // route (Claude) is switched off reroutes to Codex; every other provider is
+    // absent⇒disabled, so reaching it always takes an explicit request and it is
+    // never a reroute target.
+    //
+    // The mix-derived arm deliberately sits BELOW the explicit request (which the
+    // reconcile above already folded into the mix) and ABOVE the reroute (a mix
+    // is a stated intent; the reroute is a fallback).
     const resolvedProvider: AgentProvider | undefined =
-      explicitProvider ?? (!claudeEnabled && codexEnabled ? 'codex' : undefined);
+      explicitProvider ?? mixDerivedProvider ?? (!claudeEnabled && codexEnabled ? 'codex' : undefined);
     /**
      * The STRUCTURED non-Claude runtime this run resolves onto, or undefined for
      * Claude. It drives the substrate projection ('sdk' — every structured
@@ -1555,7 +1719,10 @@ export class WorkflowRegistry {
       requestedSubstrate !== substrateFromRuntime
     ) {
       throw new Error(
-        `WorkflowRegistry.createRun: substrate ${requestedSubstrate} conflicts with agentRuntime ${requestedAgentRuntime}`,
+        // Name the runtime that actually caused the conflict: on a mix-derived
+        // route there IS no requested runtime, and reporting `undefined` would
+        // send the reader looking for a request nobody made.
+        `WorkflowRegistry.createRun: substrate ${requestedSubstrate} conflicts with agentRuntime ${requestedAgentRuntime ?? structuredSdkRuntime}`,
       );
     }
     const substrateRequest = requestedSubstrate ?? substrateFromRuntime;
@@ -1636,7 +1803,7 @@ export class WorkflowRegistry {
     // resolve normally: the global default now floors to 'programmatic' via
     // ConfigManager.getDefaultExecutionModel (SDK only; interactive hard-pins
     // orchestrated inside the resolver).
-    const executionModel = isQuickSentinel
+    const resolvedExecutionModel: ExecutionModel = isQuickSentinel
       ? 'orchestrated'
       : resolveExecutionModel({
           substrate,
@@ -1644,6 +1811,31 @@ export class WorkflowRegistry {
           globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
           env: process.env,
         });
+
+    // A non-claude mix routes individual agents through `agentConfigs` pins, and
+    // ONLY the programmatic step runner honors those — the orchestrated plane's
+    // overlay writes Claude subagent `.md` files with no Codex equivalent, so an
+    // orchestrated mixed run would silently ignore every per-step tier the mix
+    // promises. Silent degradation is exactly what the mixed-provider guard below
+    // exists to prevent, so the mix forces the plane instead of tripping it
+    // (runtime-mix plan D3 step 3).
+    //
+    // An inherit / global-default resolution is upgraded SILENTLY; only an
+    // EXPLICIT `'orchestrated'` request is refused, because that is a
+    // contradiction the caller stated and must not have resolved behind their
+    // back. The wizard hides the Mode row under a non-claude mix, so only a raw
+    // API/MCP caller can reach the throw.
+    const mixForcesProgrammatic = effectiveMix !== null && effectiveMix !== 'claude';
+    if (
+      effectiveMix !== null &&
+      mixForcesProgrammatic &&
+      opts?.requestedExecutionModel === 'orchestrated'
+    ) {
+      throw new RuntimeMixOrchestratedError(effectiveMix);
+    }
+    const executionModel: ExecutionModel = mixForcesProgrammatic
+      ? 'programmatic'
+      : resolvedExecutionModel;
 
     // Whole-run provider / orchestrated guard. The mixed-provider guard below is
     // deliberately scoped to a CLAUDE base provider, because a whole-run
@@ -1678,7 +1870,8 @@ export class WorkflowRegistry {
     // has no built-in baseline for a preset to transform, so it keeps today's
     // behaviour (freeze its own spec) and stamps a NULL level. The `__quick__`
     // sentinel lands here too, which is correct — a quick chat has no DAG to tune.
-    const isBuiltInFlow = isCyboflowWorkflowName(workflow.name);
+    // (`isBuiltInFlow` is resolved with the runtime mix above — the same predicate
+    // gates both dials.)
     const overrideLevel = opts?.tuningLevel;
     if (overrideLevel !== undefined) {
       if (!isTuningLevel(overrideLevel)) {
@@ -1718,16 +1911,27 @@ export class WorkflowRegistry {
     // The EFFECTIVE spec TEXT this run freezes, in precedence order:
     //   1. an explicit variant's frozen spec (a variant is its own definition);
     //   2. a restart's recovered frozen spec (replay, never re-derive — D4);
-    //   3. the level materialization (custom -> slot, standard -> '{}', preset ->
-    //      the serialized transform).
+    //   3. the level×mix materialization (custom -> slot, standard -> '{}', preset
+    //      -> the serialized transform; then the mix's provider pins on top).
     // Unreachable in combination: restart pins `baseline: true` exactly when the
     // failed run had no variant, so (1) and (2) never both apply.
+    //
+    // `materializeForLevelAndMix` short-circuits the `'claude'` arm through
+    // `materializeForLevel` VERBATIM — no parse, no re-serialize — so a flow that
+    // never touched the mix dial (and every non-built-in flow, whose mix is NULL)
+    // freezes the byte-identical text, and therefore the identical spec_hash, it
+    // froze before migration 128.
     const effectiveSpecJson =
       opts?.variantSpecJson ??
       opts?.frozenSpec?.specJson ??
       (effectiveLevel === null
         ? workflow.spec_json ?? '{}'
-        : materializeForLevel(workflow.name, workflow.spec_json, effectiveLevel));
+        : materializeForLevelAndMix(
+            workflow.name,
+            workflow.spec_json,
+            effectiveLevel,
+            effectiveMix ?? DEFAULT_RUNTIME_MIX,
+          ));
 
     // The level this run is FILED under (migration 122). NULL is "unattributed":
     // a variant run (its spec is the variant's, not a level's — crediting a level
@@ -1740,8 +1944,20 @@ export class WorkflowRegistry {
           ? opts.frozenSpec.tuningLevel
           : effectiveLevel;
 
+    // The mix this run is FILED under (migration 128), on the SAME provenance
+    // ladder as the level: variant -> NULL (its graph is the variant's, not a
+    // mix's), restart -> the replayed stamp, otherwise the effective mix. NULL is
+    // "unattributed" for every other suppressed arm too (a non-built-in flow, an
+    // omp/pi lane, demo mode) — never `'claude'`.
+    const runtimeMixStamp: RuntimeMix | null =
+      opts?.variantId !== undefined || opts?.variantSpecJson !== undefined
+        ? null
+        : opts?.frozenSpec !== undefined
+          ? opts.frozenSpec.runtimeMix
+          : effectiveMix;
+
     // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent
-    // NON-CLAUDE runtime pin — set EITHER in a workflow agent config
+    // FOREIGN runtime pin — set EITHER in a workflow agent config
     // (`WorkflowAgentConfig.runtime`) OR in the project's `agent_overrides`
     // catalogue via the Agents editor — is only honored by the PROGRAMMATIC step
     // runner, which spawns each step as its own CLI process. An ORCHESTRATED run
@@ -1751,16 +1967,24 @@ export class WorkflowRegistry {
     // a later slice's UI catches MixedProviderOrchestratedError to prompt "switch
     // to programmatic?" instead.
     //
-    // Scoped to the run's BASE provider being Claude: a whole-run non-Claude
-    // request (agentProvider === 'codex' / 'omp' — every step already targets it)
-    // is a single consistent provider, not a mix, and must NOT trip this.
+    // SYMMETRIC in the run's base provider (runtime-mix plan D3, review finding
+    // 6). The trip condition is a pin whose provider differs from the one the RUN
+    // resolved onto — so a whole-run Codex request with every step on Codex is
+    // still exempt (nothing is mixed), while a hand-pinned `claude-sdk` step on a
+    // codex-base orchestrated run — which the old `agentProvider === 'claude'`
+    // scoping waved through, silently ignoring the pin — now trips it. A
+    // claude-base run behaves exactly as before: a claude pin on a claude run is
+    // not foreign.
+    //
+    // A non-claude MIX never reaches here: it forced 'programmatic' above, which
+    // is precisely the plane that honors the pins it wrote.
     //
     // The `__quick__` sentinel is EXEMPT: a quick chat is a single ad-hoc Claude
     // turn, not a DAG that dispatches step agents, so a per-agent pin is
     // inert there — and neither the quick-session nor the chat-sentinel createRun
     // caller catches MixedProviderOrchestratedError, so tripping it would brick
     // quick sessions project-wide the moment any agent is pinned off Claude.
-    if (executionModel === 'orchestrated' && agentProvider === 'claude' && !isQuickSentinel) {
+    if (executionModel === 'orchestrated' && !isQuickSentinel) {
       // Resolve the definition from the SAME `effectiveSpecJson` the freeze
       // below stamps — including a tuning preset's `agentConfigs`, which can
       // themselves pin a runtime and so must be visible to this guard. For the
@@ -1775,7 +1999,13 @@ export class WorkflowRegistry {
         opts?.variantSpecJson !== undefined
           ? parseWorkflowDefinition(effectiveSpecJson)
           : resolveWorkflowDefinition(workflow.name, effectiveSpecJson);
-      if (this.effectiveSetPinsNonClaudeRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
+      if (
+        this.effectiveSetPinsForeignRuntime(
+          runProjectId,
+          effectiveDefinitionForMixCheck,
+          agentProvider,
+        )
+      ) {
         throw new MixedProviderOrchestratedError();
       }
     }
@@ -1873,8 +2103,8 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
@@ -1916,6 +2146,7 @@ export class WorkflowRegistry {
         opts?.variantLabel ?? null,
         rotationExperimentId,
         tuningLevelStamp,
+        runtimeMixStamp,
       );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
@@ -1938,8 +2169,9 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Does an agent THIS workflow can actually dispatch resolve onto a NON-CLAUDE
-   * runtime? — the orchestrated mixed-provider trip condition.
+   * Does an agent THIS workflow can actually dispatch resolve onto a runtime
+   * belonging to a provider OTHER than the one the run resolved onto? — the
+   * orchestrated mixed-provider trip condition.
    *
    * Two-part check:
    *   1. REACHABILITY — the agent keys the workflow can spawn: every phase step's
@@ -1952,24 +2184,27 @@ export class WorkflowRegistry {
    *      the workflow's `agentConfigs` (the same precedence the spawn-time overlay
    *      applies; variant deltas can't touch `runtime`, so they're excluded).
    *      Consulting the RESOLVED set is what catches a pin set through the
-   *      Agents editor, while a workflow config that pins an agent back to a Claude
-   *      runtime correctly MASKS a catalogue non-Claude pin (no false positive).
+   *      Agents editor, while a workflow config that pins an agent back to the
+   *      run's own provider correctly MASKS a catalogue foreign pin (no false
+   *      positive).
    *
-   * The trip condition is "the pinned runtime's provider is not Claude", read
-   * through the runtime registry — NOT a literal `=== 'codex-sdk'`. That literal
-   * is exactly what would let an `omp-sdk` per-agent pin launch an orchestrated
-   * run that silently ignores it, which is the failure this guard exists to
-   * prevent; the guard has to widen with the launchable set, not one provider
-   * behind it.
+   * The trip condition is "the pinned runtime's provider is not `runProvider`",
+   * read through the runtime registry — NOT a literal `=== 'codex-sdk'`, and not
+   * a one-way "is not Claude". The literal is exactly what would let an `omp-sdk`
+   * per-agent pin launch an orchestrated run that silently ignores it; the
+   * one-way form let a `claude-sdk` pin do the same on a codex-BASE run
+   * (runtime-mix plan D3, review finding 6). The guard has to widen with the
+   * launchable set, not stay one provider behind it.
    *
    * Fail-soft: an unresolvable definition (null) or any read/parse error yields
    * `false` — an unprovable mix must never break a launch. A missing catalogue
    * table is expected on a schema-narrow test DB (→ no overrides); a genuine read
    * error is logged so a silently-disabled guard stays diagnosable.
    */
-  private effectiveSetPinsNonClaudeRuntime(
+  private effectiveSetPinsForeignRuntime(
     projectId: number,
     definition: WorkflowDefinition | null,
+    runProvider: AgentProvider,
   ): boolean {
     try {
       if (definition === null) return false;
@@ -1993,7 +2228,7 @@ export class WorkflowRegistry {
           .all(projectId) as AgentOverrideRow[];
       } catch (err) {
         this.logger.warn(
-          `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+          `WorkflowRegistry.effectiveSetPinsForeignRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       let effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
@@ -2003,12 +2238,12 @@ export class WorkflowRegistry {
       return effective.some(
         (agent) =>
           agent.runtime != null &&
-          providerForRuntime(agent.runtime) !== 'claude' &&
+          providerForRuntime(agent.runtime) !== runProvider &&
           reachable.has(agent.agentKey),
       );
     } catch (err) {
       this.logger.warn(
-        `WorkflowRegistry.effectiveSetPinsNonClaudeRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+        `WorkflowRegistry.effectiveSetPinsForeignRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
     }
@@ -2020,7 +2255,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, seed_prompt, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, tuning_level, runtime_mix, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

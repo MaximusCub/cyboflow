@@ -41,6 +41,8 @@ function createCanonicalDb(): Database.Database {
     'src/database/migrations/111_approval_awaited.sql',
     // 124 adds tuning_level to BOTH workflows and workflow_runs.
     'src/database/migrations/124_workflow_tuning_level.sql',
+    // 127 adds runtime_mix to BOTH workflows and workflow_runs.
+    'src/database/migrations/127_workflow_runtime_mix.sql',
   ];
   const sql = readFileSync(schemaPath, 'utf8');
   const db = new Database(':memory:');

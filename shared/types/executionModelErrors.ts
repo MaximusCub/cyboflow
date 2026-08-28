@@ -103,3 +103,45 @@ export class ProviderOrchestratedUnsupportedError extends Error {
 export function isProviderOrchestratedUnsupportedError(err: unknown): boolean {
   return err instanceof Error && err.message.includes(PROVIDER_ORCHESTRATED_UNSUPPORTED_CODE);
 }
+
+/**
+ * The third sibling: an EXPLICIT orchestrated request under a non-`claude`
+ * RUNTIME MIX (migration 127 / `docs/plans/workflow-runtime-mix.md` D3).
+ *
+ * A mix routes individual agents through `agentConfigs` pins, which only the
+ * PROGRAMMATIC step runner honors — the orchestrated plane's overlay writes
+ * Claude subagent `.md` files with no Codex equivalent, so an orchestrated mixed
+ * run would silently ignore every per-step provider the mix promises. `createRun`
+ * therefore UPGRADES an inherited/global-default resolution to `'programmatic'`
+ * silently, and throws this only when the caller EXPLICITLY asked for
+ * `'orchestrated'` — a contradiction that must not be resolved behind their back.
+ *
+ * Only raw API/MCP callers can reach it: the launch wizard hides the Mode row
+ * under a non-claude mix. Distinct from {@link MixedProviderOrchestratedError},
+ * whose renderer prompt offers "switch to programmatic?" for a HAND-PINNED mix —
+ * here the fix is to drop the orchestrated request or the mix, so the message
+ * says that instead. Same message-prefix convention (see the tRPC boundary note
+ * above).
+ */
+export const RUNTIME_MIX_ORCHESTRATED_CODE = 'RUNTIME_MIX_REQUIRES_PROGRAMMATIC';
+
+export class RuntimeMixOrchestratedError extends Error {
+  readonly code = RUNTIME_MIX_ORCHESTRATED_CODE;
+
+  constructor(
+    /** The effective mix as the user picked it (e.g. 'codex-primary'). */
+    readonly mix: string,
+  ) {
+    super(
+      `[${RUNTIME_MIX_ORCHESTRATED_CODE}] the '${mix}' runtime mix routes individual steps to a ` +
+        'second provider, which only programmatic execution honors — drop the orchestrated ' +
+        "request or set the flow's runtime mix back to Claude only.",
+    );
+    this.name = 'RuntimeMixOrchestratedError';
+  }
+}
+
+/** {@link isMixedProviderOrchestratedError} for the runtime-mix guard. */
+export function isRuntimeMixOrchestratedError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(RUNTIME_MIX_ORCHESTRATED_CODE);
+}

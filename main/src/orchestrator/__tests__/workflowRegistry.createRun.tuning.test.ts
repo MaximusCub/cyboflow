@@ -392,6 +392,7 @@ describe('createRun — frozenSpec replay', () => {
       frozenSpec: {
         specJson: revisionOf(WF_SPRINT, originalFrozen.specHash) ?? '',
         tuningLevel: 'efficient',
+        runtimeMix: null,
       },
     });
 
@@ -400,7 +401,7 @@ describe('createRun — frozenSpec replay', () => {
 
   it('replays a NULL stamp for a run that was itself unattributed', () => {
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
-      frozenSpec: { specJson: '{}', tuningLevel: null },
+      frozenSpec: { specJson: '{}', tuningLevel: null, runtimeMix: null },
     });
     const frozen = frozenOf(runId);
     expect(frozen.level).toBeNull();

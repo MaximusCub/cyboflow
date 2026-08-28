@@ -141,6 +141,7 @@ function makeWorkflowRow(overrides?: Partial<WorkflowRow>): WorkflowRow {
     permission_mode: 'default',
     spec_json: '{}',
     tuning_level: 'standard',
+    runtime_mix: 'claude',
     created_at: new Date().toISOString(),
     archived_at: null,
     ...overrides,

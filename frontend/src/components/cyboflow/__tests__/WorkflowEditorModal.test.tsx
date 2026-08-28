@@ -50,6 +50,7 @@ const SEED_ROW: WorkflowRow = {
   permission_mode: 'default',
   spec_json: '{}',
   tuning_level: 'standard',
+  runtime_mix: 'claude',
   created_at: '',
   archived_at: null,
 };
@@ -62,6 +63,7 @@ const NEW_CUSTOM_ROW: WorkflowRow = {
   permission_mode: 'default',
   spec_json: JSON.stringify(SEED_DEFINITION),
   tuning_level: 'standard',
+  runtime_mix: 'claude',
   created_at: '',
   archived_at: null,
 };

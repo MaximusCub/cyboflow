@@ -25,6 +25,10 @@ import { SPRINT_BATCH_CAP } from './sprintBatch';
 // runtime (workflowTuning imports the definitions from here; this import is
 // erased at compile time and creates no cycle).
 import type { TuningLevel } from '../tuning/workflowTuning';
+// Same one-directional-at-runtime discipline as the TuningLevel import above:
+// runtimeMix.ts imports the definitions from here, and this type-only import is
+// erased at compile time.
+import type { RuntimeMix } from '../tuning/runtimeMix';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -93,6 +97,23 @@ export interface WorkflowRow {
    * column would silently resolve to `undefined` and read as "not custom".
    */
   tuning_level: TuningLevel;
+  /**
+   * Runtime mix (migration 128): WHICH PROVIDER runs each step — `'claude'` (the
+   * identity: Claude executes and verifies, today's behaviour byte for byte),
+   * `'claude-primary'` / `'codex-primary'` (one provider executes, the other
+   * verifies), `'codex'` (everything on Codex). Orthogonal to
+   * {@link tuning_level}, which decides which steps run and at what tier·effort.
+   *
+   * Unlike the level, the mix is materialized ONLY at `createRun`'s spec freeze
+   * (`materializeForLevelAndMix`) and never on the read path — see
+   * `shared/tuning/runtimeMix.ts`. An Advanced-editor spec save therefore does
+   * NOT touch it (it flips `tuning_level` to `'custom'` and leaves the mix alone).
+   *
+   * REQUIRED rather than optional for the same reason `tuning_level` is: every
+   * `WorkflowRow`-producing SELECT must project it explicitly, or the omitted
+   * column silently reads as `undefined`.
+   */
+  runtime_mix: RuntimeMix;
   created_at: string;
   /**
    * Soft-archive stamp (migration 078, mirrors the entity `archived_at`
@@ -246,6 +267,17 @@ export interface WorkflowRunRow {
    * per-level estimate buckets. Every reader must treat NULL that way.
    */
   tuning_level?: TuningLevel | null;
+  /**
+   * The runtime mix this run FROZE at (migration 128) — the immutable-snapshot
+   * sibling of `tuning_level`, stamped once at createRun from the per-run
+   * override if given, else the workflow's own stamp (a restart replays the
+   * failed run's stamp, which outranks both).
+   *
+   * NULL means UNATTRIBUTED, never `'claude'`: a pre-feature run, a VARIANT run
+   * (its graph is the variant's, not a mix's), a non-built-in flow, or an
+   * omp/pi run — single-provider lanes the mix does not describe.
+   */
+  runtime_mix?: RuntimeMix | null;
   /**
    * The merge commit SHA where this run's code landed (migration 049), stamped at
    * merge close-out (stampSessionRunsOutcome 'merged'). NULL until merged (or when

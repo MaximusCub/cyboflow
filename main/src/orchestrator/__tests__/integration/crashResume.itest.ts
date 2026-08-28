@@ -155,6 +155,7 @@ function ctxFor(
     permission_mode: 'default',
     spec_json: specJson,
     tuning_level: 'standard',
+    runtime_mix: 'claude',
     created_at: 'now',
     archived_at: null,
   };
