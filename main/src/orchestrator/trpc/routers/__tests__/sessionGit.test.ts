@@ -62,6 +62,7 @@ function makeFakeOps(): FakeOps {
         currentBranch: 'feature',
       },
     }),
+    getCurrentBranch: vi.fn().mockResolvedValue({ success: true, data: { branch: 'feature' } }),
     getRemoteUrl: vi.fn().mockResolvedValue({ success: true, data: { remoteUrl: '', branchName: '' } }),
     getGitStatus: vi.fn().mockResolvedValue({ success: true, gitStatus: { state: 'clean' } }),
     cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
@@ -179,6 +180,14 @@ describe('cyboflow.sessionGit', () => {
       });
     });
 
+    it('getCurrentBranch', async () => {
+      const sessionGitOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const result = await caller.cyboflow.sessionGit.getCurrentBranch({ sessionId: 's1' });
+      expect(sessionGitOps.getCurrentBranch).toHaveBeenCalledWith({ sessionId: 's1' });
+      expect(result).toEqual({ success: true, data: { branch: 'feature' } });
+    });
+
     it('a plain failure envelope also passes through untouched', async () => {
       const sessionGitOps = makeFakeOps();
       sessionGitOps.getExecutions.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
@@ -255,6 +264,11 @@ describe('cyboflow.sessionGit', () => {
     it('getGitStatus', async () => {
       const caller = appRouter.createCaller(createContext());
       await expect(caller.cyboflow.sessionGit.getGitStatus({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
+    });
+
+    it('getCurrentBranch', async () => {
+      const caller = appRouter.createCaller(createContext());
+      await expect(caller.cyboflow.sessionGit.getCurrentBranch({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
 
     it('cancelStatusForProject', async () => {

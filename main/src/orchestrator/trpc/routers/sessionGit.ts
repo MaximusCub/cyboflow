@@ -203,6 +203,15 @@ export const sessionGitRouter = router({
       return requireOps(ctx.sessionGitOps).getGitCommands(input);
     }),
 
+  getCurrentBranch: protectedProcedure
+    .input(sessionInput)
+    .query(async ({
+      ctx,
+      input,
+    }): Promise<{ success: true; data: { branch: string | null } } | SessionGitError> => {
+      return requireOps(ctx.sessionGitOps).getCurrentBranch(input);
+    }),
+
   getRemoteUrl: protectedProcedure
     .input(sessionInput)
     .query(async ({

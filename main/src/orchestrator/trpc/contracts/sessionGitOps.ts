@@ -310,6 +310,19 @@ export interface SessionGitOpsLike {
     | SessionGitError
   >;
 
+  /**
+   * The session worktree's LIVE checked-out branch — the sidebar hover tooltip's
+   * source. Deliberately narrower than getGitCommands (which also resolves the
+   * project main branch and the origin branch): this is one `git branch
+   * --show-current` per call, cheap enough to fire lazily on hover. A detached
+   * HEAD resolves to the short SHA (gitPlumbingCommands.getCurrentBranch's own
+   * fallback); `branch` is null only for an unreadable or archived worktree, and
+   * callers show nothing rather than guessing.
+   */
+  getCurrentBranch(request: {
+    sessionId: string;
+  }): Promise<{ success: true; data: { branch: string | null } } | SessionGitError>;
+
   /** Mirrors legacy `sessions:get-remote-url`. */
   getRemoteUrl(request: {
     sessionId: string;

@@ -361,6 +361,11 @@ export class API {
       return trpc.cyboflow.sessionGit.getGitCommands.query({ sessionId });
     },
 
+    /** The session worktree's live branch — the sidebar hover tooltip's source. */
+    async getCurrentBranch(sessionId: string) {
+      return trpc.cyboflow.sessionGit.getCurrentBranch.query({ sessionId });
+    },
+
     // Git pull/push operations
     async gitPull(sessionId: string) {
       return trpc.cyboflow.sessionGit.pull.mutate({ sessionId });

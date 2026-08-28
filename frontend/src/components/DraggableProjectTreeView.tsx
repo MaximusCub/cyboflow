@@ -232,6 +232,26 @@ export const SessionRow = memo(function SessionRow({
   const [editName, setEditName] = useState(session.name);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
+  // Branch shown in the name's hover tooltip. Fetched LAZILY on hover (one
+  // `git symbolic-ref` per hover, in the main process) rather than ridden along
+  // with the session list — the sidebar can hold dozens of sessions and none of
+  // them need a git spawn until pointed at. Re-fetching on every mouseenter
+  // keeps a rebased/checked-out branch honest; the last value stays on screen
+  // meanwhile so the tooltip never flickers empty.
+  const [hoverBranch, setHoverBranch] = useState<string | null>(null);
+
+  const handleNameHover = () => {
+    if (session.archived) return;
+    void (async () => {
+      try {
+        const response = await API.sessions.getCurrentBranch(session.id);
+        setHoverBranch(response.success ? response.data.branch : null);
+      } catch {
+        // A tooltip is not worth surfacing an error for — leave the last value.
+      }
+    })();
+  };
+
   useEffect(() => {
     if (isEditingName) {
       nameInputRef.current?.focus();
@@ -371,7 +391,8 @@ export const SessionRow = memo(function SessionRow({
         ) : (
           <span
             className={`text-sm truncate ${isActive ? 'font-semibold text-interactive' : 'text-text-primary'}`}
-            title={session.name}
+            title={hoverBranch ? `${session.name}\nBranch: ${hoverBranch}` : session.name}
+            onMouseEnter={handleNameHover}
             onDoubleClick={(e) => { e.stopPropagation(); handleStartRename(); }}
           >
             {/* Idea-session home marker (idea sessions plan, Stage 6). */}

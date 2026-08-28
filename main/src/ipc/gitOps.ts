@@ -40,6 +40,7 @@ import {
 import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { ALREADY_UP_TO_DATE_CODE } from '../services/worktreeManager';
+import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCommands';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
@@ -1803,6 +1804,23 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
+  const getCurrentBranch = async ({ sessionId }: OpsInput<'getCurrentBranch'>): Promise<OpsResult<'getCurrentBranch'>> => {
+    try {
+      const session = await sessionManager.getSession(sessionId);
+      if (!session || !session.worktreePath) {
+        return { success: false, error: 'Session or worktree path not found' };
+      }
+      // An archived session's worktree is gone; readCurrentBranch would only log
+      // a missing-directory warning per hover, so short-circuit to null.
+      if (session.archived) {
+        return { success: true, data: { branch: null } };
+      }
+      return { success: true, data: { branch: readCurrentBranch(session.worktreePath) } };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get current branch' };
+    }
+  };
+
   const getRemoteUrl = async ({ sessionId }: OpsInput<'getRemoteUrl'>): Promise<OpsResult<'getRemoteUrl'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -1904,6 +1922,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     getLastCommits,
     hasChangesToRebase,
     getGitCommands,
+    getCurrentBranch,
     getRemoteUrl,
     getGitStatus,
     cancelStatusForProject,
