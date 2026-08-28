@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { NotificationSettings } from './NotificationSettings';
 import { UpdateSettings } from './UpdateSettings';
 import { useNotifications } from '../hooks/useNotifications';
@@ -6,7 +6,11 @@ import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { Project } from '../types/project';
-import type { AgentRuntime } from '../../../shared/types/agentRuntime';
+import {
+  applyAriaProviderGate,
+  resolveAgentProviderAccess,
+  type AgentRuntime,
+} from '../../../shared/types/agentRuntime';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -53,6 +57,25 @@ interface SettingsProps {
 
 export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [_config, setConfig] = useState<AppConfig | null>(null);
+  /**
+   * The ARIA-GATED access map handed to the runtime pickers below.
+   *
+   * `_config.agentProviderAccess` is the RAW stored field: it still carries a
+   * `true` for an Aria-gated provider, so passing it straight through rendered
+   * that provider's runtime as a selectable "default agent runtime" on an
+   * install whose Integrations tab shows no card for it — a gate bypass on the
+   * one renderer surface not reading useAgentProviderAccess. Gated here, from
+   * this component's OWN config, rather than by switching to the config store:
+   * two sources for the same setting in one dialog is how they drift.
+   */
+  const agentProviderAccess = useMemo(
+    () =>
+      applyAriaProviderGate(
+        resolveAgentProviderAccess(_config?.agentProviderAccess),
+        _config?.ariaMode === true,
+      ),
+    [_config?.agentProviderAccess, _config?.ariaMode],
+  );
   const [verbose, setVerbose] = useState(false);
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
@@ -786,7 +809,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               onDefaultLaunchModelChange={setDefaultLaunchModel}
               defaultAgentRuntime={defaultAgentRuntime}
               onDefaultAgentRuntimeChange={setDefaultAgentRuntime}
-              agentProviderAccess={_config?.agentProviderAccess}
+              agentProviderAccess={agentProviderAccess}
               defaultExecutionModel={defaultExecutionModel}
               onDefaultExecutionModelChange={setDefaultExecutionModel}
               quickSessionWorktreeMode={quickSessionWorktreeMode}

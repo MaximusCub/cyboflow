@@ -479,6 +479,35 @@ describe('Settings — AI tab groups', () => {
       expect(screen.queryByTestId('default-agent-runtime-codex-sdk')).not.toBeInTheDocument();
       expect(screen.queryByTestId('default-agent-runtime-codex-pty')).not.toBeInTheDocument();
     });
+
+    it('hides an Aria-gated provider\'s runtime even when its access key is stored on', async () => {
+      // This picker took the RAW config field, so a stored `pi: true` made
+      // pi-sdk a selectable default on an install whose Integrations tab renders
+      // no Pi card at all — the user could pick a provider they cannot see or
+      // switch off. Access and the Aria gate are separate filters and BOTH have
+      // to apply here.
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ agentProviderAccess: { claude: true, codex: true, pi: true } }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+      await screen.findByTestId('default-agent-runtime-claude-sdk');
+
+      expect(screen.queryByTestId('default-agent-runtime-pi-sdk')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('default-agent-runtime-pi-pty')).not.toBeInTheDocument();
+      // Its non-gated siblings are unaffected.
+      expect(screen.getByTestId('default-agent-runtime-codex-sdk')).toBeInTheDocument();
+    });
+
+    it('offers the Aria-gated runtime once Aria mode is on and it is switched on', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ ariaMode: true, agentProviderAccess: { claude: true, codex: true, pi: true } }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+
+      expect(await screen.findByTestId('default-agent-runtime-pi-sdk')).toBeInTheDocument();
+    });
   });
 
   it('carries edits from BOTH groups into the same save', async () => {

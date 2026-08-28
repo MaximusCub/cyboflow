@@ -63,6 +63,12 @@ export interface SessionSettingsProps {
    * provider is switched off must not be selectable here, exactly as in every
    * other runtime picker — the renderer read is a courtesy, the launch seams
    * still fail closed.
+   *
+   * MUST be the ARIA-GATED map (`useAgentProviderAccess`), not the raw
+   * `AppConfig.agentProviderAccess` field. The raw field still carries a stored
+   * `true` for an Aria-gated provider, which would render that provider's
+   * runtime as a selectable default on an install whose Settings shows no card
+   * for it.
    */
   agentProviderAccess?: AgentProviderAccess;
   defaultExecutionModel: ExecutionModel;
