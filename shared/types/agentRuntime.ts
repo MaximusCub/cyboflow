@@ -674,9 +674,15 @@ export function isAgentProviderUsable(
  * `useAgentProviderAccess` applies the same function for the same reason.
  *
  * Applied AFTER {@link resolveAgentProviderAccess}, never before: the floor
- * that keeps a map from being all-off must see the user's real toggles. It
- * cannot empty the map in practice — every gated provider also carries
- * `defaultEnabled: false`, so the floor never depends on one.
+ * that keeps a map from being all-off must see the user's real toggles.
+ *
+ * Which means the gate can UNDO that floor, and has to restore it. A user whose
+ * only enabled provider is a gated one — reachable today: pi's card rendered
+ * before this gate existed, and the Settings "last provider standing" guard
+ * counted it — satisfies the floor on the raw map, then has that provider zeroed
+ * here, leaving nothing enabled and every launch refused. So when gating empties
+ * the map, re-run the floor and re-apply the gate to what it degrades to: the
+ * per-provider defaults, which no gated provider opts into.
  */
 export function applyAriaProviderGate(
   access: AgentProviderAccess,
@@ -684,9 +690,14 @@ export function applyAriaProviderGate(
 ): AgentProviderAccess {
   const gated = AGENT_PROVIDERS.filter((p) => !isProviderSurfaced(p, ariaMode));
   if (gated.length === 0) return access;
-  const next = { ...access };
-  for (const provider of gated) next[provider] = false;
-  return next;
+  const gate = (map: AgentProviderAccess): AgentProviderAccess => {
+    const out = { ...map };
+    for (const provider of gated) out[provider] = false;
+    return out;
+  };
+  const next = gate(access);
+  if (AGENT_PROVIDERS.some((p) => next[p] === true)) return next;
+  return gate(resolveAgentProviderAccess(next));
 }
 
 /**

@@ -18,7 +18,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  AGENT_PROVIDERS,
   AGENT_PROVIDER_DISABLED_CODE,
+  applyAriaProviderGate,
   enabledAgentProviders,
   isAgentProviderUsable,
   isProviderAriaGated,
@@ -161,6 +163,39 @@ const TEST_PROVIDER_TABLE: AgentProviderTable<TestProvider> = {
   fallbackProvider: 'claude',
 };
 
+describe('Aria gate vs the never-all-off floor', () => {
+  it('re-floors when gating removes the only enabled provider', () => {
+    // Reachable config, not a hypothetical: pi's card rendered before the Aria
+    // gate existed, and Settings' "last provider standing" guard counted it as
+    // an enabled sibling — so a user could switch every other provider off. The
+    // floor runs on the RAW map and is satisfied by pi; the gate then zeroes pi.
+    // Without re-flooring the install has NO usable provider and every launch is
+    // refused, which is strictly worse than the state the gate was protecting.
+    const stored = resolveAgentProviderAccess({ claude: false, codex: false, omp: false, pi: true });
+    expect(stored.pi).toBe(true);
+
+    const gated = applyAriaProviderGate(stored, false);
+
+    expect(gated.pi).toBe(false);
+    expect(AGENT_PROVIDERS.some((p) => gated[p] === true)).toBe(true);
+    // It degrades to the per-provider defaults, which no gated provider opts into.
+    expect(gated).toEqual({ claude: true, codex: true, omp: false, pi: false });
+  });
+
+  it('leaves a map alone when gating still leaves something enabled', () => {
+    const gated = applyAriaProviderGate(
+      resolveAgentProviderAccess({ claude: true, codex: false, omp: false, pi: true }),
+      false,
+    );
+    expect(gated).toEqual({ claude: true, codex: false, omp: false, pi: false });
+  });
+
+  it('is the identity under Aria mode', () => {
+    const stored = resolveAgentProviderAccess({ claude: false, codex: false, omp: false, pi: true });
+    expect(applyAriaProviderGate(stored, true)).toEqual(stored);
+  });
+});
+
 describe('per-provider defaultEnabled policy', () => {
   it('keeps the legacy absent⇒enabled floor for the providers that shipped with it', () => {
     expect(isProviderEnabledIn(TEST_PROVIDER_TABLE, undefined, 'claude')).toBe(true);
@@ -286,7 +321,12 @@ describe('Aria-mode provider gate', () => {
    * The load-bearing case: an access key that says pi is on must NOT get pi
    * past the gate. Such a key is reachable from a config written before the
    * gate existed, or from an MCP-pinned agent config that never passes through
-   * the Settings UI — which is exactly why the launch seams AND the gate.
+   * the Settings UI.
+   *
+   * This is the PURE predicate. The launch seams do not call it — they take the
+   * map from ConfigManager.getAgentProviderAccess and test it with the ungated
+   * `isAgentProviderEnabled`, so the gate is enforced by being applied to that
+   * MAP rather than by every seam remembering which predicate to pick.
    */
   it('refuses an Aria-gated provider even when its access key is on', () => {
     expect(isAgentProviderUsable({ pi: true }, 'pi', false)).toBe(false);
