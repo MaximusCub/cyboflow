@@ -6,6 +6,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Autonomous lane triage.** When a sprint/ship fan-out lane exhausts an automatic budget (inner-step loopbacks, code-review blocking, task-verify FAIL, or the visual merge gate), the run's monitor is now consulted before the lane settles failed. It can rescue the lane — rewind it to an earlier inner step with supervisor guidance threaded into every later spawn — or, on concrete evidence that the task's acceptance criteria conflict with repo reality, autonomously adjust the task body first (through the TaskChangeRouter chokepoint) and then rescue. Bounded (one rescue per lane, four per run), fail-safe (any doubt settles the lane exactly as before), audited via a non-blocking review-queue finding, and disabled with `CYBOFLOW_DISABLE_LANE_TRIAGE=1`. A merge-gate rescue revives the already-settled lane row and re-verifies under a fresh attempt so a passing re-run supersedes the stale blocking finding.
+- **Proactive monitor staging.** The monitor chat may now stage a confirm-gated action unprompted when the user describes a problem it is confident it can fix — still one action per reply, still behind the confirm/cancel gate — and its prompt tells it lane failures self-heal so it doesn't duplicate a rescue or promise manual intervention.
+
 ## [0.2.8] — 2026-08-27
 
 ### Added
