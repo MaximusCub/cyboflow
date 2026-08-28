@@ -217,6 +217,13 @@ export class TranscriptTailSource implements TranscriptSource {
   stop(): void {
     this.stopped = true;
     this.discoveryGaveUp = true; // make any pending late-discovery timer inert
+    // Settle a still-pending waitForFirstLine BEFORE clearing the timers: a
+    // panel stopped inside the discovery window used to leave the spawn's
+    // `await waitForFirstLine(...)` dangling forever (clearDiscovery() cancels
+    // the soft-timeout timer, the only other thing that would have settled
+    // it). The caller treats rejection as the non-fatal slow-discovery path,
+    // and `stopped` keeps every later callback inert.
+    this.settle(false, 'stopped before transcript discovery completed');
     this.clearDiscovery();
     if (this.tailInterval !== undefined) {
       clearInterval(this.tailInterval);
@@ -465,7 +472,7 @@ export class TranscriptTailSource implements TranscriptSource {
     }
   }
 
-  private settle(success: boolean): void {
+  private settle(success: boolean, failureReason?: string): void {
     if (this.settled) return;
     this.settled = true;
     if (success) {
@@ -473,7 +480,7 @@ export class TranscriptTailSource implements TranscriptSource {
     } else {
       this.rejectFirstLine?.(
         new Error(
-          `[Cyboflow Transcript] discovery timeout after ${this.discoveryTimeoutMs}ms`,
+          `[Cyboflow Transcript] ${failureReason ?? `discovery timeout after ${this.discoveryTimeoutMs}ms`}`,
         ),
       );
     }

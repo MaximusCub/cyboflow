@@ -161,6 +161,24 @@ describe('TranscriptTailSource', () => {
     expect(src.getSessionUuid()).toBe(newUuid);
   });
 
+  it('stop() during discovery settles a pending waitForFirstLine instead of dangling it', async () => {
+    // Regression: stop() cleared the discovery timers WITHOUT settling, so a
+    // panel stopped inside the discovery window left spawnCliProcess's
+    // `await waitForFirstLine(...)` pending forever.
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 60_000, // far longer than the test — settle must come from stop()
+      logger: makeSpyLogger(),
+    });
+
+    await src.start(() => undefined);
+    const pending = src.waitForFirstLine(60_000);
+    src.stop();
+
+    await expect(pending).rejects.toThrow(/stopped before transcript discovery/i);
+  });
+
   it('soft timeout: rejects firstLine with a loud diagnostic but does NOT give up (warn, not error)', async () => {
     const logger = makeSpyLogger();
     const onGiveUp = vi.fn();
