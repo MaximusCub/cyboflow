@@ -112,7 +112,7 @@ describe('VariantSelector — 1 variant (not rotation-eligible)', () => {
   });
 });
 
-describe('VariantSelector — tuning-level pool (migration 125)', () => {
+describe('VariantSelector — tuning-level pool (migration 126)', () => {
   it('asks the store for THIS level\'s variants', () => {
     mockUseWorkflowVariants.mockReturnValue({ variants: [], loaded: true, loading: false, error: null });
     render(

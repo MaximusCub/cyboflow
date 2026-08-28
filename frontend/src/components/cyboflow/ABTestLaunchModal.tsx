@@ -246,7 +246,7 @@ export interface ABTestLaunchModalProps {
    */
   workflowName: string;
   /**
-   * The tuning level both arms are drawn from (migration 125). Variants are
+   * The tuning level both arms are drawn from (migration 126). Variants are
    * level-scoped and the server refuses a cross-level head-to-head — comparing
    * an Efficient variant with a Thorough one measures the LEVELS, not the
    * variants — so the arm pickers only offer this level's set. NULL for a flow
@@ -309,7 +309,7 @@ export function ABTestLaunchModal({
   // seed arm A = the current workflow (baseline) and arm B = that variant, so a
   // one-variant workflow can be tested head-to-head against the live workflow. With
   // >=2 variants, seed the first two distinct variants. Guarded per workflow AND
-  // tuning level (migration 125 — the arms come from one level's pool) so it
+  // tuning level (migration 126 — the arms come from one level's pool) so it
   // re-seeds for a newly targeted pool without ever overwriting a later choice.
   const seededForWorkflowId = useRef<string | null>(null);
   const poolKey = `${workflowId}::${tuningLevel ?? ''}`;

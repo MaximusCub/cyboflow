@@ -7,7 +7,7 @@
  *       shared "Save as default" CTA instead);
  *   (b) picking a segment reports it via onChange;
  *   (c) Custom is disabled with a hint while the slot is empty, selectable once filled;
- *   (d) — removed: migration 125 scoped variants to a level, so a pinned variant
+ *   (d) — removed: migration 126 scoped variants to a level, so a pinned variant
  *       no longer contradicts a level pick and the control has no disabled state.
  */
 import '@testing-library/jest-dom';

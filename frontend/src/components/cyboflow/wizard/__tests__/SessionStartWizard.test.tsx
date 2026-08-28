@@ -328,7 +328,7 @@ const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
 };
 
 /** Compound row stamped THOROUGH with no custom slot — tuning-level defaulting/override tests. */
-/** A live, pickable variant row scoped to a tuning level (migration 125). */
+/** A live, pickable variant row scoped to a tuning level (migration 126). */
 function makeVariantRow(
   over: Partial<WorkflowVariantRow> & Pick<WorkflowVariantRow, 'id' | 'label'>,
 ): WorkflowVariantRow {
@@ -3677,7 +3677,7 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'custom' }));
   });
 
-  it('level containment (migration 125): the level picks the variant POOL, and both reach runs.start', async () => {
+  it('level containment (migration 126): the level picks the variant POOL, and both reach runs.start', async () => {
     // Two challengers at DIFFERENT levels. The workflow is stamped 'thorough',
     // so the picker opens on the thorough pool; overriding to efficient swaps
     // the pool (and clears the stale thorough pin) rather than disabling either

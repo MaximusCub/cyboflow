@@ -1020,7 +1020,7 @@ export function WorkflowEditorModal({
               <VariantManagerSection
                 workflowId={workflowId}
                 projectId={projectId}
-                // Variants are level-scoped (migration 125): the panel manages
+                // Variants are level-scoped (migration 126): the panel manages
                 // the page the dial is on. A flow without a dial has no levels,
                 // and its whole variant set lives in the one NULL-level pool.
                 tuningLevel={hasTuningDial ? level : null}

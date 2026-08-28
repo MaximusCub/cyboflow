@@ -45,7 +45,7 @@ export interface VariantManagerSectionProps {
   workflowId: string;
   projectId: number;
   /**
-   * The tuning level this panel manages (migration 125) — the editor page the
+   * The tuning level this panel manages (migration 126) — the editor page the
    * user is on. Variants are scoped to one level, so the panel shows ONLY that
    * level's challengers, creates into it, and asks the rotation summary for its
    * pool. `null` for a flow outside the level system (a "save as new" custom

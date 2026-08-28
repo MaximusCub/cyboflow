@@ -8,7 +8,7 @@
  *   (d) invalidate re-fetches even if a (settled) fetch already ran, and
  *       bypasses the loading re-entrancy guard.
  *   (e) two workflowIds are tracked independently.
- *   (f) useWorkflowVariants narrows to ONE tuning level (migration 125) without
+ *   (f) useWorkflowVariants narrows to ONE tuning level (migration 126) without
  *       a second fetch — one request backs every level's view.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -136,7 +136,7 @@ describe('variantsStore.invalidate', () => {
   });
 });
 
-describe('useWorkflowVariants — tuning-level narrowing (migration 125)', () => {
+describe('useWorkflowVariants — tuning-level narrowing (migration 126)', () => {
   const rows = [
     makeVariant({ id: 'wfv_std', tuning_level: 'standard' }),
     makeVariant({ id: 'wfv_thorough', tuning_level: 'thorough' }),

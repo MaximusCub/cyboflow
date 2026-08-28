@@ -118,7 +118,7 @@ export const useVariantsStore = create<VariantsState>((set, get) => ({
  * changes. Pass `null` to skip fetching (e.g. create-mode editor with no
  * workflow row yet) — returns an empty, not-loaded result.
  *
- * `tuningLevel` (migration 125) narrows the returned rows to the variants that
+ * `tuningLevel` (migration 126) narrows the returned rows to the variants that
  * challenge ONE level — the only ones that can rotate into, or be pinned for, a
  * launch at that level. The fetch itself is still per-workflow (one request
  * backs every level's view), so switching levels is a re-filter, not a refetch.

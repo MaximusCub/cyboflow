@@ -99,7 +99,7 @@ function buildDb(): Database.Database {
 }
 
 /**
- * A variant id containing a level name carries that level (migration 125) —
+ * A variant id containing a level name carries that level (migration 126) —
  * mirrors the router test's '...-sprint' → workflow convention, and keeps the
  * level visible at every call site instead of hidden in harness plumbing.
  * Anything else is level-less, i.e. a variant of a flow outside the level system.
@@ -642,7 +642,7 @@ describe('quick-arm config persistence + rerun replay (migration 098)', () => {
   });
 });
 
-describe('arm tuning level (migration 125)', () => {
+describe('arm tuning level (migration 126)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();

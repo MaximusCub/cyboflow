@@ -237,7 +237,7 @@ function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element
 
 /** A label/value row in the step-③ launch summary. */
 /**
- * The `tuningLevel` field a workflow launch payload carries (migration 125).
+ * The `tuningLevel` field a workflow launch payload carries (migration 126).
  *
  * An explicit per-run override always wins. Beyond that, a PINNED variant makes
  * the level load-bearing even when the user never diverged from the saved stamp:
@@ -1119,7 +1119,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
-          // Per-run tuning level (D4 + migration 125) — the override when the
+          // Per-run tuning level (D4 + migration 126) — the override when the
           // user diverged from the stamp, else the displayed level whenever a
           // variant is pinned. See tuningLevelPayload.
           ...tuningLevelPayload(meta, tuningLevelOverride, variantSelection),
@@ -1228,7 +1228,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               ? { executionModel: executionModelOverride }
               : {}),
           taskIds,
-          // Per-run tuning level (D4 + migration 125) — see launchRun's identical spread.
+          // Per-run tuning level (D4 + migration 126) — see launchRun's identical spread.
           ...tuningLevelPayload(
             workflowMetas.find((m) => m.id === workflowId),
             tuningLevelOverride,
@@ -1522,7 +1522,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       ? workflowMetas.find((m) => m.id === selection.workflowId)
       : undefined;
   // The tuning level this launch will actually run at — the pool its variant
-  // choice is drawn from (migration 125). Variants are scoped to a level, so the
+  // choice is drawn from (migration 126). Variants are scoped to a level, so the
   // LEVEL PICKS THE POOL and the variant control picks inside it; the two are no
   // longer mutually exclusive (they were, under plan D4, precisely because the
   // level dimension was missing). Changing the level re-seeds the variant
@@ -2028,7 +2028,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 BUILT-IN workflows only — a "save as new" custom flow has no
                 calibrated baseline to select a level of, so the control is
                 hidden entirely for it (selectedMeta.isBuiltIn). No longer
-                mutually exclusive with the variant pin (migration 125: the level
+                mutually exclusive with the variant pin (migration 126: the level
                 picks the POOL); changing it clears a stale pin instead. */}
             {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
               <TuningLevelSelector
@@ -2039,7 +2039,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                   // only a genuine divergence from the stamp is an override);
                   // any other pick sets a per-run override.
                   setTuningLevelOverride(level === selectedMeta.tuningLevel ? null : level);
-                  // Changing the level changes the POOL (migration 125), so any
+                  // Changing the level changes the POOL (migration 126), so any
                   // pinned variant belongs to the level we just left. Clear it
                   // HERE rather than in an effect: this control is always
                   // visible while VariantSelector lives inside the collapsed-by-
@@ -2202,7 +2202,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                         entirely for a workflow with zero variants. Threaded into
                         runs.start as variantId / baseline (never both); rotation
                         sends neither field. Scoped to `launchTuningLevel`
-                        (migration 125): it offers only THAT level's pool, and
+                        (migration 126): it offers only THAT level's pool, and
                         re-seeds when the level changes. It lives inside this
                         collapsed-by-default section, so it is not the
                         containment for a stale pin — the level control clears

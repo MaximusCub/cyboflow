@@ -19,7 +19,7 @@
  * Advanced options so the option logic + default never drifts between the two
  * launch surfaces.
  *
- * Variants are TUNING-LEVEL scoped (migration 125): the options are the variants
+ * Variants are TUNING-LEVEL scoped (migration 126): the options are the variants
  * of the level this launch will run at, since only those can rotate into it or
  * be pinned for it. Changing the level therefore re-seeds the selection — a pin
  * carried across levels would name a variant the launch would refuse.
@@ -38,7 +38,7 @@ import {
 interface VariantSelectorProps {
   workflowId: string;
   /**
-   * The tuning level this launch will run at (migration 125) — the pool whose
+   * The tuning level this launch will run at (migration 126) — the pool whose
    * variants are offered. `null` for a flow outside the level system.
    */
   tuningLevel: TuningLevel | null;

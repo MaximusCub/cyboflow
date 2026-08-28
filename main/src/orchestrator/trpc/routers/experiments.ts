@@ -127,7 +127,7 @@ export interface ExperimentsLaunchLike {
       experiment?: { experimentId: string; arm: ExperimentArm };
       baseline?: boolean;
       /**
-       * Per-run tuning level (migration 125). An A/B arm sets this to the level
+       * Per-run tuning level (migration 126). An A/B arm sets this to the level
        * its opponent variant challenges, so a BASELINE arm materializes that
        * level's graph instead of whatever level the flow is parked on — see the
        * `armLevel` derivation in startExperiment. Structural parity with

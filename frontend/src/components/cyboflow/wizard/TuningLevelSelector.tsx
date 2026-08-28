@@ -17,7 +17,7 @@
  * different KIND of choice from a calibrated preset.
  *
  * There is no whole-control disabled state: variants are scoped to a tuning
- * level (migration 125), so a pinned variant no longer contradicts a level pick
+ * level (migration 126), so a pinned variant no longer contradicts a level pick
  * — the level chooses the POOL and the variant picker chooses inside it.
  *
  * `estimateLabels` (plan §5 phase 7, `shared/tuning/workflowTuningEstimates`)
