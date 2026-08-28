@@ -48,6 +48,22 @@ export function useAgentProviderAccess(): AgentProviderAccess {
   return useMemo(() => applyAriaProviderGate(resolveAgentProviderAccess(raw), ariaMode), [raw, ariaMode]);
 }
 
+/**
+ * The user's STORED toggles with the floors applied but WITHOUT the Aria gate —
+ * for WRITE paths only.
+ *
+ * A surface that saves the access map must not persist what the gate computed.
+ * `useAgentProviderAccess` reports a gated provider as off, so building the
+ * saved object from it writes that `false` to disk and destroys a stored opt-in
+ * the user made under Aria mode — turning Aria back on would then show the
+ * provider off, erased by an unrelated toggle. Read this for the members a save
+ * is NOT changing, and keep reading the gated map for everything the UI renders.
+ */
+export function useStoredAgentProviderAccess(): AgentProviderAccess {
+  const raw = useConfigStore((s) => s.config?.agentProviderAccess);
+  return useMemo(() => resolveAgentProviderAccess(raw), [raw]);
+}
+
 /** True when `provider` may be used. Convenience over useAgentProviderAccess. */
 export function useIsAgentProviderEnabled(provider: AgentProvider): boolean {
   return useConfigStore(

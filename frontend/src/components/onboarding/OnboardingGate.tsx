@@ -408,8 +408,20 @@ export function OnboardingGate(): React.JSX.Element | null {
       // least one of claude/codex is true, so this can never write an all-off
       // map. `omp` rides along at whatever the (optional, non-gating) toggle is
       // currently set to — false unless the user explicitly opted in.
+      //
+      // Providers this step has NO toggle for are carried over from what is
+      // stored rather than omitted: an absent key floors to that provider's
+      // default, which is DISABLED for every post-toggle provider, so listing
+      // only the ones with a switch would silently clear an opt-in the user
+      // made elsewhere. Onboarding can be re-entered from Settings, so this is
+      // not a first-run-only path.
       await useConfigStore.getState().updateConfig({
-        agentProviderAccess: { claude: connected, codex: codexConnected, omp: ompConnected },
+        agentProviderAccess: {
+          ...persistedProviderAccess,
+          claude: connected,
+          codex: codexConnected,
+          omp: ompConnected,
+        },
       });
     } catch {
       /* non-fatal — advance regardless; the toggles live on in Settings → Integrations */
@@ -417,7 +429,7 @@ export function OnboardingGate(): React.JSX.Element | null {
       connectNextInFlight.current = false;
     }
     next();
-  }, [connected, codexConnected, ompConnected, next]);
+  }, [connected, codexConnected, ompConnected, persistedProviderAccess, next]);
 
   // Step-2 (default agent) Next: persists the chosen PROVIDER's structured
   // runtime into `AppConfig.defaultAgentRuntime` — the middle rung of

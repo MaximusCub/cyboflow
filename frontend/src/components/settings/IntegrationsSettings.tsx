@@ -4,7 +4,11 @@ import { Bot, Code2, ExternalLink, RefreshCw, Boxes, Terminal } from 'lucide-rea
 import type { AgentProvider, AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
-import { useAgentProviderAccess, useIsAgentProviderSurfaced } from '../../hooks/useAgentProviderAccess';
+import {
+  useAgentProviderAccess,
+  useIsAgentProviderSurfaced,
+  useStoredAgentProviderAccess,
+} from '../../hooks/useAgentProviderAccess';
 import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import { useConfigStore } from '../../stores/configStore';
 import { API } from '../../utils/api';
@@ -430,6 +434,9 @@ export function IntegrationsSettings(): React.JSX.Element {
   // one setting. Detection status is orthogonal: a provider can be signed in
   // and switched off, or switched on and not yet signed in.
   const providerAccess = useAgentProviderAccess();
+  // The map to WRITE from — stored values, no Aria gate. See
+  // useStoredAgentProviderAccess: the gated map above is for rendering only.
+  const storedAccess = useStoredAgentProviderAccess();
   const claudeEnabled = isAgentProviderEnabled(providerAccess, 'claude');
   const codexEnabled = isAgentProviderEnabled(providerAccess, 'codex');
   // OMP is the first provider introduced after these toggles existed, so an
@@ -457,17 +464,13 @@ export function IntegrationsSettings(): React.JSX.Element {
     async (provider: AgentProvider, enabled: boolean): Promise<void> => {
       setSavingProvider(provider);
       setSaveError(null);
-      // Full access object, never a partial patch — a sibling member must not
-      // be dropped by an update that only meant to change one provider.
-      const next: AgentProviderAccess = {
-        claude: provider === 'claude' ? enabled : claudeEnabled,
-        codex: provider === 'codex' ? enabled : codexEnabled,
-        omp: provider === 'omp' ? enabled : ompEnabled,
-        // `pi` belongs here for the reason stated above — omitting it dropped
-        // the key on every save, silently switching Pi off whenever a sibling
-        // provider was toggled.
-        pi: provider === 'pi' ? enabled : piEnabled,
-      };
+      // Full access object built from the STORED map, never a partial patch and
+      // never from the rendered one. Two distinct ways to lose a sibling here:
+      // omitting a key drops it (pi floors to disabled on absent), and sourcing
+      // a key from the Aria-GATED map persists the gate's `false` — so toggling
+      // Codex on a non-Aria install would erase a pi opt-in the user made under
+      // Aria mode. Only the provider actually being toggled takes a new value.
+      const next: AgentProviderAccess = { ...storedAccess, [provider]: enabled };
       const ok = await useConfigStore.getState().updateConfig({ agentProviderAccess: next });
       if (!ok) {
         setSaveError(
@@ -476,7 +479,7 @@ export function IntegrationsSettings(): React.JSX.Element {
       }
       setSavingProvider(null);
     },
-    [claudeEnabled, codexEnabled, ompEnabled, piEnabled],
+    [storedAccess],
   );
 
   // Guard rail mirroring onboarding's "enable at least one detected provider":

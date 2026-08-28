@@ -386,4 +386,28 @@ describe('IntegrationsSettings — the Aria gate on Pi', () => {
       }),
     );
   });
+
+  /**
+   * The configuration the test above CANNOT catch: Aria mode OFF with a stored
+   * pi opt-in. The save handler used to build its object from the rendered
+   * (Aria-gated) map, where pi reads false — so toggling an unrelated provider
+   * persisted `pi: false` and erased an opt-in the user made under Aria mode.
+   * Turning Aria back on would then show Pi switched off with no explanation.
+   * A save must write STORED values for the members it is not changing.
+   */
+  it('preserves a stored pi opt-in when Aria mode is OFF', async () => {
+    setProviderAccess({ claude: true, codex: true, omp: false, pi: true }, false);
+
+    render(<IntegrationsSettings />);
+    // No Pi row renders here — that is the point: the user cannot see or
+    // re-enable what this save would otherwise silently destroy.
+    expect(screen.queryByTestId('provider-toggle-pi')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('switch', { name: 'Use OMP in Cyboflow' }));
+
+    await waitFor(() =>
+      expect(updateConfig).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true },
+      }),
+    );
+  });
 });
