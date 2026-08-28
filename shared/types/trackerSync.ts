@@ -63,6 +63,22 @@ export interface TrackerCredentialsInput {
    * path a renderer composed can steer where the CLI is spawned.
    */
   projectId?: number;
+  /**
+   * beads only, and OPTIONAL: an override for where the workspace is, when it
+   * is not at the project's repo path (a monorepo subdirectory, a workspace
+   * kept outside the repo entirely).
+   *
+   * A TOKEN, never a path, for exactly the reason `projectId` is an id: main
+   * ran the native folder dialog itself and minted this token against the
+   * directory the USER chose, holding the mapping in its own memory. The
+   * renderer receives the token, echoes it back, and at no point names a
+   * filesystem path that main would spawn a CLI in — so the override widens
+   * WHICH directory can be picked without widening WHO gets to pick it.
+   *
+   * Takes precedence over `projectId` when both are present (the wizard always
+   * sends the project id; the token says "not that one").
+   */
+  workspaceDirToken?: string;
 }
 
 /**

@@ -185,6 +185,13 @@ export interface TrackerWizardModalProps {
   isOpen: boolean;
   provider: TrackerProvider;
   projectId: number;
+  /**
+   * The active project's repo path, DISPLAY ONLY — the Detect step's "looking
+   * in …" caption for a keyless provider. It is never sent anywhere: `projectId`
+   * is what crosses the wire, and main resolves the path itself. Null/absent
+   * simply drops the caption.
+   */
+  projectPath?: string | null;
   onClose: () => void;
   /** Fired after every mapping's `connect` resolves so the catalog can re-read its rows. */
   onConnected: () => void;
@@ -201,6 +208,7 @@ export function TrackerWizardModal({
   isOpen,
   provider,
   projectId,
+  projectPath = null,
   onClose,
   onConnected,
   sourceConnection,
@@ -233,6 +241,16 @@ export function TrackerWizardModal({
   const [validating, setValidating] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<TrackerWorkspaceIdentity | null>(null);
+  /**
+   * KEYLESS ONLY — the folder the user pointed Detect at instead of the
+   * project's repo, as main handed it back: an opaque `token` to send and a
+   * `path` to show. Null is the ordinary case, "probe the project's repo".
+   *
+   * The token is the ONLY half that goes back over the wire; `path` exists so
+   * the step can say which directory it is about to look in.
+   */
+  const [workspaceDir, setWorkspaceDir] = useState<{ token: string; path: string } | null>(null);
+  const [picking, setPicking] = useState(false);
 
   // ── Step 1 · map ──────────────────────────────────────────────────────────
   const [projects, setProjects] = useState<Project[]>([]);
@@ -330,6 +348,15 @@ export function TrackerWizardModal({
   // Derived
   // -------------------------------------------------------------------------
 
+  const workspaceDirToken = workspaceDir?.token ?? null;
+  /**
+   * The directory a keyless Detect will probe — the picked folder when there is
+   * one, else the active project's repo. Null only when the caller passed no
+   * project path, which just drops the caption. Display text: main resolves the
+   * real thing from the id and the token.
+   */
+  const probedWorkspacePath = workspaceDir?.path ?? projectPath;
+
   const credentials = useMemo<TrackerCredentialsInput>(() => {
     const trimmedBase = baseUrl.trim();
     // Plane workspace slugs are lowercase URL slugs; users naturally type the
@@ -341,14 +368,22 @@ export function TrackerWizardModal({
       // the router's schema would read as a keyed provider missing its key.
       // It sends the ACTIVE PROJECT instead: main resolves that project's repo
       // path and probes the workspace there, so nothing path-shaped that this
-      // renderer composed decides where the CLI runs.
-      ...(meta.needsApiKey ? { apiKey: apiKey.trim() } : { projectId }),
+      // renderer composed decides where the CLI runs. A picked folder rides
+      // along as main's own TOKEN for it, which is the same rule one step over:
+      // the override says WHICH directory, and only main ever knew its name.
+      ...(meta.needsApiKey
+        ? { apiKey: apiKey.trim() }
+        : {
+            projectId,
+            ...(workspaceDirToken !== null ? { workspaceDirToken } : {}),
+          }),
       ...(meta.defaultBaseUrl !== null && trimmedBase.length > 0 ? { baseUrl: trimmedBase } : {}),
       ...(meta.needsWorkspaceSlug && trimmedSlug.length > 0 ? { workspaceSlug: trimmedSlug } : {}),
     };
   }, [
     provider,
     projectId,
+    workspaceDirToken,
     apiKey,
     baseUrl,
     workspaceSlug,
@@ -778,15 +813,17 @@ export function TrackerWizardModal({
   // Invalidation — a changed upstream answer drops exactly what depended on it
   // -------------------------------------------------------------------------
 
-  // Editing a credential retires the validated identity AND the group tree: the
-  // wizard past Step 0 is only meaningful for the key that was actually probed,
-  // and a different key can name a different workspace.
-  //
-  // Inert in add-mapping mode: no credential input renders there, so the only
-  // time this could fire is the mount pass — where it would retire the inherited
-  // identity and clamp the rail behind a Step 0 that does not exist.
-  useEffect(() => {
-    if (sourceConnection !== undefined) return;
+  /**
+   * Retire the validated identity AND the group tree: the wizard past Step 0 is
+   * only meaningful for the credential that was actually probed, and a
+   * different one can name a different workspace.
+   *
+   * A function rather than only an effect because the FOLDER PICKER changes the
+   * probed workspace too, and it must invalidate and re-detect in one ordered
+   * go — an effect firing on the same commit would race the re-detect it is
+   * supposed to precede.
+   */
+  const retireProbedCredential = (): void => {
     probeVersionRef.current += 1;
     setIdentity(null);
     setAuthError(null);
@@ -800,6 +837,18 @@ export function TrackerWizardModal({
     setPriorityMapping(null);
     setCategoryMapping(null);
     setMaxStep(0);
+  };
+
+  // Editing a credential FIELD is the other way that happens.
+  //
+  // Inert in add-mapping mode: no credential input renders there, so the only
+  // time this could fire is the mount pass — where it would retire the inherited
+  // identity and clamp the rail behind a Step 0 that does not exist.
+  useEffect(() => {
+    if (sourceConnection !== undefined) return;
+    retireProbedCredential();
+    // The credential FIELDS are the trigger, and only they: retireProbedCredential
+    // is re-created every render, so listing it would fire this on every one.
   }, [apiKey, baseUrl, workspaceSlug, sourceConnection]);
 
   // The Map step's project list is a local read, loaded once per open. A failed
@@ -1016,17 +1065,50 @@ export function TrackerWizardModal({
     }
   };
 
-  const handleAuthorize = async (): Promise<void> => {
+  /**
+   * `probeWith` defaults to the memo, and is passed explicitly only by the
+   * folder picker: it re-detects in the same tick it stores the token, before
+   * the re-render that would fold that token into `credentials`.
+   */
+  const handleAuthorize = async (probeWith: TrackerCredentialsInput = credentials): Promise<void> => {
     setValidating(true);
     setAuthError(null);
     try {
-      const result = await trpc.cyboflow.tracker.wizardValidate.mutate({ credentials });
+      const result = await trpc.cyboflow.tracker.wizardValidate.mutate({
+        credentials: probeWith,
+      });
       setIdentity(result);
     } catch (err) {
       setIdentity(null);
       setAuthError(errorMessage(err));
     } finally {
       setValidating(false);
+    }
+  };
+
+  /**
+   * KEYLESS ONLY — point Detect at a folder of the user's choosing, then
+   * immediately re-run it there.
+   *
+   * The mutation opens a NATIVE dialog in main and answers with a token; a
+   * cancel comes back as null and must change nothing at all, since the user
+   * declining a dialog is not a reason to retire the workspace they already
+   * detected. A successful pick is a different workspace, so it retires
+   * everything the previous one produced before re-detecting — the same
+   * invalidation an edited API key triggers.
+   */
+  const handlePickWorkspace = async (): Promise<void> => {
+    setPicking(true);
+    try {
+      const picked = await trpc.cyboflow.tracker.wizardPickWorkspace.mutate({ provider });
+      if (picked === null) return;
+      setWorkspaceDir(picked);
+      retireProbedCredential();
+      await handleAuthorize({ ...credentials, workspaceDirToken: picked.token });
+    } catch (err) {
+      setAuthError(errorMessage(err));
+    } finally {
+      setPicking(false);
     }
   };
 
@@ -1344,6 +1426,60 @@ export function TrackerWizardModal({
         <p className="mt-2 text-[11px] text-text-tertiary">{meta.scopeFootnote}</p>
       </div>
 
+      {/*
+        WHICH FOLDER, said out loud. Detect probes one directory and until now
+        never named it, so the commonest failure — the wrong cyboflow project
+        being active — arrived as a bare "no beads database found" about a repo
+        the user was not thinking about. The picker underneath is the escape
+        hatch for the workspaces that legitimately are not at the project's
+        root (a monorepo subdirectory, a workspace kept outside the repo):
+        secondary to Detect, because it is the exception.
+      */}
+      {!meta.needsApiKey && (
+        <div className="flex w-full max-w-[440px] flex-col items-center gap-2">
+          {probedWorkspacePath !== null && (
+            <p
+              className="text-[11px] leading-relaxed text-text-tertiary"
+              data-testid="tracker-probed-path"
+            >
+              Looking in <code className="text-text-secondary">{probedWorkspacePath}</code>
+              {workspaceDir !== null && (
+                <>
+                  {' · '}
+                  <button
+                    type="button"
+                    className="underline hover:text-text-secondary"
+                    // Retires the identity along with the token, exactly as
+                    // picking one does: an identity probed in the folder the
+                    // user just abandoned would otherwise stay on screen while
+                    // the caption named a different directory, and Continue
+                    // would carry it into a connect anchored somewhere else.
+                    onClick={() => {
+                      setWorkspaceDir(null);
+                      retireProbedCredential();
+                    }}
+                  >
+                    Use the project folder
+                  </button>
+                </>
+              )}
+            </p>
+          )}
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="rounded-none"
+            disabled={picking || validating}
+            loading={picking}
+            loadingText="Choosing a folder…"
+            onClick={() => void handlePickWorkspace()}
+          >
+            Point at a {meta.name.toLowerCase()} workspace…
+          </Button>
+        </div>
+      )}
+
       {identity === null ? (
         <div className="flex flex-col items-center gap-2">
           <Button
@@ -1351,9 +1487,10 @@ export function TrackerWizardModal({
             variant="primary"
             size="sm"
             className="rounded-none"
-            // Nothing to type for a keyless provider, so the only thing that
-            // can disable Detect is a probe already in flight.
-            disabled={(meta.needsApiKey && apiKey.trim().length === 0) || validating}
+            // Nothing to type for a keyless provider, so the only things that
+            // can disable Detect are a probe already in flight and the folder
+            // dialog it would race.
+            disabled={(meta.needsApiKey && apiKey.trim().length === 0) || validating || picking}
             loading={validating}
             loadingText={
               meta.needsApiKey ? `Checking with ${meta.name}…` : 'Looking for a workspace…'
@@ -1396,6 +1533,18 @@ export function TrackerWizardModal({
               <p className="mt-0.5 text-xs text-text-secondary">
                 workspace {identity.workspaceName}
               </p>
+              {/* Which directory the connection will be BOUND to — the same
+                  question the caption above answers about the probe, worth
+                  repeating here because this is the answer the user carries
+                  into the rest of the wizard. */}
+              {!meta.needsApiKey && probedWorkspacePath !== null && (
+                <p
+                  className="mt-0.5 break-all text-[11px] text-text-tertiary"
+                  data-testid="tracker-bound-path"
+                >
+                  {probedWorkspacePath}
+                </p>
+              )}
             </div>
           </div>
           <div className="mt-3 flex justify-end">

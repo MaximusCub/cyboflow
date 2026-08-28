@@ -259,6 +259,15 @@ const credentialsSchema = z
     workspaceSlug: z.string().min(1).optional(),
     /** beads only: the project whose repo path anchors the workspace probe. */
     projectId: z.number().int().positive().optional(),
+    /**
+     * beads only: an opaque token main minted for a folder the user picked in
+     * a NATIVE dialog (`wizardPickWorkspace`), overriding the project's repo
+     * path. It stays a token all the way through — the refinement below still
+     * requires `projectId`, because the token overrides path RESOLUTION only
+     * and a stale one must fail closed rather than fall back to an unanchored
+     * probe.
+     */
+    workspaceDirToken: z.string().min(1).optional(),
   })
   .superRefine((value, ctx) => {
     if (providerNeedsSecret(value.provider)) {
@@ -420,6 +429,25 @@ export const trackerRouter = router({
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().wizardValidate(input.credentials);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Step 0, KEYLESS ONLY — open the main-process folder dialog so the user can
+   * point Detect at a workspace that is not at the project's repo path, and
+   * answer with an opaque token for it (null = cancelled).
+   *
+   * A mutation for a reason of its own on top of the section note above: it
+   * opens a modal OS dialog, so a cached or transparently re-fetched call would
+   * put a second one on screen.
+   */
+  wizardPickWorkspace: protectedProcedure
+    .input(z.object({ provider: providerSchema }))
+    .mutation(async ({ input }): Promise<{ token: string; path: string } | null> => {
+      try {
+        return await getTrackerSyncFacade().wizardPickWorkspace(input.provider);
       } catch (err) {
         rethrowAsTRPCError(err);
       }

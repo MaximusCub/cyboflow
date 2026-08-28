@@ -29,6 +29,7 @@ import type {
   TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
+  TrackerProvider,
   TrackerReconcileItem,
   TrackerRecoveryProbe,
   TrackerRemapResult,
@@ -65,6 +66,14 @@ import type {
 export interface TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. Persists nothing. */
   wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity>;
+  /**
+   * KEYLESS ONLY — run the main-process folder dialog and answer with an
+   * opaque handle to the directory the user chose, or null when they
+   * cancelled. The `path` in the result is for the wizard to DISPLAY; the
+   * `token` is the only half that comes back, so the renderer never names a
+   * directory main would spawn a CLI in.
+   */
+  wizardPickWorkspace(provider: TrackerProvider): Promise<{ token: string; path: string } | null>;
   /** The Map step's mappable tracker groups (Linear projects/teams, Plane projects, Dart spaces). */
   wizardGroups(source: TrackerWizardSourceInput): Promise<TrackerGroupTree>;
   /** Wizard Step 1, top level (Linear teams / Plane projects). */

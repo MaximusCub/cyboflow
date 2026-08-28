@@ -48,6 +48,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       tracker: {
         wizardValidate: { mutate: vi.fn() },
+        wizardPickWorkspace: { mutate: vi.fn() },
         wizardGroups: { mutate: vi.fn() },
         wizardIssues: { mutate: vi.fn() },
         wizardStates: { mutate: vi.fn() },
@@ -72,6 +73,7 @@ import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 
 const mockValidate = vi.mocked(trpc.cyboflow.tracker.wizardValidate.mutate);
+const mockPickWorkspace = vi.mocked(trpc.cyboflow.tracker.wizardPickWorkspace.mutate);
 const mockGroups = vi.mocked(trpc.cyboflow.tracker.wizardGroups.mutate);
 const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
@@ -1491,12 +1493,13 @@ describe('TrackerWizardModal — add-mapping mode · submit', () => {
  * of which warrants the `bd init` disclosure.
  */
 describe('TrackerWizardModal — keyless connect', () => {
-  function renderKeyless(): void {
+  function renderKeyless(projectPath: string | null = '/dev/cyboflow'): void {
     render(
       <TrackerWizardModal
         isOpen
         provider="beads"
         projectId={7}
+        projectPath={projectPath}
         onClose={onClose}
         onConnected={onConnected}
       />,
@@ -1551,5 +1554,130 @@ describe('TrackerWizardModal — keyless connect', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('was not found on PATH'),
     );
     expect(screen.getByRole('alert')).not.toHaveTextContent('bd init --stealth');
+  });
+});
+
+/**
+ * Pointing Detect somewhere else.
+ *
+ * Two halves, and the second only makes sense because of the first: the step
+ * now SAYS which folder it probes (the wrong active project used to surface as
+ * a bare "no workspace" about a repo the user was not thinking about), and it
+ * can be pointed at another one — a monorepo subdirectory, a workspace outside
+ * the repo. What the renderer sends for that folder is a TOKEN main minted, so
+ * the "renderer never names a path a CLI is spawned in" rule survives the
+ * override intact; that is the assertion doing the real work below.
+ */
+describe('TrackerWizardModal — keyless workspace picker', () => {
+  const PICKED = { token: 'tok-1', path: '/dev/monorepo/packages/api' };
+
+  function renderKeyless(projectPath: string | null = '/dev/cyboflow'): void {
+    render(
+      <TrackerWizardModal
+        isOpen
+        provider="beads"
+        projectId={7}
+        projectPath={projectPath}
+        onClose={onClose}
+        onConnected={onConnected}
+      />,
+    );
+  }
+
+  const pickerButton = (): HTMLElement =>
+    screen.getByRole('button', { name: 'Point at a beads workspace…' });
+
+  /**
+   * Click the picker and wait until the whole exchange has settled. The button
+   * wears its loading label while the dialog is open, so it only answers to
+   * this name again once the pick — and the re-detect behind it — is done.
+   */
+  async function pickFolder(): Promise<void> {
+    fireEvent.click(pickerButton());
+    await waitFor(() => expect(pickerButton()).toBeEnabled());
+  }
+
+  it('offers the picker and names the folder Detect will probe', async () => {
+    renderKeyless();
+
+    // waitFor, not a bare assertion, so the mount's project-list read settles
+    // inside the test rather than after it.
+    await waitFor(() => expect(pickerButton()).toBeEnabled());
+    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow');
+  });
+
+  it('offers neither to a KEYED provider — there is no local workspace to point at', async () => {
+    renderWizard();
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Point at a beads workspace…' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId('tracker-probed-path')).not.toBeInTheDocument();
+  });
+
+  it('sends the picked folder as an opaque token and re-detects there', async () => {
+    mockPickWorkspace.mockResolvedValue(PICKED);
+    renderKeyless();
+
+    await pickFolder();
+    await screen.findByTestId('tracker-authorized-card');
+
+    expect(mockPickWorkspace).toHaveBeenCalledWith({ provider: 'beads' });
+    // A TOKEN and the project id — never the path, which the renderer only ever
+    // holds as display text.
+    expect(mockValidate).toHaveBeenCalledWith({
+      credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
+    });
+    // And the step says where it looked, in both places it can be read.
+    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent(PICKED.path);
+    expect(screen.getByTestId('tracker-bound-path')).toHaveTextContent(PICKED.path);
+  });
+
+  it('changes nothing at all when the folder dialog is cancelled', async () => {
+    mockPickWorkspace.mockResolvedValue(null);
+    renderKeyless();
+
+    await pickFolder();
+
+    expect(mockPickWorkspace).toHaveBeenCalled();
+    // Declining a dialog is not an instruction to re-probe anything.
+    expect(mockValidate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow');
+  });
+
+  it('drops the token again when the user goes back to the project folder', async () => {
+    mockPickWorkspace.mockResolvedValue(PICKED);
+    renderKeyless();
+
+    await pickFolder();
+    await screen.findByTestId('tracker-authorized-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Use the project folder' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow'),
+    );
+    // The reset is only offered while a pick is active.
+    expect(
+      screen.queryByRole('button', { name: 'Use the project folder' }),
+    ).not.toBeInTheDocument();
+
+    // And the next Detect goes back to being anchored by the project alone.
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
+    await waitFor(() =>
+      expect(mockValidate).toHaveBeenLastCalledWith({
+        credentials: { provider: 'beads', projectId: 7 },
+      }),
+    );
+  });
+
+  it('drops the caption when the caller knows no project path', async () => {
+    // Nothing to name is not the same as naming nothing — an empty "Looking in"
+    // would read as a bug. The picker stays, since it is the way out.
+    renderKeyless(null);
+
+    await waitFor(() => expect(pickerButton()).toBeEnabled());
+    expect(screen.queryByTestId('tracker-probed-path')).not.toBeInTheDocument();
   });
 });

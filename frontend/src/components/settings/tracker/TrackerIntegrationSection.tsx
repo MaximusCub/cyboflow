@@ -238,6 +238,10 @@ export function TrackerIntegrationSection(): React.JSX.Element {
           isOpen
           provider={wizardProvider}
           projectId={activeProjectId}
+          // Display only, for the keyless Detect step's "looking in …" caption.
+          // Read off the projects this section already loads — the wizard sends
+          // the ID, and main resolves the path it actually probes.
+          projectPath={projects.find((p) => p.id === activeProjectId)?.path ?? null}
           onClose={() => setWizardProvider(null)}
           onConnected={refresh}
         />

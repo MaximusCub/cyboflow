@@ -29,6 +29,7 @@ import type {
   TrackerEntityType,
   TrackerFieldOptions,
   TrackerIssue,
+  TrackerProvider,
   TrackerReconcileItem,
   TrackerRecoveryProbe,
   TrackerRemapResult,
@@ -60,6 +61,9 @@ const IDENTITY: TrackerWorkspaceIdentity = {
  */
 class UnusedFacade implements TrackerSyncFacade {
   wizardValidate(_c: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  wizardPickWorkspace(_p: TrackerProvider): Promise<{ token: string; path: string } | null> {
     throw new Error('not used');
   }
   wizardGroups(_s: TrackerWizardSourceInput): Promise<TrackerGroupTree> {
@@ -632,6 +636,68 @@ describe('cyboflow.tracker — the keyless credential shape', () => {
     await expect(
       caller.wizardValidate({ credentials: { provider: 'linear', apiKey: 'k' } }),
     ).rejects.toThrow(/Check the API key/);
+  });
+
+  it('hands the picked folder’s token and path back untouched', async () => {
+    const seen: TrackerProvider[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async (provider) => {
+      seen.push(provider);
+      return { token: 'tok-1', path: '/dev/monorepo/packages/api' };
+    };
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardPickWorkspace({ provider: 'beads' })).resolves.toEqual({
+      token: 'tok-1',
+      path: '/dev/monorepo/packages/api',
+    });
+    expect(seen).toEqual(['beads']);
+  });
+
+  it('passes a cancelled pick through as null rather than as a failure', async () => {
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async () => null;
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardPickWorkspace({ provider: 'beads' })).resolves.toBeNull();
+  });
+
+  it('maps the keyed-provider refusal to PRECONDITION_FAILED, message intact', async () => {
+    // A keyed provider has no local workspace to point at, so the question does
+    // not apply — the same shape as the recovery trio's refusal above.
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async () => {
+      throw Object.assign(
+        new Error('linear connections are keyed — there is no workspace folder to pick'),
+        { name: 'TrackerCredentialsError' },
+      );
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.wizardPickWorkspace({ provider: 'linear' }))).toBe(
+      'PRECONDITION_FAILED',
+    );
+    await expect(caller.wizardPickWorkspace({ provider: 'linear' })).rejects.toThrow(
+      /no workspace folder to pick/,
+    );
+  });
+
+  it('carries an opaque workspace token on the credential shape, and never a path', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async (credentials) => {
+      seen.push(credentials);
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardValidate({
+      credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
+    });
+
+    // The project id rides along unchanged: the token overrides where the path
+    // is RESOLVED from, not whether the connection is anchored to a project.
+    expect(seen).toEqual([{ provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' }]);
   });
 
   it('maps a credential-wiring failure to PRECONDITION_FAILED, message intact', async () => {

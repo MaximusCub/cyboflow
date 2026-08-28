@@ -23,6 +23,8 @@
  *   2. "Sync now" on the keyless row (buildAdapter must not read the cipher);
  *   3. mapping-management re-entry (credentialsForConnection must not throw);
  *   4. pause → re-detect resume, and the identity change that refuses to;
+ *  4b. a workspace the user POINTED AT rather than the project's repo — what
+ *      main's folder token buys, and the re-detect that must not undo it;
  *   5. app restart — a fresh service over the same DB drives a pass;
  * plus the negatives that keep the widening from becoming a global loosening:
  *   a keyed provider with no key is still refused at both the connect and the
@@ -77,6 +79,7 @@ import { TrackerAuthError } from '../errors';
 import type { EntityWriteRouter } from '../inboundSync';
 import { getConnection, insertConnection, readSecret, updateConnectionSettings } from '../store';
 import {
+  MAX_PICKED_WORKSPACE_PATHS,
   TrackerCredentialsError,
   TrackerSyncService,
   beadsWorkspacePath,
@@ -268,6 +271,15 @@ let service: TrackerSyncService;
 let factoryCalls: Array<{ connection: TrackerConnectionRow; secret: string }>;
 /** Project id → repo path, as the boot wiring's resolver would answer. */
 let projectPaths: Map<number, string>;
+/**
+ * Every project id the service asked the resolver about. The custom-anchor
+ * cases assert this stays EMPTY — "did not re-resolve from the project" is the
+ * behaviour, and an assertion on the resulting path alone would also pass if
+ * the project happened to sit at the same place.
+ */
+let resolvedProjectIds: number[];
+/** What the injected native folder dialog answers with; null = the user cancelled. */
+let pickedDirectory: string | null;
 
 /** A service over the SAME db — the "app restarted" shape. */
 function buildService(): TrackerSyncService {
@@ -275,7 +287,11 @@ function buildService(): TrackerSyncService {
     db: raw,
     router: router as EntityWriteRouter,
     nowIso: () => '2026-08-27T12:00:00.000Z',
-    resolveProjectPath: (id) => projectPaths.get(id) ?? null,
+    resolveProjectPath: (id) => {
+      resolvedProjectIds.push(id);
+      return projectPaths.get(id) ?? null;
+    },
+    pickWorkspaceDirectory: async () => pickedDirectory,
     adapterFactory: (connection, secret) => {
       factoryCalls.push({ connection, secret });
       return adapter;
@@ -296,6 +312,8 @@ beforeEach(() => {
   adapter = new FakeBeadsAdapter();
   factoryCalls = [];
   projectPaths = new Map([[PROJECT_ID, PROJECT_PATH]]);
+  resolvedProjectIds = [];
+  pickedDirectory = null;
   service = buildService();
 });
 
@@ -592,6 +610,184 @@ describe('keyless connect — re-detect', () => {
       TrackerCredentialsError,
     );
     expect(readSecret(raw, connectionId)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4b · a workspace the user pointed at
+//
+// The wizard can anchor a keyless connection to a folder that is NOT the
+// project's repo (a monorepo subdirectory, a workspace kept outside the repo).
+// Main runs the dialog and hands out a TOKEN, so the path never has to come
+// from the renderer; the cases below are about what that token buys and what it
+// must never let through.
+// ---------------------------------------------------------------------------
+
+/** Somewhere the project's repo path could never resolve to. */
+const CUSTOM_PATH = '/tmp/monorepo/packages/api';
+
+/** Drive the injected dialog and return the token+path main minted. */
+async function pickWorkspace(path: string): Promise<{ token: string; path: string }> {
+  pickedDirectory = path;
+  const picked = await service.wizardPickWorkspace('beads');
+  if (picked === null) throw new Error('the picker answered null for a folder it was given');
+  return picked;
+}
+
+/** Connect anchored to a picked folder rather than to the project's repo. */
+async function connectPicked(token: string): Promise<string> {
+  const { connectionId } = await service.connect(
+    keylessPayload({
+      credentials: { provider: 'beads', projectId: PROJECT_ID, workspaceDirToken: token },
+    }),
+  );
+  return connectionId;
+}
+
+/** The whole `source_json` blob, for the extras that ride beside the scope. */
+function sourceBlob(connectionId: string): Record<string, unknown> {
+  return JSON.parse(row(connectionId).source_json ?? '{}') as Record<string, unknown>;
+}
+
+describe('keyless connect — a picked workspace folder', () => {
+  it('refuses to pick a folder for a KEYED provider', async () => {
+    // There is no local workspace to point a Linear connection at; the question
+    // does not apply to it, so it is refused rather than answered with a dialog.
+    await expect(service.wizardPickWorkspace('linear')).rejects.toThrow(TrackerCredentialsError);
+  });
+
+  it('answers null when the user cancels, minting nothing', async () => {
+    pickedDirectory = null;
+
+    await expect(service.wizardPickWorkspace('beads')).resolves.toBeNull();
+  });
+
+  it('anchors the connection to the picked folder and records that it is custom', async () => {
+    const { token, path } = await pickWorkspace(CUSTOM_PATH);
+    expect(path).toBe(CUSTOM_PATH);
+
+    const connectionId = await connectPicked(token);
+
+    expect(beadsWorkspacePath(row(connectionId))).toBe(CUSTOM_PATH);
+    // The provenance, without which re-detect would drag the connection back to
+    // the project's repo — see the re-detect case below.
+    expect(sourceBlob(connectionId).workspaceSource).toBe('custom');
+    // The Step-1 scope still reads off the same blob, so revival and the
+    // idempotent re-submit are undisturbed by the second extra key.
+    expect(sourceBlob(connectionId).containerId).toBe(WORKSPACE_CONTAINER_ID);
+    // And the pass builds its adapter against the picked folder, not the repo.
+    expect(beadsWorkspacePath(factoryCalls[0].connection)).toBe(CUSTOM_PATH);
+  });
+
+  it('leaves a project-anchored connect with no provenance key at all', async () => {
+    const connectionId = await connectKeyless();
+
+    // Absent, not `'project'`: that is what every row minted before the picker
+    // existed says, and the two must stay indistinguishable.
+    expect(sourceBlob(connectionId)).not.toHaveProperty('workspaceSource');
+    expect(beadsWorkspacePath(row(connectionId))).toBe(PROJECT_PATH);
+  });
+
+  it('refuses a token it never minted rather than quietly probing the project repo', async () => {
+    // Falling through to the project path is the one way this could mislead:
+    // the wizard would report a successful detect for a DIFFERENT workspace
+    // than the folder the user picked.
+    await expect(
+      service.connect(
+        keylessPayload({
+          credentials: {
+            provider: 'beads',
+            projectId: PROJECT_ID,
+            workspaceDirToken: 'not-a-token-main-minted',
+          },
+        }),
+      ),
+    ).rejects.toThrow(/pick it again/);
+    expect(
+      (raw.prepare('SELECT COUNT(*) AS n FROM tracker_connections').get() as { n: number }).n,
+    ).toBe(0);
+  });
+
+  it('evicts the oldest token once the cap is reached, and the evicted one fails closed', async () => {
+    const { token: oldest } = await pickWorkspace(CUSTOM_PATH);
+    for (let i = 0; i < MAX_PICKED_WORKSPACE_PATHS; i += 1) {
+      await pickWorkspace(`${CUSTOM_PATH}-${i}`);
+    }
+
+    await expect(
+      service.connect(
+        keylessPayload({
+          credentials: { provider: 'beads', projectId: PROJECT_ID, workspaceDirToken: oldest },
+        }),
+      ),
+    ).rejects.toThrow(/pick it again/);
+  });
+
+  it('re-detects against the STORED path, never re-resolving the project', async () => {
+    const { token } = await pickWorkspace(CUSTOM_PATH);
+    const connectionId = await connectPicked(token);
+    updateConnectionSettings(raw, connectionId, { status: 'paused' });
+
+    // The project's repo moves. Irrelevant to a workspace that never lived
+    // there — and following it would re-point the connection at whatever beads
+    // database happens to sit in the repo, which is worse than failing.
+    projectPaths.set(PROJECT_ID, '/tmp/p1-renamed');
+    resolvedProjectIds.length = 0;
+    factoryCalls.length = 0;
+
+    await service.updateCredentials(connectionId);
+
+    expect(resolvedProjectIds).toEqual([]);
+    expect(beadsWorkspacePath(factoryCalls[0].connection)).toBe(CUSTOM_PATH);
+    expect(beadsWorkspacePath(row(connectionId))).toBe(CUSTOM_PATH);
+    // Still custom after the re-stamp, so the NEXT re-detect makes the same
+    // choice rather than reverting to the project on the second pass.
+    expect(sourceBlob(connectionId).workspaceSource).toBe('custom');
+    expect(row(connectionId).status).toBe('active');
+  });
+
+  it('re-detects a PROJECT-anchored connection from the project, as it always did', async () => {
+    const connectionId = await connectKeyless();
+    updateConnectionSettings(raw, connectionId, { status: 'paused' });
+    projectPaths.set(PROJECT_ID, '/tmp/p1-renamed');
+    resolvedProjectIds.length = 0;
+
+    await service.updateCredentials(connectionId);
+
+    // The other side of the branch: the custom arm must not have swallowed the
+    // moved-repo re-anchor the ordinary case depends on.
+    expect(resolvedProjectIds).toContain(PROJECT_ID);
+    expect(beadsWorkspacePath(row(connectionId))).toBe('/tmp/p1-renamed');
+    expect(sourceBlob(connectionId)).not.toHaveProperty('workspaceSource');
+  });
+
+  it('re-enters mapping management against the picked folder, not the project repo', async () => {
+    const { token } = await pickWorkspace(CUSTOM_PATH);
+    const connectionId = await connectPicked(token);
+    factoryCalls.length = 0;
+
+    // The add-mapping wizard names the connection instead of pasting a key, and
+    // main resolves the anchor itself. Resolving it from the project here would
+    // probe one workspace and then mint the sibling mapping against another.
+    await service.wizardGroups({ connectionId });
+
+    expect(beadsWorkspacePath(factoryCalls[0].connection)).toBe(CUSTOM_PATH);
+  });
+
+  it('fails a custom anchor whose folder no longer holds the workspace, with no special arm', async () => {
+    const { token } = await pickWorkspace(CUSTOM_PATH);
+    const connectionId = await connectPicked(token);
+    updateConnectionSettings(raw, connectionId, { status: 'paused' });
+    adapter.failValidate = new TrackerAuthError(
+      'beads',
+      'no beads database found — run `bd init` in this repo',
+    );
+
+    await expect(service.updateCredentials(connectionId)).rejects.toThrow(/no beads database/);
+    expect(row(connectionId).status).toBe('paused');
+    // The anchor is untouched by a failed probe: re-pointing it is the user's
+    // call, made with the picker, not something a failure does on its own.
+    expect(beadsWorkspacePath(row(connectionId))).toBe(CUSTOM_PATH);
   });
 });
 

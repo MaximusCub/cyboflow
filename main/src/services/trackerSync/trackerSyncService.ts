@@ -243,6 +243,14 @@ const MAX_LOG_ENTRIES = 60;
  */
 export const UNLINK_RULING_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * How many picked-workspace tokens
+ * ({@link TrackerSyncService.wizardPickWorkspace}) main holds at once. A wizard
+ * run uses one, so this is a bound on accumulation over a long-lived process,
+ * not a working-set size.
+ */
+export const MAX_PICKED_WORKSPACE_PATHS = 20;
+
 // ---------------------------------------------------------------------------
 // Direction modes
 // ---------------------------------------------------------------------------
@@ -463,6 +471,18 @@ export interface TrackerSyncServiceDeps {
    * nothing it composes can decide which directory a CLI is spawned in.
    */
   resolveProjectPath?: (projectId: number) => string | null;
+  /**
+   * Run the MAIN-PROCESS native folder dialog and answer with the directory
+   * the user chose, or null when they cancelled. The other half of the same
+   * invariant `resolveProjectPath` protects: a keyless connection can be
+   * pointed somewhere other than the project's repo, but only main ever learns
+   * that path — it hands the renderer a token
+   * ({@link TrackerSyncService.wizardPickWorkspace}) and takes the token back.
+   *
+   * Optional for the same reason the resolver is: a service built without one
+   * refuses the pick with an actionable message instead of crashing.
+   */
+  pickWorkspaceDirectory?: () => Promise<string | null>;
   /** Optional structured logger for loop-level failures. */
   logger?: LoggerLike;
 }
@@ -512,6 +532,31 @@ export function beadsWorkspacePath(connection: TrackerConnectionRow): string | n
       : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Was this keyless connection anchored to a folder the user PICKED, rather
+ * than to its cyboflow project's repo path?
+ *
+ * Rides on `source_json` beside {@link beadsWorkspacePath}, by the same
+ * read-by-name reasoning. ABSENT means project-anchored — which is what every
+ * row minted before the picker existed says, and the honest default: a row
+ * with no recorded provenance is one whose path came from the project.
+ *
+ * Consulted wherever an anchor is resolved from the ROW rather than from a
+ * live wizard answer — re-detect and mapping-management re-entry — and it is
+ * the whole of what makes those safe for a custom anchor: re-resolving from
+ * `project_id` would silently drag the connection back to the repo path the
+ * user deliberately pointed away from.
+ */
+function beadsWorkspaceIsCustom(connection: TrackerConnectionRow): boolean {
+  if (connection.source_json === null) return false;
+  try {
+    const parsed = JSON.parse(connection.source_json) as { workspaceSource?: unknown };
+    return parsed.workspaceSource === 'custom';
+  } catch {
+    return false;
   }
 }
 
@@ -619,7 +664,30 @@ export class TrackerSyncService implements TrackerSyncFacade {
   private readonly adapterFactory: TrackerAdapterFactory;
   /** See {@link TrackerSyncServiceDeps.resolveProjectPath} — keyless providers only. */
   private readonly resolveProjectPath?: (projectId: number) => string | null;
+  /** See {@link TrackerSyncServiceDeps.pickWorkspaceDirectory} — keyless providers only. */
+  private readonly pickWorkspaceDirectory?: () => Promise<string | null>;
   private readonly logger?: LoggerLike;
+
+  /**
+   * Token → the directory the user picked in the native dialog, for the one
+   * wizard run that is holding the token.
+   *
+   * IN-MEMORY AND MAIN-ONLY BY DESIGN, not as a shortcut. This map is the
+   * entire reason a folder override does not weaken the rule that a renderer
+   * may never name a path a CLI is spawned in: the path exists only here, the
+   * renderer holds a random uuid, and a token main did not mint resolves to
+   * nothing. Persisting it would turn a per-run handle into a durable
+   * capability, and there is nothing to persist FOR — the anchor a connect
+   * settles on is stamped onto the row.
+   *
+   * Capped at {@link MAX_PICKED_WORKSPACE_PATHS} with oldest-first eviction (a
+   * plain Map iterates in insertion order): a wizard run holds one token at a
+   * time, so the cap is far above any live working set and exists only so a
+   * long-lived main process cannot accumulate them without bound. An evicted
+   * token fails closed — the wizard reports that the pick is stale and the
+   * user picks again.
+   */
+  private readonly pickedWorkspacePaths = new Map<string, string>();
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private listener: WriteBackListener | null = null;
@@ -681,6 +749,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     this.nowIso = deps.nowIso ?? (() => new Date().toISOString());
     this.adapterFactory = deps.adapterFactory ?? defaultAdapterFactory;
     this.resolveProjectPath = deps.resolveProjectPath;
+    this.pickWorkspaceDirectory = deps.pickWorkspaceDirectory;
     this.logger = deps.logger;
   }
 
@@ -1512,6 +1581,22 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * mis-wired, the caller omitted the project, or the project is gone.
    */
   private workspacePathForCredentials(credentials: TrackerCredentialsInput): string {
+    // THE OVERRIDE, and it is checked FIRST: a token only exists because main
+    // itself put a directory behind it, so it is at least as trustworthy as the
+    // project-table lookup below and the wizard sends it precisely to mean
+    // "not the project's repo". An unknown one is refused rather than falling
+    // through to the project path — falling through would quietly probe a
+    // DIFFERENT workspace than the one the user picked, which is the single
+    // way this feature could mislead.
+    if (credentials.workspaceDirToken !== undefined) {
+      const picked = this.pickedWorkspacePaths.get(credentials.workspaceDirToken);
+      if (picked === undefined) {
+        throw new TrackerCredentialsError(
+          'the picked folder is no longer available — pick it again',
+        );
+      }
+      return picked;
+    }
     if (this.resolveProjectPath === undefined) {
       throw new TrackerCredentialsError(
         `${credentials.provider} connections need a project repo path, and this service was built without a project-path resolver`,
@@ -1564,7 +1649,18 @@ export class TrackerSyncService implements TrackerSyncFacade {
       throw new TrackerConnectionNotFoundError(connectionId);
     }
     if (!providerNeedsSecret(row.provider)) {
-      return { provider: row.provider, projectId: row.project_id };
+      // A CUSTOM-ANCHORED row answers with its stored folder, not with its
+      // project, for the same reason re-detect does: the project's repo is not
+      // where this connection's workspace lives, and re-resolving would point
+      // every re-entered probe — and the sibling mapping a `connect` from this
+      // source would then mint — at a different directory than the one the
+      // user picked.
+      const custom = beadsWorkspaceIsCustom(row) ? beadsWorkspacePath(row) : null;
+      return {
+        provider: row.provider,
+        projectId: row.project_id,
+        ...(custom !== null ? { workspaceDirToken: this.mintWorkspaceDirToken(custom) } : {}),
+      };
     }
     const cipher = readSecret(this.db, connectionId);
     if (cipher === null || cipher.length === 0) {
@@ -1616,6 +1712,58 @@ export class TrackerSyncService implements TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. */
   async wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
     return this.adapterForCredentials(credentials).validateCredentials();
+  }
+
+  /**
+   * Record `path` under a fresh token and hand the token back, evicting the
+   * oldest when the map is full ({@link MAX_PICKED_WORKSPACE_PATHS}).
+   */
+  private mintWorkspaceDirToken(path: string): string {
+    if (this.pickedWorkspacePaths.size >= MAX_PICKED_WORKSPACE_PATHS) {
+      const oldest = this.pickedWorkspacePaths.keys().next();
+      if (!oldest.done) this.pickedWorkspacePaths.delete(oldest.value);
+    }
+    const token = randomUUID();
+    this.pickedWorkspacePaths.set(token, path);
+    return token;
+  }
+
+  /**
+   * Ask the user for the folder a keyless connection should probe, and answer
+   * with an opaque handle to it — the wizard's "Point at a beads workspace…".
+   * Null means they cancelled, which is not a failure and changes nothing.
+   *
+   * THE DIALOG RUNS IN MAIN, and that is the whole design. The path the user
+   * chose stays in {@link TrackerSyncService.pickedWorkspacePaths}; the
+   * renderer gets a token plus the path as DISPLAY TEXT, and sends only the
+   * token back on the probe and the connect. So the renderer can say "the
+   * folder the user picked" and can say nothing else — it still cannot compose
+   * a directory for `bd` to be spawned in, which is the invariant
+   * `resolveProjectPath` exists to hold.
+   *
+   * @throws {TrackerCredentialsError} a keyed provider (no local workspace to
+   *   point at), or a service built without a picker.
+   */
+  async wizardPickWorkspace(
+    provider: TrackerProvider,
+  ): Promise<{ token: string; path: string } | null> {
+    if (providerNeedsSecret(provider)) {
+      throw new TrackerCredentialsError(
+        `${provider} connections are keyed — there is no workspace folder to pick`,
+      );
+    }
+    if (this.pickWorkspaceDirectory === undefined) {
+      throw new TrackerCredentialsError(
+        `${provider} connections need a folder picker, and this service was built without one`,
+      );
+    }
+    const picked = await this.pickWorkspaceDirectory();
+    if (picked === null) return null;
+    const path = picked.trim();
+    // An empty answer is a cancel by another name — a dialog that returned no
+    // usable directory must not mint a token that resolves to nowhere.
+    if (path.length === 0) return null;
+    return { token: this.mintWorkspaceDirToken(path), path };
   }
 
   /**
@@ -1859,17 +2007,28 @@ export class TrackerSyncService implements TrackerSyncFacade {
       secret_ciphertext: null,
       // The Step-1 choice PLUS its display label — and, for a keyless
       // provider, the RESOLVED workspace path this connection is anchored to
-      // ({@link beadsWorkspacePath}). All of them are extra keys on the same
-      // blob rather than columns of their own: parseSourceSelection and
-      // storedSourceScope both read containerId/narrowId/narrowKind by name
-      // and ignore everything else, so they coexist without a migration and
-      // without touching scope equality or revival.
+      // ({@link beadsWorkspacePath}) and, when the user picked that folder
+      // themselves, where it came from ({@link beadsWorkspaceIsCustom}). All of
+      // them are extra keys on the same blob rather than columns of their own:
+      // parseSourceSelection and storedSourceScope both read
+      // containerId/narrowId/narrowKind by name and ignore everything else, so
+      // they coexist without a migration and without touching scope equality or
+      // revival.
+      //
+      // `workspaceSource` is stamped ONLY for a picked folder: its absence is
+      // the project-anchored case, which is what every row minted before the
+      // picker existed already says.
       source_json: JSON.stringify({
         ...payload.source,
         label: payload.sourceLabel,
         ...(providerNeedsSecret(credentials.provider)
           ? {}
-          : { workspacePath: this.workspacePathForCredentials(credentials) }),
+          : {
+              workspacePath: this.workspacePathForCredentials(credentials),
+              ...(credentials.workspaceDirToken !== undefined
+                ? { workspaceSource: 'custom' }
+                : {}),
+            }),
       }),
       selection_mode: payload.selectionMode,
       selection_json:
@@ -2122,43 +2281,80 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // and the cipher below cannot disagree about what is being stored.
     const key = needsSecret ? requireApiKey({ provider: connection.provider, apiKey }) : null;
 
-    const identity = await this.adapterForCredentials({
-      provider: connection.provider,
-      ...(key !== null ? { apiKey: key } : { projectId: connection.project_id }),
-      // The connection's OWN addressing, not the renderer's: this call rotates a
-      // key, it does not re-point a connection at a different instance.
-      baseUrl: connection.base_url ?? undefined,
-      workspaceSlug: connection.workspace_id ?? undefined,
-    }).validateCredentials();
-
-    if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
-      throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
-    }
-
-    // RE-ANCHOR A MOVED WORKSPACE. A keyless connection stores the RESOLVED
-    // path it spawns its CLI in, and the project's repo can move on disk
-    // (renamed, relocated, re-cloned). Re-detect then succeeds — the probe
-    // above resolved the CURRENT path and proved the SAME database instance is
-    // there — while `source_json` still names the old one, so the very next
-    // pass spawns in a directory that no longer holds the workspace and pauses
-    // again. Re-detect would keep succeeding and the connection would keep
-    // pausing, with no way out. Stamping the proven path closes that loop.
+    // WHERE A KEYLESS RE-DETECT PROBES, and the one question this method has to
+    // get right for a custom-anchored connection.
     //
-    // THE NAMED ROW ONLY, never the siblings fanned out below: this path is the
-    // one whose project the probe actually resolved. A sibling lives in a
-    // DIFFERENT cyboflow project with its own repo path, which nothing here has
-    // probed — writing this path onto it would point it at a workspace we never
-    // proved it shares. Each sibling re-anchors through its own re-detect.
-    if (!needsSecret) {
-      updateConnectionSettings(this.db, connection.id, {
-        source_json: JSON.stringify({
-          ...parseJsonObject(connection.source_json),
-          workspacePath: this.workspacePathForCredentials({
-            provider: connection.provider,
-            projectId: connection.project_id,
+    // The default is to re-resolve from `project_id`, which is what makes the
+    // moved-repo re-anchor below work. But a connection the user pointed at a
+    // folder of their own has nothing to do with the project's repo path —
+    // re-resolving would silently drag it back there, and the identity check
+    // would then either refuse a workspace that is perfectly healthy or, worse,
+    // succeed against a DIFFERENT beads database that happens to sit in the
+    // repo. So a custom anchor re-probes its STORED path.
+    //
+    // It travels as a token rather than as a path for no security reason —
+    // nothing here crosses IPC — but so that both uses below go through the one
+    // resolution path `workspacePathForCredentials` owns, instead of growing a
+    // second way to name a workspace directory. It is retired in the `finally`:
+    // it is an internal handle for the length of this call, and leaving it in
+    // the map would spend a slot the user's own picks need.
+    const customAnchor = !needsSecret && beadsWorkspaceIsCustom(connection)
+      ? beadsWorkspacePath(connection)
+      : null;
+    const anchorToken = customAnchor === null ? null : this.mintWorkspaceDirToken(customAnchor);
+    let identity: TrackerWorkspaceIdentity;
+    try {
+      identity = await this.adapterForCredentials({
+        provider: connection.provider,
+        ...(key !== null
+          ? { apiKey: key }
+          : {
+              projectId: connection.project_id,
+              ...(anchorToken !== null ? { workspaceDirToken: anchorToken } : {}),
+            }),
+        // The connection's OWN addressing, not the renderer's: this call rotates a
+        // key, it does not re-point a connection at a different instance.
+        baseUrl: connection.base_url ?? undefined,
+        workspaceSlug: connection.workspace_id ?? undefined,
+      }).validateCredentials();
+
+      if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
+        throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
+      }
+
+      // RE-ANCHOR A MOVED WORKSPACE. A keyless connection stores the RESOLVED
+      // path it spawns its CLI in, and the project's repo can move on disk
+      // (renamed, relocated, re-cloned). Re-detect then succeeds — the probe
+      // above resolved the CURRENT path and proved the SAME database instance is
+      // there — while `source_json` still names the old one, so the very next
+      // pass spawns in a directory that no longer holds the workspace and pauses
+      // again. Re-detect would keep succeeding and the connection would keep
+      // pausing, with no way out. Stamping the proven path closes that loop.
+      //
+      // A CUSTOM ANCHOR re-stamps the same stored path it just proved rather
+      // than a new one — there is nothing to re-anchor TO, since no project
+      // moved — and `workspaceSource` rides through on the spread, so the row
+      // stays custom-anchored for the next re-detect.
+      //
+      // THE NAMED ROW ONLY, never the siblings fanned out below: this path is the
+      // one whose project the probe actually resolved. A sibling lives in a
+      // DIFFERENT cyboflow project with its own repo path, which nothing here has
+      // probed — writing this path onto it would point it at a workspace we never
+      // proved it shares. Each sibling re-anchors through its own re-detect.
+      if (!needsSecret) {
+        updateConnectionSettings(this.db, connection.id, {
+          source_json: JSON.stringify({
+            ...parseJsonObject(connection.source_json),
+            workspacePath: this.workspacePathForCredentials({
+              provider: connection.provider,
+              projectId: connection.project_id,
+              ...(anchorToken !== null ? { workspaceDirToken: anchorToken } : {}),
+            }),
           }),
-        }),
-      });
+        });
+      }
+    } finally {
+      if (anchorToken !== null) this.pickedWorkspacePaths.delete(anchorToken);
     }
 
     const cipher = key === null ? null : encryptTrackerSecret(key);
