@@ -92,7 +92,7 @@ export function WorkflowTuningPage({
             className="text-[10px] font-bold uppercase text-text-tertiary"
             style={{ letterSpacing: '0.18em' }}
           >
-            What runs at this level
+            What runs — level × mix
           </span>
           <span className="flex-1" />
           <TuningModelLegend />

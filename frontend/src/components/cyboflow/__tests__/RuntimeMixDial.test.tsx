@@ -1,7 +1,7 @@
 /**
- * RuntimeMixDial (editor simple-page dial) — segment rendering, selection,
- * `mixedDisabled` gating the two cross-provider segments only, `busy`
- * swallowing clicks, and the per-mix description line
+ * RuntimeMixDial (editor simple-page dial) — card rendering, selection,
+ * `mixedDisabled` gating the two cross-provider cards only, `busy`
+ * swallowing clicks, and the per-card description copy
  * (plan `docs/plans/workflow-runtime-mix.md` D4).
  */
 import '@testing-library/jest-dom';
@@ -71,26 +71,27 @@ describe('RuntimeMixDial (editor)', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it('shows the description matching the selected mix', () => {
-    const { rerender } = render(
-      <RuntimeMixDial mix="claude" mixedDisabled={false} onSelect={vi.fn()} />,
-    );
-    expect(screen.getByTestId('runtime-mix-desc')).toHaveTextContent(
+  it('every card carries its own name and description copy', () => {
+    render(<RuntimeMixDial mix="claude" mixedDisabled={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByTestId('runtime-mix-segment-claude')).toHaveTextContent('Claude only');
+    expect(screen.getByTestId('runtime-mix-desc-claude')).toHaveTextContent(
       'Everything on Claude, model tailored to the task and effort level.',
     );
-
-    rerender(<RuntimeMixDial mix="claude-primary" mixedDisabled={false} onSelect={vi.fn()} />);
-    expect(screen.getByTestId('runtime-mix-desc')).toHaveTextContent(
+    expect(screen.getByTestId('runtime-mix-segment-claude-primary')).toHaveTextContent(
+      'Claude primary',
+    );
+    expect(screen.getByTestId('runtime-mix-desc-claude-primary')).toHaveTextContent(
       'Claude executes, Codex reviews & verifies.',
     );
-
-    rerender(<RuntimeMixDial mix="codex-primary" mixedDisabled={false} onSelect={vi.fn()} />);
-    expect(screen.getByTestId('runtime-mix-desc')).toHaveTextContent(
+    expect(screen.getByTestId('runtime-mix-segment-codex-primary')).toHaveTextContent(
+      'Codex primary',
+    );
+    expect(screen.getByTestId('runtime-mix-desc-codex-primary')).toHaveTextContent(
       'Codex executes, Claude reviews & verifies.',
     );
-
-    rerender(<RuntimeMixDial mix="codex" mixedDisabled={false} onSelect={vi.fn()} />);
-    expect(screen.getByTestId('runtime-mix-desc')).toHaveTextContent(
+    expect(screen.getByTestId('runtime-mix-segment-codex')).toHaveTextContent('Codex only');
+    expect(screen.getByTestId('runtime-mix-desc-codex')).toHaveTextContent(
       'Everything on Codex, model tailored to the task and effort level.',
     );
   });

@@ -45,6 +45,7 @@ import type {
   WorkflowStep,
 } from '../../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { CODEX_TIER_MODELS } from '../../../../shared/tuning/runtimeMix';
 
 /**
  * Per-model chip accent. Mid-tone hues chosen to stay legible on both the paper
@@ -59,8 +60,31 @@ export const MODEL_COLORS: Readonly<Record<AgentModelAlias, string>> = {
   fable: '#5a4ad6',
 };
 
+/**
+ * The Codex family's chip accents — the second half of the legend. Teal-band
+ * hues (vs. the Claude family's warm band) so the two providers separate at a
+ * glance, literal for the same both-themes reason as {@link MODEL_COLORS}.
+ */
+export const CODEX_TIER_COLORS: Readonly<Record<'luna' | 'sol', string>> = {
+  luna: '#2fa093',
+  sol: '#0b6e8e',
+};
+
+/** A Codex-routed chip's faint fill — the provider reads off the body, not just the spine. */
+const CODEX_FILL = 'rgba(14,124,134,0.06)';
+
+/** The short tier name for a pinned Codex provider-model id, or null when unrecognized. */
+function codexTierForProviderModel(providerModel: string | undefined): 'luna' | 'sol' | null {
+  if (providerModel === CODEX_TIER_MODELS.luna) return 'luna';
+  if (providerModel === CODEX_TIER_MODELS.sol) return 'sol';
+  return null;
+}
+
 /** Order the legend reads in — cheapest to strongest. */
 const LEGEND_ORDER: readonly AgentModelAlias[] = ['haiku', 'sonnet', 'opus', 'fable'];
+
+/** The Codex half of the legend, cheapest to strongest. */
+const CODEX_LEGEND_ORDER = ['luna', 'sol'] as const;
 
 /** An added step's accent (and its faint fill), shared with the chip renderer. */
 const ADDED_COLOR = '#2d8a5b';
@@ -80,7 +104,7 @@ export function TuningModelLegend(): React.JSX.Element {
   return (
     <span className="flex flex-row items-baseline gap-2" data-testid="tuning-model-legend">
       <span className="text-[8.5px] text-text-tertiary" style={{ letterSpacing: '0.08em' }}>
-        agent model:
+        claude:
       </span>
       {LEGEND_ORDER.map((model) => (
         <span
@@ -89,6 +113,18 @@ export function TuningModelLegend(): React.JSX.Element {
           style={{ letterSpacing: '0.08em', color: MODEL_COLORS[model] }}
         >
           ● {model}
+        </span>
+      ))}
+      <span className="text-[8.5px] text-text-tertiary" style={{ letterSpacing: '0.08em' }}>
+        · codex:
+      </span>
+      {CODEX_LEGEND_ORDER.map((tier) => (
+        <span
+          key={tier}
+          className="text-[8.5px] font-bold"
+          style={{ letterSpacing: '0.08em', color: CODEX_TIER_COLORS[tier] }}
+        >
+          ◆ {tier}
         </span>
       ))}
     </span>
@@ -220,6 +256,13 @@ interface ChipProps {
   isHumanGate: boolean;
   /** Colours the sub-label and the 3px left border when the step pins a model. */
   model: AgentModelAlias | null;
+  /**
+   * Set when the step is ROUTED TO CODEX (a `runtime` pin off the Claude
+   * provider — the runtime-mix transform's signature). Wins over `model` for
+   * the chip accents and adds the faint teal fill, so a mix's provider routing
+   * reads off the strip the same way the legend's second family promises.
+   */
+  codexTier: 'luna' | 'sol' | null;
   testId: string;
   /** Set on the sub-label only when it IS a pin, so tests can address it. */
   pinTestId?: string;
@@ -231,10 +274,12 @@ function StepChip({
   kind,
   isHumanGate,
   model,
+  codexTier,
   testId,
   pinTestId,
 }: ChipProps): React.JSX.Element {
-  const modelColor = model === null ? null : MODEL_COLORS[model];
+  const modelColor =
+    codexTier !== null ? CODEX_TIER_COLORS[codexTier] : model === null ? null : MODEL_COLORS[model];
   const border =
     kind === 'skip'
       ? '1px dashed var(--color-border-primary)'
@@ -250,7 +295,9 @@ function StepChip({
         ? ADDED_FILL
         : isHumanGate
           ? HUMAN_HATCH
-          : 'var(--color-surface-primary)';
+          : codexTier !== null
+            ? CODEX_FILL
+            : 'var(--color-surface-primary)';
   return (
     <span
       className="inline-flex flex-col"
@@ -325,21 +372,50 @@ function chipPropsFor(
         ? source.name
         : source.id;
   if (kind === 'skip' || source === undefined) {
-    return { label, sub: 'removed', kind: 'skip', isHumanGate: false, model: null, testId };
+    return { label, sub: 'removed', kind: 'skip', isHumanGate: false, model: null, codexTier: null, testId };
   }
   const agentKey = agentKeyOf(source);
   const isHumanGate = source.agent === HUMAN_GATE_AGENT;
   const config = definition.agentConfigs?.[agentKey];
+  const optional = source.optional === true ? ' · optional' : '';
+  // A non-Claude `runtime` pin (the runtime-mix transform's signature — the
+  // Claude `model` field survives it for flip-back, so it must NOT drive the
+  // tag here): the chip shows the CODEX tier · effort in the Codex accents.
+  const configuredRuntime = config?.runtime;
+  if (
+    !isHumanGate &&
+    configuredRuntime !== undefined &&
+    providerForRuntime(configuredRuntime) !== 'claude'
+  ) {
+    const providerModel = config?.providerModel ?? config?.codexModel;
+    const codexTier = codexTierForProviderModel(providerModel);
+    const tierLabel =
+      codexTier ??
+      (providerModel !== undefined && providerModel !== ''
+        ? providerModel
+        : WORKFLOW_AGENT_RUNTIME_LABELS[configuredRuntime]);
+    const sub = config?.effort !== undefined ? `${tierLabel} · ${config.effort}` : tierLabel;
+    return {
+      label,
+      sub: `${sub}${optional}`,
+      kind,
+      isHumanGate: false,
+      model: null,
+      codexTier,
+      testId,
+      pinTestId: `${testId}-pin`,
+    };
+  }
   const pin = isHumanGate ? null : pinLabel(config);
   // The model tag: the level's pin wins, else the agent's catalogue target.
   const fallback = targetSub(targets?.[agentKey]);
-  const optional = source.optional === true ? ' · optional' : '';
   return {
     label,
     sub: isHumanGate ? 'human' : `${pin ?? fallback.sub}${optional}`,
     kind,
     isHumanGate,
     model: isHumanGate ? null : (config?.model ?? fallback.model),
+    codexTier: null,
     testId,
     pinTestId: pin === null ? undefined : `${testId}-pin`,
   };

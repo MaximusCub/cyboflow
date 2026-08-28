@@ -13,7 +13,8 @@ import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
 import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
-import { MODEL_COLORS, TuningPhaseStrip } from '../TuningPhaseStrip';
+import { resolveEffectiveDefinitionWithMix } from '../../../../../shared/tuning/runtimeMix';
+import { CODEX_TIER_COLORS, MODEL_COLORS, TuningPhaseStrip } from '../TuningPhaseStrip';
 
 /** The sprint built-in at a level — the flow whose lane chain a level changes most. */
 function sprintAt(level: 'standard' | 'efficient') {
@@ -146,6 +147,29 @@ describe('TuningPhaseStrip', () => {
     render(<TuningPhaseStrip definition={standard} baselineDefinition={standard} />);
     expect(screen.getByTestId('tuning-lane-chip-implement-pin')).toHaveTextContent('sonnet · high');
     expect(screen.getByTestId('tuning-lane-chip-code-review-pin')).toHaveTextContent('opus · high');
+  });
+
+  it('renders a mix-routed step in the Codex tier accents, reading "tier · effort"', () => {
+    // The REAL sprint built-in through the display-side mix transform: at
+    // claude-primary the verification class flips to Codex while implement
+    // stays Claude — both providers on one strip, decoded by the two-family
+    // legend.
+    const mixed = resolveEffectiveDefinitionWithMix('sprint', null, 'standard', 'claude-primary');
+    if (mixed === null) throw new Error('sprint did not resolve at standard × claude-primary');
+    render(<TuningPhaseStrip definition={mixed} baselineDefinition={sprintAt('standard')} />);
+
+    // code-review: opus·high at standard -> sol·medium (one down), teal accents.
+    const codex = screen.getByTestId('tuning-lane-chip-code-review');
+    expect(screen.getByTestId('tuning-lane-chip-code-review-pin')).toHaveTextContent('sol · medium');
+    expect(subOf(codex)).toHaveStyle({ color: CODEX_TIER_COLORS.sol });
+    expect(codex).toHaveStyle({ borderLeft: `3px solid ${CODEX_TIER_COLORS.sol}` });
+
+    // implement keeps its Claude pin untouched — the retained `model` field on
+    // codex-routed configs never colours a chip Claude.
+    expect(screen.getByTestId('tuning-lane-chip-implement-pin')).toHaveTextContent('sonnet · high');
+    expect(subOf(screen.getByTestId('tuning-lane-chip-implement'))).toHaveStyle({
+      color: MODEL_COLORS.sonnet,
+    });
   });
 
   it('reads a human gate as "human" rather than as an agent', () => {
