@@ -789,6 +789,35 @@ describe('buildActionAnswerPrompt', () => {
     // The return-shape enum now lists the two control signals.
     expect(p).toContain('"confirm" | "cancel"');
   });
+
+  it('allows proactively staging a confirm-gated action when the monitor is confident of the fix, while keeping the one-action-per-reply and staging contract', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'the build keeps failing on the same step', history);
+    // Proactive staging is now allowed alongside the explicit-ask path — not a replacement for it.
+    expect(p).toContain('EXPLICITLY asks for it');
+    expect(p).toContain('PROACTIVELY');
+    expect(p).toContain('without being asked');
+    expect(p).toContain('describes a problem');
+    expect(p).toContain('CONFIDENT which single action fixes it');
+    // The reply must justify a proactive stage so the user can judge it before confirming.
+    expect(p).toContain('your reply MUST explain WHY you staged it');
+    // Still at most one action, still host-staged behind the confirm/cancel gate either way.
+    expect(p).toContain('AT MOST ONE action per reply');
+    expect(p).toContain('host-staged behind the confirm/cancel gate');
+    // retry_step / switch_to_orchestrated keep their own stricter, explicit-only contracts.
+    expect(p).toContain('must NEVER be attached proactively');
+    expect(p).toContain('"switch_to_orchestrated" also keeps its own stricter contract');
+  });
+
+  it('notes that sprint-lane failures are auto-triaged by the host, so the monitor should not promise manual intervention or duplicate a rescue', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'TASK-004 just failed, what do I need to do?', history);
+    expect(p).toContain('AUTO-TRIAGED by the host supervisor itself');
+    expect(p).toContain('logged as a finding in the run\'s review queue');
+    expect(p).toContain('do NOT tell the user a just-failed lane needs manual intervention');
+    expect(p).toContain('do NOT proactively stage an action that would duplicate a rescue');
+    expect(p).toContain("check the step timeline / review queue for that lane's triage outcome");
+  });
 });
 
 describe('DefaultMonitorSession.converse', () => {

@@ -620,14 +620,21 @@ Answer concisely and concretely, grounding your reply in the run's history above
  * per-lane `rewind_lane_to_step`), and review-queue actions
  * (`resolve_review_item`/`file_note`). The monitor may attach AT MOST ONE action
  * per reply. The ten steering kinds (task mutations, step control, run control,
- * review-queue, `file_note`) are HOST-STAGED: the model
+ * review-queue, `file_note`) may be attached either because the user explicitly
+ * asked, or PROACTIVELY — unprompted — when the user's message describes a problem
+ * and the model is confident which single one of them fixes it (the reply must say
+ * why it staged the action); either way they are all HOST-STAGED: the model
  * attaches the action, the host stages it (does NOT execute) and shows a pause marker,
  * and the model executes it on a LATER turn by attaching a `confirm` control (or
  * abandons it with `cancel`) — the confirmation is ENFORCED by the host, not merely
- * requested of the model. `retry_step` is single-turn (executes immediately) and
- * `switch_to_orchestrated` keeps its own suggest-first-in-reply contract. The host
- * (not the monitor) validates run state and executes the action — the monitor never
- * claims success itself. Pure (output depends only on its args); structured output
+ * requested of the model. `retry_step` is single-turn (executes immediately) so it
+ * must NEVER be attached proactively, and `switch_to_orchestrated` keeps its own
+ * suggest-first-in-reply contract — both keep their existing stricter, explicit-ask
+ * contracts unchanged. The host (not the monitor) validates run state and executes
+ * the action — the monitor never claims success itself. The capabilities list also
+ * tells the model that sprint-lane failures are auto-triaged by the host supervisor,
+ * so it neither promises manual intervention nor proactively duplicates a rescue the
+ * host already performed. Pure (output depends only on its args); structured output
  * shape is `{ reply, action? }` per `MONITOR_CONVERSE_SCHEMA`.
  */
 export function buildActionAnswerPrompt(
@@ -635,7 +642,7 @@ export function buildActionAnswerPrompt(
   question: string,
   history: MonitorHistory,
 ): string {
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and — only when explicitly asked and explicitly confirmed — attach a validated action for the host to execute.
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and attach a validated action for the host to execute — either because the user explicitly asks for it, or PROACTIVELY when the user's message describes a problem and you are confident which single action fixes it. Either way the host STAGES the action behind a confirm/cancel gate before it runs (see CONFIRM BEFORE YOU ACT below) — you never claim it already ran.
 
 Step timeline so far:
 ${digestSteps(history.steps)}${laneSection(history)}
@@ -647,7 +654,8 @@ The user asks:
 ${question}
 
 Capabilities:
-- You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it.
+- You may attach AT MOST ONE action per reply. Attach it when the user EXPLICITLY asks for it, OR PROACTIVELY — without being asked — when the user's message describes a problem and you are CONFIDENT which single action fixes it; when you stage proactively, your reply MUST explain WHY you staged it so the user can judge the proposal before confirming. Either way the action is host-staged behind the confirm/cancel gate (see CONFIRM BEFORE YOU ACT below) before it runs. "retry_step" is the one exception: it executes immediately rather than staging, so it must NEVER be attached proactively — only when the user explicitly asks for a retry. "switch_to_orchestrated" also keeps its own stricter contract below (suggest first, attach only after the user's explicit confirmation on a later turn).
+- Sprint-lane failures (a sprint/ship fan-out task lane failing a step) are AUTO-TRIAGED by the host supervisor itself — a bounded, audited rescue/adjust that is logged as a finding in the run's review queue — so do NOT tell the user a just-failed lane needs manual intervention, and do NOT proactively stage an action that would duplicate a rescue the host may have already performed; check the step timeline / review queue for that lane's triage outcome first.
 - Retrying / handover:
   - Action "retry_step": a retry, a resume, or a re-run of a failed or skipped step. Set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. This covers two cases: a FAILED or RESTING run, where it revives the run at the failed/skipped step; and a run currently PAUSED on a usage-limit item, where the host resolves that pause instead. Either way the host picks the right mechanism for the run's actual state and reports back which one happened. The HOST validates the run's state and reports the outcome back to the user — you never claim the retry succeeded yourself.
   - Action "switch_to_orchestrated": hand the ENTIRE run over to a full interactive agent that continues the remaining workflow conversationally. Offer this ONLY when the user's request cannot be served by "retry_step" or by simply answering — a freeform intervention such as "fix the conflict by hand then continue" or "change the approach for the remaining steps". NEVER attach it merely because a retry failed. Because it is ONE-WAY — the run does NOT return to step-by-step execution afterward — SUGGEST it in your reply first and WAIT for the user's EXPLICIT confirmation on a later turn before attaching it. In that suggestion, also warn the user that steps configured to run in a separate runtime (e.g. a Codex-pinned step) will be switched to this one — the single handover agent runs the entire remaining workflow itself. When you do attach it, set \`reason\` to a faithful 1-3 sentence summary of the user's outstanding request (what they want done after the handover). The HOST validates the run's state and executes the handover — you never claim it succeeded yourself.
@@ -666,7 +674,7 @@ Capabilities:
   - Action "file_note": file a non-blocking informational note into the run's review queue. Set \`title\` (required) and optionally \`body\`.
 - For a pure question (no explicit action request), return no action.
 
-CONFIRM BEFORE YOU ACT (host-enforced): when the user clearly wants a mutating action — any task edit, step-control, review-queue, or "file_note" action — ATTACH that action. The host will STAGE it (it does NOT execute yet) and show the user a pause marker asking them to confirm, so do NOT claim you already performed it. After the user EXPLICITLY confirms on the NEXT turn, attach an action of kind "confirm" to execute the staged action; if they decline or change their mind, attach kind "cancel" (or simply answer normally). A "confirm" with nothing staged does nothing, and a staged proposal EXPIRES if the very next turn is not a confirmation. "file_note" is low-risk but is still staged and confirmed the same way, for consistency. You may ask a clarifying question instead of attaching when the request is ambiguous (e.g. which task, which step, which review item). "retry_step" and "switch_to_orchestrated" are NOT staged this way — "retry_step" executes immediately, and "switch_to_orchestrated" keeps its own suggest-first-in-reply contract described above.
+CONFIRM BEFORE YOU ACT (host-enforced): when the user clearly wants a mutating action, or you are proactively proposing one to fix a problem they described — any task edit, step-control, review-queue, or "file_note" action — ATTACH that action. The host will STAGE it (it does NOT execute yet) and show the user a pause marker asking them to confirm, so do NOT claim you already performed it. After the user EXPLICITLY confirms on the NEXT turn, attach an action of kind "confirm" to execute the staged action; if they decline or change their mind, attach kind "cancel" (or simply answer normally). A "confirm" with nothing staged does nothing, and a staged proposal EXPIRES if the very next turn is not a confirmation. "file_note" is low-risk but is still staged and confirmed the same way, for consistency. You may ask a clarifying question instead of attaching when the request is ambiguous (e.g. which task, which step, which review item). "retry_step" and "switch_to_orchestrated" are NOT staged this way — "retry_step" executes immediately, and "switch_to_orchestrated" keeps its own suggest-first-in-reply contract described above.
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
 
