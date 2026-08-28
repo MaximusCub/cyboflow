@@ -195,10 +195,19 @@ function QuickCard({ row, nowMs }: { row: QuickSessionRow; nowMs: number }): Rea
 
 function CheckpointCard({
   approval,
+  quickSession,
   projectId,
   nowMs,
 }: {
   approval: Approval;
+  /**
+   * The quick-session row this approval belongs to, when its run is a
+   * `__quick__`-sentinel chat rather than a flow run. Quick runs are excluded
+   * from workflows.list, so routing them through setActiveRun strands the
+   * center pane on "Loading workflow…" — they must open via
+   * setActiveQuickSession instead (same split TypeGroupedQueue makes).
+   */
+  quickSession: QuickSessionRow | null;
   projectId: number;
   nowMs: number;
 }): React.JSX.Element {
@@ -282,7 +291,11 @@ function CheckpointCard({
         </button>
         <button
           type="button"
-          onClick={() => openRunSession(approval.runId, projectId)}
+          onClick={() =>
+            quickSession !== null
+              ? openQuickSession(quickSession.sessionId, quickSession.runId, projectId)
+              : openRunSession(approval.runId, projectId)
+          }
           className="ml-auto text-interactive hover:text-interactive-hover"
           style={{ fontSize: '11px' }}
         >
@@ -335,6 +348,12 @@ export function OverviewActiveAgents({
     for (const q of quick) if (q.runId !== null) ids.add(q.runId);
     return ids;
   }, [runs, quick]);
+  /** runId → quick-session row, so a chat approval routes via setActiveQuickSession. */
+  const quickByRunId = useMemo(() => {
+    const map = new Map<string, QuickSessionRow>();
+    for (const q of quick) if (q.runId !== null) map.set(q.runId, q);
+    return map;
+  }, [quick]);
   const checkpoints = useMemo(
     () => queue.filter((a) => projectRunIds.has(a.runId)),
     [queue, projectRunIds],
@@ -386,6 +405,7 @@ export function OverviewActiveAgents({
             <CheckpointCard
               key={approval.id}
               approval={approval}
+              quickSession={quickByRunId.get(approval.runId) ?? null}
               projectId={projectId}
               nowMs={nowMs}
             />

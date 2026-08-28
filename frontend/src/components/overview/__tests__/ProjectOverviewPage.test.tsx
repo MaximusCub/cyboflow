@@ -14,7 +14,7 @@
  * would test the stub.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
@@ -38,6 +38,7 @@ const {
   navigationStore,
   configStore,
   cyboflowStore,
+  quickInitDisposer,
 } = vi.hoisted(() => {
   function makeStore<T extends object>(initial: T): MockStore<T> {
     let state = initial;
@@ -49,22 +50,27 @@ const {
     };
     return hook;
   }
-  const teardown = () => () => {};
+  // App-owned singleton stores: their init() must NEVER be called by the page
+  // (calling + returning it as effect cleanup would tear down APP-level
+  // subscriptions on unmount — the Codex-review regression). Spies so the
+  // ownership test can assert zero calls.
+  const disposer = vi.fn();
   return {
+    quickInitDisposer: disposer,
     backlogStore: makeStore({
       tasks: [] as BacklogTaskItem[],
       boards: [] as Board[],
       projects: [{ id: 1, name: 'cyboflow' }],
-      init: teardown,
+      init: vi.fn(() => () => {}),
       setFilterProject: vi.fn(),
     }),
     activeRunsStore: makeStore({
       runsByProject: {} as Record<number, unknown[]>,
-      init: teardown,
+      init: vi.fn(() => () => {}),
       refresh: vi.fn().mockResolvedValue(undefined),
     }),
-    quickSessionsStore: makeStore({ rows: [] as unknown[], init: teardown }),
-    reviewQueueStore: makeStore({ queue: [] as unknown[], init: teardown }),
+    quickSessionsStore: makeStore({ rows: [] as unknown[], init: vi.fn(() => disposer) }),
+    reviewQueueStore: makeStore({ queue: [] as unknown[], init: vi.fn(() => () => {}) }),
     navigationStore: makeStore({
       openHumanReview: vi.fn(),
       openBacklog: vi.fn(),
@@ -74,7 +80,12 @@ const {
       goToSession: vi.fn(),
     }),
     configStore: makeStore({ config: { sprintMaxTasks: undefined } }),
-    cyboflowStore: makeStore({ activeRunId: null, initModel: null, setActiveRun: vi.fn() }),
+    cyboflowStore: makeStore({
+      activeRunId: null,
+      initModel: null,
+      setActiveRun: vi.fn(),
+      setActiveQuickSession: vi.fn(),
+    }),
   };
 });
 
@@ -109,6 +120,8 @@ vi.mock('../../../trpc/client', () => ({
 
 import { ProjectOverviewPage } from '../ProjectOverviewPage';
 import { OVERVIEW_DISMISSED_KEY } from '../overviewModel';
+import type { Approval } from '../../../../../shared/types/approvals';
+import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -277,5 +290,96 @@ describe('ProjectOverviewPage — recommended-action dismissal', () => {
     mount([]);
     expect(await screen.findByTestId('overview-action-launch-planner')).toBeInTheDocument();
     expect(screen.queryByTestId('overview-action-capture-idea')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. Store-init ownership (Codex-review regression)
+// ---------------------------------------------------------------------------
+
+describe('ProjectOverviewPage — store-init ownership', () => {
+  it('never init()s the app-owned singleton stores, and disposes only its own ref-counted quick-sessions handle on unmount', () => {
+    backlogStore.__set({ tasks: [], boards: [BOARD] });
+    const { unmount } = render(<ProjectOverviewPage projectId={1} />);
+
+    // App.tsx owns these three for the app's lifetime; their init() returns the
+    // ONE cached global teardown, so a page-scoped call would sever app-wide
+    // subscriptions on unmount.
+    expect(backlogStore.getState().init).not.toHaveBeenCalled();
+    expect(reviewQueueStore.getState().init).not.toHaveBeenCalled();
+    expect(activeRunsStore.getState().init).not.toHaveBeenCalled();
+
+    // The one store the page DOES own a mount/unmount pair for.
+    expect(quickSessionsStore.getState().init).toHaveBeenCalledTimes(1);
+    expect(quickInitDisposer).not.toHaveBeenCalled();
+    unmount();
+    expect(quickInitDisposer).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Checkpoint navigation (Codex-review regression)
+// ---------------------------------------------------------------------------
+
+function quickRow(over: Partial<QuickSessionRow> = {}): QuickSessionRow {
+  return {
+    sessionId: 'sess-q1',
+    name: 'release prep',
+    projectId: 1,
+    runId: 'run-q1',
+    state: 'blocked',
+    idleSince: null,
+    unviewed: false,
+    restedAtIso: null,
+    rawStatus: 'running',
+    exitCode: null,
+    summary: null,
+    summaryState: null,
+    waitingOn: null,
+    summarySupported: true,
+    worktreeName: 'dusty-sparrow',
+    git: null,
+    ...over,
+  };
+}
+
+function approval(over: Partial<Approval> = {}): Approval {
+  return {
+    id: 'appr-1',
+    runId: 'run-q1',
+    workflowName: '__quick__',
+    toolName: 'Bash',
+    payloadPreview: 'git push -u origin dusty-sparrow',
+    rationale: 'Pushing the session branch.',
+    createdAt: '2026-08-28T00:00:00.000Z',
+    status: 'pending',
+    sessionName: 'release prep',
+    agentProvider: 'claude',
+    awaited: true,
+    ...over,
+  };
+}
+
+describe('ProjectOverviewPage — checkpoint navigation', () => {
+  it("a quick-session approval's Open in session routes via setActiveQuickSession, never setActiveRun", async () => {
+    // A __quick__-sentinel run cannot resolve a workflow definition, so
+    // setActiveRun would strand the center pane on "Loading workflow…".
+    const user = userEvent.setup();
+    quickSessionsStore.__set({ rows: [quickRow()] });
+    reviewQueueStore.__set({ queue: [approval()] });
+    mount([]);
+
+    const card = await screen.findByTestId('overview-checkpoint-appr-1');
+    await user.click(within(card).getByRole('button', { name: 'Open in session →' }));
+
+    expect(cyboflowStore.getState().setActiveQuickSession).toHaveBeenCalledWith(
+      'sess-q1',
+      'run-q1',
+    );
+    expect(cyboflowStore.getState().setActiveRun).not.toHaveBeenCalled();
+    expect(navigationStore.getState().goToSession).toHaveBeenCalled();
+
+    quickSessionsStore.__set({ rows: [] });
+    reviewQueueStore.__set({ queue: [] });
   });
 });

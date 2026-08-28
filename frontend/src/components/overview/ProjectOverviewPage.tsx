@@ -12,12 +12,14 @@
  *
  * ## Data
  * Live data comes from the EXISTING stores, each wired per its own contract:
- *   - backlogStore.init()      (global, cross-project; narrowed client-side by
- *                              `filterTasks`, exactly as BacklogPane does)
- *   - activeRunsStore          (init() for the lifecycle subscriptions +
- *                              refresh(projectId) for this project's rows)
- *   - quickSessionsStore.init() (ref-counted 3s poll)
- *   - reviewQueueStore.init()  (full resync + approval subscriptions)
+ *   - backlogStore / reviewQueueStore / activeRunsStore are APP-OWNED
+ *     singletons: App.tsx init()s each at the app-shell level for the app's
+ *     lifetime, so this page only READS them (plus a per-project
+ *     activeRunsStore.refresh). Their init() returns the ONE cached global
+ *     teardown, so a page-scoped init effect here would hand React the app's
+ *     own unsubscribe and sever live updates app-wide on unmount.
+ *   - quickSessionsStore.init() (genuinely ref-counted 3s poll — the one
+ *     store this page does own a mount/unmount pair for)
  *
  * The three RECOMMENDATION inputs that no store owns (workflow run stats, the
  * verification setup rows, the project's tracker connections) are plain
@@ -47,7 +49,6 @@ import { filterTasks } from '../Backlog/backlogSelectors';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuickSessionsStore } from '../../stores/quickSessionsStore';
-import { useReviewQueueStore } from '../../stores/reviewQueueStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { trpc } from '../../trpc/client';
 import type { BacklogTaskItem, BoardStage } from '../../../../shared/types/tasks';
@@ -74,10 +75,13 @@ export interface ProjectOverviewPageProps {
 
 export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): React.JSX.Element {
   // -- Store wiring ---------------------------------------------------------
-  useEffect(() => useBacklogStore.getState().init(), []);
+  // backlogStore / reviewQueueStore / activeRunsStore are deliberately NOT
+  // init()'d here: App.tsx owns their app-lifetime init, and their idempotent
+  // init() returns the same cached GLOBAL unsubscribe — returning it from a
+  // page effect would tear down app-wide subscriptions when this page unmounts
+  // (e.g. on opening a run). quickSessionsStore is ref-counted, so its
+  // mount/unmount pair is safe.
   useEffect(() => useQuickSessionsStore.getState().init(), []);
-  useEffect(() => useReviewQueueStore.getState().init(), []);
-  useEffect(() => useActiveRunsStore.getState().init(), []);
   useEffect(() => {
     void useActiveRunsStore.getState().refresh(projectId);
   }, [projectId]);
