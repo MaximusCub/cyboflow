@@ -316,8 +316,10 @@ export interface SessionGitOpsLike {
    * project main branch and the origin branch): this is one `git branch
    * --show-current` per call, cheap enough to fire lazily on hover. A detached
    * HEAD resolves to the short SHA (gitPlumbingCommands.getCurrentBranch's own
-   * fallback); `branch` is null only for an unreadable or archived worktree, and
-   * callers show nothing rather than guessing.
+   * fallback). `branch` is null when the session has no branch of its own to
+   * report — archived, unreadable, or a husk directory inside the project
+   * checkout whose worktree is gone (an unguarded read there would answer with
+   * the PROJECT's branch); callers show nothing rather than that.
    */
   getCurrentBranch(request: {
     sessionId: string;

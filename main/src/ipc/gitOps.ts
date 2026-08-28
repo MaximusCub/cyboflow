@@ -41,6 +41,7 @@ import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { ALREADY_UP_TO_DATE_CODE } from '../services/worktreeManager';
 import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCommands';
+import * as fs from 'fs';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
@@ -52,6 +53,23 @@ interface GitError extends Error {
   workingDirectory?: string;
   projectPath?: string;
   originalError?: Error;
+}
+
+/**
+ * Whether `worktreePath` is itself the root of the repo git resolves from it,
+ * rather than a plain directory sitting inside some enclosing checkout. Guards
+ * the branch read in getCurrentBranch — see the comment there for why a bare
+ * read is a confidently-wrong answer instead of an error.
+ */
+function isOwnRepoRoot(worktreePath: string): boolean {
+  try {
+    const toplevel = runGit(worktreePath, ['rev-parse', '--show-toplevel']).trim();
+    if (!toplevel) return false;
+    return fs.realpathSync(toplevel) === fs.realpathSync(worktreePath);
+  } catch {
+    // Not a repo, or the directory is gone — either way there is no branch to show.
+    return false;
+  }
 }
 
 /**
@@ -1813,6 +1831,18 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // An archived session's worktree is gone; readCurrentBranch would only log
       // a missing-directory warning per hover, so short-circuit to null.
       if (session.archived) {
+        return { success: true, data: { branch: null } };
+      }
+      // Every git read walks UP to the nearest enclosing repo. A session whose
+      // worktree was removed or never finished being created leaves a husk
+      // directory INSIDE the project checkout, so an unguarded branch read
+      // there answers with the PROJECT's branch ("main") — a confident wrong
+      // answer, not an error. Trust the branch only when the repo root git
+      // resolves IS this session's own path; realpath both sides so a symlinked
+      // checkout (/tmp -> /private/tmp) does not read as a mismatch. An in-place
+      // session passes this by construction: its worktreePath IS the checkout,
+      // so it legitimately reports the project's branch.
+      if (!isOwnRepoRoot(session.worktreePath)) {
         return { success: true, data: { branch: null } };
       }
       return { success: true, data: { branch: readCurrentBranch(session.worktreePath) } };
