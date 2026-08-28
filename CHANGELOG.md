@@ -6,10 +6,29 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-08-28
+
 ### Added
 
-- **Autonomous lane triage.** When a sprint/ship fan-out lane exhausts an automatic budget (inner-step loopbacks, code-review blocking, task-verify FAIL, or the visual merge gate), the run's monitor is now consulted before the lane settles failed. It can rescue the lane — rewind it to an earlier inner step with supervisor guidance threaded into every later spawn — or, on concrete evidence that the task's acceptance criteria conflict with repo reality, autonomously adjust the task body first (through the TaskChangeRouter chokepoint) and then rescue. Bounded (one rescue per lane, four per run), fail-safe (any doubt settles the lane exactly as before), audited via a non-blocking review-queue finding, and disabled with `CYBOFLOW_DISABLE_LANE_TRIAGE=1`. A merge-gate rescue revives the already-settled lane row and re-verifies under a fresh attempt so a passing re-run supersedes the stale blocking finding.
+- **Workflow tuning levels.** The workflow editor becomes a two-page surface with a tuning dial (Quick / Standard / Thorough / Custom): a level picks the per-agent model tier across the whole flow, with per-level token estimates derived from `run_usage` medians, a three-way save prompt, and a per-run tuning-level override from the launch wizard. All six built-in flows are calibrated, and Standard pins the aligned-defaults models (migration 122).
+- **Runtime mix.** A runtime-mix dial on the workflow editor and launch wizard lets a flow pair a primary and secondary provider per level, with the mix stamped onto runs and surfaced on the MCP compact row (migration 128).
+- **Autonomous lane triage.** When a sprint/ship fan-out lane exhausts an automatic budget (inner-step loopbacks, code-review blocking, task-verify FAIL, or the visual merge gate), the run's monitor is consulted before the lane settles failed. It can rescue the lane — rewind it to an earlier inner step with supervisor guidance threaded into every later spawn — or, on concrete evidence that the task's acceptance criteria conflict with repo reality, autonomously adjust the task body first (through the TaskChangeRouter chokepoint) and then rescue. Bounded (one rescue per lane, four per run), fail-safe (any doubt settles the lane exactly as before), audited via a non-blocking review-queue finding, and disabled with `CYBOFLOW_DISABLE_LANE_TRIAGE=1`. A merge-gate rescue revives the already-settled lane row and re-verifies under a fresh attempt so a passing re-run supersedes the stale blocking finding.
 - **Proactive monitor staging.** The monitor chat may now stage a confirm-gated action unprompted when the user describes a problem it is confident it can fix — still one action per reply, still behind the confirm/cancel gate — and its prompt tells it lane failures self-heal so it doesn't duplicate a rescue or promise manual intervention.
+- **A/B variants scoped to a tuning level.** Variant surfaces (manager, pickers, A/B modal) and rotation experiments are scoped to a tuning level, with an experiment's baseline arm pinned to the variant arm's level (migration 126).
+- **Image attachments in the run/monitor chat**, with a workflow run id accepted as an attachment owner.
+- **Wizard redesign.** A redesigned Configure step, a base-branch picker in Advanced settings, per-level helper sentences, and the Mode row hidden when a provider has no CLI lane for the launch.
+- **Per-project trust prompt** for repo-supplied permission allow rules, and the global assistant can now propose backlog creates.
+
+### Changed
+
+- **`raw_events` archiving.** Daily backups no longer copy `raw_events` into every snapshot; the table is archived into partitioned delta files by lineage, with shard validation and a restore path.
+- Compound's three agent steps split across three agents; OMP and pi gain runtime-adapter prompt envelopes; Pi is gated behind Aria mode.
+- The run/session status state machine is enforced at every write site, and the too-new-schema gate runs before any DB mutation.
+- A session's branch shows in the sidebar hover tooltip (and a session whose worktree is gone no longer reports the project's branch).
+
+### Security
+
+- DOMPurify bumped 3.2.6 → 3.4.14, closing all open sanitizer advisories; the remaining prod-audit advisory backlog cleared via pnpm overrides + direct-dependency bumps.
 
 ## [0.2.8] — 2026-08-27
 
