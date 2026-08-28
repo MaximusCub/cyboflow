@@ -39,6 +39,7 @@ import {
   type ExperimentArm,
   type WorkflowVariantRow,
 } from '../../../../shared/types/experiments';
+import { TUNING_LEVELS, type TuningLevel } from '../../../../shared/tuning/workflowTuning';
 
 /** Recorded launch invocation: which arm + the launchOptions the launcher received. */
 interface RecordedLaunch {
@@ -48,6 +49,7 @@ interface RecordedLaunch {
         requestedVariantId?: string;
         experiment?: { experimentId: string; arm: ExperimentArm };
         baseline?: boolean;
+        tuningLevel?: TuningLevel;
       }
     | undefined;
 }
@@ -96,11 +98,21 @@ function buildDb(): Database.Database {
   return db;
 }
 
+/**
+ * A variant id containing a level name carries that level (migration 125) —
+ * mirrors the router test's '...-sprint' → workflow convention, and keeps the
+ * level visible at every call site instead of hidden in harness plumbing.
+ * Anything else is level-less, i.e. a variant of a flow outside the level system.
+ */
+function levelOf(id: string): TuningLevel | null {
+  return TUNING_LEVELS.find((l) => id.includes(l)) ?? null;
+}
+
 function variant(id: string): WorkflowVariantRow {
   return {
     id, workflow_id: 'wf', label: id, spec_json: '{}', agent_overrides_json: null,
     model: null, execution_model: null, agent_provider: null, agent_runtime: null,
-    weight: 1, status: 'draft', archived_at: null, tuning_level: null, created_at: '', updated_at: '',
+    weight: 1, status: 'draft', archived_at: null, tuning_level: levelOf(id), created_at: '', updated_at: '',
   };
 }
 
@@ -627,5 +639,79 @@ describe('quick-arm config persistence + rerun replay (migration 098)', () => {
 
     expect(h.armSessionCalls).toHaveLength(4);
     expect(h.armSessionCalls[2]!.quickConfig).toBeUndefined();
+  });
+});
+
+describe('arm tuning level (migration 125)', () => {
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+  });
+
+  it('pins BOTH arms to the variant arm’s level, so the baseline runs that level and not the flow’s parked one', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: BASELINE_VARIANT_SENTINEL,
+      variantBId: 'vB-thorough',
+    });
+    expect(res.experimentId).toBeTruthy();
+
+    // The baseline arm has no variant to freeze a graph, so without the override
+    // it would materialize whatever level the workflow is parked on today.
+    expect(armLaunch(h, 'A')?.opts).toMatchObject({ baseline: true, tuningLevel: 'thorough' });
+    // The variant arm carries it too: a SAME-level pin is coherent post-125, and
+    // sending it makes the comparison's level explicit at both ends.
+    expect(armLaunch(h, 'B')?.opts).toMatchObject({
+      requestedVariantId: 'vB-thorough',
+      tuningLevel: 'thorough',
+    });
+  });
+
+  it('sends NO level for a level-less variant (a flow outside the level system)', async () => {
+    const h = makeHarness();
+    await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: BASELINE_VARIANT_SENTINEL,
+      variantBId: 'vB',
+    });
+    expect(armLaunch(h, 'A')?.opts?.tuningLevel).toBeUndefined();
+    expect(armLaunch(h, 'B')?.opts?.tuningLevel).toBeUndefined();
+  });
+
+  it('a RERUN re-derives the level from the variant, so a since-moved flow cannot re-level the baseline', async () => {
+    const h = makeHarness();
+    setExperimentsDeps(h.deps);
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf',
+      variantAId: BASELINE_VARIANT_SENTINEL,
+      variantBId: 'vB-efficient',
+    });
+    updateExperimentStatus(h.deps.db, res.experimentId, 'decided');
+
+    const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
+    await caller.rerun({ experimentId: res.experimentId });
+
+    // Launches 0/1 are the source; 2/3 are the rerun. The rerun replays the arm
+    // IDS, so the level must come back off the variant — this is the path where
+    // a flow moved to another level between the original and the repeat.
+    expect(h.launches).toHaveLength(4);
+    expect(h.launches[2]!.opts).toMatchObject({ baseline: true, tuningLevel: 'efficient' });
+    expect(h.launches[3]!.opts).toMatchObject({ tuningLevel: 'efficient' });
+  });
+
+  it('still rejects a head-to-head whose two variants sit at DIFFERENT levels', async () => {
+    const h = makeHarness();
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf',
+        variantAId: 'vA-efficient',
+        variantBId: 'vB-thorough',
+      }),
+    ).rejects.toThrow(/different tuning levels/i);
   });
 });

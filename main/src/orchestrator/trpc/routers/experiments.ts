@@ -126,6 +126,14 @@ export interface ExperimentsLaunchLike {
       requestedVariantId?: string;
       experiment?: { experimentId: string; arm: ExperimentArm };
       baseline?: boolean;
+      /**
+       * Per-run tuning level (migration 125). An A/B arm sets this to the level
+       * its opponent variant challenges, so a BASELINE arm materializes that
+       * level's graph instead of whatever level the flow is parked on — see the
+       * `armLevel` derivation in startExperiment. Structural parity with
+       * RunLauncher.launch's `launchOptions.tuningLevel`.
+       */
+      tuningLevel?: TuningLevel;
     },
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }>;
 }
@@ -675,7 +683,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   // freezes one level's graph, so an Efficient-vs-Thorough head-to-head is a
   // comparison of LEVELS wearing variant labels — the winner would be adopted as
   // the flow's definition on the strength of a difference neither variant made.
-  // A baseline / quick arm has no level of its own and pairs with either.
+  // A quick arm genuinely has no level (it runs no workflow graph at all).
   if (variantA && variantB && (variantA.tuning_level ?? null) !== (variantB.tuning_level ?? null)) {
     throw new TRPCError({
       code: 'BAD_REQUEST',
@@ -684,6 +692,23 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         `'${variantB.tuning_level ?? 'none'}') — a head-to-head compares variants within one level`,
     });
   }
+  // The level the WHOLE experiment runs at: the one its real variant arm(s)
+  // challenge. A BASELINE arm has no level of its own — it runs the flow's live
+  // spec — so left alone it materializes at whatever level the workflow is
+  // PARKED on today, which need not be the level its opponent froze. That gap is
+  // reachable through `rerun`, which replays a settled experiment's arm ids: a
+  // Standard baseline-vs-variant test rerun after the flow moved to Thorough
+  // would pit a Thorough baseline against a frozen Standard variant, and the
+  // winner could then be adopted as the flow's definition on the strength of a
+  // level difference neither arm chose. Pinning BOTH arms to the variant's level
+  // holds the comparison still. (A same-level pin is coherent post-125, so the
+  // variant arm accepts the override too — createRun rejects only a FOREIGN-level
+  // pin.) A null level means a non-built-in flow's variant, i.e. a flow outside
+  // the level system, where no override is valid at all.
+  const armVariant = variantA ?? variantB;
+  const armTuningLevel: TuningLevel | null = armVariant?.tuning_level ?? null;
+  const armLevel: { tuningLevel?: TuningLevel } =
+    armTuningLevel !== null ? { tuningLevel: armTuningLevel } : {};
 
   // 1b. Validate seed idea (if given).
   let seed: SeedIdeaFields | null = null;
@@ -940,8 +965,8 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         // so the launcher's VariantResolver returns null WITHOUT rotating. A real-variant
         // arm pins its variant explicitly. Both carry the experiment/arm stamp.
         aIsBaseline
-          ? { baseline: true, experiment: { experimentId: exp.id, arm: 'A' } }
-          : { requestedVariantId: input.variantAId, experiment: { experimentId: exp.id, arm: 'A' } },
+          ? { baseline: true, ...armLevel, experiment: { experimentId: exp.id, arm: 'A' } }
+          : { requestedVariantId: input.variantAId, ...armLevel, experiment: { experimentId: exp.id, arm: 'A' } },
       );
       runAId = armA.runId;
     }
@@ -969,8 +994,8 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         undefined,
         undefined,
         bIsBaseline
-          ? { baseline: true, experiment: { experimentId: exp.id, arm: 'B' } }
-          : { requestedVariantId: input.variantBId, experiment: { experimentId: exp.id, arm: 'B' } },
+          ? { baseline: true, ...armLevel, experiment: { experimentId: exp.id, arm: 'B' } }
+          : { requestedVariantId: input.variantBId, ...armLevel, experiment: { experimentId: exp.id, arm: 'B' } },
       );
       runBId = armB.runId;
     }

@@ -378,8 +378,12 @@ export class RunLauncher {
       // wizard's "run this once at Efficient/Thorough/…" choice, threaded into
       // WorkflowRegistry.createRun, which validates it, materializes the run's
       // spec from it, and stamps workflow_runs.tuning_level. Never writes the
-      // workflows row. Mutually exclusive with requestedVariantId (createRun
-      // rejects the pair); see the baseline forcing below for the rotation half.
+      // workflows row. NOT mutually exclusive with requestedVariantId since
+      // migration 125: a variant belongs to one level's pool, so an override
+      // paired with a SAME-level pin is coherent and allowed — createRun rejects
+      // only a pin from a different level. The override also picks the ROTATION
+      // pool (see resolveEffectiveTuningLevel at the launch site below); it no
+      // longer forces the baseline arm.
       tuningLevel?: TuningLevel;
       // INTERNAL restart provenance (plan D4) — set only by runs.restart, never
       // by a tRPC input. Carries the failed run's EXACT frozen spec (recovered
