@@ -573,9 +573,12 @@ export class ConfigManager extends EventEmitter {
 
   /**
    * True when `provider` may be OFFERED on this install — the Aria gate alone,
-   * ignoring the access toggle. The renderer reads this to decide whether to
-   * render a provider's Settings card at all; a gated-out provider has no
-   * toggle to show, so there is nothing for the user to switch.
+   * ignoring the access toggle. The main-side twin of the renderer's
+   * `useIsAgentProviderSurfaced`, which is what actually decides whether a
+   * provider's Settings card renders (the renderer reads the config store, not
+   * this). Kept for a main-side caller that needs to distinguish "gated off this
+   * install" from "switched off by the user" — `isAgentProviderEnabled` above
+   * collapses the two.
    */
   isAgentProviderSurfaced(provider: AgentProvider): boolean {
     return isProviderSurfaced(provider, this.getAriaMode());

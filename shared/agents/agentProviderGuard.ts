@@ -48,6 +48,7 @@
 import {
   AGENT_PROVIDER_LABELS,
   formatAgentProviderDisabled,
+  isProviderAriaGated,
   type AgentProvider,
 } from '../types/agentRuntime';
 
@@ -60,14 +61,21 @@ export class AgentProviderDisabledError extends Error {
   readonly provider: AgentProvider;
 
   constructor(provider: AgentProvider, context: string) {
+    // An ARIA-GATED provider renders no Settings card, so "turn it back on in
+    // Settings" is an instruction the user cannot follow — the row it points at
+    // does not exist. A session created before the gate shipped hits exactly
+    // this on resume, so the two cases need different sentences.
+    const remedy = isProviderAriaGated(provider)
+      ? `${AGENT_PROVIDER_LABELS[provider]} is not available on this install. ` +
+        `Turn on Aria mode in Settings → General to use it, or switch this session to another provider.`
+      : `Turn ${AGENT_PROVIDER_LABELS[provider]} back on in Settings → Integrations to continue.`;
     // Carries the machine prefix (shared/types/agentRuntime) because every IPC
     // surface flattens this to a bare string — the renderer parses it back into
     // {provider, message} to show the reason plus an "Open Settings" affordance.
     super(
       formatAgentProviderDisabled(
         provider,
-        `${AGENT_PROVIDER_LABELS[provider]} is turned off, so ${context} cannot run. ` +
-          `Turn ${AGENT_PROVIDER_LABELS[provider]} back on in Settings → Integrations to continue.`,
+        `${AGENT_PROVIDER_LABELS[provider]} is turned off, so ${context} cannot run. ${remedy}`,
       ),
     );
     this.name = 'AgentProviderDisabledError';

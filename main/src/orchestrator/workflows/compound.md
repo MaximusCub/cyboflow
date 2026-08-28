@@ -115,7 +115,7 @@ from plugin state files:
 >    record of what you are about to apply; the seeded run has no approve gate
 >    (the human already triaged), so publish it, then proceed straight to
 >    write-back.
->    2. **write-back** → delegate the FILE EDITS to `cyboflow-compound-writeback`
+> 2. **write-back** → delegate the FILE EDITS to `cyboflow-compound-writeback`
 >    (`subagent_type: "cyboflow-compound-writeback"`), passing the findings whose
 >    target is `fix` or `docs` **in the order returned** (already P0 → P1 → P2)
 >    with each one's bucket and body; it applies them in place and returns
