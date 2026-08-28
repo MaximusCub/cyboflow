@@ -15,6 +15,8 @@ import {
   DATABASE_BACKUP_TICK_INTERVAL_MS,
   DATABASE_BACKUP_RETAIN_COUNT,
 } from '../databaseBackupService';
+import { processSnapshot } from '../databaseBackupSnapshot';
+import { restoreRawEvents } from '../databaseBackupRestore';
 
 const FIXED_NOW = () => new Date('2026-08-20T10:00:00');
 
@@ -201,5 +203,170 @@ describe('DatabaseBackupService', () => {
       // A second stop() must be safe (no throw).
       expect(() => svc.stop()).not.toThrow();
     });
+  });
+});
+
+/**
+ * The raw_events delta archive, driven through the SERVICE rather than the
+ * snapshot module directly — these prove the wiring: which directory deltas
+ * land in, that retention never touches them, and that a processing failure
+ * downgrades to an honest full copy instead of publishing a mangled one.
+ *
+ * The processor is injected in-process here. Production runs it on a worker
+ * thread (see databaseBackupService.runSnapshotWorker), which is deliberately
+ * not exercised from vitest: the worker loads a COMPILED sibling out of dist.
+ */
+describe('DatabaseBackupService — raw_events delta archive', () => {
+  /** Give the live DB a runs table and an append-only event log. */
+  function seedEvents(count: number): void {
+    db.exec('CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, name TEXT)');
+    db.exec(
+      `CREATE TABLE raw_events (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         run_id TEXT NOT NULL,
+         event_type TEXT NOT NULL,
+         payload_json TEXT NOT NULL
+       )`,
+    );
+    db.prepare('INSERT INTO workflow_runs (id, name) VALUES (?, ?)').run('run-1', 'alpha');
+    const insert = db.prepare('INSERT INTO raw_events (run_id, event_type, payload_json) VALUES (?, ?, ?)');
+    db.transaction(() => {
+      for (let i = 0; i < count; i++) insert.run('run-1', 'user', `payload-${i}`);
+    })();
+  }
+
+  function countEvents(path: string): number {
+    const snapshot = new Database(path, { readonly: true, fileMustExist: true });
+    try {
+      return (snapshot.prepare('SELECT COUNT(*) AS n FROM raw_events').get() as { n: number }).n;
+    } finally {
+      snapshot.close();
+    }
+  }
+
+  const inProcess = async (options: Parameters<typeof processSnapshot>[0]) => processSnapshot(options);
+
+  it('archives into a raw-events subdirectory of the backups dir by default', async () => {
+    seedEvents(12);
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      logger: makeSpyLogger(),
+      now: FIXED_NOW,
+      processSnapshot: inProcess,
+    });
+
+    await svc.tick();
+
+    expect(readdirSync(join(backupsDir, 'raw-events'))).toEqual(['raw-events-1-12.db']);
+    expect(countEvents(join(backupsDir, 'sessions-2026-08-20.db'))).toBe(0);
+  });
+
+  it('honours an explicit delta directory', async () => {
+    seedEvents(4);
+    const deltaDir = join(tmpDir, 'elsewhere');
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      deltaDir,
+      logger: makeSpyLogger(),
+      now: FIXED_NOW,
+      processSnapshot: inProcess,
+    });
+
+    await svc.tick();
+
+    expect(readdirSync(deltaDir)).toEqual(['raw-events-1-4.db']);
+  });
+
+  it('round-trips a backup back to the live database through the deltas', async () => {
+    seedEvents(30);
+    const expected = db.prepare('SELECT id, payload_json FROM raw_events ORDER BY id').all();
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      logger: makeSpyLogger(),
+      now: FIXED_NOW,
+      processSnapshot: inProcess,
+    });
+
+    await svc.tick();
+    const backupPath = join(backupsDir, 'sessions-2026-08-20.db');
+    restoreRawEvents(backupPath, join(backupsDir, 'raw-events'));
+
+    const restored = new Database(backupPath, { readonly: true, fileMustExist: true });
+    try {
+      expect(restored.prepare('SELECT id, payload_json FROM raw_events ORDER BY id').all()).toEqual(expected);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it('never prunes delta files with the daily backups', async () => {
+    seedEvents(5);
+    mkdirSync(backupsDir, { recursive: true });
+    for (let day = 1; day <= DATABASE_BACKUP_RETAIN_COUNT + 3; day++) {
+      writeFileSync(join(backupsDir, `sessions-2026-07-${String(day).padStart(2, '0')}.db`), '');
+    }
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      logger: makeSpyLogger(),
+      now: FIXED_NOW,
+      processSnapshot: inProcess,
+    });
+
+    await svc.tick();
+
+    // The daily files are down to the retention window...
+    const dailies = readdirSync(backupsDir).filter((f) => f.startsWith('sessions-'));
+    expect(dailies).toHaveLength(DATABASE_BACKUP_RETAIN_COUNT);
+    // ...but the archive, which is the ONLY copy of that history, is intact.
+    expect(readdirSync(join(backupsDir, 'raw-events'))).toEqual(['raw-events-1-5.db']);
+  });
+
+  it('publishes an unprocessed FULL copy when processing fails', async () => {
+    seedEvents(9);
+    const logger = makeSpyLogger();
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      logger,
+      now: FIXED_NOW,
+      processSnapshot: async () => {
+        throw new Error('worker exploded');
+      },
+    });
+
+    await svc.tick();
+
+    const targetPath = join(backupsDir, 'sessions-2026-08-20.db');
+    expect(existsSync(targetPath)).toBe(true);
+    // An oversized backup is still a complete backup — and it must be a REAL
+    // full copy, not the half-processed partial.
+    expect(countEvents(targetPath)).toBe(9);
+    expect(readWidgetNames(targetPath)).toEqual(['alpha', 'beta']);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('snapshot processing failed'),
+      expect.anything(),
+    );
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('UNPROCESSED full daily backup'));
+  });
+
+  it('leaves no partial behind when processing fails', async () => {
+    seedEvents(3);
+    const svc = new DatabaseBackupService({
+      db,
+      backupsDir,
+      logger: makeSpyLogger(),
+      now: FIXED_NOW,
+      processSnapshot: async () => {
+        throw new Error('worker exploded');
+      },
+    });
+
+    await svc.tick();
+
+    expect(readdirSync(backupsDir)).toEqual(['sessions-2026-08-20.db']);
   });
 });

@@ -27,6 +27,22 @@
  * complete, consistent snapshot regardless of WAL state, without blocking
  * writers, and runs on a background thread.
  *
+ * WHY raw_events IS ARCHIVED SEPARATELY. `raw_events` is roughly 80% of the
+ * database, so copying it into all seven retained backups is where this
+ * directory's bulk comes from. It is NOT disposable — the `messages` table is
+ * empty by design and `raw_events` is the source of truth for reconstructed
+ * chat history, the context-usage view, the run inspector, and Insights — so
+ * it cannot simply be dropped. Instead it is stored ONCE: the table is
+ * append-only with an AUTOINCREMENT id, so each tick appends the rows above
+ * the previous high-water mark to an immutable delta file and the daily backup
+ * carries none of them. Fidelity is unchanged; only the seven-fold duplication
+ * goes away. See databaseBackupSnapshot.ts for the archive and
+ * databaseBackupRestore.ts for the replay.
+ *
+ * WHY THE PROCESSING RUNS IN A WORKER. Archiving and VACUUMing are synchronous
+ * better-sqlite3 work over a multi-gigabyte file; on the main thread they would
+ * freeze the app for seconds, and the first tick fires during initialisation.
+ *
  * WHY THE .partial RENAME. A crash or force-quit mid-backup must never leave
  * a file that looks like a finished backup — if it did, the next day's tick
  * would treat that day as already covered and silently skip it, and a
@@ -37,8 +53,11 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../orchestrator/types';
+import type { ProcessSnapshotOptions, ProcessSnapshotResult } from './databaseBackupSnapshot';
+import type { SnapshotWorkerMessage } from './databaseBackupWorker';
 
 /** How often the tick runs. Cheap once today's backup already exists (see file doc). */
 export const DATABASE_BACKUP_TICK_INTERVAL_MS = 60 * 60 * 1000;
@@ -49,11 +68,50 @@ export const DATABASE_BACKUP_RETAIN_COUNT = 7;
 /** Matches a finished daily backup filename exactly — never a `.partial`. */
 const BACKUP_FILENAME_RE = /^sessions-\d{4}-\d{2}-\d{2}\.db$/;
 
+/** Matches an in-progress backup or a sidecar left beside one. */
+const PARTIAL_FILENAME_RE = /\.partial(-wal|-shm)?$/;
+
+/**
+ * Run {@link processSnapshot} on a worker thread. The compiled worker sits
+ * beside this file in `dist`, which is what `__dirname` resolves to at runtime.
+ */
+function runSnapshotWorker(options: ProcessSnapshotOptions): Promise<ProcessSnapshotResult> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, 'databaseBackupWorker.js'), { workerData: options });
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      void worker.terminate();
+      fn();
+    };
+    worker.on('message', (message: SnapshotWorkerMessage) => {
+      finish(() => {
+        if (message.ok) resolve(message.result);
+        else reject(new Error(message.error));
+      });
+    });
+    worker.on('error', (err) => finish(() => reject(err)));
+    worker.on('exit', (code) => finish(() => reject(new Error(`snapshot worker exited with code ${code}`))));
+  });
+}
+
 export interface DatabaseBackupServiceOptions {
   /** The live better-sqlite3 connection to snapshot. */
   db: Database.Database;
   /** Absolute directory backups are written to. Created recursively as needed. */
   backupsDir: string;
+  /**
+   * Where immutable `raw_events` delta files live. Defaults to a `raw-events`
+   * subdirectory of {@link backupsDir}. NOT subject to the daily retention:
+   * these files are the only copy of that history outside the live database.
+   */
+  deltaDir?: string;
+  /**
+   * Override for the snapshot processor, so tests can run it in-process
+   * instead of spawning a worker thread. Production always uses the worker.
+   */
+  processSnapshot?: (options: ProcessSnapshotOptions) => Promise<ProcessSnapshotResult>;
   /** Structured logger. Required — this service's only output is log lines. */
   logger: LoggerLike;
   /** Current wall-clock time. Injectable for deterministic tests. */
@@ -83,6 +141,8 @@ function errorContext(err: unknown): Record<string, unknown> {
 export class DatabaseBackupService {
   private readonly db: Database.Database;
   private readonly backupsDir: string;
+  private readonly deltaDir: string;
+  private readonly processSnapshot: (options: ProcessSnapshotOptions) => Promise<ProcessSnapshotResult>;
   private readonly logger: LoggerLike;
   private readonly now: () => Date;
   private readonly intervalMs: number;
@@ -92,6 +152,8 @@ export class DatabaseBackupService {
   constructor(opts: DatabaseBackupServiceOptions) {
     this.db = opts.db;
     this.backupsDir = opts.backupsDir;
+    this.deltaDir = opts.deltaDir ?? path.join(opts.backupsDir, 'raw-events');
+    this.processSnapshot = opts.processSnapshot ?? runSnapshotWorker;
     this.logger = opts.logger;
     this.now = opts.now ?? (() => new Date());
     this.intervalMs = opts.intervalMs ?? DATABASE_BACKUP_TICK_INTERVAL_MS;
@@ -146,16 +208,41 @@ export class DatabaseBackupService {
       const partialPath = `${targetPath}.partial`;
       try {
         await this.db.backup(partialPath);
-        fs.renameSync(partialPath, targetPath);
-        this.logger.info(`[DatabaseBackup] wrote daily backup to ${targetPath}`);
       } catch (err) {
-        try {
-          if (fs.existsSync(partialPath)) fs.unlinkSync(partialPath);
-        } catch {
-          // best-effort cleanup only
-        }
+        this.discardPartial(partialPath);
         this.logger.error('[DatabaseBackup] backup failed', errorContext(err));
         return;
+      }
+
+      try {
+        const result = await this.processSnapshot({ snapshotPath: partialPath, deltaDir: this.deltaDir });
+        fs.renameSync(partialPath, targetPath);
+        this.logger.info(
+          `[DatabaseBackup] wrote daily backup to ${targetPath}`,
+          {
+            archivedRows: result.archivedRows,
+            deltaFile: result.deltaPath ?? 'none',
+            bytesReclaimed: result.bytesReclaimed,
+          },
+        );
+      } catch (err) {
+        // The partial may be half-processed — rows archived but not yet
+        // stripped, or stripped but not compacted — so it is NOT a full copy
+        // and must never be published as one. Throw it away and take a clean
+        // unprocessed snapshot instead: an oversized backup is still a
+        // complete backup, and losing the day's snapshot over a disk-space
+        // optimisation would be exactly backwards.
+        this.logger.error('[DatabaseBackup] snapshot processing failed', errorContext(err));
+        this.discardPartial(partialPath);
+        try {
+          await this.db.backup(partialPath);
+          fs.renameSync(partialPath, targetPath);
+          this.logger.info(`[DatabaseBackup] wrote UNPROCESSED full daily backup to ${targetPath}`);
+        } catch (fallbackErr) {
+          this.discardPartial(partialPath);
+          this.logger.error('[DatabaseBackup] full-copy fallback failed', errorContext(fallbackErr));
+          return;
+        }
       }
 
       this.prune();
@@ -163,6 +250,15 @@ export class DatabaseBackupService {
       this.logger.error('[DatabaseBackup] tick failed', errorContext(err));
     } finally {
       this.inFlight = false;
+    }
+  }
+
+  /** Best-effort removal of a partial that must not be published. */
+  private discardPartial(partialPath: string): void {
+    try {
+      if (fs.existsSync(partialPath)) fs.unlinkSync(partialPath);
+    } catch {
+      // best-effort cleanup only
     }
   }
 
@@ -175,7 +271,10 @@ export class DatabaseBackupService {
       return;
     }
     for (const entry of entries) {
-      if (!entry.endsWith('.partial')) continue;
+      // `-wal`/`-shm` too: processing OPENS the partial, so a crash during
+      // that step leaves sidecars beside it that `.partial` alone would not
+      // match, and they would orphan forever.
+      if (!PARTIAL_FILENAME_RE.test(entry)) continue;
       try {
         fs.unlinkSync(path.join(this.backupsDir, entry));
       } catch (err) {

@@ -1947,7 +1947,11 @@ async function initializeServices(): Promise<boolean> {
   setTrackerSyncFacade(trackerSyncService);
 
   // Daily sessions.db backup (7-day retention) — see databaseBackupService.ts
-  // for why hourly-tick + file-existence-guard rather than a 24h timer.
+  // for why hourly-tick + file-existence-guard rather than a 24h timer, and
+  // why raw_events is archived once into <backups>/raw-events deltas instead
+  // of being copied into all seven dailies. Those deltas are NOT covered by
+  // the retention window: they are the only copy of that history outside the
+  // live database.
   // Skipped in demo mode: demoBootEnv's database is a throwaway reset on every
   // launch, so backing it up is pure waste.
   if (!demoBootEnv) {
