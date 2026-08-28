@@ -305,6 +305,11 @@ export class SpawnStepRunner implements StepRunner {
       ...(runbookProposal ? { runbookProposal } : {}),
       ...(approveRunbookResolution ? { approveRunbookResolution } : {}),
       ...(userGuidance ? { userGuidance } : {}),
+      // Per-LANE rescue guidance (monitor lane triage). Threaded off the ctx, not
+      // a thunk: it is per fan-out item, and the `stepGuidance` map the thunk
+      // reads is keyed by bare step id and shared across lanes. Absent on every
+      // non-rescued lane ⇒ byte-identical prompt.
+      ...(ctx.laneGuidance ? { laneGuidance: ctx.laneGuidance } : {}),
       ...(bootstrapProtectedPaths && bootstrapProtectedPaths.length > 0
         ? { bootstrapProtectedPaths }
         : {}),

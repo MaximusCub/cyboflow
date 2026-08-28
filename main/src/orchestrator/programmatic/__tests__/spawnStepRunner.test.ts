@@ -342,6 +342,50 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).not.toContain('## Operator guidance');
   });
 
+  // ── per-LANE rescue guidance (monitor lane triage, threaded on the ctx) ─────
+  it('appends the ctx laneGuidance to the composed prompt (a rescued fan-out lane)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts); // no stepGuidance thunk
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), {
+      ...ctx,
+      item: { id: 't1', over: 'tasks' },
+      laneGuidance: 'mock the clock instead of sleeping',
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('## Operator guidance');
+    expect(passed.prompt).toContain('mock the clock instead of sleeping');
+  });
+
+  it('renders BOTH the step-keyed operator steer and the ctx laneGuidance when both exist', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, stepGuidance: () => 'prefer the streaming API' });
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), {
+      ...ctx,
+      item: { id: 't1', over: 'tasks' },
+      laneGuidance: 'mock the clock instead of sleeping',
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('prefer the streaming API');
+    expect(passed.prompt).toContain('mock the clock instead of sleeping');
+  });
+
+  it('adds no guidance section when the ctx carries no laneGuidance (byte-identity)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), {
+      ...ctx,
+      item: { id: 't1', over: 'tasks' },
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('## Operator guidance');
+  });
+
   it('adds NO guidance section when the bound thunk returns undefined for this step id', async () => {
     const spawner = makeSpawner();
     const runner = new SpawnStepRunner(spawner, { ...opts, stepGuidance: () => undefined });

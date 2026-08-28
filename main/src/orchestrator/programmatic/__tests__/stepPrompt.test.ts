@@ -580,6 +580,64 @@ describe('composeStepPrompt', () => {
   });
 
   // -------------------------------------------------------------------------
+  // laneGuidance — the supervisor's LANE-RESCUE guidance (monitor lane triage).
+  // Shares the `## Operator guidance` heading with the operator's own steer, but
+  // is labelled separately; both may be present at once.
+  // -------------------------------------------------------------------------
+
+  it('renders the supervisor lane-rescue guidance under the Operator guidance heading', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      laneGuidance: 'mock the clock instead of sleeping',
+    });
+    expect(out).toContain('## Operator guidance');
+    expect(out).toContain('SUPERVISOR');
+    expect(out).toContain('mock the clock instead of sleeping');
+  });
+
+  it('renders BOTH guidance sources, labelled, when an operator steer and a lane rescue coexist', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      userGuidance: 'Keep the change under the feature flag.',
+      laneGuidance: 'mock the clock instead of sleeping',
+    });
+    // ONE heading, both bodies — an agent should not have to learn two section
+    // names for the same kind of instruction.
+    expect(out.match(/## Operator guidance/g)).toHaveLength(1);
+    expect(out).toContain('The operator added mid-run guidance for this step');
+    expect(out).toContain("The run's SUPERVISOR rescued this task's lane");
+    expect(out).toContain('Keep the change under the feature flag.');
+    expect(out).toContain('mock the clock instead of sleeping');
+  });
+
+  it('renders an operator-only steer byte-identically to the single-channel version', () => {
+    const args = {
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      userGuidance: 'Keep the change under the feature flag.',
+    } as const;
+    // No lane guidance ⇒ the exact pre-existing section text.
+    expect(composeStepPrompt(args)).toContain(
+      '## Operator guidance\n\nThe operator added mid-run guidance for this step — follow it:\n\nKeep the change under the feature flag.',
+    );
+  });
+
+  it('omits the section when laneGuidance is empty / whitespace and no operator steer exists', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'a' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      laneGuidance: '   ',
+    });
+    expect(out).not.toContain('## Operator guidance');
+  });
+
+  // -------------------------------------------------------------------------
   // Approve-ideas decisions — the resolved batch-gate verdict lines threaded
   // into every POST-gate step turn (launch's programmatic plane). Heading must
   // stay byte-identical to APPROVE_IDEAS_DECISIONS_HEADING.

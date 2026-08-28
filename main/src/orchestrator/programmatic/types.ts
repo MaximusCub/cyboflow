@@ -135,6 +135,24 @@ export interface ControllerStepContext {
    * previous step had nothing to say.
    */
   priorStepOutput?: { stepId: string; name: string; text?: string };
+  /**
+   * The supervisor's LANE-RESCUE guidance for THIS fan-out item (monitor lane
+   * triage). Unlike `contractError` / `loopbackFeedback` — one-shot sections
+   * consumed by a single re-driven step — this is STICKY: once a lane is
+   * rescued the controller threads it into EVERY subsequent inner-step spawn of
+   * that lane until the lane settles, because the guidance describes what the
+   * whole re-run must do differently, not one step's defect.
+   *
+   * It is per-LANE, which is exactly why it rides the ctx instead of
+   * `RunDirectives.stepGuidance`: that map is keyed by bare step id and SHARED
+   * across every lane, so storing lane guidance there would leak one task's
+   * rescue into every sibling lane's next spawn of the same step.
+   * `composeStepPrompt` renders it under the SAME `## Operator guidance`
+   * section as the operator's own steer, labelled so the agent knows which is
+   * which. Absent on every non-rescued lane and every non-fan-out step
+   * (byte-identical prompts).
+   */
+  laneGuidance?: string;
 }
 
 /**
@@ -289,10 +307,81 @@ export interface FanOutDriver {
    * it must never invent a failure of its own.
    */
   beginCommitProbe?(runId: string): Promise<CommitIntegrityProbe | undefined>;
+  /**
+   * OPTIONAL targeted un-settle of ONE lane from 'failed' back to 'running',
+   * for the controller's MONITOR LANE RESCUE at the visual merge gate. The
+   * merge-gate driver durably writes the lane 'failed' BEFORE the controller's
+   * `awaitVerdict` resolves, so a lane the supervisor rescues is already settled
+   * in the store while its in-memory walk is still live and about to re-drive
+   * it. Production maps this to `SprintLaneStore.reviveLane` (status-guarded to
+   * 'failed', routed through the same updateLane chokepoint + emit as every
+   * other lane write). Fail-soft — MUST never throw (like `driveLane`, the
+   * controller does not wrap it). Absent (test drivers / non-sprint fan-outs) ⇒
+   * the rescue simply re-drives without the row un-settle.
+   */
+  reviveLane?(args: { runId: string; itemId: string }): void;
 }
 
 /** Ship's per-lane loopback contract: initial pass plus at most two re-delegates. */
 export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
+
+/**
+ * Which automatic budget a sprint fan-out LANE exhausted before the controller
+ * would settle it 'failed'. Rendered into the monitor's lane-triage prompt so it
+ * knows what evidence to look for; the controller decides which sites consult.
+ * Canonical HERE (not in monitor.ts) so the controller/host protocol stays free
+ * of the monitor brain's heavier import graph; `monitor.ts` re-exports it.
+ */
+export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+
+/**
+ * The lane/failure facts the controller already holds when a lane exhausts an
+ * automatic budget, handed to `ControllerHost.triageLaneFailure`. Deliberately
+ * NOT the monitor's full `LaneTriageRequest`: the controller knows nothing about
+ * the task's ref/title/body, so the HOST enriches this with task data before it
+ * consults the brain.
+ */
+export interface LaneTriageFailure {
+  /** The fan-out item (in production the opaque sprint task id). */
+  itemId: string;
+  /**
+   * The task's display ref when the controller happens to know it. It does not
+   * on the sprint path (items are opaque ids), so the host resolves it; this
+   * field exists for a driver whose item ids ARE refs.
+   */
+  taskRef?: string;
+  /** The inner step that failed. */
+  stepId: string;
+  /** The lane's current 1-based attempt at the moment of exhaustion. */
+  attempt: number;
+  failureKind: LaneFailureKind;
+  /** The error / verdict text, already excerpted by the controller. */
+  errorExcerpt: string;
+  /** The lane's configured inner chain, in execution order. */
+  innerStepIds: readonly string[];
+  /** The run's cancel signal, so a slow triage query dies with the run. */
+  signal?: AbortSignal;
+}
+
+/**
+ * What the host decided about a lane that exhausted its budget:
+ *   - 'give_up' — settle the lane 'failed' exactly as before the seam existed
+ *                 (the fail-safe default: kill switch, no monitor, caps spent,
+ *                 a brain that judged the failure genuine, any internal error).
+ *   - 'rescue'  — re-drive the lane from `targetStepId` with `guidance`, which
+ *                 the controller threads into EVERY later inner-step spawn of
+ *                 that lane. `adjusted` records whether the host also replaced
+ *                 the task's body (the monitor's `adjust_and_retry`); a refused
+ *                 edit is DOWNGRADED to a plain rescue with `adjusted: false`,
+ *                 never to a give_up — the guidance still carries the substance.
+ * `targetStepId` is guaranteed by the brain's parse ladder to be one of the
+ * request's `innerStepIds` at or before the failing step, and `guidance` to be
+ * non-blank; the controller still re-resolves the id against its own chain
+ * (a target it cannot locate is treated as a give_up).
+ */
+export type LaneRescueOutcome =
+  | { kind: 'give_up' }
+  | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
 
 /**
  * The outcome of awaiting an async visual merge-gate verdict for ONE lane
@@ -440,6 +529,26 @@ export interface ControllerHost {
    * monitor's verdict when one is wired).
    */
   triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
+
+  /**
+   * Optional LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted
+   * when ONE fan-out lane has exhausted an automatic budget, BEFORE the
+   * controller settles that lane 'failed'. The production host asks the
+   * ON-DEMAND monitor whether the lane is worth re-driving (optionally with an
+   * adjusted task body) and returns only the executable verdict; the controller
+   * stays dumb, branching on `give_up` vs `rescue`.
+   *
+   * The controller consults it ONLY at genuine budget exhaustion — never for a
+   * systemic failure (that has its own park path), an aborted result, a
+   * dependency-blocked / cycle lane, a task-verify output-CONTRACT exhaustion
+   * (a malformed result is not a defect a rescue can reason about), or once the
+   * per-lane / per-run rescue caps are spent.
+   *
+   * MUST be fail-soft (resolve `{ kind: 'give_up' }`, never reject) and MUST
+   * honor `req.signal`. Absent (tests / any host built without a monitor) ⇒ the
+   * controller settles the lane failed exactly as before the seam existed.
+   */
+  triageLaneFailure?(req: LaneTriageFailure): Promise<LaneRescueOutcome>;
 
   /**
    * Optional per-step result sink (Stage 3, migration 033). The controller calls

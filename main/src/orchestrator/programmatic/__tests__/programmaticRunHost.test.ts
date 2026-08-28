@@ -1,10 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
-import { ProgrammaticRunHost, type StepReporter } from '../programmaticRunHost';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  ProgrammaticRunHost,
+  LANE_TRIAGE_KILL_SWITCH_ENV,
+  type StepReporter,
+} from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
-import type { MonitorSession } from '../monitor';
+import type { LaneTriageDecision, MonitorSession } from '../monitor';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
-import type { ControllerStepContext, FanOutDriver, SystemicPauseVerdict } from '../types';
+import type {
+  ControllerStepContext,
+  FanOutDriver,
+  LaneTriageFailure,
+  SystemicPauseVerdict,
+} from '../types';
 import type { SystemicPauseResolver } from '../systemicPauseGate';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
@@ -323,5 +332,268 @@ describe('ProgrammaticRunHost', () => {
     });
 
     expect(await host.awaitSystemicPause(step({ id: 'a' }), ctx, 'boom')).toBe('giveup');
+  });
+  // ── Autonomous LANE TRIAGE (monitor lane rescue) ────────────────────────────
+  describe('triageLaneFailure', () => {
+    const failure: LaneTriageFailure = {
+      itemId: 'tsk_a',
+      stepId: 'implement',
+      attempt: 3,
+      failureKind: 'inner-step',
+      errorExcerpt: 'tsc: 4 errors',
+      innerStepIds: ['implement', 'code-review', 'task-verify'],
+    };
+
+    /** A monitor whose triageLane returns a canned verdict. */
+    function makeLaneMonitor(
+      decision: LaneTriageDecision,
+    ): MonitorSession & { triageLane: ReturnType<typeof vi.fn> } {
+      return {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        triageLane: vi.fn().mockResolvedValue(decision),
+      };
+    }
+
+    const RETRY: LaneTriageDecision = {
+      verdict: 'retry',
+      targetStepId: 'implement',
+      guidance: 'stub the network layer instead of hitting it',
+      reason: 'the failure is an unmocked fetch',
+    };
+    const ADJUST: LaneTriageDecision = {
+      verdict: 'adjust_and_retry',
+      targetStepId: 'implement',
+      guidance: 'narrow the criterion to the sync path',
+      reason: 'the async API the AC assumes does not exist (src/x.ts:12)',
+      taskBody: '## New body\n\nnarrowed',
+    };
+
+    /** Extract the plain text of every injected assistant turn. */
+    function texts(events: ClaudeStreamEvent[]): string[] {
+      return events.map((ev) =>
+        'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+          ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+          : '',
+      );
+    }
+
+    afterEach(() => {
+      delete process.env[LANE_TRIAGE_KILL_SWITCH_ENV];
+    });
+
+    it('gives up WITHOUT consulting the monitor when the kill switch is set', async () => {
+      process.env[LANE_TRIAGE_KILL_SWITCH_ENV] = '1';
+      const monitor = makeLaneMonitor(RETRY);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor, injectEvent: (e) => injected.push(e),
+      });
+
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+      expect(monitor.triageLane).not.toHaveBeenCalled();
+      // A rollback lever is silent — no chat turn beyond the log.
+      expect(injected).toHaveLength(0);
+    });
+
+    it('gives up when no monitor is wired', async () => {
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      });
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
+    it('gives up when the monitor has no triageLane (the suite’s faked sessions)', async () => {
+      const monitor: MonitorSession = { triage: vi.fn(), answer: vi.fn().mockResolvedValue('') };
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
+    it('enriches the request with the task facts and injects NO chat turn of its own (triageLane owns its rendering)', async () => {
+      const monitor = makeLaneMonitor(RETRY);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        injectEvent: (e) => injected.push(e),
+        readLaneTask: () => ({ taskRef: 'TASK-014', taskTitle: 'Wire the thing', taskBody: '## Old body' }),
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      expect(outcome).toEqual({
+        kind: 'rescue',
+        targetStepId: 'implement',
+        guidance: RETRY.guidance,
+        adjusted: false,
+      });
+      expect(monitor.triageLane).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskRef: 'TASK-014',
+          taskTitle: 'Wire the thing',
+          taskBody: '## Old body',
+          itemId: 'tsk_a',
+          stepId: 'implement',
+          attempt: 3,
+          failureKind: 'inner-step',
+          innerStepIds: ['implement', 'code-review', 'task-verify'],
+        }),
+        undefined,
+      );
+      // The host must not double-render what the brain already announced.
+      expect(injected).toHaveLength(0);
+    });
+
+    it('falls back to the item id as the ref when no task reader is wired', async () => {
+      const monitor = makeLaneMonitor(RETRY);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+
+      await host.triageLaneFailure(failure);
+
+      expect(monitor.triageLane).toHaveBeenCalledWith(
+        expect.objectContaining({ taskRef: 'tsk_a', taskTitle: '', taskBody: '' }),
+        undefined,
+      );
+    });
+
+    it('files NO finding for a give_up verdict (the failure already reaches the human gate)', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({ verdict: 'give_up', reason: 'genuinely broken' }),
+        fileLaneTriageFinding,
+      });
+
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+      expect(fileLaneTriageFinding).not.toHaveBeenCalled();
+    });
+
+    it('applies the adjust_and_retry body edit and reports adjusted:true', async () => {
+      const adjustRunTask = vi.fn().mockResolvedValue({ ok: true });
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(ADJUST),
+        injectEvent: (e) => injected.push(e),
+        readLaneTask: () => ({ taskRef: 'TASK-014', taskTitle: 'T', taskBody: '## Old body' }),
+        adjustRunTask,
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      expect(outcome).toMatchObject({ kind: 'rescue', adjusted: true, guidance: ADJUST.guidance });
+      expect(adjustRunTask).toHaveBeenCalledWith({ taskRef: 'TASK-014', body: ADJUST.taskBody });
+      // A successful adjust needs no host turn — the brain already said it would.
+      expect(injected).toHaveLength(0);
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor rescued TASK-014 (inner-step)');
+      expect(finding.body).toContain('APPLIED');
+      expect(finding.body).toContain('## Old body');
+      expect(finding.body).toContain('## New body');
+    });
+
+    it('DOWNGRADES a refused adjust to a plain rescue: adjusted:false + a chat turn + the finding says so', async () => {
+      const adjustRunTask = vi.fn().mockResolvedValue({ ok: false, reason: 'That task has already started.' });
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(ADJUST),
+        injectEvent: (e) => injected.push(e),
+        readLaneTask: () => ({ taskRef: 'TASK-014', taskBody: '## Old body' }),
+        adjustRunTask,
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      // The rescue still happens — the guidance carries the substance.
+      expect(outcome).toEqual({
+        kind: 'rescue',
+        targetStepId: 'implement',
+        guidance: ADJUST.guidance,
+        adjusted: false,
+      });
+      // The ONE thing the brain could not know is rendered by the host.
+      const injectedTexts = texts(injected);
+      expect(injectedTexts).toHaveLength(1);
+      expect(injectedTexts[0]).toContain('TASK-014');
+      expect(injectedTexts[0]).toContain('That task has already started.');
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { body: string };
+      expect(finding.body).toContain('NOT applied');
+      expect(finding.body).toContain('That task has already started.');
+      // The proposed body is recorded, but nothing claims it was written.
+      expect(finding.body).toContain('Proposed (not applied) body');
+    });
+
+    it('downgrades an adjust when the edit THROWS, and when no adjust capability is wired at all', async () => {
+      const thrower = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(ADJUST),
+        adjustRunTask: vi.fn().mockRejectedValue(new Error('router down')),
+      });
+      expect(await thrower.triageLaneFailure(failure)).toMatchObject({ kind: 'rescue', adjusted: false });
+
+      const unwired = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(ADJUST),
+      });
+      expect(await unwired.triageLaneFailure(failure)).toMatchObject({ kind: 'rescue', adjusted: false });
+    });
+
+    it('is fail-soft on the finding: a throwing sink never costs the lane its rescue', async () => {
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(RETRY),
+        fileLaneTriageFinding: vi.fn().mockRejectedValue(new Error('review queue down')),
+      });
+
+      expect(await host.triageLaneFailure(failure)).toMatchObject({ kind: 'rescue', adjusted: false });
+    });
+
+    it('is fail-soft on a throwing task reader (the consult still runs, with no body)', async () => {
+      const monitor = makeLaneMonitor(RETRY);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+        readLaneTask: () => { throw new Error('db down'); },
+      });
+
+      expect(await host.triageLaneFailure(failure)).toMatchObject({ kind: 'rescue' });
+      expect(monitor.triageLane).toHaveBeenCalledWith(
+        expect.objectContaining({ taskBody: '' }),
+        undefined,
+      );
+    });
+
+    it('gives up (belt-and-braces) when triageLane itself rejects', async () => {
+      const monitor: MonitorSession = {
+        triage: vi.fn(),
+        answer: vi.fn().mockResolvedValue(''),
+        triageLane: vi.fn().mockRejectedValue(new Error('brain boom')),
+      };
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
+    it('forwards the run signal so a slow triage query dies with the run', async () => {
+      const monitor = makeLaneMonitor(RETRY);
+      const signal = new AbortController().signal;
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), monitor,
+      });
+
+      await host.triageLaneFailure({ ...failure, signal });
+
+      expect(monitor.triageLane).toHaveBeenCalledWith(expect.anything(), signal);
+    });
   });
 });

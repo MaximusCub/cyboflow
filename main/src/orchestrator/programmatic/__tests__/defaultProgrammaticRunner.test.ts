@@ -621,4 +621,92 @@ describe('DefaultProgrammaticRunner', () => {
     await expect(runner.run(ctxFor(oneStepDef(), { batchId: 'batch-7' }))).resolves.toBeUndefined();
     expect(vi.mocked(spawner.spawnCliProcess).mock.calls[0][0].prompt).not.toContain('# Sprint tasks');
   });
+  // ── Lane-triage wiring (autonomous lane rescue) ────────────────────────────
+  // The runner is the seam that RUN-BINDS the composition root's lane-triage
+  // collaborators onto the host, so this asserts the plumbing end to end:
+  // a failing lane → the monitor's brain → the task reader → the body edit →
+  // the audit sink → the rescued re-drive, all carrying THIS run's id.
+  it('run-binds the lane-triage task reader, body writer, and finding sink onto the host', async () => {
+    const triageLane = vi.fn().mockResolvedValue({
+      verdict: 'adjust_and_retry',
+      targetStepId: 'impl',
+      guidance: 'stub the network layer',
+      reason: 'the AC assumes an API that does not exist (src/x.ts:12)',
+      taskBody: '## Narrowed body',
+    });
+    const monitor: MonitorSession = { triage: vi.fn(), answer: vi.fn().mockResolvedValue(''), triageLane };
+    const driver: FanOutDriver = { resolveItems: vi.fn(() => ['task-1']), driveLane: vi.fn() };
+
+    const laneTriageTaskReader = vi.fn(() => ({
+      taskRef: 'TASK-014',
+      taskTitle: 'Wire the thing',
+      taskBody: '## Old body',
+    }));
+    const laneTriageAdjustTask = vi.fn().mockResolvedValue({ ok: true });
+    const laneTriageFindingSink = vi.fn().mockResolvedValue(undefined);
+
+    // The lane's only inner step fails ONCE (exhausting it — no declared
+    // loopback), then succeeds on the rescued traversal.
+    let impl = 0;
+    const spawner = makeSpawner(async () => {
+      impl += 1;
+      if (impl === 1) throw new Error('tsc: 4 errors');
+    });
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      monitorFactory: () => monitor,
+      fanOutDriverFactory: () => driver,
+      laneTriageTaskReader,
+      laneTriageAdjustTask,
+      laneTriageFindingSink,
+    });
+
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: 'batch-9' }))).resolves.toBeUndefined();
+
+    // Enrichment: the reader is called with THIS run's id + the fan-out item id.
+    expect(laneTriageTaskReader).toHaveBeenCalledWith('run-1', 'task-1');
+    // The brain saw the enriched request, not the controller's bare facts.
+    expect(triageLane).toHaveBeenCalledWith(
+      expect.objectContaining({ taskRef: 'TASK-014', taskBody: '## Old body', failureKind: 'inner-step' }),
+      expect.anything(),
+    );
+    // The adjust + the audit note both carry the bound runId.
+    expect(laneTriageAdjustTask).toHaveBeenCalledWith('run-1', {
+      taskRef: 'TASK-014',
+      body: '## Narrowed body',
+    });
+    expect(laneTriageFindingSink).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ title: 'Monitor rescued TASK-014 (inner-step)' }),
+    );
+    // And the lane actually re-ran and integrated rather than settling failed.
+    expect(impl).toBe(2);
+    expect(vi.mocked(driver.driveLane).mock.calls.some(([a]) => a.status === 'integrated')).toBe(true);
+  });
+
+  it('gives up (lane settles failed) when the lane-triage deps are not wired', async () => {
+    const triageLane = vi.fn();
+    const monitor: MonitorSession = { triage: vi.fn(), answer: vi.fn().mockResolvedValue(''), triageLane };
+    const driver: FanOutDriver = { resolveItems: vi.fn(() => ['task-1']), driveLane: vi.fn() };
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(() => Promise.reject(new Error('boom'))),
+      reporter,
+      gate: gateOf('approve'),
+      monitorFactory: () => monitor,
+      fanOutDriverFactory: () => driver,
+      // No laneTriage* deps — but the monitor CAN triage, so the consult still
+      // happens; it simply runs without task facts.
+    });
+
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: 'batch-9' }))).resolves.toBeUndefined();
+
+    expect(triageLane).toHaveBeenCalledWith(
+      expect.objectContaining({ taskRef: 'task-1', taskTitle: '', taskBody: '' }),
+      expect.anything(),
+    );
+    expect(vi.mocked(driver.driveLane).mock.calls.some(([a]) => a.status === 'failed')).toBe(true);
+  });
 });

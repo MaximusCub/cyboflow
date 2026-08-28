@@ -44,6 +44,8 @@ import type {
   ControllerResult,
   ControllerStepContext,
   HumanGateDecision,
+  LaneFailureKind,
+  LaneRescueOutcome,
   StepReport,
   StepRunner,
   SupervisorEvent,
@@ -142,6 +144,49 @@ export const MAX_SYSTEMIC_PAUSES = 10;
 export const MAX_VISUAL_LOOPBACKS = 5;
 
 /**
+ * How many times ONE lane may be rescued by the monitor's autonomous lane triage
+ * (`ControllerHost.triageLaneFailure`) across a whole walk. ONE: a rescue buys the
+ * lane a fresh traversal from an earlier inner step with fresh guidance — if that
+ * traversal fails too, the supervisor's read of the problem was wrong and a second
+ * round of the same reasoning is not going to find a different answer. The lane
+ * then settles 'failed' and reaches the human at the run's gate, which is the
+ * outcome that always existed.
+ */
+export const MONITOR_LANE_RESCUE_CAP = 1;
+
+/**
+ * How many lane rescues the monitor may spend across a WHOLE walk, however many
+ * lanes fail. Bounds the blast radius of a supervisor that has misdiagnosed
+ * something run-wide (a broken toolchain, a bad merge base) into rescuing every
+ * lane in turn: past this, failures settle as they always did rather than
+ * multiplying agent turns against a cause no per-lane guidance can fix.
+ */
+export const MONITOR_RUN_RESCUE_CAP = 4;
+
+/**
+ * Walk-scoped bookkeeping for autonomous lane rescue. Created once per `run()`
+ * and threaded into every `runFanOut`, so the caps span the whole walk (a run
+ * with two fan-out steps cannot spend the run budget twice) and a lane's rescue
+ * guidance survives across the inner-chain jumps of that lane.
+ */
+interface LaneRescueState {
+  /** itemId → rescues spent (capped by MONITOR_LANE_RESCUE_CAP). */
+  perItem: Map<string, number>;
+  /** Rescues spent across the walk (capped by MONITOR_RUN_RESCUE_CAP). */
+  runTotal: number;
+  /**
+   * itemId → the guidance a rescue attached to that lane. STICKY for the life of
+   * the lane: the controller threads it into EVERY subsequent inner-step spawn
+   * (via `ControllerStepContext.laneGuidance`) until the lane settles, because
+   * the guidance describes what the whole re-run must do differently. Keyed by
+   * ITEM, never by step id — `RunDirectives.stepGuidance` is keyed by bare step
+   * id and shared across lanes, so writing lane guidance there would leak one
+   * task's rescue into every sibling lane's next spawn of that step.
+   */
+  guidance: Map<string, string>;
+}
+
+/**
  * A step is a PURE human gate (no agent work) when its agent is the dedicated
  * human-gate agent. A step that names a REAL agent AND also sets `human === true`
  * (e.g. the planner's `context` step) is an AGENT step WITH a trailing human
@@ -231,6 +276,10 @@ export class WorkflowController {
     // then fails normally" contract. The SAME set keys both the single-step retry
     // loop and the fan-out wave-park path (keyed on the outer step id).
     const systemicGiveUps = new Set<string>();
+    // Walk-scoped autonomous LANE-RESCUE state (per-item + per-run caps, plus the
+    // sticky per-lane rescue guidance). Created here rather than per fan-out step
+    // so both caps bound the WHOLE walk, and threaded into runFanOut by reference.
+    const laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() };
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -420,6 +469,7 @@ export class WorkflowController {
               signal,
               systemicPauses,
               systemicGiveUps,
+              laneRescues,
             );
             if (fanResult.terminal) {
               // Mark the outer step canceled in the trace before the terminal.
@@ -731,6 +781,18 @@ export class WorkflowController {
    * `laneInterrupts` unpark hook this method registers around the park). A rewind
    * restores the lane's automatic loopback budgets but never bumps its attempt
    * counter — see `clearStateForRewind`.
+   *
+   * MONITOR LANE RESCUE: every site that would settle a lane 'failed' after it
+   * EXHAUSTED an automatic budget first consults `host.triageLaneFailure` (see
+   * `consultLaneTriage`). A 'rescue' verdict re-drives the lane from an earlier
+   * inner step with supervisor guidance — the AUTONOMOUS analogue of the operator
+   * rewind above, sharing its `clearStateForRewind` semantics and its refusal to
+   * bump `laneAttempt`. Bounded by MONITOR_LANE_RESCUE_CAP (per lane) and
+   * MONITOR_RUN_RESCUE_CAP (per walk). Failures that are NOT budget exhaustion
+   * never consult: a systemic failure (it has its own park path), an aborted
+   * result, a dependency-blocked / cycle lane (`markBlocked`), a lane the
+   * commit-integrity probe caught, and a task-verify output-CONTRACT exhaustion
+   * (a malformed result is not a defect a rescue can reason about).
    */
   private async runFanOut(
     runId: string,
@@ -740,6 +802,7 @@ export class WorkflowController {
     signal: AbortSignal | undefined,
     systemicPauses: Map<string, number>,
     systemicGiveUps: Set<string>,
+    laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() },
   ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
@@ -816,6 +879,94 @@ export class WorkflowController {
       );
       return targetIndex;
     };
+    /**
+     * Consult the host's AUTONOMOUS lane-triage seam for a lane that exhausted an
+     * automatic budget, resolving the inner-chain index to re-drive from — or
+     * `null`, meaning "settle this lane 'failed'", which is what every call site
+     * did unconditionally before this seam existed.
+     *
+     * Every `null` arm is the pre-seam behavior, so a host with no seam, a spent
+     * budget, a give_up verdict, an unresolvable target, or a throwing consult all
+     * land on exactly the same code path they always did:
+     *   - no `host.triageLaneFailure` (tests, orchestrated hosts) ⇒ null;
+     *   - the per-lane or per-run cap is already spent ⇒ null WITHOUT consulting
+     *     (a rescue we could not act on is not worth an agent turn);
+     *   - the host gives up ⇒ null;
+     *   - the target id is not in THIS fan-out's inner chain ⇒ null (defensive:
+     *     the brain's parse ladder already constrains it to `innerStepIds`);
+     *   - the consult throws ⇒ null (the host contract says it never does).
+     *
+     * Budget is RESERVED before the consult and RELEASED on every non-rescue arm,
+     * rather than charged after it. Lanes run concurrently, and the consult is a
+     * slow SDK turn: charging afterwards would let a whole wave of failing lanes
+     * pass the cap check together and every one of them get rescued, which is
+     * exactly the runaway MONITOR_RUN_RESCUE_CAP exists to prevent. Reserving is
+     * safe because the release path restores the counters exactly, so a give_up
+     * still costs nothing — the caps bound INTERVENTION, not consultation.
+     *
+     * The guidance is stored per ITEM, sticky for the life of the lane — see
+     * `LaneRescueState.guidance`.
+     */
+    const consultLaneTriage = async (
+      itemId: string,
+      failingStepId: string,
+      attempt: number,
+      failureKind: LaneFailureKind,
+      errorExcerpt: string,
+    ): Promise<number | null> => {
+      if (!this.host.triageLaneFailure) return null;
+      const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
+      if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= MONITOR_RUN_RESCUE_CAP) {
+        this.host.log?.(
+          'info',
+          `fan-out item '${itemId}': lane-rescue budget spent (lane ${usedForLane}/${MONITOR_LANE_RESCUE_CAP}, run ${laneRescues.runTotal}/${MONITOR_RUN_RESCUE_CAP}); not consulting lane triage`,
+        );
+        return null;
+      }
+      // Reserve now, release on every non-rescue arm below (see the docblock).
+      laneRescues.perItem.set(itemId, usedForLane + 1);
+      laneRescues.runTotal += 1;
+      const releaseReservation = (): null => {
+        laneRescues.perItem.set(itemId, usedForLane);
+        laneRescues.runTotal -= 1;
+        return null;
+      };
+
+      let outcome: LaneRescueOutcome;
+      try {
+        outcome = await this.host.triageLaneFailure({
+          itemId,
+          stepId: failingStepId,
+          attempt,
+          failureKind,
+          errorExcerpt,
+          innerStepIds: allowedStepIds,
+          ...(signal ? { signal } : {}),
+        });
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': lane triage threw (${err instanceof Error ? err.message : String(err)}); failing the lane`,
+        );
+        return releaseReservation();
+      }
+      if (outcome.kind !== 'rescue') return releaseReservation();
+      const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
+      if (targetIndex < 0) {
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': lane triage named '${outcome.targetStepId}', which is not one of this fan-out's inner steps; failing the lane`,
+        );
+        return releaseReservation();
+      }
+      laneRescues.guidance.set(itemId, outcome.guidance);
+      this.host.log?.(
+        'warn',
+        `fan-out item '${itemId}': ${failureKind} exhausted at '${failingStepId}' — monitor RESCUE${outcome.adjusted ? ' (task body adjusted)' : ''} → re-driving from '${inner[targetIndex].id}'`,
+      );
+      return targetIndex;
+    };
+
     // The park step is NOT an inner-chain id, so the lane-store vocabulary must be
     // widened to accept it when the controller parks at the merge-gate.
     const parkAllowedStepIds: readonly string[] = [...allowedStepIds, AWAITING_VERIFY_STEP];
@@ -904,6 +1055,52 @@ export class WorkflowController {
         laneContractRetries = 0;
         visualLoopbacks = 0;
         if (taskVerifyIndex >= 0 && targetIndex <= taskVerifyIndex) visualVerifyTask = undefined;
+      };
+
+      /**
+       * This lane exhausted an automatic budget and is about to settle 'failed'.
+       * Consult autonomous lane triage first; on a RESCUE, prepare the lane for
+       * the re-drive and return the inner index to jump to, else null (the caller
+       * settles the lane exactly as it did before this seam existed).
+       *
+       * A rescue is deliberately the SAME state transition an operator lane rewind
+       * performs — `clearStateForRewind` — so the two interventions cannot drift:
+       *   - the AUTOMATIC budgets the re-driven region needs (`laneContractRetries`,
+       *     `visualLoopbacks`) are reset, otherwise the rescue would be cosmetic:
+       *     the lane would fail on the first defect of the very region the
+       *     supervisor just asked it to redo;
+       *   - the one-shot prompt sections + any armed loopback attempt write are
+       *     dropped (they describe the superseded attempt);
+       *   - `laneAttempt` is NOT bumped. A rescue must not BURN the lane's
+       *     FAN_OUT_LANE_ATTEMPT_CAP budget — the same reasoning that exempts an
+       *     operator rewind (and an operator step-skip) from the budgets they
+       *     bypass. It is bounded by MONITOR_LANE_RESCUE_CAP instead.
+       *
+       * `needsRevive` is set at the MERGE-GATE sites only: the merge-gate driver
+       * durably wrote the lane row 'failed' before `awaitVerdict` resolved, so a
+       * rescue there has to un-settle the row before re-driving or the lane would
+       * re-run under a 'failed' chip (and the production driver's `resolveItems`
+       * would drop it from the next wave's re-resolution). `reviveLane` is
+       * status-guarded to 'failed', so passing it on a not-actually-settled lane
+       * is a harmless no-op.
+       */
+      const rescueLaneOrNull = async (
+        failingStepId: string,
+        failureKind: LaneFailureKind,
+        errorExcerpt: string,
+        needsRevive = false,
+      ): Promise<number | null> => {
+        const targetIndex = await consultLaneTriage(
+          itemId,
+          failingStepId,
+          laneAttempt,
+          failureKind,
+          errorExcerpt,
+        );
+        if (targetIndex === null) return null;
+        clearStateForRewind(targetIndex);
+        if (needsRevive) driver.reviveLane?.({ runId, itemId });
+        return targetIndex;
       };
 
       for (let k = 0; k < inner.length; k++) {
@@ -1022,6 +1219,19 @@ export class WorkflowController {
           }
           if (outcome.kind === 'aborted') return 'aborted';
           if (outcome.kind === 'failed') {
+            // Budget exhaustion (the merge gate hit its own attempt cap) — consult
+            // autonomous lane triage before settling. The gate ALREADY wrote the
+            // lane 'failed', hence needsRevive.
+            const rescueTarget = await rescueLaneOrNull(
+              innerStep.id,
+              'merge-gate',
+              'the visual merge gate rejected this lane at its attempt cap',
+              true,
+            );
+            if (rescueTarget !== null) {
+              k = rescueTarget - 1; // The loop's k++ lands on the target next.
+              continue;
+            }
             driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
             this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate FAILED; lane failed`);
             return 'failed';
@@ -1041,6 +1251,21 @@ export class WorkflowController {
               outcome.attempt <= laneAttempt ||
               outcome.attempt > FAN_OUT_LANE_ATTEMPT_CAP
             ) {
+              // The defensive re-check refused this loopback — the lane is out of
+              // visual-loopback budget (or the verdict is unusable). Consult lane
+              // triage before settling, exactly like the 'failed' arm above. The
+              // merge-gate driver may already have written the row, so revive
+              // defensively (the store's guard makes it a no-op when it has not).
+              const rescueTarget = await rescueLaneOrNull(
+                innerStep.id,
+                'merge-gate',
+                `the visual merge gate loopback was refused (attempt ${outcome.attempt}, lane attempt ${laneAttempt}, ${visualLoopbacks} visual loopback(s) used)`,
+                true,
+              );
+              if (rescueTarget !== null) {
+                k = rescueTarget - 1; // The loop's k++ lands on the target next.
+                continue;
+              }
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
               this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
               return 'failed';
@@ -1096,6 +1321,14 @@ export class WorkflowController {
           // cleared below so no later step inherits them.
           ...(pendingContractError !== undefined ? { contractError: pendingContractError } : {}),
           ...(pendingLoopbackFeedback !== undefined ? { loopbackFeedback: pendingLoopbackFeedback } : {}),
+          // STICKY per-lane rescue guidance (monitor lane triage) — unlike the
+          // one-shot sections above it is re-read on EVERY subsequent inner-step
+          // spawn of a rescued lane until that lane settles, and it is keyed by
+          // ITEM so a sibling lane's prompt is untouched. Absent on every lane
+          // that was never rescued (byte-identical prompts).
+          ...(laneRescues.guidance.has(itemId)
+            ? { laneGuidance: laneRescues.guidance.get(itemId) }
+            : {}),
         };
         pendingContractError = undefined;
         pendingLoopbackFeedback = undefined;
@@ -1141,6 +1374,19 @@ export class WorkflowController {
               `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
             );
             k = targetIndex - 1; // The loop's k++ lands on the target next.
+            continue;
+          }
+          // The lane's loopback budget is spent (or it declares no target) — the
+          // one genuine exhaustion of an inner step. Consult lane triage before
+          // settling; a rescue re-drives from the supervisor's target with
+          // guidance, without bumping laneAttempt.
+          const rescueTarget = await rescueLaneOrNull(
+            innerStep.id,
+            'inner-step',
+            result.error ?? '(no error text)',
+          );
+          if (rescueTarget !== null) {
+            k = rescueTarget - 1; // The loop's k++ lands on the target next.
             continue;
           }
           driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
@@ -1197,6 +1443,19 @@ export class WorkflowController {
                 k = targetIndex - 1; // The loop's k++ lands on the target next.
                 continue;
               }
+              // Code-review keeps reporting blocking defects and the loopback
+              // budget is spent — consult lane triage before settling. The
+              // excerpt is the `## Blocking` section (the defects themselves),
+              // falling back to the whole result text.
+              const rescueTarget = await rescueLaneOrNull(
+                innerStep.id,
+                'code-review',
+                extractBlockingSection(resultText) ?? resultText,
+              );
+              if (rescueTarget !== null) {
+                k = rescueTarget - 1; // The loop's k++ lands on the target next.
+                continue;
+              }
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
               this.host.log?.(
                 'warn',
@@ -1248,6 +1507,14 @@ export class WorkflowController {
                   `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
                 );
                 k = targetIndex - 1; // The loop's k++ lands on the target next.
+                continue;
+              }
+              // task-verify keeps returning FAIL and the loopback budget is spent
+              // — consult lane triage before settling. The excerpt is the verify
+              // agent's own result text (its verdict + fix guidance).
+              const rescueTarget = await rescueLaneOrNull(innerStep.id, 'task-verify', resultText);
+              if (rescueTarget !== null) {
+                k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
               }
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });

@@ -34,6 +34,8 @@ import type {
   ControllerStepContext,
   FanOutDriver,
   HumanGateDecision,
+  LaneRescueOutcome,
+  LaneTriageFailure,
   StepReport,
   SystemicPauseVerdict,
   TriageDecision,
@@ -44,6 +46,49 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
+
+/**
+ * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
+ * With it set to '1' the host never consults the monitor about a failing lane and
+ * every lane settles 'failed' exactly as it did before the seam existed — no
+ * query cost, no task edits, no findings.
+ */
+export const LANE_TRIAGE_KILL_SWITCH_ENV = 'CYBOFLOW_DISABLE_LANE_TRIAGE';
+
+/** True when the operator has disabled autonomous lane rescue for this process. */
+function laneTriageDisabled(): boolean {
+  return process.env[LANE_TRIAGE_KILL_SWITCH_ENV] === '1';
+}
+
+/**
+ * The task facts the monitor's lane-triage prompt needs but the CONTROLLER does
+ * not have (it only ever sees opaque fan-out item ids). Resolved by the injected
+ * {@link ProgrammaticRunHostArgs.readLaneTask} reader.
+ */
+export interface LaneTriageTaskFacts {
+  /** Display ref, e.g. `TASK-014`. */
+  taskRef?: string;
+  taskTitle?: string;
+  /** The task's CURRENT body — the acceptance criteria the lane works from. */
+  taskBody?: string;
+}
+
+/** Outcome of the injected task-body adjust (a REFUSAL is `ok: false`, not a throw). */
+export interface LaneTriageAdjustResult {
+  ok: boolean;
+  /** Machine-readable refusal reason, surfaced in the chat note + the finding. */
+  reason?: string;
+}
+
+/** Longest before/after body excerpt rendered into the audit finding. */
+const FINDING_BODY_EXCERPT = 1200;
+
+/** Truncate a body for the audit finding without pretending it is complete. */
+function excerptBody(body: string | undefined): string {
+  const text = (body ?? '').trim();
+  if (text.length === 0) return '_(empty)_';
+  return text.length <= FINDING_BODY_EXCERPT ? text : `${text.slice(0, FINDING_BODY_EXCERPT)}\n\n…(truncated)`;
+}
 
 /**
  * Drives a step boundary onto the live timeline (current_step_id + emit). In
@@ -144,6 +189,38 @@ export interface ProgrammaticRunHostArgs {
    * gate. Absent ⇒ every gate opens.
    */
   humanGateSkip?: (step: WorkflowStep) => string | null;
+  /**
+   * LANE-TRIAGE task reader. Resolves the ref / title / CURRENT body for a
+   * fan-out item so `triageLaneFailure` can ENRICH the controller's bare
+   * lane/failure facts into the monitor's full `LaneTriageRequest` — the brain
+   * decides whether the task's acceptance criteria conflict with repo reality,
+   * which it cannot do without seeing them. Run-bound by the composition root
+   * (production reads the `tasks` row). MUST be fail-soft (return undefined
+   * rather than throw). Absent ⇒ the monitor is consulted with an empty
+   * title/body and the item id standing in for the ref: still a usable rescue
+   * consult, but `adjust_and_retry` is effectively out of reach.
+   */
+  readLaneTask?: (itemId: string) => LaneTriageTaskFacts | undefined;
+  /**
+   * LANE-TRIAGE task-body writer — the monitor's AUTONOMOUS requirements
+   * adjustment (`adjust_and_retry`). Bound by the composition root to
+   * `adjustRunTaskForLaneTriage`, which routes through TaskChangeRouter and
+   * deliberately bypasses `edit_task`'s queued-only lane guard (safe because
+   * lane prompts re-read the body at every step spawn and the host always pairs
+   * the edit with a lane rewind). A normal refusal resolves `{ ok: false,
+   * reason }`; the host DOWNGRADES to a plain rescue rather than abandoning it.
+   * Absent ⇒ every adjust verdict is downgraded to a plain rescue.
+   */
+  adjustRunTask?: (input: { taskRef: string; body: string }) => Promise<LaneTriageAdjustResult>;
+  /**
+   * LANE-TRIAGE audit sink. Files the NON-BLOCKING review-queue record of an
+   * autonomous intervention (bound by the composition root to the SAME
+   * ReviewItemRouter seam the monitor's `fileNote` action uses). Called for
+   * RESCUES only — a plain give_up needs no record because the lane's failure
+   * already surfaces at the run's human gate. Fail-soft at the call site: a
+   * throwing/absent sink never blocks the rescue it was supposed to audit.
+   */
+  fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
   logger?: LoggerLike;
 }
 
@@ -282,6 +359,216 @@ export class ProgrammaticRunHost implements ControllerHost {
         `Step **${step.name}** exhausted its retries — escalated to the review queue for your decision.`,
       );
       return 'escalate';
+    }
+  }
+
+  /**
+   * LANE-triage seam — `triageFailure`'s per-lane sibling. Consulted when ONE
+   * sprint fan-out lane exhausts an automatic budget, BEFORE the controller
+   * settles it 'failed'. Resolves the executable verdict only (give_up | rescue),
+   * so the controller never learns what a monitor, a task edit, or a finding is.
+   *
+   * Order of business, each arm short-circuiting to the pre-seam behavior:
+   *   1. KILL SWITCH (`CYBOFLOW_DISABLE_LANE_TRIAGE=1`) ⇒ give_up. No consult, no
+   *      chat turn (a rollback lever should be silent, not chatty) — just a log.
+   *   2. No monitor, or a monitor with no `triageLane` (the many faked sessions
+   *      across the suite) ⇒ give_up, mirroring `fanOut`/`visualGate`'s
+   *      absent-optional-dep style.
+   *   3. ENRICH with the task's ref/title/CURRENT body via `readLaneTask` — the
+   *      controller only holds opaque item ids, and the brain cannot judge an
+   *      acceptance-criteria conflict it cannot see.
+   *   4. Consult `monitor.triageLane`. It OWNS its own chat rendering (the
+   *      failure announcement + the decision turn), so this method injects NO
+   *      turn for the consult itself — a host turn here would double-render.
+   *   5. `adjust_and_retry` ⇒ apply the body edit via `adjustRunTask`. A refusal
+   *      (or a throw, or an unwired dep) DOWNGRADES to a plain rescue carrying
+   *      the same guidance — never to a give_up, since the guidance still holds
+   *      the substance. The downgrade IS injected as a chat turn: it is the one
+   *      thing the brain cannot know, and its own decision turn is deliberately
+   *      phrased as a decision rather than a completed act, so the downgrade note
+   *      corrects the record without making the earlier turn a lie.
+   *   6. File the audit finding for the rescue (fail-soft; a broken review queue
+   *      must never cost the run a rescue). Nothing is filed for a give_up —
+   *      that lane's failure already reaches the human at the run's gate.
+   *
+   * Fail-soft overall: `DefaultMonitorSession.triageLane` already never rejects,
+   * so the try/catch is belt-and-braces — any escape still yields give_up, i.e.
+   * exactly the behavior of a run without the seam.
+   */
+  async triageLaneFailure(req: LaneTriageFailure): Promise<LaneRescueOutcome> {
+    if (laneTriageDisabled()) {
+      this.args.logger?.info('[ProgrammaticRunHost] lane triage disabled by kill switch; letting the lane fail', {
+        runId: this.args.runId,
+        itemId: req.itemId,
+        stepId: req.stepId,
+      });
+      return { kind: 'give_up' };
+    }
+    const monitor = this.args.monitor;
+    if (!monitor?.triageLane) {
+      this.args.logger?.info('[ProgrammaticRunHost] no lane-triage-capable monitor; letting the lane fail', {
+        runId: this.args.runId,
+        itemId: req.itemId,
+        stepId: req.stepId,
+      });
+      return { kind: 'give_up' };
+    }
+
+    let facts: LaneTriageTaskFacts | undefined;
+    try {
+      facts = this.args.readLaneTask?.(req.itemId);
+    } catch (err) {
+      // A broken reader degrades the consult (empty body ⇒ no adjust), never
+      // costs the lane its rescue.
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-triage task read failed (fail-soft)', {
+        runId: this.args.runId,
+        itemId: req.itemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const taskRef = req.taskRef ?? facts?.taskRef ?? req.itemId;
+    const previousBody = facts?.taskBody;
+
+    try {
+      const decision = await monitor.triageLane(
+        {
+          taskRef,
+          itemId: req.itemId,
+          stepId: req.stepId,
+          attempt: req.attempt,
+          failureKind: req.failureKind,
+          errorExcerpt: req.errorExcerpt,
+          innerStepIds: [...req.innerStepIds],
+          taskTitle: facts?.taskTitle ?? '',
+          taskBody: previousBody ?? '',
+        },
+        req.signal,
+      );
+      if (decision.verdict === 'give_up') return { kind: 'give_up' };
+
+      let adjusted = false;
+      let downgradeReason: string | undefined;
+      if (decision.verdict === 'adjust_and_retry') {
+        if (!this.args.adjustRunTask) {
+          downgradeReason = 'no task-adjust capability is wired on this run';
+        } else {
+          try {
+            const result = await this.args.adjustRunTask({ taskRef, body: decision.taskBody });
+            if (result.ok) adjusted = true;
+            else downgradeReason = result.reason ?? 'the task edit was refused';
+          } catch (err) {
+            downgradeReason = err instanceof Error ? err.message : String(err);
+          }
+        }
+        if (!adjusted) {
+          this.args.logger?.warn('[ProgrammaticRunHost] lane-triage task adjust refused; downgrading to a plain rescue', {
+            runId: this.args.runId,
+            taskRef,
+            reason: downgradeReason,
+          });
+          // The ONE thing the brain could not know — its decision turn said it
+          // would adjust the body, so correct the record before the lane re-runs.
+          this.injectMonitorTurn(
+            `⚠ **${taskRef}**: the requirements adjustment could NOT be applied (${downgradeReason ?? 'unknown reason'}) — re-driving the lane with the guidance alone, task body unchanged.`,
+          );
+        }
+      }
+
+      await this.fileLaneRescueFinding({
+        taskRef,
+        req,
+        targetStepId: decision.targetStepId,
+        guidance: decision.guidance,
+        reason: decision.reason,
+        adjusted,
+        ...(downgradeReason !== undefined ? { downgradeReason } : {}),
+        ...(decision.verdict === 'adjust_and_retry' ? { proposedBody: decision.taskBody } : {}),
+        ...(previousBody !== undefined ? { previousBody } : {}),
+      });
+
+      return { kind: 'rescue', targetStepId: decision.targetStepId, guidance: decision.guidance, adjusted };
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane triage failed; letting the lane fail', {
+        runId: this.args.runId,
+        itemId: req.itemId,
+        stepId: req.stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'give_up' };
+    }
+  }
+
+  /**
+   * File the NON-BLOCKING audit record for one autonomous lane rescue. Every
+   * intervention is auditable at the run's human gate before anything merges,
+   * which is what makes an unconfirmed body edit acceptable in the first place —
+   * so the body carries the verdict, its reason, the guidance that will be
+   * threaded into the re-run, and, for an adjust, BOTH the old and the proposed
+   * body (a downgraded adjust says so explicitly, since the body on disk is
+   * still the old one). Fail-soft: the rescue is already decided, and losing its
+   * paper trail must not lose the rescue.
+   */
+  private async fileLaneRescueFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    targetStepId: string;
+    guidance: string;
+    reason: string;
+    adjusted: boolean;
+    downgradeReason?: string;
+    proposedBody?: string;
+    previousBody?: string;
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const lines = [
+        `The run supervisor rescued task **${args.taskRef}** after its lane exhausted an automatic budget.`,
+        '',
+        `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        `- Verdict: ${args.adjusted ? 'adjust_and_retry (task body REPLACED)' : 'retry'} — re-driving from \`${args.targetStepId}\``,
+        `- Reason: ${args.reason.trim().length > 0 ? args.reason.trim() : '(none given)'}`,
+        '',
+        '## Guidance threaded into the re-run',
+        '',
+        args.guidance.trim(),
+      ];
+      if (args.proposedBody !== undefined) {
+        if (!args.adjusted) {
+          lines.push(
+            '',
+            '## Requirements adjustment NOT applied',
+            '',
+            `The supervisor asked to replace this task's body, but the edit was refused (${args.downgradeReason ?? 'unknown reason'}). The task body on disk is UNCHANGED; the lane was re-driven with the guidance above only. The proposed body is recorded below for review.`,
+            '',
+            '### Proposed (not applied) body',
+            '',
+            excerptBody(args.proposedBody),
+          );
+        } else {
+          lines.push(
+            '',
+            '## Requirements adjustment APPLIED (autonomous — review this)',
+            '',
+            '### Previous body',
+            '',
+            excerptBody(args.previousBody),
+            '',
+            '### New body',
+            '',
+            excerptBody(args.proposedBody),
+          );
+        }
+      }
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor rescued ${args.taskRef} (${args.req.failureKind})`,
+        body: lines.join('\n'),
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-triage finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

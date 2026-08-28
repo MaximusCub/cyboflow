@@ -40,7 +40,12 @@ import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
-import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
+import {
+  ProgrammaticRunHost,
+  type LaneTriageAdjustResult,
+  type LaneTriageTaskFacts,
+  type StepReporter,
+} from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
@@ -191,6 +196,33 @@ export interface DefaultProgrammaticRunnerDeps {
         effort?: ReasoningEffort;
       }
     | undefined;
+  /**
+   * LANE-TRIAGE task reader (autonomous lane rescue). Resolves a fan-out item's
+   * ref / title / CURRENT body so the host can enrich the controller's bare
+   * lane-failure facts before consulting the monitor — the brain judges whether
+   * the task's acceptance criteria conflict with repo reality, which it cannot do
+   * without seeing them. MUST be fail-soft. Absent ⇒ the consult still happens,
+   * but with an empty title/body (so `adjust_and_retry` is out of reach).
+   */
+  laneTriageTaskReader?: (runId: string, itemId: string) => LaneTriageTaskFacts | undefined;
+  /**
+   * LANE-TRIAGE task-body writer (autonomous lane rescue). Bound in production to
+   * `adjustRunTaskForLaneTriage` over the SAME `TaskMutationDeps` the monitor's
+   * chat `edit_task` action uses, so every backlog write still lands on the
+   * TaskChangeRouter chokepoint. Absent ⇒ an `adjust_and_retry` verdict is
+   * downgraded to a plain rescue (guidance only).
+   */
+  laneTriageAdjustTask?: (
+    runId: string,
+    input: { taskRef: string; body: string },
+  ) => Promise<LaneTriageAdjustResult>;
+  /**
+   * LANE-TRIAGE audit sink (autonomous lane rescue). Bound in production to the
+   * SAME ReviewItemRouter seam the monitor's `fileNote` action uses, so an
+   * autonomous rescue — and above all an autonomous requirements adjustment —
+   * always reaches the human's review queue. Absent ⇒ rescues are logged only.
+   */
+  laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
   logger?: LoggerLike;
 }
 
@@ -491,6 +523,14 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         : 'no design surface to review — no prototype artifact and no architecture design section';
     };
 
+    // Autonomous LANE-RESCUE collaborators, run-bound here so the host only ever
+    // passes the item / edit / note. Each is threaded ONLY when wired: an absent
+    // dep is exactly the "no lane triage" posture (the host gives up, the lane
+    // settles failed as it always did).
+    const laneTriageTaskReader = this.deps.laneTriageTaskReader;
+    const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
+    const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
       projectId: ctx.run.project_id,
@@ -510,6 +550,16 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       // into the walk (see ProgrammaticRunHostArgs.visualGate's docblock).
       ...(this.deps.visualGate ? { visualGate: this.deps.visualGate } : {}),
       ...(enqueueVisualVerification ? { enqueueVisualVerification } : {}),
+      ...(laneTriageTaskReader ? { readLaneTask: (itemId: string) => laneTriageTaskReader(ctx.runId, itemId) } : {}),
+      ...(laneTriageAdjustTask
+        ? { adjustRunTask: (input: { taskRef: string; body: string }) => laneTriageAdjustTask(ctx.runId, input) }
+        : {}),
+      ...(laneTriageFindingSink
+        ? {
+            fileLaneTriageFinding: (input: { title: string; body: string }) =>
+              laneTriageFindingSink(ctx.runId, input),
+          }
+        : {}),
       logger: this.deps.logger,
     });
 

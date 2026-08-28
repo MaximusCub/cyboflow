@@ -132,6 +132,18 @@ export interface ComposeStepPromptArgs {
    */
   userGuidance?: string;
   /**
+   * The run supervisor's LANE-RESCUE guidance for this fan-out lane (monitor
+   * lane triage). Rendered in the SAME `## Operator guidance` section as
+   * `userGuidance` — an agent should not have to learn two section names for
+   * "instructions someone added mid-run" — but LABELLED as the supervisor's,
+   * since it exists because this lane already failed and the label is what tells
+   * the agent this is a correction rather than a preference. Both may be present
+   * at once (an operator steer AND a rescue); both render. Absent / empty ⇒ no
+   * contribution (a prompt with only `userGuidance` is byte-identical to before
+   * this field existed).
+   */
+  laneGuidance?: string;
+  /**
    * The §5.1 visual-verification output-contract defect quoted back to a
    * RE-DELEGATED task-verify (verification-agent redesign §5.3). Set ONLY on the
    * single contract re-run: the previous attempt's PASS result carried neither the
@@ -395,10 +407,26 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     workflowName === 'compound'
       ? `\n\n## Compound review-queue discipline\n\nThe \`cyboflow-compounder\` subagent may return a \`## Discarded\` list of candidates it considered and set aside. These are CONTEXT, not actions: NEVER file a discarded candidate as a \`cyboflow_report_finding\` (\`decision\` or \`finding\`) or any other review-queue item. Discarded candidates belong ONLY in the \`## Discarded\` section of the \`compound-recommendations\` doc (composed at the \`extract\` step). Compound has exactly TWO human gates and BOTH are workflow STEPS: the \`approve-learnings\` question, and the terminal \`human-review\` step — a "merge in changes" gate over the applied diff (Approve / Reject), just like a Sprint/Ship human-review. Compound emits NO \`decision\` review items anywhere — not at \`write-back\`, not per doc edit, not per drop. write-back APPLIES every approved change in-place, commits, and reports no review item; per-item gates are the sequential-gate spam this flow must never produce.`
       : '';
+  // ONE `## Operator guidance` section carries BOTH mid-run guidance channels:
+  // the operator's own steer for this STEP, and the supervisor's rescue guidance
+  // for this LANE. They are labelled separately (the agent needs to know a rescue
+  // is a correction after a real failure, not a preference) but share the heading
+  // so no agent has to learn two section names for the same kind of instruction.
+  // With only `userGuidance` present the rendered text is byte-identical to the
+  // single-channel version this replaces.
+  const guidanceBlocks: string[] = [];
+  if (args.userGuidance !== undefined && args.userGuidance.trim().length > 0) {
+    guidanceBlocks.push(
+      `The operator added mid-run guidance for this step — follow it:\n\n${args.userGuidance.trim()}`,
+    );
+  }
+  if (args.laneGuidance !== undefined && args.laneGuidance.trim().length > 0) {
+    guidanceBlocks.push(
+      `The run's SUPERVISOR rescued this task's lane after it failed, and left guidance for the re-run. The previous attempt failed WITHOUT it — follow it:\n\n${args.laneGuidance.trim()}`,
+    );
+  }
   const userGuidance =
-    args.userGuidance !== undefined && args.userGuidance.trim().length > 0
-      ? `\n\n## Operator guidance\n\nThe operator added mid-run guidance for this step — follow it:\n\n${args.userGuidance.trim()}`
-      : '';
+    guidanceBlocks.length > 0 ? `\n\n## Operator guidance\n\n${guidanceBlocks.join('\n\n')}` : '';
   // Visual-verification output-contract re-run (§5.1/§5.3): a task-verify PASS
   // result MUST contain EXACTLY ONE of a `## Visual verification task` fence or a
   // `VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>` line. The previous attempt
