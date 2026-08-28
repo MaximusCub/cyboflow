@@ -18,6 +18,7 @@ Agents in this repo usually run *inside* a cyboflow session while editing cybofl
 - `docs/RELEASE-RUNBOOK.md` + `docs/signing/APPLE_DEVELOPER_SETUP.md` — load before any build, packaging, or release task.
 - `docs/VISUAL-VERIFICATION-SETUP.md` — how to see/drive the UI (CDP attach on :9223 is the primary path; Peekaboo is the fallback, with TCC diagnostics).
 - `docs/PERFORMANCE.md` — the CPU/memory harness (`pnpm dev:perf`, `scripts/profile-electron.mjs`), baselines, and the measurement traps (main-process timer wakeups cost more than their callbacks; dev-mode renderer profiles are inflated by `jsxDEV`).
+- `docs/BACKUP-RESTORE.md` — daily `sessions.db` snapshots, the `raw_events` shard archive, lineages, and the restore procedure. Read before touching a backup: a daily backup alone has an EMPTY `raw_events`.
 - `docs/PROVENANCE.md` — fork lineage; standing rule: never merge or cherry-pick from Nimbalyst.
 - `docs/crystal-legacy/` and `docs/workflows-future/` — historical reference, not current truth.
 

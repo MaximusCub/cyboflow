@@ -1,57 +1,51 @@
 /**
- * databaseBackupRestore — replay archived `raw_events` deltas back into a daily
- * backup, reconstituting the full database a restore needs.
+ * databaseBackupRestore — replay archived `raw_events` shards back into a daily
+ * backup, reconstituting the full database a recovery needs.
  *
  * A daily `sessions-YYYY-MM-DD.db` carries every table EXCEPT the rows of
- * `raw_events`, which are archived once into immutable delta files instead of
- * seven times into the retained backups (see databaseBackupSnapshot.ts for
- * why). Restoring is therefore two steps: take the daily backup you want, then
- * run this to pour the history back in.
+ * `raw_events`, which are archived once into immutable shards instead of seven
+ * times into the retained backups (see databaseBackupSnapshot.ts for why).
+ * Recovering is therefore two steps: take the daily backup you want, then run
+ * this to pour the history back in. `scripts/restore-backup.cjs` is the
+ * operator-facing wrapper; docs/BACKUP-RESTORE.md is the procedure.
  *
- * WHY THE WATERMARK MATTERS. The delta store keeps growing after a given day's
- * backup was taken, so it holds events that did not exist yet on that day.
- * Replaying those into an older backup would graft future conversations onto a
- * past snapshot. `sqlite_sequence` records the highest id the database had ever
- * issued at the moment it was snapshotted — it is preserved through the strip
- * precisely so it can serve as that cut-off here.
+ * WHY IT READS THE MARKER RATHER THAN JUST SCANNING THE STORE. The archive is
+ * partitioned into lineages, and a backup belongs to exactly one of them. The
+ * marker the strip stamped into the backup names that lineage and the id it was
+ * cut at, so a restore can neither reach into a sibling timeline's shards nor
+ * replay events that did not exist yet when the backup was taken.
  *
- * IDEMPOTENT. Rows are inserted OR IGNORE, so running this twice, or against a
- * backup that still has its rows (one taken before this scheme existed), adds
- * nothing the second time.
+ * VALIDATES BEFORE IT WRITES. Coverage is proven complete up to the watermark
+ * first; a missing or corrupt shard aborts with the target untouched rather
+ * than producing a confidently partial history.
+ *
+ * IDEMPOTENT. Rows go in OR IGNORE, so running this twice — or against a backup
+ * that still has its rows, taken before this scheme existed — adds nothing the
+ * second time.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import Database from 'better-sqlite3';
-import { DELTA_ARCHIVED_TABLE } from './databaseBackupSnapshot';
-
-/** `raw-events-<lo>-<hi>.db`, captured so deltas replay in id order. */
-const DELTA_FILENAME_RE = /^raw-events-(\d+)-(\d+)\.db$/;
+import {
+  DELTA_ARCHIVED_TABLE,
+  listShards,
+  probeShardWith,
+  readArchiveMarker,
+  validateShards,
+} from './databaseBackupArchive';
 
 export interface RestoreResult {
-  /** Delta files actually replayed, in the order they were applied. */
+  /** Lineage the backup named, or null when it carried no marker. */
+  lineage: string | null;
+  /** Shard files actually replayed, in the order they were applied. */
   appliedFiles: string[];
-  /** Rows inserted across all deltas. */
+  /** Rows inserted across all shards. */
   restoredRows: number;
-  /** The id cut-off taken from the backup's sqlite_sequence. */
+  /** The id cut-off taken from the backup's marker. */
   watermark: number;
+  /** Set when the backup needed no restore, explaining why. */
+  skipped?: string;
 }
 
-/** Delta files in ascending id order. */
-function deltaFilesInOrder(deltaDir: string): { file: string; lo: number }[] {
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(deltaDir);
-  } catch {
-    return [];
-  }
-  const parsed: { file: string; lo: number }[] = [];
-  for (const entry of entries) {
-    const match = DELTA_FILENAME_RE.exec(entry);
-    if (match === null) continue;
-    parsed.push({ file: entry, lo: Number(match[1]) });
-  }
-  return parsed.sort((a, b) => a.lo - b.lo);
-}
+const probeShard = probeShardWith((p) => new Database(p, { readonly: true, fileMustExist: true }));
 
 /** Column names of `table` in the given schema (`main` or an attached alias). */
 function columnNames(db: Database.Database, schema: string, table: string): string[] {
@@ -60,8 +54,8 @@ function columnNames(db: Database.Database, schema: string, table: string): stri
 }
 
 /**
- * Replay every applicable delta into the backup at `backupPath`, in place.
- * Throws if the backup has no `raw_events` table to restore into.
+ * Replay every applicable shard into the backup at `backupPath`, in place.
+ * Throws if the backup cannot be restored — never leaves it partially filled.
  */
 export function restoreRawEvents(backupPath: string, deltaDir: string): RestoreResult {
   const db = new Database(backupPath);
@@ -76,46 +70,85 @@ export function restoreRawEvents(backupPath: string, deltaDir: string): RestoreR
       throw new Error(`${backupPath} has no ${DELTA_ARCHIVED_TABLE} table to restore into`);
     }
 
-    // MAX rather than a bare SELECT: sqlite_sequence has no unique index on
-    // `name`, so a database written by other tooling can legitimately carry
-    // more than one row for a table, and the watermark is the highest of them.
-    const sequence = db
-      .prepare('SELECT MAX(seq) AS seq FROM sqlite_sequence WHERE name = ?')
-      .get(DELTA_ARCHIVED_TABLE) as { seq: number | null } | undefined;
-    // No sequence row means the table was never written to in this database,
-    // so there is no snapshot moment to cut the deltas at and nothing that
-    // could legitimately belong to it.
-    const watermark = sequence?.seq ?? 0;
-    if (watermark === 0) return { appliedFiles: [], restoredRows: 0, watermark: 0 };
+    const existing = db.prepare(`SELECT COUNT(*) AS n FROM ${DELTA_ARCHIVED_TABLE}`).get() as { n: number };
+    const marker = readArchiveMarker(db);
+
+    if (marker === null) {
+      // No marker means nothing ever stripped this database. If it still has
+      // its rows it is a complete backup and needs no restore; if it is empty
+      // there is no lineage to consult and guessing one could graft a foreign
+      // timeline onto it.
+      if (existing.n > 0) {
+        return {
+          lineage: null,
+          appliedFiles: [],
+          restoredRows: 0,
+          watermark: 0,
+          skipped: 'backup carries its own raw_events rows; no archive replay needed',
+        };
+      }
+      throw new Error(
+        `${backupPath} has an empty ${DELTA_ARCHIVED_TABLE} and no archive marker — cannot tell which lineage its history is in`,
+      );
+    }
+
+    if (marker.watermark === 0) {
+      return {
+        lineage: marker.lineage,
+        appliedFiles: [],
+        restoredRows: 0,
+        watermark: 0,
+        skipped: 'the database held no events when this backup was taken',
+      };
+    }
+
+    const shards = listShards(deltaDir, marker.lineage);
+    if (shards.length === 0) {
+      throw new Error(`archive lineage ${marker.lineage} has no shards under ${deltaDir}`);
+    }
+
+    // Prove the cover BEFORE writing anything: a partial restore that reports
+    // success is worse than a refusal, because it looks like a recovered
+    // database and reads as though history simply ended early.
+    const integrity = validateShards(shards, probeShard);
+    if (!integrity.ok) {
+      throw new Error(`archive lineage ${marker.lineage} is not intact: ${integrity.reason}`);
+    }
+    if (integrity.coveredThrough < marker.watermark) {
+      throw new Error(
+        `archive lineage ${marker.lineage} covers ids up to ${integrity.coveredThrough}, but this backup needs ${marker.watermark}`,
+      );
+    }
 
     const targetColumns = columnNames(db, 'main', DELTA_ARCHIVED_TABLE);
 
-    for (const { file } of deltaFilesInOrder(deltaDir)) {
-      const deltaPath = path.join(deltaDir, file);
-      db.exec(`ATTACH DATABASE '${deltaPath.replace(/'/g, "''")}' AS delta`);
+    for (const shard of shards) {
+      if (shard.lo > marker.watermark) break;
+      db.exec(`ATTACH DATABASE '${shard.path.replace(/'/g, "''")}' AS shard`);
       try {
-        // Intersect the column sets: a delta written before a migration added a
-        // column simply does not carry it, and must still replay cleanly.
-        const shared = targetColumns.filter((c) => columnNames(db, 'delta', DELTA_ARCHIVED_TABLE).includes(c));
+        // Intersect the column sets: a shard written before a migration added
+        // a column simply does not carry it, and must still replay cleanly.
+        const shardColumns = columnNames(db, 'shard', DELTA_ARCHIVED_TABLE);
+        const shared = targetColumns.filter((c) => shardColumns.includes(c));
         const list = shared.map((c) => `"${c}"`).join(', ');
         const inserted = db
           .prepare(
             `INSERT OR IGNORE INTO main.${DELTA_ARCHIVED_TABLE} (${list})
-             SELECT ${list} FROM delta.${DELTA_ARCHIVED_TABLE}
+             SELECT ${list} FROM shard.${DELTA_ARCHIVED_TABLE}
              WHERE id <= ?
                AND run_id IN (SELECT id FROM main.workflow_runs)`,
           )
-          .run(watermark);
+          .run(marker.watermark);
         if (inserted.changes > 0) {
           restoredRows += inserted.changes;
-          applied.push(file);
+          applied.push(shard.file);
         }
       } finally {
-        db.exec('DETACH DATABASE delta');
+        db.exec('DETACH DATABASE shard');
       }
     }
 
-    return { appliedFiles: applied, restoredRows, watermark };
+    return { lineage: marker.lineage, appliedFiles: applied, restoredRows, watermark: marker.watermark };
   } finally {
     db.close();
   }

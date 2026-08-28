@@ -220,8 +220,11 @@ export class DatabaseBackupService {
         this.logger.info(
           `[DatabaseBackup] wrote daily backup to ${targetPath}`,
           {
+            lineage: result.lineage,
+            lineageMinted: result.lineageMinted,
             archivedRows: result.archivedRows,
-            deltaFile: result.deltaPath ?? 'none',
+            shardFile: result.shardPath ?? 'none',
+            watermark: result.watermark,
             bytesReclaimed: result.bytesReclaimed,
           },
         );

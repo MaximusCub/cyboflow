@@ -258,7 +258,7 @@ describe('DatabaseBackupService — raw_events delta archive', () => {
 
     await svc.tick();
 
-    expect(readdirSync(join(backupsDir, 'raw-events'))).toEqual(['raw-events-1-12.db']);
+    expect(readdirSync(join(backupsDir, 'raw-events', 'lineage-0001'))).toEqual(['raw-events-1-12.db']);
     expect(countEvents(join(backupsDir, 'sessions-2026-08-20.db'))).toBe(0);
   });
 
@@ -276,7 +276,7 @@ describe('DatabaseBackupService — raw_events delta archive', () => {
 
     await svc.tick();
 
-    expect(readdirSync(deltaDir)).toEqual(['raw-events-1-4.db']);
+    expect(readdirSync(join(deltaDir, 'lineage-0001'))).toEqual(['raw-events-1-4.db']);
   });
 
   it('round-trips a backup back to the live database through the deltas', async () => {
@@ -322,7 +322,7 @@ describe('DatabaseBackupService — raw_events delta archive', () => {
     const dailies = readdirSync(backupsDir).filter((f) => f.startsWith('sessions-'));
     expect(dailies).toHaveLength(DATABASE_BACKUP_RETAIN_COUNT);
     // ...but the archive, which is the ONLY copy of that history, is intact.
-    expect(readdirSync(join(backupsDir, 'raw-events'))).toEqual(['raw-events-1-5.db']);
+    expect(readdirSync(join(backupsDir, 'raw-events', 'lineage-0001'))).toEqual(['raw-events-1-5.db']);
   });
 
   it('publishes an unprocessed FULL copy when processing fails', async () => {

@@ -1,13 +1,16 @@
 /**
- * databaseBackupRestore tests — replaying archived raw_events deltas back into
+ * databaseBackupRestore tests — replaying archived raw_events shards back into
  * a daily backup.
  *
  * These are the tests that make the delta scheme trustworthy: a backup you
  * cannot restore is not a backup, so the round trip is asserted end to end
- * against real files rather than mocked out.
+ * against real files. The refusal cases matter just as much as the happy path —
+ * a restore that reports success over an incomplete archive is worse than one
+ * that stops, because the result looks recovered and simply reads as though
+ * history ended early.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, copyFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -26,8 +29,7 @@ function makeLiveDb(path: string): void {
        id INTEGER PRIMARY KEY AUTOINCREMENT,
        run_id TEXT NOT NULL,
        event_type TEXT NOT NULL,
-       payload_json TEXT NOT NULL,
-       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+       payload_json TEXT NOT NULL
      )`,
   );
   db.prepare('INSERT INTO workflow_runs (id, name) VALUES (?, ?)').run('run-1', 'alpha');
@@ -84,10 +86,11 @@ describe('restoreRawEvents', () => {
     const result = restoreRawEvents(backupPath, deltaDir);
 
     expect(result.restoredRows).toBe(25);
+    expect(result.lineage).toBe('lineage-0001');
     expect(events(backupPath)).toEqual(expected);
   });
 
-  it('reassembles history spread across several days of deltas', () => {
+  it('reassembles history spread across several days of shards', () => {
     addEvents(livePath, 10);
     takeBackup('sessions-2026-08-26.db');
     addEvents(livePath, 10);
@@ -98,14 +101,17 @@ describe('restoreRawEvents', () => {
 
     const result = restoreRawEvents(latest, deltaDir);
 
-    expect(result.appliedFiles).toEqual(['raw-events-1-10.db', 'raw-events-11-20.db', 'raw-events-21-30.db']);
+    expect(result.appliedFiles).toEqual([
+      'raw-events-1-10.db',
+      'raw-events-11-20.db',
+      'raw-events-21-30.db',
+    ]);
     expect(events(latest)).toEqual(expected);
   });
 
   it('never grafts newer events onto an older backup', () => {
     addEvents(livePath, 10);
     const older = takeBackup('sessions-2026-08-26.db');
-    // The delta store keeps growing after that backup was taken.
     addEvents(livePath, 40);
     takeBackup('sessions-2026-08-28.db');
 
@@ -130,8 +136,6 @@ describe('restoreRawEvents', () => {
   it('does not resurrect events whose run was deleted before the backup', () => {
     addEvents(livePath, 5);
     addEvents(livePath, 5, 'run-doomed');
-    // The run is removed from the live database; its events are archived
-    // already, but the backup has no row to hang them on.
     const live = new Database(livePath);
     live.prepare('DELETE FROM raw_events WHERE run_id = ?').run('run-doomed');
     live.close();
@@ -142,12 +146,64 @@ describe('restoreRawEvents', () => {
     expect(events(backupPath).map((e) => e.id)).toEqual([1, 2, 3, 4, 5]);
   });
 
-  it('restores nothing when the backup never held any events', () => {
+  it('skips a backup that never held any events', () => {
     const backupPath = takeBackup('sessions-2026-08-28.db');
 
     const result = restoreRawEvents(backupPath, deltaDir);
 
-    expect(result).toEqual({ appliedFiles: [], restoredRows: 0, watermark: 0 });
+    expect(result.restoredRows).toBe(0);
+    expect(result.skipped).toMatch(/held no events/);
+  });
+
+  it('skips a pre-scheme backup that still carries its own rows', () => {
+    addEvents(livePath, 8);
+    const full = join(tmpDir, 'sessions-legacy.db');
+    copyFileSync(livePath, full); // never processed, so no marker and rows intact
+
+    const result = restoreRawEvents(full, deltaDir);
+
+    expect(result.skipped).toMatch(/carries its own raw_events rows/);
+    expect(events(full)).toHaveLength(8);
+  });
+
+  it('refuses a stripped backup that carries no marker', () => {
+    addEvents(livePath, 8);
+    const backupPath = takeBackup('sessions-2026-08-28.db');
+    const db = new Database(backupPath);
+    db.exec('DROP TABLE raw_events_archive');
+    db.close();
+
+    expect(() => restoreRawEvents(backupPath, deltaDir)).toThrow(/cannot tell which lineage/);
+  });
+
+  it('refuses rather than half-restoring when a shard is missing', () => {
+    addEvents(livePath, 10);
+    takeBackup('sessions-2026-08-26.db');
+    addEvents(livePath, 10);
+    const latest = takeBackup('sessions-2026-08-28.db');
+    rmSync(join(deltaDir, 'lineage-0001', 'raw-events-1-10.db'));
+
+    expect(() => restoreRawEvents(latest, deltaDir)).toThrow(/not intact/);
+    // The target is untouched — no confidently partial history.
+    expect(events(latest)).toEqual([]);
+  });
+
+  it('refuses when a shard is corrupt', () => {
+    addEvents(livePath, 10);
+    const latest = takeBackup('sessions-2026-08-28.db');
+    writeFileSync(join(deltaDir, 'lineage-0001', 'raw-events-1-10.db'), 'not a database');
+
+    expect(() => restoreRawEvents(latest, deltaDir)).toThrow(/not intact/);
+    expect(events(latest)).toEqual([]);
+  });
+
+  it('refuses when the archive does not reach the backup watermark', () => {
+    addEvents(livePath, 10);
+    const latest = takeBackup('sessions-2026-08-28.db');
+    // Truncate the cover: drop the only shard, leaving the lineage short.
+    rmSync(join(deltaDir, 'lineage-0001', 'raw-events-1-10.db'));
+
+    expect(() => restoreRawEvents(latest, deltaDir)).toThrow(/no shards|covers ids up to/);
   });
 
   it('throws when the target has no raw_events table to restore into', () => {
