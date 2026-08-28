@@ -1189,6 +1189,105 @@ export class SprintLaneStore {
   }
 
   // --------------------------------------------------------------------------
+  // reviveLane — targeted failed→running un-settle (controller merge-gate rescue)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Un-settle ONE lane from 'failed' back to 'running'.
+   *
+   * SCOPE — this exists for exactly ONE caller: the WorkflowController's
+   * MONITOR LANE RESCUE at the visual merge gate, from INSIDE a live fan-out
+   * walk. The merge-gate driver durably wrote the lane 'failed' before
+   * `awaitVerdict` resolved, so a lane the supervisor decides to rescue is
+   * already settled in the DB even though its in-memory walk is still running
+   * and about to re-drive it. Every OTHER un-settle path must keep refusing:
+   * the wave loop never un-settles a lane (a settled lane is excluded from
+   * `remaining` and from the production driver's `resolveItems`), and
+   * `laneRewindHandler` must keep refusing settled lanes from OUTSIDE the walk
+   * — reviving a lane no walk is driving would strand a 'running' row nothing
+   * advances. Do not reach for this anywhere else.
+   *
+   * Status-GUARDED to 'failed' only, mirroring `reopenBatch`'s guarded-UPDATE
+   * discipline: a queued / running / integrated lane is an idempotent no-op, so
+   * a double consult (or a rescue racing a lane that never settled) can never
+   * flip a lane backwards out of 'integrated'. The guard is a read-then-write
+   * rather than a `WHERE status='failed'` clause because the write itself MUST
+   * go through the `updateLane` chokepoint — the same write + emit pipeline
+   * every other lane mutation uses (driveLane, resetFailedLanes), so the
+   * revival lands on `sprintLaneChannel` like any other lane change. Both halves
+   * are synchronous better-sqlite3 calls on the single main-process handle, so
+   * nothing interleaves between them.
+   *
+   * `taskId` accepts EITHER the opaque tasks.id or the display ref, resolved the
+   * same way `updateLane` resolves it (opaque id first, then the ref join scoped
+   * to this batch) so the status guard reads the same row the write will target.
+   *
+   * `current_step_id` is deliberately left alone: the rescue's very next
+   * `driveLane` stamps the target inner step, and clearing it here would blank
+   * the lane's step chip for the width of that gap.
+   *
+   * Fail-soft: never throws. Returns 1 on a revive, 0 when the lane is missing,
+   * not 'failed', has no owning run, or anything errors (logged at 'warn').
+   */
+  reviveLane(batchId: string, taskId: string): number {
+    try {
+      let resolvedTaskId = taskId;
+      let row = this.db
+        .prepare('SELECT status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, taskId) as { status: string } | undefined;
+      if (!row) {
+        const byRef = this.db
+          .prepare(
+            `SELECT sbt.status AS status, sbt.task_id AS taskId
+               FROM sprint_batch_tasks sbt
+               JOIN tasks t ON t.id = sbt.task_id
+              WHERE sbt.batch_id = ? AND t.ref = ?`,
+          )
+          .get(batchId, taskId) as { status: string; taskId: string } | undefined;
+        if (byRef) {
+          row = { status: byRef.status };
+          resolvedTaskId = byRef.taskId;
+        }
+      }
+      if (!row) {
+        this.logger?.debug('[SprintLaneStore] reviveLane no-op (no such lane)', { batchId, taskId });
+        return 0;
+      }
+      if (row.status !== 'failed') {
+        this.logger?.debug('[SprintLaneStore] reviveLane no-op (lane is not failed)', {
+          batchId,
+          taskId: resolvedTaskId,
+          status: row.status,
+        });
+        return 0;
+      }
+
+      const runRow = this.db
+        .prepare('SELECT id FROM workflow_runs WHERE batch_id = ?')
+        .get(batchId) as { id: string } | undefined;
+      if (!runRow) {
+        this.logger?.warn('[SprintLaneStore] reviveLane: no owning run for batch (skipped)', { batchId });
+        return 0;
+      }
+
+      this.updateLane({ runId: runRow.id, batchId, taskId: resolvedTaskId, status: 'running' });
+      this.logger?.info('[SprintLaneStore] lane revived for an in-walk rescue', {
+        batchId,
+        runId: runRow.id,
+        taskId: resolvedTaskId,
+      });
+      return 1;
+    } catch (err) {
+      this.logger?.warn('[SprintLaneStore] reviveLane failed (fail-soft)', {
+        batchId,
+        taskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // markBatchTerminal — batch close-out
   // --------------------------------------------------------------------------
 

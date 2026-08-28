@@ -27,7 +27,7 @@ import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
-import type { TriageDecision } from './types';
+import type { LaneFailureKind, TriageDecision } from './types';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
@@ -236,8 +236,12 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
  * Which budget-exhaustion site in a lane's inner chain produced the failure. Purely
  * descriptive (it is rendered into the prompt so the monitor knows what kind of
  * evidence to look for); the controller decides which sites consult lane triage.
+ *
+ * Declared canonically in `./types` (the controller/host protocol module, which
+ * must stay free of this file's heavier import graph) and re-exported here so the
+ * brain, the host seam, and the controller can never drift apart on the union.
  */
-export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+export type { LaneFailureKind };
 
 /**
  * Everything the monitor needs to triage ONE failing sprint fan-out lane. Assembled
