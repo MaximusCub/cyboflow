@@ -620,6 +620,35 @@ export function isAgentProviderUsable(
 }
 
 /**
+ * Force every Aria-gated provider OFF in an access map, so a map that has
+ * passed through here is safe to hand to the plain `isAgentProviderEnabled` —
+ * which knows nothing about Aria mode.
+ *
+ * This exists because the two predicates are one keystroke apart at a call
+ * site: `isAgentProviderEnabled(access, p)` (access only) vs
+ * `isAgentProviderUsable(access, p, aria)` (access AND the gate). Rather than
+ * ask every launch seam to remember the difference, `ConfigManager` applies
+ * this ONCE to the map it hands out, so the ungated predicate cannot reach a
+ * gated provider no matter which overload a caller picks. The renderer's
+ * `useAgentProviderAccess` applies the same function for the same reason.
+ *
+ * Applied AFTER {@link resolveAgentProviderAccess}, never before: the floor
+ * that keeps a map from being all-off must see the user's real toggles. It
+ * cannot empty the map in practice — every gated provider also carries
+ * `defaultEnabled: false`, so the floor never depends on one.
+ */
+export function applyAriaProviderGate(
+  access: AgentProviderAccess,
+  ariaMode: boolean,
+): AgentProviderAccess {
+  const gated = AGENT_PROVIDERS.filter((p) => !isProviderSurfaced(p, ariaMode));
+  if (gated.length === 0) return access;
+  const next = { ...access };
+  for (const provider of gated) next[provider] = false;
+  return next;
+}
+
+/**
  * Normalize a persisted/IPC value into an access map with the "never disable
  * everything" floor applied. An all-off map would leave the app unable to
  * launch anything, so it degrades to the per-provider defaults rather than

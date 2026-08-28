@@ -17,14 +17,16 @@
  * THE ARIA GATE IS FOLDED IN HERE, once, for that same reason: a provider whose
  * registry entry sets `requiresAriaMode` comes back FALSE on a non-Aria install
  * whatever its access key says, so every picker downstream inherits the gate
- * without a per-surface check somebody can forget to add. Settings →
- * Integrations is the one surface that needs more than this, because it must
- * also decide whether to render the provider's CARD — it reads
- * `useIsAgentProviderSurfaced` for that.
+ * without a per-surface check somebody can forget to add. It is applied with the
+ * SAME shared `applyAriaProviderGate` the backend runs over the map it hands the
+ * launch seams, so the two sides cannot drift. Settings → Integrations is the one
+ * surface that needs more than this, because it must also decide whether to
+ * render the provider's CARD — it reads `useIsAgentProviderSurfaced` for that.
  */
 import { useMemo } from 'react';
 import {
   AGENT_PROVIDERS,
+  applyAriaProviderGate,
   isAgentProviderEnabled,
   isProviderSurfaced,
   isRuntimeProviderEnabled,
@@ -36,23 +38,6 @@ import {
 } from '../../../shared/types/agentRuntime';
 import { useConfigStore } from '../stores/configStore';
 
-/**
- * Force every Aria-gated provider off when Aria mode is off. Applied AFTER
- * `resolveAgentProviderAccess` so the "never all-off" floor it applies is not
- * defeated — the gated providers all default to disabled anyway, so this can
- * never empty the map.
- */
-function applyAriaGate(
-  access: AgentProviderAccess,
-  ariaMode: boolean,
-): AgentProviderAccess {
-  const gated = AGENT_PROVIDERS.filter((p) => !isProviderSurfaced(p, ariaMode));
-  if (gated.length === 0) return access;
-  const next = { ...access };
-  for (const provider of gated) next[provider] = false;
-  return next;
-}
-
 export function useAgentProviderAccess(): AgentProviderAccess {
   // The raw field is a stable object reference for as long as the config isn't
   // refetched, so the default Object.is store equality is correct; useMemo then
@@ -60,7 +45,7 @@ export function useAgentProviderAccess(): AgentProviderAccess {
   // that use it as an effect dependency.
   const raw = useConfigStore((s) => s.config?.agentProviderAccess);
   const ariaMode = useConfigStore((s) => s.config?.ariaMode === true);
-  return useMemo(() => applyAriaGate(resolveAgentProviderAccess(raw), ariaMode), [raw, ariaMode]);
+  return useMemo(() => applyAriaProviderGate(resolveAgentProviderAccess(raw), ariaMode), [raw, ariaMode]);
 }
 
 /** True when `provider` may be used. Convenience over useAgentProviderAccess. */

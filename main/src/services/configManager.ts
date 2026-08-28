@@ -16,6 +16,7 @@ import {
   type AgentProvider,
   type AgentProviderAccess,
   type AgentRuntime,
+  applyAriaProviderGate,
   isAgentProviderUsable,
   isProviderSurfaced,
   isAgentRuntime,
@@ -515,15 +516,33 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * The user's per-provider access toggles (Settings → Integrations / the
-   * onboarding Connect step), with the floors applied: an absent member is
-   * ENABLED, and an all-off map degrades to both-enabled rather than leaving
-   * the app unable to launch anything. Like `defaultSubstrate`, the field is
-   * intentionally NOT seeded into the constructor defaults, so config.json
-   * stays byte-identical for users who never touch the toggles.
+   * The provider access map the rest of the main process may act on: the user's
+   * per-provider toggles (Settings → Integrations / the onboarding Connect
+   * step) with BOTH filters applied — the floors (an absent member is ENABLED,
+   * and an all-off map degrades rather than leaving the app unable to launch
+   * anything) and the ARIA GATE. Like `defaultSubstrate`, the field is
+   * intentionally NOT seeded into the constructor defaults, so config.json stays
+   * byte-identical for users who never touch the toggles.
+   *
+   * The Aria gate is applied HERE, on the map itself, rather than only in
+   * `isAgentProviderEnabled` below. The launch seams (WorkflowRegistry.createRun,
+   * the quick-session IPC handler) take this map and test it with the PURE
+   * `isAgentProviderEnabled(access, provider)` from shared/types/agentRuntime —
+   * a same-named function that knows nothing about Aria mode. Gating only the
+   * method would leave those seams admitting a gated provider on the strength of
+   * an access key written before the gate existed, or by an MCP-pinned agent
+   * config that never passes through the Settings UI. Gating the map closes them
+   * both without either having to know the gate exists.
+   *
+   * This returns EFFECTIVE access, not the raw toggles. Settings renders its
+   * switches from `config.agentProviderAccess` in the renderer store, so a
+   * gated-off member here never shows up as a switch the user cannot explain.
    */
   getAgentProviderAccess(): AgentProviderAccess {
-    return resolveAgentProviderAccess(this.config.agentProviderAccess);
+    return applyAriaProviderGate(
+      resolveAgentProviderAccess(this.config.agentProviderAccess),
+      this.getAriaMode(),
+    );
   }
 
   /**
@@ -537,17 +556,16 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * True when `provider` may be used for a run/session. The authoritative read
-   * for the launch seams (WorkflowRegistry.createRun, the quick-session IPC
-   * handler, the per-step agent resolver) — the renderer's pickers mirror this
-   * via useAgentProviderAccess, but never substitute for it (an agent runtime
-   * can also be pinned through the MCP workflow-config tools, bypassing the UI).
+   * True when `provider` may be used for a run/session — the access toggle ANDed
+   * with the Aria gate ({@link AgentProviderDefinition.requiresAriaMode}).
    *
-   * ANDs the access toggle with the Aria gate
-   * ({@link AgentProviderDefinition.requiresAriaMode}). Gating HERE rather than
-   * only in the pickers is the point: an Aria-gated provider must be refused
-   * even when an access key says otherwise — one written before the gate
-   * existed, or by an MCP-pinned agent config that never touches the UI.
+   * The convenience form for a caller holding a provider and nothing else
+   * (`main/src/index.ts`'s agent-config and usage surfaces). A caller that
+   * already has the map from `getAgentProviderAccess` above is equally safe
+   * using the pure predicate on it: the gate is applied to the map itself, so
+   * the two paths cannot disagree. The renderer's pickers mirror this via
+   * useAgentProviderAccess, but never substitute for it — an agent runtime can
+   * be pinned through the MCP workflow-config tools, bypassing the UI entirely.
    */
   isAgentProviderEnabled(provider: AgentProvider): boolean {
     return isAgentProviderUsable(this.getAgentProviderAccess(), provider, this.getAriaMode());

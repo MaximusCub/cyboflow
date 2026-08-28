@@ -19,6 +19,7 @@ import path from 'path';
 import os from 'os';
 import { ConfigManager } from '../configManager';
 import { setCyboflowDirectory } from '../../utils/cyboflowDirectory';
+import { isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 
 let tempDir: string;
 
@@ -140,6 +141,43 @@ describe('ConfigManager Aria-mode provider gate', () => {
 
     expect(mgr.isAgentProviderSurfaced('pi')).toBe(true);
     expect(mgr.isAgentProviderEnabled('pi')).toBe(true);
+  });
+
+  it('gates the ACCESS MAP itself, not just the predicate', async () => {
+    // This is the fix for the bypass the predicate alone left open. The launch
+    // seams (WorkflowRegistry.createRun, the quick-session IPC handler) take
+    // getAgentProviderAccess() and test it with the PURE isAgentProviderEnabled
+    // from shared/types/agentRuntime — a same-named function that knows nothing
+    // about Aria mode. If the map still said `pi: true`, an explicit pi launch
+    // would be admitted on a non-Aria install, which is exactly the stale/
+    // MCP-written access key this gate exists to refuse.
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ gitRepoPath: '/some/repo', agentProviderAccess: { pi: true } }, null, 2),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    expect(mgr.getAgentProviderAccess().pi).toBe(false);
+    expect(isAgentProviderEnabled(mgr.getAgentProviderAccess(), 'pi')).toBe(false);
+    // The user's RAW toggle is untouched — Settings renders its switches from
+    // the config field, so nothing here rewrites what the user chose.
+    expect(mgr.getConfig().agentProviderAccess).toEqual({ pi: true });
+  });
+
+  it('passes pi through the access map once Aria mode is on', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify(
+        { gitRepoPath: '/some/repo', ariaMode: true, agentProviderAccess: { pi: true } },
+        null,
+        2,
+      ),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    expect(isAgentProviderEnabled(mgr.getAgentProviderAccess(), 'pi')).toBe(true);
   });
 
   it('keeps pi off under Aria mode when its access key is not set (gate is not an opt-in)', async () => {
