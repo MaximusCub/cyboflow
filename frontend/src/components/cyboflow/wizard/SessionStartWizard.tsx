@@ -236,6 +236,29 @@ function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element
 }
 
 /** A label/value row in the step-③ launch summary. */
+/**
+ * The `tuningLevel` field a workflow launch payload carries (migration 125).
+ *
+ * An explicit per-run override always wins. Beyond that, a PINNED variant makes
+ * the level load-bearing even when the user never diverged from the saved stamp:
+ * a variant belongs to exactly ONE level's pool, so sending the level the wizard
+ * was DISPLAYING lets createRun's containment guard reject a pin from a
+ * different level LOUDLY, instead of silently running that variant's frozen
+ * graph under the displayed level's name. The level control clears a stale pin
+ * on its own (see its onChange); this is the backstop for any path that does
+ * not go through it. Rotation/baseline selections carry no such pin, so they
+ * keep sending nothing when there is no override.
+ */
+function tuningLevelPayload(
+  meta: { isBuiltIn: boolean; tuningLevel: TuningLevel } | undefined,
+  override: TuningLevel | null,
+  variantSelection: VariantSelection,
+): { tuningLevel?: TuningLevel } {
+  if (override !== null) return { tuningLevel: override };
+  if (variantSelection.mode !== 'variant') return {};
+  return meta?.isBuiltIn === true ? { tuningLevel: meta.tuningLevel } : {};
+}
+
 function SummaryRow({ label, value }: { label: string; value: string }): React.JSX.Element {
   return (
     <div className="flex items-baseline justify-between gap-3">
@@ -1096,12 +1119,10 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
-          // Per-run tuning-level override (D4) — omitted when the user never
-          // diverged from the workflow's stamped level (see tuningLevelOverride's
-          // doc comment). Mutually exclusive with an explicit variant pin
-          // server-side; the effects above keep the two controls from both
-          // being live at once.
-          ...(tuningLevelOverride !== null ? { tuningLevel: tuningLevelOverride } : {}),
+          // Per-run tuning level (D4 + migration 125) — the override when the
+          // user diverged from the stamp, else the displayed level whenever a
+          // variant is pinned. See tuningLevelPayload.
+          ...tuningLevelPayload(meta, tuningLevelOverride, variantSelection),
           ...variantSelectionToStartInput(variantSelection),
         });
         // Nest the run under its session so the close-out + panels resolve
@@ -1207,8 +1228,12 @@ export default function SessionStartWizard(): React.JSX.Element {
               ? { executionModel: executionModelOverride }
               : {}),
           taskIds,
-          // Per-run tuning-level override (D4) — see launchRun's identical spread.
-          ...(tuningLevelOverride !== null ? { tuningLevel: tuningLevelOverride } : {}),
+          // Per-run tuning level (D4 + migration 125) — see launchRun's identical spread.
+          ...tuningLevelPayload(
+            workflowMetas.find((m) => m.id === workflowId),
+            tuningLevelOverride,
+            variantSelection,
+          ),
           ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -2002,9 +2027,9 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Per-run tuning-level override (workflow-tuning-levels.md D4),
                 BUILT-IN workflows only — a "save as new" custom flow has no
                 calibrated baseline to select a level of, so the control is
-                hidden entirely for it (selectedMeta.isBuiltIn). Disabled
-                (with a note) while a SPECIFIC variant is pinned — see the D4
-                mutual-exclusion effects above `selectedWorkflowId`. */}
+                hidden entirely for it (selectedMeta.isBuiltIn). No longer
+                mutually exclusive with the variant pin (migration 125: the level
+                picks the POOL); changing it clears a stale pin instead. */}
             {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
               <TuningLevelSelector
                 value={tuningLevelOverride ?? selectedMeta.tuningLevel}
@@ -2014,6 +2039,16 @@ export default function SessionStartWizard(): React.JSX.Element {
                   // only a genuine divergence from the stamp is an override);
                   // any other pick sets a per-run override.
                   setTuningLevelOverride(level === selectedMeta.tuningLevel ? null : level);
+                  // Changing the level changes the POOL (migration 125), so any
+                  // pinned variant belongs to the level we just left. Clear it
+                  // HERE rather than in an effect: this control is always
+                  // visible while VariantSelector lives inside the collapsed-by-
+                  // default Advanced section, so the selector's own pool-keyed
+                  // re-seed cannot be the containment — collapse Advanced and it
+                  // unmounts, leaving the pin behind. Doing it in the handler
+                  // also runs BEFORE the re-render, so a mounted VariantSelector
+                  // still re-seeds this to the new pool's default afterwards.
+                  setVariantSelection((prev) => (prev.mode === 'variant' ? { mode: 'rotation' } : prev));
                 }}
                 id="wizard-tuning-level"
                 estimateLabels={tuningEstimateLabels}
@@ -2166,11 +2201,12 @@ export default function SessionStartWizard(): React.JSX.Element {
                     {/* Per-run A/B variant selector (migration 048) — hidden
                         entirely for a workflow with zero variants. Threaded into
                         runs.start as variantId / baseline (never both); rotation
-                        sends neither field. Replaced with a disabled/forced-
-                        baseline placeholder (D4's mirror rule) while a
-                        tuning-level override is active — a level override IS an
-                        explicit spec choice, so variant pinning is disabled
-                        rather than silently ignored. */}
+                        sends neither field. Scoped to `launchTuningLevel`
+                        (migration 125): it offers only THAT level's pool, and
+                        re-seeds when the level changes. It lives inside this
+                        collapsed-by-default section, so it is not the
+                        containment for a stale pin — the level control clears
+                        that itself. */}
                     <VariantSelector
                       workflowId={selection.workflowId}
                       tuningLevel={launchTuningLevel}

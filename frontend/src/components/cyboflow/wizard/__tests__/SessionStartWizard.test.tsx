@@ -3728,6 +3728,74 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     );
   });
 
+  it('clears a stale pin on a level change even while the variant picker is COLLAPSED', async () => {
+    // The regression this guards: VariantSelector re-seeds itself per pool, but
+    // it lives inside the collapsed-by-default Advanced section while the level
+    // segments are always visible. Collapse Advanced and the selector unmounts,
+    // so it cannot be the containment — pin, collapse, change level, and the
+    // pin would otherwise ride along and silently run the OTHER level's frozen
+    // graph under the level the wizard was displaying.
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    mockVariantsList.mockResolvedValue([
+      makeVariantRow({ id: 'wfv_thorough', label: 'Thorough A', tuning_level: 'thorough' }),
+      makeVariantRow({ id: 'wfv_efficient', label: 'Efficient A', tuning_level: 'efficient' }),
+    ]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await screen.findByLabelText('Select workflow variant');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select workflow variant'), {
+        target: { value: 'wfv_thorough' },
+      });
+    });
+    // Collapse Advanced — the selector unmounts, the wizard keeps the pin.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    expect(screen.queryByLabelText('Select workflow variant')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'efficient' }));
+    expect(mockRunStart.mock.calls[0]?.[0]).not.toHaveProperty('variantId');
+  });
+
+  it('sends the displayed level alongside a pin even with NO override, so a foreign-level pin is refused loudly', async () => {
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    mockVariantsList.mockResolvedValue([
+      makeVariantRow({ id: 'wfv_thorough', label: 'Thorough A', tuning_level: 'thorough' }),
+    ]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await screen.findByLabelText('Select workflow variant');
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select workflow variant'), {
+        target: { value: 'wfv_thorough' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The saved level is NOT an override, but a pin makes it load-bearing: sent,
+    // createRun's containment guard can reject a pin from another level instead
+    // of running it under this one's name.
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ tuningLevel: 'thorough', variantId: 'wfv_thorough' }),
+    );
+  });
+
   it('hides the control entirely for a non-built-in flow', async () => {
     mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
     await renderLockedWizard();
