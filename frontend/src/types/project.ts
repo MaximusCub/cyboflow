@@ -12,6 +12,12 @@ export interface Project {
   displayOrder?: number;
   worktree_folder?: string | null;
   lastUsedModel?: string;
+  /**
+   * Per-project trust for repo-supplied permission ALLOW rules (migration 127).
+   * NULL/undefined = undecided (the trust prompt has not been answered yet);
+   * 'trusted' | 'untrusted' are terminal.
+   */
+  permission_trust?: 'trusted' | 'untrusted' | null;
 }
 
 export interface ProjectRunCommand {
@@ -42,4 +48,5 @@ export interface UpdateProjectRequest {
   open_ide_command?: string | null;
   worktree_folder?: string | null;
   lastUsedModel?: string;
+  permission_trust?: 'trusted' | 'untrusted' | null;
 }

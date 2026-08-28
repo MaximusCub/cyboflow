@@ -19,6 +19,8 @@ import {
   splitShellSegments,
   isToolAllowed,
   loadMergedPermissionRules,
+  setProjectPermissionTrustResolver,
+  projectSettingsContainAllowRules,
   type MergedPermissionRules,
 } from '../permissionRules';
 
@@ -381,5 +383,119 @@ describe('loadMergedPermissionRules — project files must not grant auto-approv
 
   it('missing files contribute nothing and do not throw', () => {
     expect(loadMergedPermissionRules(projectDir, homeDir)).toEqual({ allow: [], deny: [], ask: [] });
+  });
+});
+
+describe('loadMergedPermissionRules — per-project trust resolver', () => {
+  let homeDir: string;
+  let projectDir: string;
+  const savedEnv = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+
+  const writeSettings = (dir: string, file: string, permissions: object) => {
+    fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude', file), JSON.stringify({ permissions }));
+  };
+
+  beforeEach(() => {
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permrules-trust-home-'));
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permrules-trust-proj-'));
+    delete process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+  });
+
+  afterEach(() => {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    if (savedEnv === undefined) delete process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES;
+    else process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES = savedEnv;
+    // Reset the module-scoped resolver so later describes are unaffected —
+    // the default matches production's boot-time no-op before wiring.
+    setProjectPermissionTrustResolver(() => false);
+  });
+
+  it('a resolver returning true honors the project allow rules', () => {
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash(pnpm test:*)'] });
+    setProjectPermissionTrustResolver(() => true);
+
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual(['Bash(pnpm test:*)']);
+    expect(isToolAllowed('Bash', bash('pnpm test'), merged)).toBe(true);
+  });
+
+  it('a resolver returning false keeps project files at suppressors only', () => {
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash(pnpm test:*)'] });
+    setProjectPermissionTrustResolver(() => false);
+
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual([]);
+  });
+
+  it('a resolver that throws is treated as untrusted (fail-closed)', () => {
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash(pnpm test:*)'] });
+    setProjectPermissionTrustResolver(() => {
+      throw new Error('boom');
+    });
+
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual([]);
+  });
+
+  it('the resolver receives the exact projectDir passed in', () => {
+    const seen: string[] = [];
+    setProjectPermissionTrustResolver((dir) => {
+      seen.push(dir);
+      return false;
+    });
+    loadMergedPermissionRules(projectDir, homeDir);
+    expect(seen).toEqual([projectDir]);
+  });
+
+  it('CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1 still trusts even when the resolver says no', () => {
+    process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES = '1';
+    writeSettings(projectDir, 'settings.json', { allow: ['Bash(pnpm test:*)'] });
+    setProjectPermissionTrustResolver(() => false);
+
+    const merged = loadMergedPermissionRules(projectDir, homeDir);
+    expect(merged.allow).toEqual(['Bash(pnpm test:*)']);
+  });
+});
+
+describe('projectSettingsContainAllowRules', () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permrules-allowcheck-'));
+  });
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  const write = (dir: string, rel: string, body: unknown): void => {
+    const full = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, JSON.stringify(body), 'utf8');
+  };
+
+  it('is false when neither settings file exists', () => {
+    expect(projectSettingsContainAllowRules(projectDir)).toBe(false);
+  });
+
+  it('is false when settings files exist but declare no allow rules', () => {
+    write(projectDir, '.claude/settings.json', { permissions: { deny: ['Bash(rm:*)'] } });
+    expect(projectSettingsContainAllowRules(projectDir)).toBe(false);
+  });
+
+  it('is false when the allow array is empty', () => {
+    write(projectDir, '.claude/settings.json', { permissions: { allow: [] } });
+    expect(projectSettingsContainAllowRules(projectDir)).toBe(false);
+  });
+
+  it('is true when settings.json declares a non-empty allow array', () => {
+    write(projectDir, '.claude/settings.json', { permissions: { allow: ['Bash(git:*)'] } });
+    expect(projectSettingsContainAllowRules(projectDir)).toBe(true);
+  });
+
+  it('is true when only settings.local.json declares allow rules', () => {
+    write(projectDir, '.claude/settings.local.json', { permissions: { allow: ['WebSearch'] } });
+    expect(projectSettingsContainAllowRules(projectDir)).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Save, Trash2, FolderIcon, GitBranch, Settings, Code2, BrainCircuit } from 'lucide-react';
+import { Save, Trash2, FolderIcon, GitBranch, Settings, Code2, BrainCircuit, ShieldCheck } from 'lucide-react';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
@@ -8,6 +8,14 @@ import { Button } from './ui/Button';
 import { EnhancedInput } from './ui/EnhancedInput';
 import { FieldWithTooltip } from './ui/FieldWithTooltip';
 import { Card } from './ui/Card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/Select';
+
+type PermissionTrustValue = 'undecided' | 'trusted' | 'untrusted';
+
+/** NULL/undefined on the wire means "undecided" — the Select needs a concrete value. */
+function toSelectValue(trust: Project['permission_trust']): PermissionTrustValue {
+  return trust ?? 'undecided';
+}
 
 interface ProjectSettingsProps {
   project: Project;
@@ -26,6 +34,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   const [openIdeCommand, setOpenIdeCommand] = useState('');
   const [worktreeFolder, setWorktreeFolder] = useState('');
+  const [permissionTrust, setPermissionTrust] = useState<PermissionTrustValue>('undecided');
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -47,6 +56,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
       }
       setOpenIdeCommand(project.open_ide_command || '');
       setWorktreeFolder(project.worktree_folder || '');
+      setPermissionTrust(toSelectValue(project.permission_trust));
       setError(null);
     }
   }, [isOpen, project]);
@@ -63,7 +73,8 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
         run_script: runScript || null,
         build_script: buildScript || null,
         open_ide_command: openIdeCommand || null,
-        worktree_folder: worktreeFolder || null
+        worktree_folder: worktreeFolder || null,
+        permission_trust: permissionTrust === 'undecided' ? null : permissionTrust
       };
       
       const response = await API.projects.update(project.id.toString(), updates);
@@ -299,6 +310,26 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
                 <br />
                 <span className="text-text-tertiary">• The command runs with your shell's environment, inheriting your PATH</span>
               </p>
+            </FieldWithTooltip>
+
+            <FieldWithTooltip
+              label="Project permission rules"
+              tooltip="Whether commands matching this project's own .claude/settings.json allow list run without an approval prompt. By default only your personal ~/.claude/settings.json can grant auto-approval — a repo cannot grant itself that. Trusting a project extends that same auto-approval to its allow list too."
+            >
+              <Select
+                value={permissionTrust}
+                onValueChange={(value) => setPermissionTrust(value as PermissionTrustValue)}
+              >
+                <SelectTrigger className="max-w-xs">
+                  <ShieldCheck className="w-4 h-4 text-text-tertiary mr-1.5" />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="undecided">Undecided (ask next time)</SelectItem>
+                  <SelectItem value="trusted">Trusted</SelectItem>
+                  <SelectItem value="untrusted">Untrusted</SelectItem>
+                </SelectContent>
+              </Select>
             </FieldWithTooltip>
 
             <FieldWithTooltip

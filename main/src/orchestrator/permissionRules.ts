@@ -39,17 +39,25 @@
  * asked about, which inverts the safety posture stated below. Routing an ask
  * match to ApprovalRouter satisfies the user's intent precisely: a human decides.
  *
- * ## Trust model (repo-trust hole, deep-review 2026-08 P0)
+ * ## Trust model (repo-trust hole, deep-review 2026-08 P0; per-project trust, migration 127)
  *
  * Allow rules are only honored from the USER settings file
- * (`~/.claude/settings.json`). Project-level files under the worktree
- * (`.claude/settings.json` and `.claude/settings.local.json`) contribute
- * SUPPRESSORS only (deny and ask rules): both arrive via clone/worktree
- * checkout (and even an untracked local file can be written by a compromised
- * agent in an earlier session), so a hostile repo shipping `"allow": ["Bash"]`
- * must not disable the approval gate. Suppressors can only narrow, never grant,
- * so honoring them from the repo is safe. `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1`
- * restores the legacy full merge until a per-project trust prompt exists.
+ * (`~/.claude/settings.json`) UNLESS the project has been explicitly marked
+ * trusted. Project-level files under the worktree (`.claude/settings.json`
+ * and `.claude/settings.local.json`) contribute SUPPRESSORS only (deny and
+ * ask rules) by default: both arrive via clone/worktree checkout (and even an
+ * untracked local file can be written by a compromised agent in an earlier
+ * session), so a hostile repo shipping `"allow": ["Bash"]` must not disable
+ * the approval gate. Suppressors can only narrow, never grant, so honoring
+ * them from the repo is always safe, trusted or not.
+ *
+ * Trust is decided PER PROJECT via `setProjectPermissionTrustResolver` (see
+ * below) — the boot wiring in main/src/index.ts injects a resolver backed by
+ * the `projects.permission_trust` column (migration 127), stamped by a
+ * one-time dialog shown at project activation (main/src/ipc/project.ts).
+ * `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1` remains a global override that
+ * trusts every project regardless of its stamp — useful for CI/dev, but the
+ * per-project resolver is the normal path.
  *
  * Unsupported specifier kinds (e.g. Read/Edit path globs) intentionally do NOT
  * auto-allow in v1 — they keep prompting, which is no worse than today.
@@ -327,17 +335,59 @@ function readRuleArray(filePath: string, key: 'allow' | 'deny' | 'ask'): string[
 }
 
 /**
+ * Per-project trust resolver, injected by the Electron main process at boot
+ * (main/src/index.ts, mirroring the setStreamParserPerfBump pattern in
+ * shared/streamParser/rawEventsSink.ts) so this module stays free of
+ * `electron` / `main/src/services/*` imports (standalone-typecheck invariant).
+ *
+ * Defaults to "never trust" — a caller before boot wiring (or a resolver that
+ * throws) gets the fail-closed answer, matching this module's existing
+ * safety posture: a non-match must fall through to asking, never to an
+ * auto-allow.
+ */
+let projectTrustResolver: (projectDir: string) => boolean = () => false;
+
+/**
+ * Inject the per-project trust resolver. `fn` is called with the worktree
+ * path passed to {@link loadMergedPermissionRules} and must return whether
+ * that project's owning row has `permission_trust === 'trusted'`. Any throw
+ * from `fn` is treated as untrusted (fail-closed) — see
+ * {@link loadMergedPermissionRules}.
+ */
+export function setProjectPermissionTrustResolver(fn: (projectDir: string) => boolean): void {
+  projectTrustResolver = fn;
+}
+
+/**
+ * True if either project settings file (`.claude/settings.json` or
+ * `.claude/settings.local.json` under `projectDir`) declares a non-empty
+ * `permissions.allow` array. Used to decide whether the per-project trust
+ * prompt (main/src/ipc/project.ts) has anything to ask about — a repo with no
+ * allow rules never needs a trust decision.
+ */
+export function projectSettingsContainAllowRules(projectDir: string): boolean {
+  const projectFiles = [
+    path.join(projectDir, '.claude', 'settings.json'),
+    path.join(projectDir, '.claude', 'settings.local.json'),
+  ];
+  return projectFiles.some((file) => readRuleArray(file, 'allow').length > 0);
+}
+
+/**
  * Load and merge `permissions.allow` / `permissions.deny` / `permissions.ask`
  * from the user (`~/.claude/settings.json`) and project
  * (`<projectDir>/.claude/settings.json` and `.claude/settings.local.json`)
  * settings files.
  *
  * Trust model (see module header): allow rules are honored from the USER file
- * only; project files contribute suppressors (deny and ask) only, because their
- * content is repo-controlled and a hostile repo must not be able to grant
- * itself auto-approval. `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1` restores
- * the legacy full merge. Deny and ask rules are always a union of every present
- * file. Results are de-duplicated to keep the matcher cheap.
+ * always, and from project files only when the project is trusted — either
+ * globally via `CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES=1`, or per-project via
+ * the injected {@link setProjectPermissionTrustResolver} resolver (fail-closed
+ * on throw). Project files contribute suppressors (deny and ask) unconditionally,
+ * because their content is repo-controlled and a hostile repo must not be able
+ * to grant itself auto-approval regardless of trust. Deny and ask rules are
+ * always a union of every present file. Results are de-duplicated to keep the
+ * matcher cheap.
  *
  * @param projectDir - The session cwd (worktree path) whose `.claude/` is read.
  * @param homeDir    - Override for the user home dir (tests). Defaults to os.homedir().
@@ -351,7 +401,14 @@ export function loadMergedPermissionRules(
     path.join(projectDir, '.claude', 'settings.json'),
     path.join(projectDir, '.claude', 'settings.local.json'),
   ];
-  const trustProject = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES === '1';
+  let resolvedTrust = false;
+  try {
+    resolvedTrust = projectTrustResolver(projectDir);
+  } catch {
+    // Fail-closed: a throwing resolver must never be read as "trusted".
+    resolvedTrust = false;
+  }
+  const trustProject = process.env.CYBOFLOW_TRUST_PROJECT_PERMISSION_RULES === '1' || resolvedTrust;
 
   const allow = new Set<string>();
   const deny = new Set<string>();

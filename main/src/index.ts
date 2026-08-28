@@ -333,6 +333,7 @@ import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { runGitAsync } from './utils/runGit';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
+import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 
 // Wire the shared/streamParser module's perf-counter hook to the real perfTracer
 // (perfBump is a no-op unless CYBOFLOW_PERF_TRACE=1, so unconditional wiring is
@@ -1639,6 +1640,38 @@ async function initializeServices(): Promise<boolean> {
 
   sessionManager = new SessionManager(databaseService);
   sessionManager.initializeFromDatabase();
+
+  // Per-project trust for repo-supplied permission ALLOW rules (  // migration 127). permissionRules.ts cannot import electron/services
+  // (standalone-typecheck invariant), so it exposes an injectable resolver —
+  // same boot-injection pattern as setStreamParserPerfBump above. `projectDir`
+  // here is the worktree path (or, for an in-place/main-repo session, the
+  // project root itself) that loadMergedPermissionRules is called with.
+  setProjectPermissionTrustResolver((projectDir: string): boolean => {
+    try {
+      const session = databaseService.getSessionByWorktreePath(projectDir);
+      if (session?.project_id !== undefined) {
+        const project = databaseService.getProject(session.project_id);
+        return project?.permission_trust === 'trusted';
+      }
+
+      const projects = databaseService.getAllProjects();
+      const exact = projects.find((p) => p.path === projectDir);
+      if (exact) return exact.permission_trust === 'trusted';
+
+      // Fall back to a path-prefix match (a worktree not recorded as any
+      // session's worktree_path, e.g. an ad-hoc cwd nested under a known
+      // project). path.relative-based containment, not naive startsWith —
+      // startsWith('/Users/foo') would also match '/Users/foobar'.
+      const containing = projects.find((p) => {
+        const relative = path.relative(p.path, projectDir);
+        return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+      });
+      return containing?.permission_trust === 'trusted';
+    } catch {
+      // Fail-closed: an unexpected DB error must read as untrusted, never trusted.
+      return false;
+    }
+  });
 
   archiveProgressManager = new ArchiveProgressManager();
 

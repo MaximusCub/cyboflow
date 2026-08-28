@@ -2049,6 +2049,20 @@ export class DatabaseService {
     return this.db.prepare('SELECT * FROM projects WHERE path = ?').get(path) as Project | undefined;
   }
 
+  /**
+   * Look up a session by its exact worktree_path. Used by the boot-injected
+   * permission-trust resolver (main/src/index.ts →
+   * setProjectPermissionTrustResolver) to map a session's cwd — usually a
+   * worktree, sometimes the project root itself for an in-place session —
+   * back to its owning project. Multiple sessions can never share a
+   * worktree_path, so LIMIT 1 is exact, not a "pick one" compromise.
+   */
+  getSessionByWorktreePath(worktreePath: string): Session | undefined {
+    return this.db
+      .prepare('SELECT * FROM sessions WHERE worktree_path = ? LIMIT 1')
+      .get(worktreePath) as Session | undefined;
+  }
+
   getActiveProject(): Project | undefined {
     const project = this.db.prepare('SELECT * FROM projects WHERE active = 1 LIMIT 1').get() as Project | undefined;
     if (project) {
@@ -2105,6 +2119,10 @@ export class DatabaseService {
     if (updates.lastUsedModel !== undefined) {
       fields.push('lastUsedModel = ?');
       values.push(updates.lastUsedModel);
+    }
+    if (updates.permission_trust !== undefined) {
+      fields.push('permission_trust = ?');
+      values.push(updates.permission_trust);
     }
     if (updates.active !== undefined) {
       fields.push('active = ?');

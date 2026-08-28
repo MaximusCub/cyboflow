@@ -19,6 +19,13 @@ export interface Project {
   display_order?: number;
   worktree_folder?: string | null;
   lastUsedModel?: string;
+  /**
+   * Per-project trust for repo-supplied permission ALLOW rules (migration 127).
+   * NULL = undecided (the trust prompt in projects:activate / projects:create
+   * has not been answered yet); 'trusted' | 'untrusted' are terminal — see
+   * main/src/orchestrator/permissionRules.ts's trust-model doc comment.
+   */
+  permission_trust?: 'trusted' | 'untrusted' | null;
 }
 
 export interface ProjectRunCommand {
