@@ -216,6 +216,17 @@ export interface AgentProviderDefinition {
    */
   readonly runtimePrefix: string;
   /**
+   * This provider's STRUCTURED (JSON-events) runtime — the one a workflow run
+   * resolves onto when the run names this provider. `WorkflowRegistry.createRun`
+   * reads it instead of a `provider === 'codex' ? 'codex-sdk' : ...` chain: each
+   * arm of such a chain has to be remembered when a provider is added, and the
+   * one that is forgotten does not throw — the run falls through to `undefined`
+   * and is silently STAMPED CLAUDE, so it executes on the wrong vendor with the
+   * wrong prompt envelope. Declaring it here makes a new provider's launch arm a
+   * compile error instead of a silent misroute.
+   */
+  readonly sdkRuntime: WorkflowRunStorableRuntime;
+  /**
    * What an ABSENT {@link AgentProviderAccess} key means for this provider.
    * `claude`/`codex` keep the legacy absent⇒enabled floor so every config.json
    * written before the toggles existed behaves exactly as it did. A provider
@@ -255,8 +266,18 @@ export interface AgentProviderTable<P extends string = AgentProvider> {
 }
 
 export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProviderDefinition>> = {
-  claude: { runtimePrefix: 'claude-', defaultEnabled: true, requiresAriaMode: false },
-  codex: { runtimePrefix: 'codex-', defaultEnabled: true, requiresAriaMode: false },
+  claude: {
+    runtimePrefix: 'claude-',
+    sdkRuntime: 'claude-sdk',
+    defaultEnabled: true,
+    requiresAriaMode: false,
+  },
+  codex: {
+    runtimePrefix: 'codex-',
+    sdkRuntime: 'codex-sdk',
+    defaultEnabled: true,
+    requiresAriaMode: false,
+  },
   // OMP (oh-my-pi) — the first provider introduced AFTER the access toggles, so
   // it takes the absent⇒DISABLED policy this field exists for: every install
   // that has never seen the OMP card in Settings → Integrations keeps OMP off,
@@ -265,7 +286,12 @@ export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProvid
   // supervisor (`omp-fleet`) — the fleet status-bar indicator and the
   // fleet-session launch both respect the same toggle. See
   // `AgentProviderDefinition.defaultEnabled`.
-  omp: { runtimePrefix: 'omp-', defaultEnabled: false, requiresAriaMode: false },
+  omp: {
+    runtimePrefix: 'omp-',
+    sdkRuntime: 'omp-sdk',
+    defaultEnabled: false,
+    requiresAriaMode: false,
+  },
   // Pi — the terminal coding agent OMP forked from, integrated natively
   // (spawned binary, no bridge). Post-toggle provider like omp: an absent
   // access key defaults DISABLED so installs that never touched Settings →
@@ -280,7 +306,12 @@ export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProvid
   // that to everyone offers a lane that silently under-delivers; behind Aria
   // mode it stays available to an operator who knows what they are taking on.
   // Remove this gate when pi has an MCP writer, not before.
-  pi: { runtimePrefix: 'pi-', defaultEnabled: false, requiresAriaMode: true },
+  pi: {
+    runtimePrefix: 'pi-',
+    sdkRuntime: 'pi-sdk',
+    defaultEnabled: false,
+    requiresAriaMode: true,
+  },
 };
 
 /**
@@ -587,6 +618,16 @@ export function enabledAgentProviders(access: AgentProviderAccess | undefined): 
  */
 export function isProviderAriaGated(provider: AgentProvider): boolean {
   return AGENT_PROVIDER_REGISTRY[provider].requiresAriaMode;
+}
+
+/**
+ * The structured (JSON-events) runtime a workflow run resolves onto for
+ * `provider` — see {@link AgentProviderDefinition.sdkRuntime}. Claude's is
+ * returned like any other; a caller that treats Claude as "no structured
+ * runtime" should test the provider, not expect undefined here.
+ */
+export function sdkRuntimeForProvider(provider: AgentProvider): WorkflowRunStorableRuntime {
+  return AGENT_PROVIDER_REGISTRY[provider].sdkRuntime;
 }
 
 /**

@@ -48,6 +48,7 @@ import {
   assertProviderRuntimeConsistent,
   claudeRuntimeFromSubstrate,
   isAgentProviderEnabled,
+  sdkRuntimeForProvider,
   isWorkflowLaunchableRuntime,
   providerForRuntime,
   type AgentProvider,
@@ -1470,25 +1471,32 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is disabled in Settings → Integrations`,
       );
     }
-    // An UNREQUESTED run whose default route (Claude) is switched off reroutes to
-    // Codex. OMP is deliberately not a reroute target: it is absent⇒disabled, so
-    // reaching it always takes an explicit request.
-    const codexSdkRequested =
-      explicitProvider === 'codex' || (explicitProvider === undefined && !claudeEnabled && codexEnabled);
-    const ompSdkRequested = explicitProvider === 'omp';
+    // The provider this run actually resolves onto. An UNREQUESTED run whose
+    // default route (Claude) is switched off reroutes to Codex; every other
+    // provider is absent⇒disabled, so reaching it always takes an explicit
+    // request and it is never a reroute target.
+    const resolvedProvider: AgentProvider | undefined =
+      explicitProvider ?? (!claudeEnabled && codexEnabled ? 'codex' : undefined);
     /**
      * The STRUCTURED non-Claude runtime this run resolves onto, or undefined for
-     * Claude. This is the ONE place a provider's launch arm is named: it drives
-     * the substrate projection ('sdk' — both structured runtimes piggyback it),
-     * the sdk-substrate conflict guard, and both stamps. A provider whose
-     * runtime is storable-but-not-launchable can only reach here on the
-     * sentinel; the guard above refuses a real launch that names one.
+     * Claude. It drives the substrate projection ('sdk' — every structured
+     * runtime piggybacks it), the sdk-substrate conflict guard, and both stamps.
+     *
+     * DERIVED from the provider registry rather than a per-provider ternary
+     * chain. The chain this replaced had arms for codex and omp only, so an
+     * explicit `pi` request fell through to `undefined` and was then stamped
+     * `agentProvider: 'claude'` on a Claude runtime — a launch silently
+     * executing on the wrong vendor, with pi's prompt envelope never rendered.
+     * A missing arm is not a throw, it is a misroute, which is why the mapping
+     * belongs on `AgentProviderDefinition.sdkRuntime` where a new provider
+     * cannot omit it. A provider whose runtime is storable-but-not-launchable
+     * can only reach here on the sentinel; the guard above refuses a real launch
+     * that names one.
      */
-    const structuredSdkRuntime: WorkflowRunStorableRuntime | undefined = codexSdkRequested
-      ? 'codex-sdk'
-      : ompSdkRequested
-        ? 'omp-sdk'
-        : undefined;
+    const structuredSdkRuntime: WorkflowRunStorableRuntime | undefined =
+      resolvedProvider === undefined || resolvedProvider === 'claude'
+        ? undefined
+        : sdkRuntimeForProvider(resolvedProvider);
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'

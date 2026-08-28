@@ -1242,6 +1242,83 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('STAMPS pi-sdk rather than silently flooring a pi launch to Claude', async () => {
+      // The ladder used to name each provider's launch arm in a ternary chain
+      // with arms for codex and omp only. A missing arm does not throw — the run
+      // falls through to `undefined` and is stamped agent_provider 'claude' on a
+      // Claude runtime, so a Pi launch executes on the wrong vendor and pi's
+      // prompt envelope never renders. The arm is now derived from the provider
+      // registry, which is what this pins.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'pi-launchable.md', '---\n---\n');
+        // The shared fixture switches every provider on, pi included, so the
+        // access gate answers 'enabled' and this exercises the launch-resolution
+        // ladder rather than the toggle.
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const { runId, substrate } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'pi',
+          requestedAgentRuntime: 'pi-sdk',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(substrate).toBe('sdk');
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'pi', agent_runtime: 'pi-sdk' });
+      });
+    });
+
+    it('resolves the pi launch arm from the PROVIDER half alone', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'pi-provider-only.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const { runId } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'pi',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'pi', agent_runtime: 'pi-sdk' });
+      });
+    });
+
+    it('refuses a pi workflow launch when the access map has pi off', async () => {
+      // The shape ConfigManager hands the registry on a NON-ARIA install: the
+      // Aria gate is applied to the map itself, so the launch seam refuses pi
+      // through the ordinary access gate without knowing the gate exists.
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'pi-disabled-launch.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: true, codex: true, omp: false, pi: false }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'pi',
+            requestedAgentRuntime: 'pi-sdk',
+          }),
+        ).toThrow(/Pi provider is disabled/);
+      });
+    });
+
     it('refuses an omp-sdk workflow launch when the provider is switched off', async () => {
       // The access gate is what a default install hits: OMP is absent⇒DISABLED,
       // and it must answer BEFORE the launch resolves — otherwise the T1

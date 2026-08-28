@@ -148,12 +148,15 @@ describe('firstEnabledRuntime', () => {
  */
 type TestProvider = 'claude' | 'codex' | 'newcomer';
 
+// `sdkRuntime` is required by the definition type but irrelevant to these
+// tests, which exercise the defaultEnabled/floor policy only — every entry
+// carries the same placeholder rather than inventing runtime ids.
 const TEST_PROVIDER_TABLE: AgentProviderTable<TestProvider> = {
   providers: ['claude', 'codex', 'newcomer'],
   definitions: {
-    claude: { runtimePrefix: 'claude-', defaultEnabled: true, requiresAriaMode: false },
-    codex: { runtimePrefix: 'codex-', defaultEnabled: true, requiresAriaMode: false },
-    newcomer: { runtimePrefix: 'newcomer-', defaultEnabled: false, requiresAriaMode: false },
+    claude: { runtimePrefix: 'claude-', sdkRuntime: 'claude-sdk', defaultEnabled: true, requiresAriaMode: false },
+    codex: { runtimePrefix: 'codex-', sdkRuntime: 'claude-sdk', defaultEnabled: true, requiresAriaMode: false },
+    newcomer: { runtimePrefix: 'newcomer-', sdkRuntime: 'claude-sdk', defaultEnabled: false, requiresAriaMode: false },
   },
   fallbackProvider: 'claude',
 };
@@ -213,8 +216,8 @@ describe('the never-all-disabled floor', () => {
     const allOptIn: AgentProviderTable<'first' | 'second'> = {
       providers: ['first', 'second'],
       definitions: {
-        first: { runtimePrefix: 'first-', defaultEnabled: false, requiresAriaMode: false },
-        second: { runtimePrefix: 'second-', defaultEnabled: false, requiresAriaMode: false },
+        first: { runtimePrefix: 'first-', sdkRuntime: 'claude-sdk', defaultEnabled: false, requiresAriaMode: false },
+        second: { runtimePrefix: 'second-', sdkRuntime: 'claude-sdk', defaultEnabled: false, requiresAriaMode: false },
       },
       fallbackProvider: 'first',
     };
