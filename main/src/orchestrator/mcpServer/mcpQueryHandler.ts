@@ -107,7 +107,7 @@ import {
   isCyboflowWorkflowName,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../../shared/types/workflows';
-import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
+import { resolveEffectiveDefinition, type TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
 import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../../shared/types/workflows';
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
@@ -755,15 +755,18 @@ export type McpQueryMessage =
       workflowId: string;
     }
   | {
-      /** Create a variant snapshotting the workflow's current resolved
-       *  definition — or, when `definitionJson` is supplied (a JSON-encoded
-       *  WorkflowDefinition, validated in the handler like update_workflow),
-       *  that edited graph instead. Status stays 'draft' either way. */
+      /** Create a variant snapshotting the workflow's resolved definition at
+       *  `tuningLevel` (migration 126 — the level the variant challenges;
+       *  omitted = the workflow's saved stamp) — or, when `definitionJson` is
+       *  supplied (a JSON-encoded WorkflowDefinition, validated in the handler
+       *  like update_workflow), that edited graph instead. Status stays 'draft'
+       *  either way. */
       type: 'mcp-create-variant';
       requestId: string;
       runId: string;
       workflowId: string;
       label: string;
+      tuningLevel?: TuningLevel;
       definitionJson?: string;
     }
   | {
@@ -1812,7 +1815,7 @@ export interface WorkflowConfigLike {
   createVariantFromCurrent(
     workflowId: string,
     label: string,
-    definition?: WorkflowDefinition,
+    opts?: { definition?: WorkflowDefinition; tuningLevel?: TuningLevel },
   ): WorkflowVariantRow;
   updateVariant(
     variantId: string,
@@ -6739,6 +6742,7 @@ export class McpQueryHandler {
       execution_model: row.execution_model,
       weight: row.weight,
       status: row.status,
+      tuning_level: row.tuning_level,
       has_agent_overrides: row.agent_overrides_json !== null,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -6984,7 +6988,10 @@ export class McpQueryHandler {
       definition = parsed;
     }
     try {
-      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label, definition);
+      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label, {
+        ...(definition !== undefined ? { definition } : {}),
+        ...(msg.tuningLevel !== undefined ? { tuningLevel: msg.tuningLevel } : {}),
+      });
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,

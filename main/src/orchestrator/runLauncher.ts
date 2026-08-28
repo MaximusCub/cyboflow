@@ -551,17 +551,27 @@ export class RunLauncher {
     // otherwise the resolver does weighted random over active variants (or null →
     // baseline live-spec run). A foreign-workflow pin throws inside the resolver.
     //
-    // Tuning override × rotation (plan D4): an explicit level override IS an
-    // explicit spec choice, so it FORCES the baseline arm — a rotation pick would
-    // hand the run a variant's frozen graph and discard the level the user just
-    // asked for. An explicit variant PIN is not resolved away here: it survives
-    // into createRun, which rejects the pair outright rather than silently
-    // dropping one half of a contradictory request.
+    // Tuning override × rotation (migration 126): variants are scoped to a tuning
+    // level, so the LEVEL PICKS THE POOL and rotation picks inside it. An override
+    // therefore no longer forces the baseline arm — it redirects rotation at that
+    // level's challengers, which is the whole point of a per-run override on a
+    // flow being A/B'd. The pool key is the run's EFFECTIVE level (the override,
+    // else the workflow's saved stamp, else NULL for a flow outside the level
+    // system), resolved through the registry so this and createRun cannot drift.
+    // An explicit variant PIN still survives into createRun, which rejects it only
+    // when it belongs to a DIFFERENT level than an explicit override.
     const tuningLevel = launchOptions?.tuningLevel;
+    const poolTuningLevel = this.workflowRegistry.resolveEffectiveTuningLevel(
+      workflowId,
+      tuningLevel,
+    );
     const assignment =
-      this.variantResolver?.resolveForLaunch(workflowId, launchOptions?.requestedVariantId, {
-        baseline: launchOptions?.baseline ?? (tuningLevel !== undefined ? true : undefined),
-      }) ?? null;
+      this.variantResolver?.resolveForLaunch(
+        workflowId,
+        poolTuningLevel,
+        launchOptions?.requestedVariantId,
+        { baseline: launchOptions?.baseline },
+      ) ?? null;
     // Provenance split (phase 2): the resolved variant is folded as before, and a
     // GENUINE weighted rotation pick (source==='rotation') additionally stamps the
     // run's rotation_experiment_id when a rotation experiment is open. A pin /

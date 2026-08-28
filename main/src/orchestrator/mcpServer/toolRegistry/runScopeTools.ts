@@ -40,6 +40,7 @@
 import { z } from 'zod';
 import { compact, defineTool, type RegisteredTool } from './defineTool';
 import { declareAs } from './toolSchema';
+import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
 
 /**
  * IPC budget for the BLOCKING `cyboflow_await_verification` call
@@ -724,7 +725,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_list_variants',
     description:
-      'List a workflow\'s A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). NOTE: `has_agent_overrides` reflects only the `agent_overrides_json` blob (Claude prompt/model tweaks); a variant can still carry per-agent model pins or Codex routing via its `definition_json` `agentConfigs` and show `has_agent_overrides: false` — fetch the variant\'s definition to see those. ARCHIVED variants (migration 116) are OMITTED — an archived variant still exists, still holds its status and run history, and is still pinnable by id; it is just hidden from this listing, so an empty result is not proof the workflow has no variants. Use before creating/editing variants to see what already exists.',
+      'List a workflow\'s A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, tuning_level, has_agent_overrides). VARIANTS ARE SCOPED TO A TUNING LEVEL: `tuning_level` is the level a variant challenges, and it only ever rotates into launches of THAT level (null = the parent flow has no levels, i.e. a non-built-in "save as new" flow). Two variants may share a label at different levels, so read the level before assuming a name is taken or that a variant will affect the launch you have in mind. NOTE: `has_agent_overrides` reflects only the `agent_overrides_json` blob (Claude prompt/model tweaks); a variant can still carry per-agent model pins or Codex routing via its `definition_json` `agentConfigs` and show `has_agent_overrides: false` — fetch the variant\'s definition to see those. ARCHIVED variants (migration 116) are OMITTED — an archived variant still exists, still holds its status and run history, and is still pinnable by id; it is just hidden from this listing, so an empty result is not proof the workflow has no variants. Use before creating/editing variants to see what already exists.',
     input: z.object({
       workflow_id: z.string().min(1).describe('The parent workflow id (required)'),
     }),
@@ -735,16 +736,18 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_create_variant',
     description:
-      'Create a new variant of a workflow, snapshotting its CURRENT resolved definition, seeded status=\'draft\' (opt into rotation later via cyboflow_set_variant_status / cyboflow_update_variant weight). Pass `definition_json` to seed the variant\'s frozen graph with an edited definition instead of snapshotting the current one (validated like cyboflow_update_workflow: bad JSON → \'invalid_json\', a graph the schema rejects → \'invalid_definition\'); the parent workflow\'s own spec and tuning level are untouched and the status stays draft either way. `label` must be unique within the workflow (collision → error \'already_exists\'). Unknown workflow → \'not_found\'.',
+      'Create a new variant of a workflow AT ONE TUNING LEVEL, snapshotting that level\'s resolved definition, seeded status=\'draft\' (opt into rotation later via cyboflow_set_variant_status / cyboflow_update_variant weight). A variant challenges ONE level and only rotates into launches of that level, so `tuning_level` decides which pool it joins — omit it to snapshot (and attach to) the flow\'s currently saved level. On a non-built-in "save as new" flow, which has no levels, passing one is an error. Pass `definition_json` to seed the variant\'s frozen graph with an edited definition instead of snapshotting the level\'s (validated like cyboflow_update_workflow: bad JSON → \'invalid_json\', a graph the schema rejects → \'invalid_definition\'); the parent workflow\'s own spec and level stamp are untouched and the status stays draft either way. `label` must be unique within the workflow AT THAT LEVEL (collision → error \'already_exists\'). Unknown workflow → \'not_found\'.',
     input: z.object({
       workflow_id: z.string().min(1).describe('The parent workflow id (required)'),
-      label: z.string().min(1).describe('Unique variant label within the workflow (required)'),
-      definition_json: z.string().describe("Optional JSON-encoded WorkflowDefinition to freeze as the variant's graph, instead of snapshotting the workflow's current resolved definition. Get a starting definition from cyboflow_get_workflow, edit it, pass it back.").optional(),
+      label: z.string().min(1).describe('Variant label, unique within the workflow AT ITS TUNING LEVEL (required)'),
+      tuning_level: z.enum(TUNING_LEVELS).describe("Optional tuning level this variant challenges — the pool it rotates in. Defaults to the workflow's currently saved level. Rejected on a flow that has no levels.").optional(),
+      definition_json: z.string().describe("Optional JSON-encoded WorkflowDefinition to freeze as the variant's graph, instead of snapshotting the resolved definition of its tuning level. Get a starting definition from cyboflow_get_workflow, edit it, pass it back.").optional(),
     }),
     envelope: 'mcp-create-variant',
     toEnvelope: (args) => ({
       workflowId: args.workflow_id,
       label: args.label,
+      ...(args.tuning_level !== undefined ? { tuningLevel: args.tuning_level } : {}),
       ...(args.definition_json !== undefined ? { definitionJson: args.definition_json } : {}),
     }),
   }),
@@ -760,7 +763,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
       model: z.string().nullable().describe('Optional per-variant model alias; null clears it.').optional(),
       execution_model: z.enum(['orchestrated', 'programmatic']).nullable().describe('Optional per-variant execution model; null clears it.').optional(),
       weight: integerAtLeast(z.number().describe('Optional rotation weight (non-negative integer).'), 0).optional(),
-      label: z.string().min(1).describe('Optional new label (must stay unique within the workflow).').optional(),
+      label: z.string().min(1).describe("Optional new label (must stay unique within the workflow at the variant's tuning level).").optional(),
     }).superRefine((value, ctx) => {
       const untouched =
         value.definition_json === undefined &&

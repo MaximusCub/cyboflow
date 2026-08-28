@@ -21,6 +21,7 @@ import type { DatabaseLike } from './types';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowVariantRow } from '../../../shared/types/experiments';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
 import { getRunningRotationExperiment } from './experimentStore';
 
 /** A random number generator in `[0, 1)`. Defaults to `Math.random`. */
@@ -67,6 +68,11 @@ export class VariantResolver {
    * Resolve the variant for a launch of `workflowId`.
    *
    * @param workflowId        The workflow being launched.
+   * @param tuningLevel       The run's EFFECTIVE tuning level (migration 126) — the
+   *   rotation pool's second key. NULL for a workflow outside the level system
+   *   (a non-built-in flow / the quick sentinel), which has exactly one pool.
+   *   Used ONLY for rotation: an explicit pin is honoured whatever its level, so a
+   *   restart still reproduces a variant the workflow has since moved away from.
    * @param requestedVariantId Optional explicit pin (restart inherit / experiment
    *   arm / UI selection). When supplied it is loaded regardless of status; it
    *   MUST belong to `workflowId` or this throws (mapped to BAD_REQUEST upstream).
@@ -81,6 +87,7 @@ export class VariantResolver {
    */
   resolveForLaunch(
     workflowId: string,
+    tuningLevel: TuningLevel | null,
     requestedVariantId?: string,
     opts?: { baseline?: boolean },
   ): VariantAssignment {
@@ -108,6 +115,12 @@ export class VariantResolver {
           `VariantResolver: variant ${requestedVariantId} belongs to a different workflow`,
         );
       }
+      // NOTE: a pin is NOT level-checked here. `tuningLevel` is the rotation POOL
+      // key, and an explicit pin bypasses the pool entirely — a restart or an
+      // experiment arm must reproduce its variant even after the workflow's saved
+      // level moved on. The one genuine contradiction (an EXPLICIT level override
+      // paired with a foreign-level pin) is rejected in createRun, which is where
+      // the override lives and where the tuning error taxonomy already is.
       return { variant: this.toResolved(variant), source: 'pin', rotationExperimentId: null };
     }
 
@@ -116,10 +129,10 @@ export class VariantResolver {
     if (opts?.baseline) return { variant: null, source: 'baseline-pin', rotationExperimentId: null };
 
     // ⚠️ LOCKSTEP with experimentStore.computeRotationArmSet's pool predicate — the
-    // two MUST admit exactly the same members (active + weight>0 + NOT archived
-    // variants, plus the opted-in baseline). If you change this predicate, change
-    // computeRotationArmSet's in the same edit, or a run could be attributed to a
-    // rotation whose arm snapshot omits the picked arm.
+    // two MUST admit exactly the same members (this LEVEL's active + weight>0 +
+    // NOT archived variants, plus the opted-in baseline). If you change this
+    // predicate, change computeRotationArmSet's in the same edit, or a run could
+    // be attributed to a rotation whose arm snapshot omits the picked arm.
     //
     // `archived_at IS NULL` (migration 116) is a ROTATION-only exclusion: the
     // explicit-pin path above deliberately loads a variant of any status and any
@@ -127,10 +140,11 @@ export class VariantResolver {
     const variants = this.db
       .prepare(
         `SELECT * FROM workflow_variants
-          WHERE workflow_id = ? AND status = 'active' AND weight > 0 AND archived_at IS NULL
+          WHERE workflow_id = ? AND tuning_level IS ?
+            AND status = 'active' AND weight > 0 AND archived_at IS NULL
           ORDER BY id`,
       )
-      .all(workflowId) as WorkflowVariantRow[];
+      .all(workflowId, tuningLevel) as WorkflowVariantRow[];
 
     // A `variant: null` candidate represents the live baseline (variant_id NULL run).
     const pool: Array<{ weight: number; variant: WorkflowVariantRow | null }> = variants.map((v) => ({
@@ -152,7 +166,8 @@ export class VariantResolver {
     // rotation pick (source='rotation'): a baseline-vs-variant rotation's baseline
     // draws must be attributed too, so the experiment's arm stats are complete.
     const picked = this.weightedPick(pool);
-    const rotationExperimentId = getRunningRotationExperiment(this.db, workflowId)?.id ?? null;
+    const rotationExperimentId =
+      getRunningRotationExperiment(this.db, workflowId, tuningLevel)?.id ?? null;
     return {
       variant: picked && picked.variant ? this.toResolved(picked.variant) : null,
       source: 'rotation',

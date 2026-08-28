@@ -130,17 +130,18 @@ export interface WorkflowRegistryLike {
   /** Reverse `archiveVariant`; a no-op if never archived. */
   unarchiveVariant(variantId: string): void;
   /**
-   * Create a variant snapshotting the workflow's current resolved definition
-   * (seeds status='draft'). An explicit `definition` freezes THAT graph instead
-   * (the Advanced editor's "save as new variant of this flow"); callers validate
-   * it with the write-path schema first. Throws distinguishable Errors:
-   * 'not found' / reserved sentinel / unresolvable definition / label
-   * 'already exists'.
+   * Create a variant snapshotting the workflow's resolved definition at ONE
+   * tuning level (seeds status='draft'). `opts.tuningLevel` (migration 126) is
+   * the level the variant challenges — omitted, the workflow's saved stamp.
+   * `opts.definition` freezes THAT graph instead (the Advanced editor's "save as
+   * new variant of this flow"); callers validate it with the write-path schema
+   * first. Throws distinguishable Errors: 'not found' / reserved sentinel /
+   * 'no tuning levels' / unresolvable definition / label 'already exists'.
    */
   createVariantFromCurrent(
     workflowId: string,
     label: string,
-    definition?: WorkflowDefinition,
+    opts?: { definition?: WorkflowDefinition; tuningLevel?: TuningLevel },
   ): WorkflowVariantRow;
   /** Patch a variant in place (re-snapshot). Throws 'not found' when missing. */
   updateVariant(

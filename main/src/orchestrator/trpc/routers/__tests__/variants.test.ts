@@ -33,7 +33,7 @@ function createVariantsTestDb(): Database.Database {
   db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
   db.exec(`
     CREATE TABLE workflow_variants (
-      id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
       agent_provider TEXT, agent_runtime TEXT,
       weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
@@ -44,7 +44,7 @@ function createVariantsTestDb(): Database.Database {
     -- Migration 058: the variant-config chokepoint reconciles the rotation experiment
     -- inside the same transaction, so these tables must exist (058 shape).
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
       base_branch TEXT, base_sha TEXT, variant_a_id TEXT, variant_b_id TEXT,
       run_a_id TEXT, run_b_id TEXT, session_a_id TEXT, session_b_id TEXT,

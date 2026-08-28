@@ -24,10 +24,16 @@ export const TUNING_OVERRIDE_CODE = 'TUNING_OVERRIDE_REJECTED';
 /**
  * Why an override was refused.
  *
- *   `variant_conflict`   — the launch ALSO pins an A/B variant. A variant carries
- *                          its own frozen graph, so the two are competing spec
- *                          choices; the wizard makes them mutually exclusive and
- *                          this is the server-side half of that rule.
+ *   `variant_conflict`   — the launch ALSO pins an A/B variant belonging to a
+ *                          DIFFERENT tuning level. Migration 126 scoped variants
+ *                          to a level, so an override plus a variant of the
+ *                          SAME level is coherent (the level picks the pool, the
+ *                          pin picks inside it) and is allowed; only a foreign-level
+ *                          pin is refused, because the variant's frozen graph would
+ *                          win and silently run a configuration the requested level
+ *                          does not describe. A bare `variantSpecJson` with no
+ *                          variant id carries no level to compare and is refused
+ *                          on the same grounds.
  *   `not_built_in`       — a "save as new" flow has no built-in baseline for a
  *                          preset to transform, so it is outside the level system
  *                          entirely (its runs stamp NULL).
@@ -69,8 +75,8 @@ export function tuningOverrideRejection(
     case 'variant_conflict':
       return new TuningOverrideError(
         reason,
-        `a per-run tuning level ('${String(level)}') cannot be combined with an explicit A/B variant pin — ` +
-          'a variant runs its own frozen definition, so pick one or the other',
+        `a per-run tuning level ('${String(level)}') cannot be combined with an A/B variant pinned to a different level — ` +
+          "a variant runs its own frozen definition, so pin one of that level's variants or drop the level override",
       );
     case 'not_built_in':
       return new TuningOverrideError(

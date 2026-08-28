@@ -38,13 +38,21 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 122 — i.e. the pre-122 app. */
+/**
+ * A migrations dir holding every real migration BEFORE 124 — i.e. the pre-124 app.
+ *
+ * Cutting on the NUMBER, not just skipping 124's filename: later migrations may
+ * build on the column 124 adds (126 backfills `workflow_variants.tuning_level`
+ * from `workflows.tuning_level`), and copying those into a dir where 124 is
+ * absent makes the first boot fail on a column that does not exist yet.
+ */
 function migrationsDirWithout122(): string {
   const dir = join(tmpDir, 'migrations-pre-122');
   mkdirSync(dir);
+  const cutoff = Number(MIGRATION_122.slice(0, 3));
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_122) continue;
     if (!/^\d{3}_.*\.sql$/.test(name)) continue;
+    if (Number(name.slice(0, 3)) >= cutoff) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
   return dir;

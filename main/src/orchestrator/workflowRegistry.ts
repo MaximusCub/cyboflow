@@ -74,7 +74,11 @@ import { resolveExecutionModel } from './executionModelResolver';
 import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
-import { reconcileRotationExperiment, revalidateRotationAttribution } from './experimentStore';
+import {
+  reconcileRotationExperiment,
+  reconcileRotationExperimentsForWorkflow,
+  revalidateRotationAttribution,
+} from './experimentStore';
 import { BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
 
 // ---------------------------------------------------------------------------
@@ -622,23 +626,48 @@ export class WorkflowRegistry {
     );
     const tx = this.db.transaction(() => {
       stmt.run(variantId);
-      reconcileRotationExperiment(this.db, existing.workflow_id);
+      reconcileRotationExperiment(this.db, existing.workflow_id, existing.tuning_level ?? null);
     });
     tx();
   }
 
   /**
-   * Create a variant snapshotting the workflow's RESOLVED effective definition
-   * ("Create variant from current").
+   * The tuning level a launch (or a variant) of `workflowId` belongs to
+   * (migration 126) — the single place "which pool is this?" is decided.
    *
-   * Snapshots the workflow's EFFECTIVE definition (migration 122: the level's
-   * materialized graph, `spec_json` when the level is `'custom'`) — so a
-   * built-in with a live `spec_json='{}'` freezes the CONCRETE static graph
-   * rather than '{}' (independent of later built-in code changes), and "create
-   * variant from current" on an Efficient-stamped flow snapshots what that flow
-   * actually runs rather than the untransformed built-in. Seeds `status='draft'` (rotation
-   * is explicit opt-in — a fresh variant is pinnable + experiment-usable but never
-   * auto-rotated), `weight=1`, NULL model/execution_model/agent_overrides_json.
+   * A BUILT-IN flow resolves `override ?? the workflow's saved stamp`; anything
+   * else (a "save as new" custom flow, the `__quick__` sentinel) is outside the
+   * level system and resolves NULL, which is a real pool key meaning "this
+   * workflow has exactly one pool". Returns null for a missing workflow too —
+   * callers that care about existence check that themselves.
+   */
+  resolveEffectiveTuningLevel(workflowId: string, override?: TuningLevel): TuningLevel | null {
+    const workflow = this.getById(workflowId);
+    if (!workflow) return null;
+    if (!isCyboflowWorkflowName(workflow.name)) return null;
+    return override ?? workflow.tuning_level;
+  }
+
+  /**
+   * Create a variant snapshotting the workflow's RESOLVED effective definition
+   * at ONE TUNING LEVEL ("Create variant from current").
+   *
+   * Snapshots the workflow's EFFECTIVE definition at `tuningLevel` (migration
+   * 122: the level's materialized graph, `spec_json` when the level is
+   * `'custom'`) — so a built-in with a live `spec_json='{}'` freezes the
+   * CONCRETE static graph rather than '{}' (independent of later built-in code
+   * changes), and "create variant from current" on the Efficient page snapshots
+   * what Efficient actually runs rather than the untransformed built-in. Seeds
+   * `status='draft'` (rotation is explicit opt-in — a fresh variant is pinnable +
+   * experiment-usable but never auto-rotated), `weight=1`, NULL
+   * model/execution_model/agent_overrides_json.
+   *
+   * `tuningLevel` (migration 126) is the level the variant CHALLENGES, and it is
+   * stored: a variant only ever rotates within its own level's pool. Omitted, it
+   * defaults to the workflow's saved stamp — the level the editor is showing
+   * when no page context is threaded. A non-built-in flow is outside the level
+   * system, so its variants are always stored NULL and an explicit level there
+   * is rejected rather than silently dropped.
    *
    * `definition` overrides what gets frozen: the Advanced editor's "save as new
    * variant of this flow" (plan D3) carries the EDITED graph, which is not the
@@ -651,14 +680,15 @@ export class WorkflowRegistry {
    * Guards (distinguishable Error messages the router maps to TRPCError):
    *   - missing workflow → 'not found' (NOT_FOUND)
    *   - reserved sentinel (__quick__) → 'reserved' (BAD_REQUEST)
+   *   - a tuning level on a non-built-in flow → 'no tuning levels' (BAD_REQUEST)
    *   - unresolvable definition (broken custom flow, no explicit `definition`)
    *     → 'unresolvable' (BAD_REQUEST)
-   *   - label collision (UNIQUE) → 'already exists' (CONFLICT)
+   *   - label collision within the SAME level (UNIQUE) → 'already exists' (CONFLICT)
    */
   createVariantFromCurrent(
     workflowId: string,
     label: string,
-    definitionOverride?: WorkflowDefinition,
+    opts?: { definition?: WorkflowDefinition; tuningLevel?: TuningLevel },
   ): WorkflowVariantRow {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -669,9 +699,18 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createVariantFromCurrent: '${workflow.name}' is a reserved sentinel and cannot have variants`,
       );
     }
+    const isBuiltInFlow = isCyboflowWorkflowName(workflow.name);
+    if (opts?.tuningLevel !== undefined && !isBuiltInFlow) {
+      throw new Error(
+        `WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} is not a built-in flow, so it has no tuning levels to scope a variant to`,
+      );
+    }
+    const variantLevel: TuningLevel | null = isBuiltInFlow
+      ? opts?.tuningLevel ?? workflow.tuning_level
+      : null;
     const definition =
-      definitionOverride ??
-      resolveEffectiveDefinition(workflow.name, workflow.spec_json, workflow.tuning_level);
+      opts?.definition ??
+      resolveEffectiveDefinition(workflow.name, workflow.spec_json, variantLevel ?? 'custom');
     if (definition === null) {
       throw new Error(
         `WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} has an unresolvable definition`,
@@ -683,12 +722,16 @@ export class WorkflowRegistry {
     }
     // Collision pre-check for a clean CONFLICT message (the UNIQUE index is the
     // authoritative guard; a concurrent insert would still throw the raw error).
+    // Scoped to the LEVEL (migration 126): the same label may name a challenger
+    // of Standard and a challenger of Thorough. `IS` so the NULL level compares.
     const collision = this.db
-      .prepare('SELECT 1 FROM workflow_variants WHERE workflow_id = ? AND label = ? LIMIT 1')
-      .get(workflowId, trimmed);
+      .prepare(
+        'SELECT 1 FROM workflow_variants WHERE workflow_id = ? AND tuning_level IS ? AND label = ? LIMIT 1',
+      )
+      .get(workflowId, variantLevel, trimmed);
     if (collision !== undefined) {
       throw new Error(
-        `WorkflowRegistry.createVariantFromCurrent: a variant named '${trimmed}' already exists for this workflow`,
+        `WorkflowRegistry.createVariantFromCurrent: a variant named '${trimmed}' already exists for this workflow at tuning level '${variantLevel ?? 'none'}'`,
       );
     }
 
@@ -699,11 +742,11 @@ export class WorkflowRegistry {
     // key order their producer happened to use.
     const specJson = serializeDefinition(definition);
     const insert = this.db.prepare(`
-      INSERT INTO workflow_variants (id, workflow_id, label, spec_json, status, weight)
-      VALUES (?, ?, ?, ?, 'draft', 1)
+      INSERT INTO workflow_variants (id, workflow_id, label, spec_json, status, weight, tuning_level)
+      VALUES (?, ?, ?, ?, 'draft', 1, ?)
     `);
     const tx = this.db.transaction(() => {
-      insert.run(id, workflowId, trimmed, specJson);
+      insert.run(id, workflowId, trimmed, specJson, variantLevel);
     });
     tx();
 
@@ -794,7 +837,7 @@ export class WorkflowRegistry {
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.updateVariant: variant ${variantId} not found`);
       }
-      reconcileRotationExperiment(this.db, existing.workflow_id);
+      reconcileRotationExperiment(this.db, existing.workflow_id, existing.tuning_level ?? null);
     });
     tx();
   }
@@ -815,7 +858,7 @@ export class WorkflowRegistry {
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.setVariantStatus: variant ${variantId} not found`);
       }
-      reconcileRotationExperiment(this.db, existing.workflow_id);
+      reconcileRotationExperiment(this.db, existing.workflow_id, existing.tuning_level ?? null);
     });
     tx();
   }
@@ -844,7 +887,7 @@ export class WorkflowRegistry {
     // change; reconcile atomically after the row is gone.
     const tx = this.db.transaction(() => {
       this.db.prepare('DELETE FROM workflow_variants WHERE id = ?').run(variantId);
-      reconcileRotationExperiment(this.db, workflowId);
+      reconcileRotationExperiment(this.db, workflowId, variant.tuning_level ?? null);
     });
     tx();
   }
@@ -888,12 +931,15 @@ export class WorkflowRegistry {
     const stmt = this.db.prepare(`UPDATE workflows SET ${sets.join(', ')} WHERE id = ?`);
     // Rotation-lifecycle chokepoint (migration 058): toggling the baseline into/out of
     // rotation (or its weight across 0) is a membership change; reconcile atomically.
+    // The baseline is an arm of EVERY tuning level's pool (migration 126), so this
+    // one write fans out across all of the workflow's levels — unlike a variant
+    // mutation, which touches only its own level's pool.
     const tx = this.db.transaction(() => {
       const result = stmt.run(...params, workflowId);
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.setBaselineRotation: workflow ${workflowId} not found`);
       }
-      reconcileRotationExperiment(this.db, workflowId);
+      reconcileRotationExperimentsForWorkflow(this.db, workflowId);
     });
     tx();
   }
@@ -1641,13 +1687,24 @@ export class WorkflowRegistry {
       if (!isBuiltInFlow) {
         throw tuningOverrideRejection('not_built_in', overrideLevel, workflow.name);
       }
-      // Mutual exclusion (plan D4): a variant carries its own frozen graph, so an
-      // explicit variant pin and a level override are two competing spec choices.
-      // The wizard disables one when the other is picked; this is the server half.
-      // Only an EXPLICIT pin can reach here — RunLauncher forces the baseline arm
-      // whenever an override is present, so rotation never assigns a variant
-      // underneath one.
-      if (opts?.variantId !== undefined || opts?.variantSpecJson !== undefined) {
+      // Level containment (migration 126, superseding plan D4's blanket mutual
+      // exclusion): variants are scoped to a level, so the level picks the POOL
+      // and rotation/baseline/pin picks inside it — an override paired with a
+      // variant of THAT level is coherent and allowed. What is still rejected is
+      // a pin of a variant belonging to some OTHER level: the variant's frozen
+      // graph would win over the level the user just asked for, silently running
+      // a different configuration under its name.
+      //
+      // A `variantSpecJson` with no `variantId` carries no level to compare, so
+      // it stays rejected outright (no such caller exists today — RunLauncher
+      // always threads the pair — but a bare spec is unattributable by
+      // construction, not merely unverified).
+      if (opts?.variantId !== undefined) {
+        const pinned = this.getVariantById(opts.variantId);
+        if (pinned !== null && (pinned.tuning_level ?? null) !== overrideLevel) {
+          throw tuningOverrideRejection('variant_conflict', overrideLevel, workflow.name);
+        }
+      } else if (opts?.variantSpecJson !== undefined) {
         throw tuningOverrideRejection('variant_conflict', overrideLevel, workflow.name);
       }
       if (overrideLevel === 'custom' && !hasCustomSpecSlot(workflow.spec_json)) {
@@ -1833,6 +1890,7 @@ export class WorkflowRegistry {
           : revalidateRotationAttribution(
               this.db,
               workflowId,
+              effectiveLevel,
               opts.rotationExperimentId,
               opts.variantId ?? BASELINE_VARIANT_SENTINEL,
             );

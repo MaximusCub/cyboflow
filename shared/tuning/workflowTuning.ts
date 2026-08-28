@@ -50,6 +50,19 @@ export type TuningLevel = (typeof TUNING_LEVELS)[number];
 /** The default level for a workflow that has never been tuned. */
 export const DEFAULT_TUNING_LEVEL: TuningLevel = 'standard';
 
+/**
+ * Display name per level — the ONE spelling every surface uses (the editor's
+ * dial cards, the wizard's segments, the variant manager's header). Kept here
+ * rather than per-component so a level never reads as two different things
+ * depending on where you are.
+ */
+export const TUNING_LEVEL_LABELS: Readonly<Record<TuningLevel, string>> = {
+  efficient: 'Efficient',
+  standard: 'Standard',
+  thorough: 'Thorough',
+  custom: 'Custom',
+};
+
 /** Runtime guard for an untyped value (DB column, IPC payload) being a TuningLevel. */
 export function isTuningLevel(value: unknown): value is TuningLevel {
   return typeof value === 'string' && (TUNING_LEVELS as readonly string[]).includes(value);

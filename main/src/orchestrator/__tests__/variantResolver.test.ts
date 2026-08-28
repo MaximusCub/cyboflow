@@ -33,7 +33,7 @@ function makeDb(): Database.Database {
       baseline_rotation_weight INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE workflow_variants (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY, tuning_level TEXT,
       workflow_id TEXT NOT NULL,
       label TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}',
@@ -52,7 +52,7 @@ function makeDb(): Database.Database {
     -- lookup (getRunningRotationExperiment) resolves. No arms table needed — the
     -- resolver only reads the running experiment id.
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
       status TEXT NOT NULL DEFAULT 'running'
         CHECK (status IN ('running','grading','decided','abandoned','superseded')),
@@ -66,10 +66,15 @@ function makeDb(): Database.Database {
   return db;
 }
 
-function seedRunningRotation(db: Database.Database, id: string, workflowId = WF): void {
+function seedRunningRotation(
+  db: Database.Database,
+  id: string,
+  workflowId = WF,
+  tuningLevel: string | null = null,
+): void {
   db.prepare(
-    "INSERT INTO experiments (id, project_id, workflow_id, kind, status) VALUES (?, 1, ?, 'rotation', 'running')",
-  ).run(id, workflowId);
+    "INSERT INTO experiments (id, project_id, workflow_id, tuning_level, kind, status) VALUES (?, 1, ?, ?, 'rotation', 'running')",
+  ).run(id, workflowId, tuningLevel);
 }
 
 function seedVariant(
@@ -88,11 +93,13 @@ function seedVariant(
     agentRuntime?: string | null;
     /** Migration 116 archive stamp; non-null = archived. */
     archivedAt?: string | null;
+    /** Migration 126: the tuning level this variant challenges. */
+    tuningLevel?: string | null;
   } = {},
 ): void {
   db.prepare(
-    `INSERT INTO workflow_variants (id, workflow_id, label, spec_json, weight, status, model, execution_model, agent_overrides_json, agent_provider, agent_runtime, archived_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO workflow_variants (id, workflow_id, label, spec_json, weight, status, model, execution_model, agent_overrides_json, agent_provider, agent_runtime, archived_at, tuning_level)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     opts.workflowId ?? WF,
@@ -106,6 +113,7 @@ function seedVariant(
     opts.agentProvider ?? null,
     opts.agentRuntime ?? null,
     opts.archivedAt ?? null,
+    opts.tuningLevel ?? null,
   );
 }
 
@@ -118,7 +126,7 @@ describe('VariantResolver', () => {
 
   it('source=none with null variant when the workflow has zero variants (baseline run)', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant).toBeNull();
     expect(a.source).toBe('none');
     expect(a.rotationExperimentId).toBeNull();
@@ -128,7 +136,7 @@ describe('VariantResolver', () => {
     seedVariant(db, 'v1', { status: 'paused' });
     seedVariant(db, 'v2', { status: 'paused' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant).toBeNull();
     expect(a.source).toBe('none');
   });
@@ -136,7 +144,7 @@ describe('VariantResolver', () => {
   it('excludes weight=0 active variants from rotation (source=none)', () => {
     seedVariant(db, 'v0', { weight: 0, status: 'active' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant).toBeNull();
     expect(a.source).toBe('none');
   });
@@ -144,7 +152,7 @@ describe('VariantResolver', () => {
   it('excludes ARCHIVED active variants from rotation (migration 116, source=none)', () => {
     seedVariant(db, 'v1', { status: 'active', weight: 1, archivedAt: '2026-08-01T00:00:00Z' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant).toBeNull();
     expect(a.source).toBe('none');
   });
@@ -152,7 +160,7 @@ describe('VariantResolver', () => {
   it('explicit pin loads an ARCHIVED variant (a restart must reproduce a historical run)', () => {
     seedVariant(db, 'v1', { status: 'active', archivedAt: '2026-08-01T00:00:00Z' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF, 'v1');
+    const a = resolver.resolveForLaunch(WF,null,  'v1');
     expect(a.variant?.variantId).toBe('v1');
     expect(a.source).toBe('pin');
   });
@@ -161,7 +169,7 @@ describe('VariantResolver', () => {
     seedVariant(db, 'v1', { weight: 1 });
     seedVariant(db, 'v2', { weight: 1 });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant?.variantId).toBe('v1');
     expect(a.source).toBe('rotation');
   });
@@ -171,16 +179,16 @@ describe('VariantResolver', () => {
     seedVariant(db, 'v2', { weight: 3 });
     // total = 4. rng()=0.25 → r=1.0; cumulative after v1 is 1 (not > 1.0) → v2.
     const resolver = new VariantResolver(dbAdapter(db), () => 0.25);
-    expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v2');
+    expect(resolver.resolveForLaunch(WF, null).variant?.variantId).toBe('v2');
     // rng()=0.2 → r=0.8; cumulative after v1 is 1 (> 0.8) → v1.
     const resolver2 = new VariantResolver(dbAdapter(db), () => 0.2);
-    expect(resolver2.resolveForLaunch(WF).variant?.variantId).toBe('v1');
+    expect(resolver2.resolveForLaunch(WF, null).variant?.variantId).toBe('v1');
   });
 
   it('explicit pin loads a PAUSED variant regardless of status (source=pin)', () => {
     seedVariant(db, 'vp', { status: 'paused', label: 'paused-one' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF, 'vp');
+    const a = resolver.resolveForLaunch(WF,null,  'vp');
     expect(a.variant?.variantId).toBe('vp');
     expect(a.variant?.variantLabel).toBe('paused-one');
     expect(a.source).toBe('pin');
@@ -190,7 +198,7 @@ describe('VariantResolver', () => {
   it('explicit pin loads a RETIRED variant regardless of status', () => {
     seedVariant(db, 'vr', { status: 'retired' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF, 'vr');
+    const a = resolver.resolveForLaunch(WF,null,  'vr');
     expect(a.variant?.variantId).toBe('vr');
     expect(a.source).toBe('pin');
   });
@@ -198,12 +206,12 @@ describe('VariantResolver', () => {
   it('throws when an explicit pin belongs to a different workflow', () => {
     seedVariant(db, 'foreign', { workflowId: OTHER_WF });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(() => resolver.resolveForLaunch(WF, 'foreign')).toThrow(/different workflow/);
+    expect(() => resolver.resolveForLaunch(WF,null,  'foreign')).toThrow(/different workflow/);
   });
 
   it('throws when an explicit pin does not exist', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(() => resolver.resolveForLaunch(WF, 'nope')).toThrow(/not found/);
+    expect(() => resolver.resolveForLaunch(WF,null,  'nope')).toThrow(/not found/);
   });
 
   it('baseline pin returns source=baseline-pin (null variant) WITHOUT rotating even when active variants exist', () => {
@@ -213,25 +221,25 @@ describe('VariantResolver', () => {
     seedVariant(db, 'v1', { weight: 1, status: 'active' });
     seedVariant(db, 'v2', { weight: 5, status: 'active' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const baselinePin = resolver.resolveForLaunch(WF, undefined, { baseline: true });
+    const baselinePin = resolver.resolveForLaunch(WF,null,  undefined, { baseline: true });
     expect(baselinePin.variant).toBeNull();
     expect(baselinePin.source).toBe('baseline-pin');
     expect(baselinePin.rotationExperimentId).toBeNull();
     // Sanity: without the baseline pin the same resolver WOULD pick a variant.
-    expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
+    expect(resolver.resolveForLaunch(WF, null).variant?.variantId).toBe('v1');
   });
 
   it('explicit pin wins over the baseline flag', () => {
     seedVariant(db, 'vp', { status: 'paused', label: 'pinned' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF, 'vp', { baseline: true });
+    const a = resolver.resolveForLaunch(WF,null,  'vp', { baseline: true });
     expect(a.variant?.variantId).toBe('vp');
     expect(a.source).toBe('pin');
   });
 
   it('source=none for the __quick__ sentinel workflow', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch('wf-q');
+    const a = resolver.resolveForLaunch('wf-q', null);
     expect(a.variant).toBeNull();
     expect(a.source).toBe('none');
   });
@@ -243,7 +251,7 @@ describe('VariantResolver', () => {
       seedVariant(db, 'v2', { weight: 1 });
       seedRunningRotation(db, 'exp-rot-1');
       const resolver = new VariantResolver(dbAdapter(db), () => 0);
-      const a = resolver.resolveForLaunch(WF);
+      const a = resolver.resolveForLaunch(WF, null);
       expect(a.source).toBe('rotation');
       expect(a.rotationExperimentId).toBe('exp-rot-1');
     });
@@ -252,7 +260,7 @@ describe('VariantResolver', () => {
       seedVariant(db, 'v1', { weight: 1 });
       seedVariant(db, 'v2', { weight: 1 });
       const resolver = new VariantResolver(dbAdapter(db), () => 0);
-      const a = resolver.resolveForLaunch(WF);
+      const a = resolver.resolveForLaunch(WF, null);
       expect(a.source).toBe('rotation');
       expect(a.rotationExperimentId).toBeNull();
     });
@@ -261,7 +269,7 @@ describe('VariantResolver', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       seedRunningRotation(db, 'exp-rot-2');
       const resolver = new VariantResolver(dbAdapter(db), () => 0);
-      const a = resolver.resolveForLaunch(WF, 'v1');
+      const a = resolver.resolveForLaunch(WF,null,  'v1');
       expect(a.source).toBe('pin');
       expect(a.rotationExperimentId).toBeNull();
     });
@@ -279,16 +287,16 @@ describe('VariantResolver', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       // rng()=0.99 would land in the baseline slice IF the baseline were in the pool.
       const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
-      expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
+      expect(resolver.resolveForLaunch(WF, null).variant?.variantId).toBe('v1');
     });
 
     it('adds the baseline to the weighted pool when opted in — a baseline win → null variant, source=rotation', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       optBaselineIn(3); // pool: v1(1) + baseline(3), total 4
       // rng()=0 → r=0 → first candidate (v1).
-      expect(new VariantResolver(dbAdapter(db), () => 0).resolveForLaunch(WF).variant?.variantId).toBe('v1');
+      expect(new VariantResolver(dbAdapter(db), () => 0).resolveForLaunch(WF, null).variant?.variantId).toBe('v1');
       // rng()=0.5 → r=2; cumulative after v1 is 1 (not > 2) → baseline slice → null variant.
-      const baselineWin = new VariantResolver(dbAdapter(db), () => 0.5).resolveForLaunch(WF);
+      const baselineWin = new VariantResolver(dbAdapter(db), () => 0.5).resolveForLaunch(WF, null);
       expect(baselineWin.variant).toBeNull();
       expect(baselineWin.source).toBe('rotation');
     });
@@ -297,13 +305,13 @@ describe('VariantResolver', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       optBaselineIn(0);
       const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
-      expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
+      expect(resolver.resolveForLaunch(WF, null).variant?.variantId).toBe('v1');
     });
 
     it('baseline-only rotation (no active variants) resolves to the baseline run (null variant, source=rotation)', () => {
       optBaselineIn(5);
       const resolver = new VariantResolver(dbAdapter(db), () => 0);
-      const a = resolver.resolveForLaunch(WF);
+      const a = resolver.resolveForLaunch(WF, null);
       expect(a.variant).toBeNull();
       expect(a.source).toBe('rotation');
     });
@@ -317,7 +325,7 @@ describe('VariantResolver', () => {
       agentOverridesJson: '{"planner":{"model":"sonnet"}}',
     });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant).toEqual({
       variantId: 'v1',
       variantLabel: 'v1',
@@ -337,9 +345,73 @@ describe('VariantResolver', () => {
       agentRuntime: 'codex-sdk',
     });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const a = resolver.resolveForLaunch(WF);
+    const a = resolver.resolveForLaunch(WF, null);
     expect(a.variant?.agentProvider).toBe('codex');
     expect(a.variant?.agentRuntime).toBe('codex-sdk');
     expect(a.variant?.model).toBe('gpt-5.2-codex');
+  });
+});
+
+describe('VariantResolver — tuning-level scoping (migration 126)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  it('rotates ONLY among the launch level\'s variants', () => {
+    // Two active weight>0 challengers at different levels. A Thorough launch
+    // must never draw the Standard one: it froze a different flow.
+    seedVariant(db, 'v-standard', { tuningLevel: 'standard' });
+    seedVariant(db, 'v-thorough', { tuningLevel: 'thorough', specJson: '{"thorough":true}' });
+    const resolver = new VariantResolver(dbAdapter(db), () => 0);
+
+    expect(resolver.resolveForLaunch(WF, 'thorough').variant?.variantId).toBe('v-thorough');
+    expect(resolver.resolveForLaunch(WF, 'standard').variant?.variantId).toBe('v-standard');
+  });
+
+  it('falls through to the baseline when the launch level has no variants', () => {
+    seedVariant(db, 'v-standard', { tuningLevel: 'standard' });
+    db.prepare('UPDATE workflows SET baseline_in_rotation = 0 WHERE id = ?').run(WF);
+    const resolver = new VariantResolver(dbAdapter(db), () => 0);
+
+    const a = resolver.resolveForLaunch(WF, 'efficient');
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('none');
+  });
+
+  it('the BASELINE competes in every level\'s pool', () => {
+    // The baseline is "this flow, un-varied" — which exists at every level — so
+    // an opted-in baseline is an arm of each pool, not just the saved one.
+    seedVariant(db, 'v-thorough', { tuningLevel: 'thorough' });
+    db.prepare('UPDATE workflows SET baseline_in_rotation = 1, baseline_rotation_weight = 1 WHERE id = ?').run(WF);
+    // rng()=0.99 lands on the LAST candidate — the synthetic baseline.
+    const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
+
+    const a = resolver.resolveForLaunch(WF, 'thorough');
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('rotation');
+  });
+
+  it('attributes a pick to the rotation experiment of ITS OWN level', () => {
+    seedVariant(db, 'v-thorough', { tuningLevel: 'thorough' });
+    seedRunningRotation(db, 'exp-standard', WF, 'standard');
+    seedRunningRotation(db, 'exp-thorough', WF, 'thorough');
+    const resolver = new VariantResolver(dbAdapter(db), () => 0);
+
+    expect(resolver.resolveForLaunch(WF, 'thorough').rotationExperimentId).toBe('exp-thorough');
+  });
+
+  it('honours an explicit PIN of a foreign-level variant (restart reproduces history)', () => {
+    // The level keys the POOL only. A restart or experiment arm pins by id and
+    // must reproduce its variant even after the flow moved to another level —
+    // the genuine contradiction (an explicit level OVERRIDE plus a foreign-level
+    // pin) is caught in createRun, which is where the override lives.
+    seedVariant(db, 'v-standard', { tuningLevel: 'standard', status: 'paused' });
+    const resolver = new VariantResolver(dbAdapter(db), () => 0);
+
+    const a = resolver.resolveForLaunch(WF, 'efficient', 'v-standard');
+    expect(a.source).toBe('pin');
+    expect(a.variant?.variantId).toBe('v-standard');
   });
 });

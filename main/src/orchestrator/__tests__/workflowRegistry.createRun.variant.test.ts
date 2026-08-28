@@ -50,7 +50,7 @@ function setupDb(): Database.Database {
   // (revalidateRotationAttribution), so any test that stamps a rotation id needs
   // real experiment + arm-snapshot rows.
   db.exec(`CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
     status TEXT NOT NULL DEFAULT 'running'
       CHECK (status IN ('running','grading','decided','abandoned','superseded')),
@@ -71,11 +71,13 @@ function seedRotation(
   armVariantIds: string[],
   status: 'running' | 'superseded' = 'running',
 ): void {
-  db.prepare("INSERT INTO experiments (id, workflow_id, kind, status) VALUES (?, ?, 'rotation', ?)").run(
-    id,
-    WF,
-    status,
-  );
+  // tuning_level 'standard' (migration 126): rotations are per (workflow, LEVEL)
+  // and revalidateRotationAttribution matches on both, so a rotation over this
+  // planner workflow must carry the level the workflow is stamped with — the
+  // GATE_SCHEMA default.
+  db.prepare(
+    "INSERT INTO experiments (id, workflow_id, tuning_level, kind, status) VALUES (?, ?, 'standard', 'rotation', ?)",
+  ).run(id, WF, status);
   for (const v of armVariantIds) {
     db.prepare('INSERT INTO experiment_rotation_arms (experiment_id, variant_id, label) VALUES (?, ?, ?)').run(
       id,

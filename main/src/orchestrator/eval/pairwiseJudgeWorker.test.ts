@@ -24,7 +24,7 @@ function buildDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, project_id INTEGER, status TEXT,
+      id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, status TEXT,
       base_sha TEXT, seed_idea_id TEXT
     );
     CREATE TABLE workflow_runs (

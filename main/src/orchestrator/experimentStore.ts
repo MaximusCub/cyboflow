@@ -25,6 +25,7 @@ import type {
   ExperimentStatus,
 } from '../../../shared/types/experiments';
 import { isExperimentArmSettled, BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
+import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
 
 /** Fields required to seed a new experiments row (status defaults to 'running'). */
 export interface InsertExperimentInput {
@@ -588,7 +589,13 @@ export interface RotationArmInput {
  */
 export function insertRotationExperiment(
   db: DatabaseLike,
-  input: { workflowId: string; arms: RotationArmInput[]; rerunOfExperimentId?: string | null },
+  input: {
+    workflowId: string;
+    /** The pool's tuning level (migration 126); NULL for a level-less workflow. */
+    tuningLevel: TuningLevel | null;
+    arms: RotationArmInput[];
+    rerunOfExperimentId?: string | null;
+  },
 ): ExperimentRow {
   if (input.arms.length < 2) {
     throw new Error(
@@ -598,10 +605,10 @@ export function insertRotationExperiment(
   const id = `exp_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
   const tx = db.transaction(() => {
     db.prepare(
-      `INSERT INTO experiments (id, project_id, workflow_id, kind, base_branch, base_sha,
+      `INSERT INTO experiments (id, project_id, workflow_id, tuning_level, kind, base_branch, base_sha,
          variant_a_id, variant_b_id, status, rerun_of_experiment_id)
-       VALUES (?, NULL, ?, 'rotation', NULL, NULL, NULL, NULL, 'running', ?)`,
-    ).run(id, input.workflowId, input.rerunOfExperimentId ?? null);
+       VALUES (?, NULL, ?, ?, 'rotation', NULL, NULL, NULL, NULL, 'running', ?)`,
+    ).run(id, input.workflowId, input.tuningLevel, input.rerunOfExperimentId ?? null);
     const armStmt = db.prepare(
       `INSERT INTO experiment_rotation_arms (experiment_id, variant_id, label, weight_at_open)
        VALUES (?, ?, ?, ?)`,
@@ -618,16 +625,49 @@ export function insertRotationExperiment(
   return row;
 }
 
-/** The OPEN rotation experiment for a workflow (kind='rotation' AND status='running'), newest first; null when none. */
-export function getRunningRotationExperiment(db: DatabaseLike, workflowId: string): ExperimentRow | null {
+/**
+ * The OPEN rotation experiment for a workflow AT ONE TUNING LEVEL (kind='rotation'
+ * AND status='running'), newest first; null when none.
+ *
+ * Variants are level-scoped (migration 126), so a workflow can hold one running
+ * rotation per level — the SELECT therefore keys on both. `IS` rather than `=` so
+ * the NULL level (a workflow outside the level system) matches its own pool
+ * instead of matching nothing.
+ */
+export function getRunningRotationExperiment(
+  db: DatabaseLike,
+  workflowId: string,
+  tuningLevel: TuningLevel | null,
+): ExperimentRow | null {
   const row = db
     .prepare(
       `SELECT * FROM experiments
-        WHERE workflow_id = ? AND kind = 'rotation' AND status = 'running'
+        WHERE workflow_id = ? AND tuning_level IS ? AND kind = 'rotation' AND status = 'running'
         ORDER BY created_at DESC, id DESC LIMIT 1`,
     )
-    .get(workflowId) as ExperimentRow | undefined;
+    .get(workflowId, tuningLevel) as ExperimentRow | undefined;
   return row ?? null;
+}
+
+/**
+ * Every tuning level a workflow currently holds rotation state for: the levels its
+ * variants live at, UNION the levels that still carry a running rotation (so a
+ * pool that just emptied is still visited, and closed). NULL is a real member
+ * here, meaning "this workflow is outside the level system".
+ */
+export function listRotationLevelsForWorkflow(
+  db: DatabaseLike,
+  workflowId: string,
+): Array<TuningLevel | null> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT tuning_level AS level FROM workflow_variants WHERE workflow_id = ?
+        UNION
+       SELECT DISTINCT tuning_level AS level FROM experiments
+        WHERE workflow_id = ? AND kind = 'rotation' AND status = 'running'`,
+    )
+    .all(workflowId, workflowId) as Array<{ level: TuningLevel | null }>;
+  return rows.map((r) => r.level ?? null);
 }
 
 /** The arm-set snapshot rows for a rotation experiment, ordered by variant id. */
@@ -679,6 +719,7 @@ export function deleteRotationExperiment(db: DatabaseLike, experimentId: string)
 export function revalidateRotationAttribution(
   db: DatabaseLike,
   workflowId: string,
+  tuningLevel: TuningLevel | null,
   rotationExperimentId: string,
   armVariantId: string,
 ): string | null {
@@ -691,11 +732,12 @@ export function revalidateRotationAttribution(
     exp.kind === 'rotation' &&
     exp.status === 'running' &&
     exp.workflow_id === workflowId &&
+    exp.tuning_level === tuningLevel &&
     armInSnapshot(exp.id)
   ) {
     return exp.id;
   }
-  const current = getRunningRotationExperiment(db, workflowId);
+  const current = getRunningRotationExperiment(db, workflowId, tuningLevel);
   if (current !== null && current.id !== rotationExperimentId && armInSnapshot(current.id)) {
     return current.id;
   }
@@ -716,13 +758,19 @@ export function setRotationLineage(db: DatabaseLike, experimentId: string, rerun
  * ⚠️ LOCKSTEP with VariantResolver.resolveForLaunch's pool predicate — the two
  * MUST admit exactly the same members or a run could be attributed to a rotation
  * whose snapshot does not contain the picked arm (or vice versa). The predicate:
- * `workflow_variants` where `status='active' AND weight>0 AND archived_at IS NULL`
- * (migration 116; ORDER BY id), plus the
+ * `workflow_variants` where `workflow_id = ? AND tuning_level IS ?` (migration 126 —
+ * the pool is per (workflow, LEVEL), never per workflow) `AND status='active' AND
+ * weight>0 AND archived_at IS NULL` (migration 116; ORDER BY id), plus the
  * live BASELINE when `workflows.baseline_in_rotation=1 AND baseline_rotation_weight>0`
- * (migration 054). The `__quick__` sentinel never rotates → []. If you change this
- * predicate, change resolveForLaunch's in the same edit.
+ * (migration 054) — the baseline is an arm of EVERY level's pool, since "the
+ * un-varied config" exists at each level. The `__quick__` sentinel never rotates → [].
+ * If you change this predicate, change resolveForLaunch's in the same edit.
  */
-export function computeRotationArmSet(db: DatabaseLike, workflowId: string): RotationArmInput[] {
+export function computeRotationArmSet(
+  db: DatabaseLike,
+  workflowId: string,
+  tuningLevel: TuningLevel | null,
+): RotationArmInput[] {
   const workflow = db
     .prepare(
       'SELECT name AS name, baseline_in_rotation AS baselineInRotation, baseline_rotation_weight AS baselineWeight FROM workflows WHERE id = ?',
@@ -736,10 +784,11 @@ export function computeRotationArmSet(db: DatabaseLike, workflowId: string): Rot
   const variants = db
     .prepare(
       `SELECT id AS id, label AS label, weight AS weight FROM workflow_variants
-        WHERE workflow_id = ? AND status = 'active' AND weight > 0 AND archived_at IS NULL
+        WHERE workflow_id = ? AND tuning_level IS ?
+          AND status = 'active' AND weight > 0 AND archived_at IS NULL
         ORDER BY id`,
     )
-    .all(workflowId) as Array<{ id: string; label: string; weight: number }>;
+    .all(workflowId, tuningLevel) as Array<{ id: string; label: string; weight: number }>;
 
   const arms: RotationArmInput[] = variants.map((v) => ({
     variantId: v.id,
@@ -790,10 +839,11 @@ function sameMembership(a: readonly string[], b: readonly string[]): boolean {
 export function reconcileRotationExperiment(
   db: DatabaseLike,
   workflowId: string,
+  tuningLevel: TuningLevel | null,
 ): { action: RotationReconcileAction; experimentId: string | null } {
   const tx = db.transaction(() => {
-    const desired = computeRotationArmSet(db, workflowId);
-    const running = getRunningRotationExperiment(db, workflowId);
+    const desired = computeRotationArmSet(db, workflowId, tuningLevel);
+    const running = getRunningRotationExperiment(db, workflowId, tuningLevel);
     const live = desired.length >= 2;
 
     if (!live) {
@@ -807,7 +857,7 @@ export function reconcileRotationExperiment(
     }
 
     if (!running) {
-      const opened = insertRotationExperiment(db, { workflowId, arms: desired });
+      const opened = insertRotationExperiment(db, { workflowId, tuningLevel, arms: desired });
       return { action: 'opened' as RotationReconcileAction, experimentId: opened.id };
     }
 
@@ -821,6 +871,7 @@ export function reconcileRotationExperiment(
       updateExperimentStatus(db, running.id, 'superseded');
       const successor = insertRotationExperiment(db, {
         workflowId,
+        tuningLevel,
         arms: desired,
         rerunOfExperimentId: running.id,
       });
@@ -831,6 +882,7 @@ export function reconcileRotationExperiment(
     deleteRotationExperiment(db, running.id);
     const fresh = insertRotationExperiment(db, {
       workflowId,
+      tuningLevel,
       arms: desired,
       rerunOfExperimentId: inheritedLineage,
     });
@@ -840,10 +892,27 @@ export function reconcileRotationExperiment(
 }
 
 /**
- * Boot-recovery sweep: reconcile EVERY workflow's rotation experiment against its
- * live pool (config could have drifted while a pre-058 build ran, or a crash
- * interrupted a mid-reconcile). Per-workflow try/catch — one bad workflow never
- * aborts the rest — and NEVER throws. Skips the `__quick__` sentinel.
+ * Reconcile EVERY tuning level a workflow holds rotation state for (migration
+ * 126). The pool is per (workflow, level), so a mutation whose blast radius is
+ * the whole workflow rather than one level — toggling the BASELINE into or out
+ * of rotation, which is an arm of every level's pool — must sweep them all.
+ * Returns the per-level actions in visit order (for logging / tests).
+ */
+export function reconcileRotationExperimentsForWorkflow(
+  db: DatabaseLike,
+  workflowId: string,
+): Array<{ tuningLevel: TuningLevel | null; action: RotationReconcileAction; experimentId: string | null }> {
+  return listRotationLevelsForWorkflow(db, workflowId).map((tuningLevel) => ({
+    tuningLevel,
+    ...reconcileRotationExperiment(db, workflowId, tuningLevel),
+  }));
+}
+
+/**
+ * Boot-recovery sweep: reconcile EVERY workflow's rotation experiments against
+ * their live pools (config could have drifted while a pre-058 build ran, or a
+ * crash interrupted a mid-reconcile). Per-workflow try/catch — one bad workflow
+ * never aborts the rest — and NEVER throws. Skips the `__quick__` sentinel.
  */
 export function reconcileAllRotationExperiments(db: DatabaseLike, logger?: Pick<LoggerLike, 'error'>): void {
   let workflows: Array<{ id: string; name: string }>;
@@ -856,7 +925,7 @@ export function reconcileAllRotationExperiments(db: DatabaseLike, logger?: Pick<
   for (const wf of workflows) {
     if (wf.name === '__quick__') continue;
     try {
-      reconcileRotationExperiment(db, wf.id);
+      reconcileRotationExperimentsForWorkflow(db, wf.id);
     } catch (err) {
       logger?.error('[experiments] rotation reconcile failed', {
         workflowId: wf.id,

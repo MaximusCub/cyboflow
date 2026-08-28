@@ -224,6 +224,7 @@ function makeHarness(
   // send this spawn to OMP.
   const registry: WorkflowRegistryLike = {
     getRunById: () => ({ id: 'run-1', substrate: 'sdk', agent_provider: 'claude', agent_runtime: 'claude-sdk' }),
+    resolveEffectiveTuningLevel: () => null,
   } as unknown as WorkflowRegistryLike;
 
   const facade = new SubstrateDispatchFacade({

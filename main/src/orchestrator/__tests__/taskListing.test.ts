@@ -1099,13 +1099,13 @@ function buildMembershipDb(): Database.Database {
   const db = buildOverlayDb();
   db.exec(`
     CREATE TABLE workflow_variants (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY, tuning_level TEXT,
       workflow_id TEXT NOT NULL,
       label TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}'
     );
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY,
+      id TEXT PRIMARY KEY, tuning_level TEXT,
       project_id INTEGER,
       workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'side_by_side',

@@ -26,7 +26,7 @@ function buildDb(): Database.Database {
       session_id TEXT, created_at TEXT
     );
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, workflow_id TEXT, kind TEXT, status TEXT,
+      id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT, kind TEXT, status TEXT,
       created_at TEXT, decided_at TEXT, promoted_variant_id TEXT
     );
     CREATE TABLE experiment_rotation_arms (

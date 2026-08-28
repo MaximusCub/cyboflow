@@ -19,6 +19,7 @@ import {
   AGENT_PROVIDERS,
   WORKFLOW_LAUNCHABLE_RUNTIMES,
 } from '../../../../../shared/types/agentRuntime';
+import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
 
 /**
  * A per-agent variant delta map: `{ [agentKey]: { systemPrompt?, model? } }`.
@@ -42,7 +43,8 @@ function mapRegistryError(err: unknown): TRPCError {
   if (message.includes('run history') || message.includes('already exists')) {
     return new TRPCError({ code: 'CONFLICT', message });
   }
-  // reserved sentinel / unresolvable definition / non-empty label / bad weight.
+  // reserved sentinel / unresolvable definition / non-empty label / bad weight /
+  // a tuning level on a level-less flow.
   return new TRPCError({ code: 'BAD_REQUEST', message });
 }
 
@@ -67,10 +69,14 @@ export const variantsRouter = router({
     }),
 
   /**
-   * Create a variant snapshotting the workflow's current resolved definition
-   * ("Create variant from current"). Seeds status='draft'. CONFLICT on a label
-   * collision; BAD_REQUEST on an unresolvable/reserved workflow; NOT_FOUND when
-   * the workflow is missing.
+   * Create a variant snapshotting the workflow's resolved definition AT ONE
+   * TUNING LEVEL ("Create variant from current"). Seeds status='draft'. CONFLICT
+   * on a label collision within that level; BAD_REQUEST on an
+   * unresolvable/reserved workflow; NOT_FOUND when the workflow is missing.
+   *
+   * `tuningLevel` (migration 126) is the level the variant challenges — the page
+   * the editor was on. Omitted, the registry falls back to the workflow's saved
+   * stamp; on a non-built-in flow (no levels) an explicit value is BAD_REQUEST.
    *
    * An optional `definition` (validated by the strict write-path schema, so a
    * malformed graph is BAD_REQUEST before the body runs) freezes THAT graph
@@ -83,6 +89,7 @@ export const variantsRouter = router({
       z.object({
         workflowId: z.string().min(1),
         label: z.string().min(1),
+        tuningLevel: z.enum(TUNING_LEVELS).optional(),
         definition: workflowDefinitionSchema.optional(),
       }),
     )
@@ -94,11 +101,10 @@ export const variantsRouter = router({
         });
       }
       try {
-        return ctx.workflowRegistry.createVariantFromCurrent(
-          input.workflowId,
-          input.label,
-          input.definition,
-        );
+        return ctx.workflowRegistry.createVariantFromCurrent(input.workflowId, input.label, {
+          ...(input.definition !== undefined ? { definition: input.definition } : {}),
+          ...(input.tuningLevel !== undefined ? { tuningLevel: input.tuningLevel } : {}),
+        });
       } catch (err) {
         throw mapRegistryError(err);
       }

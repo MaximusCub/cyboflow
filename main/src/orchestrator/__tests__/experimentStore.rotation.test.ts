@@ -37,14 +37,14 @@ const SCHEMA = `
     baseline_rotation_weight INTEGER NOT NULL DEFAULT 1
   );
   CREATE TABLE workflow_variants (
-    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
     spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
     weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
     archived_at TEXT,  -- migration 116
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
     base_branch TEXT, base_sha TEXT, variant_a_id TEXT, variant_b_id TEXT,
     run_a_id TEXT, run_b_id TEXT, session_a_id TEXT, session_b_id TEXT,
@@ -104,10 +104,10 @@ describe('reconcileRotationExperiment matrix', () => {
   it('opens a rotation when the pool reaches 2 live arms', () => {
     seedVariant('v1');
     seedVariant('v2');
-    const { action, experimentId } = reconcileRotationExperiment(db, WF);
+    const { action, experimentId } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('opened');
     expect(experimentId).not.toBeNull();
-    const exp = getRunningRotationExperiment(db, WF);
+    const exp = getRunningRotationExperiment(db, WF, null);
     expect(exp?.kind).toBe('rotation');
     expect(exp?.status).toBe('running');
     expect(listRotationArms(db, experimentId as string).map((a) => a.variant_id).sort()).toEqual(['v1', 'v2']);
@@ -115,20 +115,20 @@ describe('reconcileRotationExperiment matrix', () => {
 
   it('is a no-op below 2 live arms', () => {
     seedVariant('v1');
-    const { action, experimentId } = reconcileRotationExperiment(db, WF);
+    const { action, experimentId } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('none');
     expect(experimentId).toBeNull();
-    expect(getRunningRotationExperiment(db, WF)).toBeNull();
+    expect(getRunningRotationExperiment(db, WF, null)).toBeNull();
   });
 
   it('is a no-op on a pure weight change (same membership)', () => {
     seedVariant('v1', { weight: 1 });
     seedVariant('v2', { weight: 1 });
-    const opened = reconcileRotationExperiment(db, WF);
+    const opened = reconcileRotationExperiment(db, WF, null);
     expect(opened.action).toBe('opened');
     // Pure weight change — membership unchanged.
     raw.prepare("UPDATE workflow_variants SET weight = 5 WHERE id = 'v1'").run();
-    const again = reconcileRotationExperiment(db, WF);
+    const again = reconcileRotationExperiment(db, WF, null);
     expect(again.action).toBe('none');
     expect(again.experimentId).toBe(opened.experimentId);
     // The arm snapshot retains its weight_at_open (denormalized at open).
@@ -139,11 +139,11 @@ describe('reconcileRotationExperiment matrix', () => {
   it('supersedes (with a successor chained by rerun_of) on a membership change WITH runs', () => {
     seedVariant('v1');
     seedVariant('v2');
-    const opened = reconcileRotationExperiment(db, WF);
+    const opened = reconcileRotationExperiment(db, WF, null);
     attributeRun(opened.experimentId as string);
     // Membership change: add a third active arm.
     seedVariant('v3');
-    const { action, experimentId } = reconcileRotationExperiment(db, WF);
+    const { action, experimentId } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('superseded');
     const old = getExperiment(db, opened.experimentId as string);
     expect(old?.status).toBe('superseded');
@@ -160,12 +160,12 @@ describe('reconcileRotationExperiment matrix', () => {
   it('replaces (deletes old, inherits lineage) on a membership change with ZERO runs', () => {
     seedVariant('v1');
     seedVariant('v2');
-    const opened = reconcileRotationExperiment(db, WF);
+    const opened = reconcileRotationExperiment(db, WF, null);
     // Give the open rotation a pre-existing lineage to prove REPLACE inherits it.
     setRotationLineage(db, opened.experimentId as string, 'src-exp-xyz');
     // Membership change with no attributed runs.
     seedVariant('v3');
-    const { action, experimentId } = reconcileRotationExperiment(db, WF);
+    const { action, experimentId } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('replaced');
     expect(getExperiment(db, opened.experimentId as string)).toBeNull();
     expect(getExperiment(db, experimentId as string)?.rerun_of_experiment_id).toBe('src-exp-xyz');
@@ -174,11 +174,11 @@ describe('reconcileRotationExperiment matrix', () => {
   it('closes as abandoned when rotation is turned off WITH runs', () => {
     seedVariant('v1');
     seedVariant('v2');
-    const opened = reconcileRotationExperiment(db, WF);
+    const opened = reconcileRotationExperiment(db, WF, null);
     attributeRun(opened.experimentId as string);
     // Turn rotation off (pool < 2): pause both variants.
     raw.prepare("UPDATE workflow_variants SET status = 'paused'").run();
-    const { action } = reconcileRotationExperiment(db, WF);
+    const { action } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('closed');
     expect(getExperiment(db, opened.experimentId as string)?.status).toBe('abandoned');
   });
@@ -186,9 +186,9 @@ describe('reconcileRotationExperiment matrix', () => {
   it('deletes silently when rotation is turned off with ZERO runs', () => {
     seedVariant('v1');
     seedVariant('v2');
-    const opened = reconcileRotationExperiment(db, WF);
+    const opened = reconcileRotationExperiment(db, WF, null);
     raw.prepare("UPDATE workflow_variants SET status = 'paused'").run();
-    const { action } = reconcileRotationExperiment(db, WF);
+    const { action } = reconcileRotationExperiment(db, WF, null);
     expect(action).toBe('closed');
     expect(getExperiment(db, opened.experimentId as string)).toBeNull();
   });
@@ -196,13 +196,13 @@ describe('reconcileRotationExperiment matrix', () => {
 
 describe('computeRotationArmSet', () => {
   it('returns [] for the __quick__ sentinel workflow', () => {
-    expect(computeRotationArmSet(db, 'wf-q')).toEqual([]);
+    expect(computeRotationArmSet(db, 'wf-q', null)).toEqual([]);
   });
 
   it('includes the opted-in baseline as an arm', () => {
     seedVariant('v1');
     raw.prepare("UPDATE workflows SET baseline_in_rotation = 1, baseline_rotation_weight = 3 WHERE id = ?").run(WF);
-    const arms = computeRotationArmSet(db, WF);
+    const arms = computeRotationArmSet(db, WF, null);
     expect(arms.map((a) => a.variantId).sort()).toEqual([BASELINE_VARIANT_SENTINEL, 'v1'].sort());
     const baseline = arms.find((a) => a.variantId === BASELINE_VARIANT_SENTINEL);
     expect(baseline?.weightAtOpen).toBe(3);
@@ -212,7 +212,7 @@ describe('computeRotationArmSet', () => {
 describe('insertRotationExperiment', () => {
   it('rejects an arm set smaller than 2', () => {
     expect(() =>
-      insertRotationExperiment(db, { workflowId: WF, arms: [{ variantId: 'v1', label: 'v1', weightAtOpen: 1 }] }),
+      insertRotationExperiment(db, { workflowId: WF, tuningLevel: null, arms: [{ variantId: 'v1', label: 'v1', weightAtOpen: 1 }] }),
     ).toThrow(/>= 2 arms/);
   });
 });
@@ -220,8 +220,9 @@ describe('insertRotationExperiment', () => {
 describe('setRotationLineage', () => {
   it('fills only a NULL lineage (never overwrites)', () => {
     const exp = insertRotationExperiment(db, {
-      workflowId: WF,
-      arms: [
+        workflowId: WF,
+        tuningLevel: null,
+        arms: [
         { variantId: 'v1', label: 'v1', weightAtOpen: 1 },
         { variantId: 'v2', label: 'v2', weightAtOpen: 1 },
       ],
@@ -237,8 +238,9 @@ describe('setRotationLineage', () => {
 describe('countRotationExperimentRuns', () => {
   it('counts only runs attributed to the experiment', () => {
     const exp = insertRotationExperiment(db, {
-      workflowId: WF,
-      arms: [
+        workflowId: WF,
+        tuningLevel: null,
+        arms: [
         { variantId: 'v1', label: 'v1', weightAtOpen: 1 },
         { variantId: 'v2', label: 'v2', weightAtOpen: 1 },
       ],
@@ -250,51 +252,53 @@ describe('countRotationExperimentRuns', () => {
   });
 });
 
-describe('revalidateRotationAttribution (createRun INSERT seam)', () => {
+describe('revalidateRotationAttribution (createRun INSERT seam, null)', () => {
   const ARMS = [
     { variantId: 'v1', label: 'v1', weightAtOpen: 1 },
     { variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 },
   ];
 
   it('returns the same id while the rotation is still running with the arm in its snapshot', () => {
-    const exp = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
-    expect(revalidateRotationAttribution(db, WF, exp.id, 'v1')).toBe(exp.id);
-    expect(revalidateRotationAttribution(db, WF, exp.id, BASELINE_VARIANT_SENTINEL)).toBe(exp.id);
+    const exp = insertRotationExperiment(db, { workflowId: WF, tuningLevel: null, arms: ARMS });
+    expect(revalidateRotationAttribution(db, WF,null,  exp.id, 'v1')).toBe(exp.id);
+    expect(revalidateRotationAttribution(db, WF,null,  exp.id, BASELINE_VARIANT_SENTINEL)).toBe(exp.id);
   });
 
   it('returns null for a deleted id with no running successor (zero-run replace raced the launch)', () => {
-    expect(revalidateRotationAttribution(db, WF, 'exp-gone', 'v1')).toBeNull();
+    expect(revalidateRotationAttribution(db, WF,null,  'exp-gone', 'v1')).toBeNull();
   });
 
   it('re-attributes to the running successor when the original was superseded and the arm is still a member', () => {
-    const old = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
+    const old = insertRotationExperiment(db, { workflowId: WF, tuningLevel: null, arms: ARMS });
     raw.prepare("UPDATE experiments SET status = 'superseded' WHERE id = ?").run(old.id);
     const successor = insertRotationExperiment(db, {
-      workflowId: WF,
-      arms: [...ARMS, { variantId: 'v2', label: 'v2', weightAtOpen: 1 }],
+        workflowId: WF,
+        tuningLevel: null,
+        arms: [...ARMS, { variantId: 'v2', label: 'v2', weightAtOpen: 1 }],
     });
-    expect(revalidateRotationAttribution(db, WF, old.id, 'v1')).toBe(successor.id);
+    expect(revalidateRotationAttribution(db, WF,null,  old.id, 'v1')).toBe(successor.id);
   });
 
   it('returns null when the successor no longer contains the picked arm', () => {
-    const old = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
+    const old = insertRotationExperiment(db, { workflowId: WF, tuningLevel: null, arms: ARMS });
     raw.prepare("UPDATE experiments SET status = 'superseded' WHERE id = ?").run(old.id);
     insertRotationExperiment(db, {
-      workflowId: WF,
-      arms: [
+        workflowId: WF,
+        tuningLevel: null,
+        arms: [
         { variantId: 'v2', label: 'v2', weightAtOpen: 1 },
         { variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 },
       ],
     });
-    expect(revalidateRotationAttribution(db, WF, old.id, 'v1')).toBeNull();
+    expect(revalidateRotationAttribution(db, WF,null,  old.id, 'v1')).toBeNull();
   });
 
   it("never cross-attributes to another workflow's running rotation", () => {
     raw.prepare("INSERT INTO workflows (id, project_id, name) VALUES ('wf-2', 1, 'sprint')").run();
-    const foreign = insertRotationExperiment(db, { workflowId: 'wf-2', arms: ARMS });
+    const foreign = insertRotationExperiment(db, { workflowId: 'wf-2', tuningLevel: null, arms: ARMS });
     // The stale id belongs to wf-2; a launch of WF must not adopt it (nor find a
     // WF successor, since WF has no running rotation).
-    expect(revalidateRotationAttribution(db, WF, foreign.id, 'v1')).toBeNull();
+    expect(revalidateRotationAttribution(db, WF,null,  foreign.id, 'v1')).toBeNull();
   });
 });
 

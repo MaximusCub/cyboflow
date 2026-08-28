@@ -344,7 +344,7 @@ describe('chatSentinelProvider', () => {
     }
 
     beforeEach(() => {
-      db.exec('CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+      db.exec('CREATE TABLE experiments (id TEXT PRIMARY KEY, tuning_level TEXT, status TEXT NOT NULL)');
     });
 
     function seedExperimentArm(runId: string, runStatusValue: string, experimentStatus: string): void {

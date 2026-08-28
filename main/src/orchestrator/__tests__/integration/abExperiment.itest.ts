@@ -389,6 +389,9 @@ describe('Tier-3 A/B testing: variants, rotation, side-by-side experiments, pair
   it('2. variant + rotation: an active variant is picked by the rng, stamps the run, and freezes its spec', () => {
     const variant = registry.createVariantFromCurrent(WF_ID, 'challenger');
     expect(variant.status).toBe('draft');
+    // Migration 126: a variant challenges ONE tuning level — the flow's saved
+    // stamp when the caller names none — and only rotates into launches of it.
+    expect(variant.tuning_level).toBe('standard');
     registry.setVariantStatus(variant.id, 'active');
 
     // A hosting session for the run (workflow_runs.session_id FK).
@@ -402,7 +405,9 @@ describe('Tier-3 A/B testing: variants, rotation, side-by-side experiments, pair
 
     // rng()=0 ⇒ weightedPick returns the first (only) active candidate deterministically.
     const resolver = new VariantResolver(t.db, () => 0);
-    const assignment = resolver.resolveForLaunch(WF_ID);
+    // The pool key is the level the launch runs at; the challenger lives in it.
+    expect(resolver.resolveForLaunch(WF_ID, 'thorough').variant).toBeNull();
+    const assignment = resolver.resolveForLaunch(WF_ID, 'standard');
     expect(assignment.source).toBe('rotation');
     const resolved = assignment.variant;
     expect(resolved?.variantId).toBe(variant.id);

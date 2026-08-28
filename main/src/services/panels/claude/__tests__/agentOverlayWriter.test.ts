@@ -335,7 +335,7 @@ describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 04
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
     db.exec(`
       CREATE TABLE workflow_variants (
-        id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+        id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
         spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
         weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
         archived_at TEXT,  -- migration 116
@@ -539,7 +539,7 @@ describe('agentOverlayWriter — workflow agent configs (workflow-scoped)', () =
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
     db.exec(`
       CREATE TABLE workflow_variants (
-        id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+        id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
         spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
         weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
         archived_at TEXT,  -- migration 116

@@ -75,12 +75,19 @@ function buildDb(): Database.Database {
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
   }
   db.exec(`CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, workflow_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER NOT NULL, workflow_id TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'side_by_side', base_branch TEXT NOT NULL, base_sha TEXT NOT NULL,
     variant_a_id TEXT NOT NULL, variant_b_id TEXT NOT NULL, run_a_id TEXT, run_b_id TEXT,
     session_a_id TEXT, session_b_id TEXT, seed_idea_id TEXT, seed_idea_clone_a_id TEXT, seed_idea_clone_b_id TEXT,
     status TEXT NOT NULL DEFAULT 'running', winner_run_id TEXT, winner_arm TEXT, merge_sha TEXT,
     decided_at TEXT, rerun_of_experiment_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+  // Migration 126: switchToRotation reads the arms' tuning level to find the
+  // rotation their activation opened (rotations are per workflow AND level).
+  db.exec(`CREATE TABLE workflow_variants (
+    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+    spec_json TEXT NOT NULL DEFAULT '{}', tuning_level TEXT,
+    weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft', archived_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`).run();
   // Migration 059: category (feature|bug|chore) — an unconditional column in
@@ -93,7 +100,7 @@ function variant(id: string): WorkflowVariantRow {
   return {
     id, workflow_id: 'wf', label: id, spec_json: '{}', agent_overrides_json: null,
     model: null, execution_model: null, agent_provider: null, agent_runtime: null,
-    weight: 1, status: 'draft', archived_at: null, created_at: '', updated_at: '',
+    weight: 1, status: 'draft', archived_at: null, tuning_level: null, created_at: '', updated_at: '',
   };
 }
 

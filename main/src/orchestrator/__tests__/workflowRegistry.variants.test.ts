@@ -29,13 +29,16 @@ function setupDb(): Database.Database {
       spec_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(workflow_id, spec_hash)
     );
     CREATE TABLE workflow_variants (
-      id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
       weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
       archived_at TEXT,  -- migration 116
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
+    -- Migration 126: label uniqueness is per (workflow, LEVEL); COALESCE keeps
+    -- the NULL-level (level-less flow) rows in one bucket.
+    CREATE UNIQUE INDEX idx_workflow_variants_wf_level_label
+      ON workflow_variants(workflow_id, COALESCE(tuning_level, ''), label);
   `);
   // Migration 054: the baseline rotation-participation columns on workflows (the
   // baseline is the champion — in rotation by DEFAULT 1).
@@ -47,7 +50,7 @@ function setupDb(): Database.Database {
   // setBaselineRotation write would throw. 058 shape (widened CHECKs, relaxed NULLs).
   db.exec(`
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
       base_branch TEXT, base_sha TEXT, variant_a_id TEXT, variant_b_id TEXT,
       run_a_id TEXT, run_b_id TEXT, session_a_id TEXT, session_b_id TEXT,
@@ -106,7 +109,7 @@ describe('WorkflowRegistry variants', () => {
     // The Advanced editor's "save as new variant of this flow" carries the EDITED
     // graph, which by construction is not the workflow's resolved definition.
     const edited = makeCustomDefinition('edited-graph');
-    const variant = registry.createVariantFromCurrent(WF_PLANNER, 'from-editor', edited);
+    const variant = registry.createVariantFromCurrent(WF_PLANNER, 'from-editor', { definition: edited });
 
     const parsed = JSON.parse(variant.spec_json) as WorkflowDefinition;
     expect(parsed).toEqual(edited);
@@ -134,8 +137,8 @@ describe('WorkflowRegistry variants', () => {
       id: 'x',
     } as WorkflowDefinition;
 
-    const va = registry.createVariantFromCurrent(WF_PLANNER, 'order-a', a);
-    const vb = registry.createVariantFromCurrent(WF_PLANNER, 'order-b', b);
+    const va = registry.createVariantFromCurrent(WF_PLANNER, 'order-a', { definition: a });
+    const vb = registry.createVariantFromCurrent(WF_PLANNER, 'order-b', { definition: b });
     expect(va.spec_json).toBe(vb.spec_json);
   });
 
@@ -278,8 +281,11 @@ describe('WorkflowRegistry variants', () => {
 
   // -- Rotation-experiment reconcile chokepoint (migration 058) ---------------
   describe('rotation reconcile via the variant-config chokepoint', () => {
+    // Migration 126: rotations are per (workflow, LEVEL). These variants are
+    // created with no explicit level, so they inherit planner's saved stamp —
+    // 'standard' — and that is the pool their reconcile opens/closes.
     const rot = (): ReturnType<typeof getRunningRotationExperiment> =>
-      getRunningRotationExperiment(dbAdapter(db), WF_PLANNER);
+      getRunningRotationExperiment(dbAdapter(db), WF_PLANNER, 'standard');
     const activate = (label: string, weight = 1): string => {
       const v = registry.createVariantFromCurrent(WF_PLANNER, label);
       registry.setVariantStatus(v.id, 'active');

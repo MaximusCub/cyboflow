@@ -18,7 +18,7 @@ function buildDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE experiments (
-      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL CHECK (kind IN ('side_by_side','rotation')),
       status TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT,
       promoted_variant_id TEXT

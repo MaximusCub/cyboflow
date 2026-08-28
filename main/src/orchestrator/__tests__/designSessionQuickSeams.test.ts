@@ -48,7 +48,7 @@ const SCHEMA = `
     baseline_rotation_weight INTEGER NOT NULL DEFAULT 1
   );
   CREATE TABLE workflow_variants (
-    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
     spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
     agent_provider TEXT, agent_runtime TEXT,
     weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
@@ -56,7 +56,7 @@ const SCHEMA = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
     status TEXT NOT NULL DEFAULT 'running'
       CHECK (status IN ('running','grading','decided','abandoned','superseded')),
@@ -116,7 +116,7 @@ describe('Design Mode v0 — __quick__ seam parity (design-mode.md)', () => {
     seedDesignQuickRun(db, 'running');
 
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const assignment = resolver.resolveForLaunch(QUICK_WF_ID);
+    const assignment = resolver.resolveForLaunch(QUICK_WF_ID, null);
 
     expect(assignment).toEqual({ variant: null, source: 'none', rotationExperimentId: null });
   });
@@ -127,7 +127,7 @@ describe('Design Mode v0 — __quick__ seam parity (design-mode.md)', () => {
   it('computeRotationArmSet excludes the __quick__ workflow hosting a design session (returns [])', () => {
     seedDesignQuickRun(db, 'running');
 
-    expect(computeRotationArmSet(dbAdapter(db), QUICK_WF_ID)).toEqual([]);
+    expect(computeRotationArmSet(dbAdapter(db), QUICK_WF_ID, null)).toEqual([]);
   });
 
   // (c) reviveQuickRunToRunning — revival policy is unchanged: the design

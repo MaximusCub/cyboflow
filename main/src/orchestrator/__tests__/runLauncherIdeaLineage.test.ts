@@ -108,6 +108,7 @@ function makeFixture(db: Database.Database, tmpDir: string, workflowName = 'plan
         )
         .get(id) ?? null,
     createRun,
+    resolveEffectiveTuningLevel: () => null,
   } as unknown as WorkflowRegistry;
 
   const fakeWorktree = {

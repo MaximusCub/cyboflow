@@ -14,7 +14,9 @@
  *   - a variant wins the spec and voids the level stamp (a variant is its own
  *     definition; crediting a level to it would poison the estimate buckets);
  *   - the per-run override outranks the workflow's stamp but is refused for the
- *     three shapes it cannot honestly mean (variant pin, non-built-in, empty slot);
+ *     shapes it cannot honestly mean (a variant pinned to ANOTHER level — since
+ *     migration 126 a same-level pin is coherent and allowed — a bare variant
+ *     spec with no level to compare, a non-built-in flow, an empty custom slot);
  *   - `evalDefault` supplies the eval default ONLY when the wizard pinned none.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -64,6 +66,17 @@ function setupDb(): Database.Database {
     CREATE TABLE workflow_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, spec_hash TEXT NOT NULL,
       spec_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(workflow_id, spec_hash)
+    );
+    -- Migration 126: an override + variant pin is now judged by the PINNED
+    -- VARIANT'S LEVEL, so the guard reads this table.
+    CREATE TABLE workflow_variants (
+      id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+      spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT,
+      execution_model TEXT, agent_provider TEXT, agent_runtime TEXT,
+      weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
+      archived_at TEXT, tuning_level TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'sprint', '{}')").run(
@@ -243,17 +256,50 @@ describe('createRun — per-run tuning override', () => {
     expect(frozen.specHash).toBe(computeSpecHash(presetSpec('sprint', 'standard')));
   });
 
-  it("rejects an override combined with an explicit variant pin", () => {
+  /** Seed a variant of `WF_SPRINT` scoped to `level` (migration 126). */
+  const seedVariant = (id: string, level: string | null): void => {
+    db.prepare(
+      "INSERT INTO workflow_variants (id, workflow_id, label, spec_json, tuning_level) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, WF_SPRINT, id, JSON.stringify(editedDefinition('variant-graph')), level);
+  };
+
+  it('rejects an override combined with a variant pinned to a DIFFERENT level', () => {
+    seedVariant('wfv_std', 'standard');
     expect(() =>
       registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
         tuningLevel: 'efficient',
-        variantId: 'wfv_1',
+        variantId: 'wfv_std',
         variantSpecJson: JSON.stringify(editedDefinition('variant-graph')),
       }),
     ).toThrow(new RegExp(`${TUNING_OVERRIDE_CODE}:variant_conflict`));
     // Nothing was inserted — the guard runs before the INSERT transaction.
     const count = db.prepare('SELECT COUNT(*) AS n FROM workflow_runs').get() as { n: number };
     expect(count.n).toBe(0);
+  });
+
+  it('ACCEPTS an override combined with a variant pinned to the SAME level', () => {
+    // Migration 126's containment model: the level picks the pool, the pin picks
+    // inside it. The variant's own frozen graph still wins for the spec, and the
+    // run stays level-UNATTRIBUTED (its cost is the variant's, not the level's).
+    seedVariant('wfv_eff', 'efficient');
+    const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
+      tuningLevel: 'efficient',
+      variantId: 'wfv_eff',
+      variantSpecJson: JSON.stringify(editedDefinition('variant-graph')),
+    });
+    expect(frozenOf(runId).level).toBeNull();
+    expect(frozenOf(runId).specHash).toBe(
+      computeSpecHash(JSON.stringify(editedDefinition('variant-graph'))),
+    );
+  });
+
+  it('rejects an override combined with a bare variantSpecJson (no id, no level to compare)', () => {
+    expect(() =>
+      registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
+        tuningLevel: 'efficient',
+        variantSpecJson: JSON.stringify(editedDefinition('variant-graph')),
+      }),
+    ).toThrow(new RegExp(`${TUNING_OVERRIDE_CODE}:variant_conflict`));
   });
 
   it("rejects an override to 'custom' when the slot is empty", () => {

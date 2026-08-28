@@ -66,6 +66,7 @@ import {
 } from '../../../../../shared/types/experiments';
 import type { RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
 import { ALL_EFFORT_LEVELS } from '../../../../../shared/types/reasoningEffort';
+import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
 import { displayRationaleForVerdict } from '../../eval/pairwiseScoring';
 import {
   insertExperiment,
@@ -669,6 +670,19 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     (variantB && variantB.workflow_id !== input.workflowId)
   ) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'a variant belongs to a different workflow' });
+  }
+  // Both arms must challenge the SAME tuning level (migration 126). A variant
+  // freezes one level's graph, so an Efficient-vs-Thorough head-to-head is a
+  // comparison of LEVELS wearing variant labels — the winner would be adopted as
+  // the flow's definition on the strength of a difference neither variant made.
+  // A baseline / quick arm has no level of its own and pairs with either.
+  if (variantA && variantB && (variantA.tuning_level ?? null) !== (variantB.tuning_level ?? null)) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message:
+        `the two arms belong to different tuning levels ('${variantA.tuning_level ?? 'none'}' vs ` +
+        `'${variantB.tuning_level ?? 'none'}') — a head-to-head compares variants within one level`,
+    });
   }
 
   // 1b. Validate seed idea (if given).
@@ -1790,7 +1804,16 @@ export function switchToRotationExperiment(
   // rotation to THIS head-to-head that birthed it (setRotationLineage only fills a
   // NULL lineage, so it is a no-op if a chain already exists). Skip silently if the
   // pool did not reach 2 arms (no rotation opened).
-  const rotation = getRunningRotationExperiment(deps.db, exp.workflow_id);
+  // Both arms are variants of the SAME tuning level (startSideBySide enforces
+  // it), so the rotation their activation opened is that level's — read it back
+  // with the same key rather than "the workflow's rotation", which is no longer
+  // unique (migration 126).
+  const armLevel = deps.db
+    .prepare('SELECT tuning_level AS level FROM workflow_variants WHERE id = ? LIMIT 1')
+    .get(variantAId === BASELINE_VARIANT_SENTINEL ? variantBId : variantAId) as
+    | { level: TuningLevel | null }
+    | undefined;
+  const rotation = getRunningRotationExperiment(deps.db, exp.workflow_id, armLevel?.level ?? null);
   if (rotation) setRotationLineage(deps.db, rotation.id, exp.id);
 
   return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
@@ -1807,9 +1830,10 @@ export function switchToRotationExperiment(
 export function getRunningRotationSummary(
   deps: ExperimentsDeps,
   workflowId: string,
+  tuningLevel: TuningLevel | null,
 ): RotationExperimentSummary | null {
   const { db } = deps;
-  const exp = getRunningRotationExperiment(db, workflowId);
+  const exp = getRunningRotationExperiment(db, workflowId, tuningLevel);
   if (!exp) return null;
   const arms = listRotationArms(db, exp.id).map((a) => ({
     variantId: a.variant_id,
@@ -1819,6 +1843,7 @@ export function getRunningRotationSummary(
   return {
     experimentId: exp.id,
     workflowId: exp.workflow_id,
+    tuningLevel: exp.tuning_level,
     startedAt: exp.created_at,
     arms,
     runCount: countRotationExperimentRuns(db, exp.id),
@@ -2454,11 +2479,21 @@ export const experimentsRouter = router({
       return settleQuickArm(deps, input.experimentId, input.arm);
     }),
 
-  /** The OPEN rotation experiment summary for a workflow (null when none). */
+  /**
+   * The OPEN rotation experiment summary for a workflow AT ONE TUNING LEVEL
+   * (null when none). Variants are level-scoped (migration 126), so a workflow
+   * can hold one rotation per level and the caller must say which pool it means;
+   * `tuningLevel` omitted / null is the pool of a flow outside the level system.
+   */
   getRunningRotation: protectedProcedure
-    .input(z.object({ workflowId: z.string().min(1) }))
+    .input(
+      z.object({
+        workflowId: z.string().min(1),
+        tuningLevel: z.enum(TUNING_LEVELS).nullish(),
+      }),
+    )
     .query(async ({ input }): Promise<RotationExperimentSummary | null> => {
-      return getRunningRotationSummary(requireDeps(), input.workflowId);
+      return getRunningRotationSummary(requireDeps(), input.workflowId, input.tuningLevel ?? null);
     }),
 
   /**

@@ -2689,6 +2689,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
@@ -2799,6 +2800,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
@@ -2891,6 +2893,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
@@ -2951,6 +2954,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {

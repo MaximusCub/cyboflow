@@ -787,7 +787,7 @@ describe('transitions', () => {
 
     function seedExperimentTag(experimentStatus: string): void {
       db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
-      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)`);
+      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, tuning_level TEXT, status TEXT NOT NULL)`);
       db.prepare(`INSERT INTO experiments (id, status) VALUES ('exp-1', ?)`).run(experimentStatus);
       db.prepare(`UPDATE workflow_runs SET experiment_id = 'exp-1' WHERE id = ?`).run(QUICK_RUN_ID);
     }
@@ -821,7 +821,7 @@ describe('transitions', () => {
       seedQuickWorkflow();
       seedQuickRun('failed', { error: 'app_restart' });
       db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
-      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, status TEXT NOT NULL)`);
+      db.exec(`CREATE TABLE experiments (id TEXT PRIMARY KEY, tuning_level TEXT, status TEXT NOT NULL)`);
 
       const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
 

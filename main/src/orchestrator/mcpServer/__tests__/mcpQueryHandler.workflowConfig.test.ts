@@ -90,6 +90,7 @@ function variantRow(over: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow 
     execution_model: null,
     agent_provider: null,
     agent_runtime: null,
+    tuning_level: null,
     weight: 1,
     status: 'draft',
     archived_at: null,
@@ -162,9 +163,19 @@ function makeFakeConfig(over: Partial<WorkflowConfigLike> = {}): {
     },
     deleteWorkflow: () => undefined,
     listVariants: () => [variantRow()],
-    createVariantFromCurrent: (workflowId, label, definition) => {
-      calls.createVariant.push({ workflowId, label, ...(definition !== undefined ? { definition } : {}) });
-      return variantRow({ label, ...(definition !== undefined ? { spec_json: JSON.stringify(definition) } : {}) });
+    createVariantFromCurrent: (workflowId, label, opts) => {
+      const definition = opts?.definition;
+      calls.createVariant.push({
+        workflowId,
+        label,
+        ...(definition !== undefined ? { definition } : {}),
+        ...(opts?.tuningLevel !== undefined ? { tuningLevel: opts.tuningLevel } : {}),
+      });
+      return variantRow({
+        label,
+        ...(opts?.tuningLevel !== undefined ? { tuning_level: opts.tuningLevel } : {}),
+        ...(definition !== undefined ? { spec_json: JSON.stringify(definition) } : {}),
+      });
     },
     updateVariant: (id, patch) => {
       calls.updateVariant.push({ id, patch });

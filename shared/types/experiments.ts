@@ -14,6 +14,7 @@
 import type { WorkflowRunStatus } from './cyboflow';
 import type { RunUsageRollup, RunEval, QualityFinding } from './insights';
 import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
+import type { TuningLevel } from '../tuning/workflowTuning';
 
 /**
  * Lifecycle status of a workflow variant (migration 048).
@@ -92,6 +93,18 @@ export interface WorkflowVariantRow {
    * still resolves an archived variant by id.
    */
   archived_at: string | null;
+  /**
+   * The TUNING LEVEL this variant challenges (migration 126), or NULL when the
+   * parent workflow is outside the level system (a non-built-in "save as new
+   * flow", whose runs stamp a NULL level too).
+   *
+   * A variant freezes the resolved graph of ONE level, so it is only a coherent
+   * challenger within that level's pool: the level picks the pool, and
+   * rotation / baseline / an explicit pin picks inside it. Every rotation
+   * predicate, the label-uniqueness key and the rotation arm set carry this
+   * alongside `workflow_id`.
+   */
+  tuning_level: TuningLevel | null;
   created_at: string;
   updated_at: string;
 }
@@ -251,6 +264,14 @@ export interface ExperimentRow {
   decided_at: string | null;
   /** Soft chain link to the source experiment (experiments.rerun); NULL for an original. */
   rerun_of_experiment_id: string | null;
+  /**
+   * The TUNING LEVEL a ROTATION experiment's pool belongs to (migration 126), or
+   * NULL for a side-by-side head-to-head and for a rotation over a workflow
+   * outside the level system. Variants are level-scoped, so "the open rotation"
+   * is unique per (workflow, level) rather than per workflow — this column is
+   * that second key half.
+   */
+  tuning_level: TuningLevel | null;
   /** The variant adopted as the base workflow (experiments.promoteVariant); '__baseline__' when the baseline arm won. NULL until promoted. */
   promoted_variant_id: string | null;
   promoted_arm: ExperimentArm | null;
@@ -299,6 +320,8 @@ export interface ExperimentRotationArmRow {
 export interface RotationExperimentSummary {
   experimentId: string;
   workflowId: string;
+  /** The tuning level whose pool this rotation covers (migration 126); NULL for a level-less flow. */
+  tuningLevel: TuningLevel | null;
   startedAt: string;
   arms: Array<{ variantId: string; label: string; weightAtOpen: number }>;
   runCount: number;

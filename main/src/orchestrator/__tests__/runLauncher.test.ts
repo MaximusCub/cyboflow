@@ -23,6 +23,7 @@ import type { McpConfigWriter } from '../mcpConfigWriter';
 import type { RunExecutor } from '../runExecutor';
 import type { VariantResolver } from '../variantResolver';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
@@ -279,6 +280,7 @@ describe('RunLauncher.launch', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       // Session-aware WorktreeManager: branch resolved from the session worktree.
@@ -324,6 +326,7 @@ describe('RunLauncher.launch', () => {
         getById: (id: string) =>
           db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
         createRun: createRunSpy,
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub('main');
@@ -368,6 +371,7 @@ describe('RunLauncher.launch', () => {
         getById: (id: string) =>
           db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
         createRun: createRunSpy,
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -411,6 +415,7 @@ describe('RunLauncher.launch', () => {
         getById: (id: string) =>
           db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
         createRun: createRunSpy,
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -477,6 +482,7 @@ describe('RunLauncher.launch', () => {
         getById: (id: string) =>
           db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
         createRun: createRunSpy,
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -521,6 +527,7 @@ describe('RunLauncher.launch', () => {
         getById: (id: string) =>
           db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
         createRun: createRunSpy,
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -579,6 +586,7 @@ describe('RunLauncher.launch', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'auto' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -623,6 +631,7 @@ describe('RunLauncher.launch', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
@@ -651,6 +660,7 @@ describe('RunLauncher.launch', () => {
       const fakeRegistry = {
         getById: vi.fn().mockReturnValue(null),
         createRun: vi.fn(),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {} as WorktreeManager;
@@ -695,6 +705,7 @@ describe('RunLauncher.launch', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       // The session worktree is resolved (getProjectMainBranch) before the mcp.json
@@ -802,6 +813,7 @@ describe('RunLauncher.launch error handling', () => {
         ).run(cannedRunId, workflowId, 1, sessionId ?? null);
         return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     return { workflowId, cannedRunId, fakeRegistry };
@@ -1039,6 +1051,7 @@ describe('RunLauncher.launch publisher', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1122,6 +1135,7 @@ describe('RunLauncher.launch publisher', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1224,6 +1238,7 @@ describe('RunLauncher constructor validation', () => {
           ).run(cannedRunId, workflowId, 1, sessionId ?? null);
           return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
+        resolveEffectiveTuningLevel: () => null,
       } as unknown as WorkflowRegistry;
 
       const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1278,6 +1293,7 @@ describe('RunLauncher constructor validation', () => {
         ).run(cannedRunId, workflowId, 1, sid ?? null);
         return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1422,6 +1438,7 @@ describe('RunLauncher.launch ideaId seed', () => {
         ).run(cannedRunId, workflowId, 1, sid ?? null);
         return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1530,6 +1547,7 @@ describe('RunLauncher.launch ideaIds (planner multi-idea seed)', () => {
           'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
         ).get(id) ?? null,
       createRun: createRunSpy,
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1651,6 +1669,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
       getById: (id: string) =>
         db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
       createRun: createRunSpy,
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1806,6 +1825,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       getById: (id: string) =>
         db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
       createRun: createRunSpy,
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -1936,6 +1956,7 @@ describe('RunLauncher.launch seedPrompt (Launch flow pre-launch seed)', () => {
       getById: (id: string) =>
         db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
       createRun: createRunSpy,
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
@@ -2085,6 +2106,7 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       getById: (id: string) =>
         db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
       createRun: createRunSpy,
+      resolveEffectiveTuningLevel: () => null,
     } as unknown as WorkflowRegistry;
 
     return { registry, workflowId, createRunSpy };
@@ -2553,6 +2575,9 @@ describe('RunLauncher.launch tuningLevel override', () => {
           .prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?')
           .get(id) ?? null,
       createRun: createRunSpy,
+      // Mirrors the real resolver for a BUILT-IN flow (this fixture's workflow is
+      // 'sprint'): the override when present, else the workflow's saved stamp.
+      resolveEffectiveTuningLevel: (_id: string, override?: TuningLevel) => override ?? 'standard',
     } as unknown as WorkflowRegistry;
     return { registry, createRunSpy };
   }
@@ -2590,33 +2615,40 @@ describe('RunLauncher.launch tuningLevel override', () => {
     return { createRunSpy, resolveSpy };
   }
 
-  it('forces the baseline arm and threads the level into createRun', async () => {
+  it("redirects rotation at the OVERRIDDEN level's pool (migration 126), not at the baseline", async () => {
     await withTempDir('runlauncher-tuning-', async (tmpDir) => {
       const { createRunSpy, resolveSpy } = await launchWith(tmpDir, { tuningLevel: 'efficient' });
-      // Rotation is skipped: the override IS the spec choice for this run.
-      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), undefined, { baseline: true });
+      // Variants are level-scoped, so an override no longer forces the baseline
+      // arm — it moves rotation onto that level's challengers.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'efficient', undefined, {
+        baseline: undefined,
+      });
       expect(createRunSpy.mock.calls[0][4]).toMatchObject({ tuningLevel: 'efficient' });
     });
   });
 
-  it('leaves rotation alone when no override is supplied', async () => {
+  it("rotates in the workflow's SAVED level pool when no override is supplied", async () => {
     await withTempDir('runlauncher-tuning-', async (tmpDir) => {
       const { createRunSpy, resolveSpy } = await launchWith(tmpDir, undefined);
-      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), undefined, { baseline: undefined });
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'standard', undefined, {
+        baseline: undefined,
+      });
       expect(createRunSpy.mock.calls[0][4]).not.toHaveProperty('tuningLevel');
     });
   });
 
-  it('still forwards an explicit variant pin so createRun can reject the pair', async () => {
+  it('forwards an explicit variant pin alongside the override for createRun to judge', async () => {
     await withTempDir('runlauncher-tuning-', async (tmpDir) => {
       const { createRunSpy, resolveSpy } = await launchWith(tmpDir, {
         tuningLevel: 'efficient',
         requestedVariantId: 'wfv_1',
       });
-      // The pin reaches the resolver (which ignores `baseline` when one is set),
-      // and the contradictory pair is refused at the createRun chokepoint rather
-      // than half-honoured here.
-      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'wfv_1', { baseline: true });
+      // The pin reaches the resolver, which honours it whatever its level; only
+      // createRun knows whether it CONTRADICTS the override (a pin from another
+      // level) or simply picks inside the overridden pool.
+      expect(resolveSpy).toHaveBeenCalledWith(expect.any(String), 'efficient', 'wfv_1', {
+        baseline: undefined,
+      });
       expect(createRunSpy.mock.calls[0][4]).toMatchObject({ tuningLevel: 'efficient' });
     });
   });

@@ -194,7 +194,7 @@ describe('WorkflowRegistry.createVariantFromCurrent × tuning levels', () => {
   beforeEach(() => {
     db.exec(`
       CREATE TABLE workflow_variants (
-        id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+        id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
         spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT,
         execution_model TEXT, agent_provider TEXT, agent_runtime TEXT,
         weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
@@ -202,7 +202,9 @@ describe('WorkflowRegistry.createVariantFromCurrent × tuning levels', () => {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
+      -- Migration 126: uniqueness is per (workflow, LEVEL).
+      CREATE UNIQUE INDEX idx_workflow_variants_wf_level_label
+        ON workflow_variants(workflow_id, COALESCE(tuning_level, ''), label);
     `);
   });
 
@@ -219,5 +221,44 @@ describe('WorkflowRegistry.createVariantFromCurrent × tuning levels', () => {
     expect(JSON.parse(variant.spec_json)).toEqual(
       applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'),
     );
+  });
+
+  // -- Migration 126: a variant belongs to ONE level --------------------------
+
+  it("stamps the flow's SAVED level when the caller names none", () => {
+    registry.setTuningLevel(WF_SPRINT, 'thorough');
+    expect(registry.createVariantFromCurrent(WF_SPRINT, 'inherits').tuning_level).toBe('thorough');
+  });
+
+  it('snapshots the NAMED level, not the saved one, and stamps it', () => {
+    // The editor's Efficient page creates an Efficient challenger even while the
+    // flow itself is parked on Standard — otherwise "create variant from current"
+    // would freeze a graph the page never showed.
+    const variant = registry.createVariantFromCurrent(WF_SPRINT, 'from-page', {
+      tuningLevel: 'efficient',
+    });
+    expect(variant.tuning_level).toBe('efficient');
+    expect(JSON.parse(variant.spec_json)).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'efficient'),
+    );
+    // The flow's own stamp is untouched.
+    expect(registry.getById(WF_SPRINT)?.tuning_level).toBe('standard');
+  });
+
+  it('allows the SAME label at two different levels, but not twice at one', () => {
+    registry.createVariantFromCurrent(WF_SPRINT, 'aggressive', { tuningLevel: 'standard' });
+    expect(() =>
+      registry.createVariantFromCurrent(WF_SPRINT, 'aggressive', { tuningLevel: 'thorough' }),
+    ).not.toThrow();
+    expect(() =>
+      registry.createVariantFromCurrent(WF_SPRINT, 'aggressive', { tuningLevel: 'standard' }),
+    ).toThrow(/already exists/);
+  });
+
+  it('stores NULL for a non-built-in flow and REFUSES an explicit level there', () => {
+    expect(registry.createVariantFromCurrent(WF_CUSTOM, 'flow-scoped').tuning_level).toBeNull();
+    expect(() =>
+      registry.createVariantFromCurrent(WF_CUSTOM, 'levelled', { tuningLevel: 'thorough' }),
+    ).toThrow(/no tuning levels/);
   });
 });

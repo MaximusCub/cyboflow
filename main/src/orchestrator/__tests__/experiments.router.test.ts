@@ -82,7 +82,7 @@ function buildDb(): Database.Database {
   // 'superseded'; project_id / base_branch / base_sha / variant_a_id / variant_b_id
   // lose NOT NULL (a rotation has no fixed two-arm pair, base SHA, or project).
   db.exec(`CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, project_id INTEGER, workflow_id TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
     base_branch TEXT, base_sha TEXT,
     variant_a_id TEXT, variant_b_id TEXT, run_a_id TEXT, run_b_id TEXT,
@@ -107,7 +107,7 @@ function buildDb(): Database.Database {
   // listForDashboard's LEFT JOINs and the decision-review-item resolution path have
   // real tables to read.
   db.exec(`CREATE TABLE workflow_variants (
-    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+    id TEXT PRIMARY KEY, tuning_level TEXT, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
     spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT,
     execution_model TEXT, weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
     archived_at TEXT,  -- migration 116
@@ -148,7 +148,7 @@ function variant(id: string): WorkflowVariantRow {
   return {
     id, workflow_id: workflowId, label: id, spec_json: '{}', agent_overrides_json: null,
     model: null, execution_model: null, agent_provider: null, agent_runtime: null,
-    weight: 1, status: 'draft', archived_at: null, created_at: '', updated_at: '',
+    weight: 1, status: 'draft', archived_at: null, tuning_level: null, created_at: '', updated_at: '',
   };
 }
 
@@ -1155,6 +1155,7 @@ describe('experiments router orchestration (slice B)', () => {
       execution_model: null,
       agent_provider: null,
       agent_runtime: null,
+      tuning_level: null,
       weight: 1,
       status: 'draft',
       archived_at: null,
@@ -1333,8 +1334,9 @@ describe('experiments router orchestration (slice B)', () => {
       const h = makeHarness();
       const res = await settledExperiment(h, { variantAId: 'vA', variantBId: 'vB' });
       const rotation = insertRotationExperiment(dbAdapter(h.db), {
-        workflowId: 'wf',
-        arms: [
+          workflowId: 'wf',
+          tuningLevel: null,
+          arms: [
           { variantId: 'vA', label: 'vA', weightAtOpen: 1 },
           { variantId: 'vB', label: 'vB', weightAtOpen: 1 },
         ],
@@ -1348,8 +1350,9 @@ describe('experiments router orchestration (slice B)', () => {
     /** Seed an OPEN rotation for 'wf' with the given arm variant ids. */
     function openRotation(h: Harness, variantIds: string[]): string {
       return insertRotationExperiment(dbAdapter(h.db), {
-        workflowId: 'wf',
-        arms: variantIds.map((id) => ({ variantId: id, label: id, weightAtOpen: 1 })),
+          workflowId: 'wf',
+          tuningLevel: null,
+          arms: variantIds.map((id) => ({ variantId: id, label: id, weightAtOpen: 1 })),
       }).id;
     }
     /** deps whose getVariant returns a promotable variant for the named real variants; records setVariantStatus. */
@@ -1392,7 +1395,7 @@ describe('experiments router orchestration (slice B)', () => {
       expect(exp.promoted_variant_id).toBe('vA');
       expect(exp.promoted_arm).toBeNull();
       // No running rotation remains.
-      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf')).toBeNull();
+      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf', null)).toBeNull();
     });
 
     it('baseline winner: no spec adoption, pauses real arms, stamps the __baseline__ sentinel', () => {
@@ -1437,19 +1440,19 @@ describe('experiments router orchestration (slice B)', () => {
         ]),
       );
       // No active variants exist in workflow_variants → pool empty → reconcile stays 'none'.
-      const rec = reconcileRotationExperiment(dbAdapter(h.db), 'wf');
+      const rec = reconcileRotationExperiment(dbAdapter(h.db), 'wf', null);
       expect(rec.action).toBe('none');
-      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf')).toBeNull();
+      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf', null)).toBeNull();
     });
 
     it('getRunningRotationSummary reflects the open rotation with its arm snapshot + run count', () => {
       const h = makeHarness();
       const expId = openRotation(h, ['vA', '__baseline__']);
-      const summary = getRunningRotationSummary(h.deps, 'wf');
+      const summary = getRunningRotationSummary(h.deps, 'wf', null);
       expect(summary?.experimentId).toBe(expId);
       expect(summary?.arms.map((a) => a.variantId).sort()).toEqual(['__baseline__', 'vA']);
       expect(summary?.runCount).toBe(0);
-      expect(getRunningRotationSummary(h.deps, 'wf-sprint')).toBeNull();
+      expect(getRunningRotationSummary(h.deps, 'wf-sprint', null)).toBeNull();
     });
   });
 
