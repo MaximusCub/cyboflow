@@ -5,8 +5,16 @@
  * end (not a single private method in isolation) so a regression in the
  * design-branch-first ordering, the tools narrowing, or the mcpScope omission
  * would show up here exactly as it would in production.
+ *
+ * Also covers the `agentOverlayWriter.resolveRunEffectiveAgents` LIVE branch: it
+ * runs on every spawn but returns `[]` for an unseeded `workflow_runs`, so the
+ * third case below seeds a run + a frozen spec with a per-workflow agent config
+ * and asserts on the overlay `.md` the spawn wrote into the worktree.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type Database from 'better-sqlite3';
 import {
   createModuleFakeSdk,
@@ -22,8 +30,19 @@ import type { SessionManager } from '../../../sessionManager';
 
 const fakeSdk = createModuleFakeSdk();
 
+/**
+ * Optional per-test hook fired at the query seam — i.e. INSIDE the spawn, while
+ * the worktree still carries everything the spawn wrote for the agent to read.
+ * Used by the agent-overlay case, whose files are stripped again as soon as the
+ * spawn drains (cleanupCliResources -> removeBundleForSession).
+ */
+let onQuery: ((params: FakeQueryParams) => void) | undefined;
+
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: (params: FakeQueryParams) => fakeSdk.query(params),
+  query: (params: FakeQueryParams) => {
+    onQuery?.(params);
+    return fakeSdk.query(params);
+  },
 }));
 
 vi.mock('../../../../orchestrator/mcpServer/scriptPath', () => ({
@@ -60,6 +79,7 @@ describe('idea-session spawn config (mocked-SDK integration)', () => {
 
   beforeEach(() => {
     process.env.CYBOFLOW_DISABLE_WARM_SDK = '1';
+    onQuery = undefined;
     fakeSdk.reset();
     db = createTestDb();
     // Minimal `ideas` table (the real schema's columns, no migration replay
@@ -146,5 +166,90 @@ describe('idea-session spawn config (mocked-SDK integration)', () => {
     expect(cyboflow?.env?.CYBOFLOW_MCP_SCOPE).toBe('design');
 
     await mgr.killProcess('panel-design').catch(() => {});
+  });
+
+  /**
+   * `resolveRunEffectiveAgents` runs on EVERY spawn (via installWorkflowBundle ->
+   * installAgentOverlay), but it short-circuits to `[]` whenever the run's
+   * `workflow_runs` row is missing — which every other itest leaves unseeded, so
+   * its real override-merging never executed under integration. This seeds the
+   * minimum that makes it take its live branch (a run row with a project_id, and a
+   * frozen spec carrying a per-workflow agent config) and asserts on the OVERLAY
+   * FILE the spawn actually wrote.
+   */
+  it('renders the workflow agent-config override into the spawn worktree overlay (resolveRunEffectiveAgents live branch)', async () => {
+    const worktreePath = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'idea-session-overlay-')),
+    );
+    // Minimal structurally-valid definition (parseWorkflowDefinition needs a
+    // non-empty id + one phase with one step) carrying a per-agent model pin.
+    const specJson = JSON.stringify({
+      id: 'itest-overlay-flow',
+      phases: [
+        {
+          id: 'phase-1',
+          label: 'Build',
+          color: '#8b5cf6',
+          steps: [{ id: 'step-1', name: 'Implement', agent: 'implement' }],
+        },
+      ],
+      agentConfigs: { implement: { model: 'haiku' } },
+    });
+    db.prepare(
+      `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path) VALUES (?, ?, ?, ?, ?)`,
+    ).run('wf-overlay', 7, 'itest-overlay-flow', specJson, null);
+    // getRunProjectId reads workflow_runs.project_id; the id matches the panelId
+    // because the session row's run_id is null (resolveGateRunId -> panelId).
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status) VALUES (?, ?, ?, ?)`,
+    ).run('panel-overlay', 'wf-overlay', 7, 'running');
+
+    const sessionManager = makeSessionManager({
+      id: 'session-overlay',
+      substrate: 'sdk',
+      permission_mode: 'ignore',
+      run_id: null,
+      chat_run_id: null,
+      skip_continue_next: false,
+    });
+    const mgr = new ClaudeCodeManager(sessionManager, undefined, undefined, db);
+    mgr.setOrchSocketPath('/tmp/overlay-test.sock');
+
+    // The overlay is installed BEFORE query() and stripped by
+    // cleanupCliResources -> removeBundleForSession when the spawn drains, so the
+    // files exist only WHILE the agent is running. Snapshot them from the query
+    // seam — which is exactly the window the SDK auto-discovers `.claude/agents`
+    // in, so this reads what the agent would actually have seen.
+    const agentsDir = path.join(worktreePath, '.claude', 'agents');
+    let overlayDuringQuery: Record<string, string> = {};
+    onQuery = () => {
+      overlayDuringQuery = Object.fromEntries(
+        fs
+          .readdirSync(agentsDir)
+          .map((name) => [name, fs.readFileSync(path.join(agentsDir, name), 'utf8')]),
+      );
+    };
+
+    try {
+      await mgr.spawnClaudeCode('panel-overlay', 'session-overlay', worktreePath, 'hello');
+
+      // The config flips the builtin to an override, so the overlay renders the
+      // agent instead of writing its verbatim bundled `.md` — with the alias
+      // resolved to its concrete snapshot id for the CLI subagent frontmatter.
+      const pinned = overlayDuringQuery['cyboflow-implement.md'];
+      expect(pinned).toBeDefined();
+      expect(pinned).toContain('name: cyboflow-implement');
+      expect(pinned).toContain('model: claude-haiku-4-5');
+
+      // Control: an agent the config does not name keeps its unpinned builtin
+      // body, so the assertion above is the config layer and not a blanket write.
+      const untouched = overlayDuringQuery['cyboflow-code-review.md'];
+      expect(untouched).toBeDefined();
+      expect(untouched).not.toContain('model:');
+
+      await mgr.killProcess('panel-overlay').catch(() => {});
+    } finally {
+      fs.rmSync(worktreePath, { recursive: true, force: true });
+    }
   });
 });

@@ -26,6 +26,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { makeRawEventsDb, countRawEvents } from '../../../../orchestrator/__test_fixtures__/rawEvents';
+import { FakePty } from '../../../../test/fakes/fakePty';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { orchTokenRegistry } from '../../../../orchestrator/orchAuthToken';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
@@ -45,77 +46,6 @@ import type {
   OnTurnEndCallback,
   TurnEndMarker,
 } from '../transcript/transcriptSource';
-
-// ---------------------------------------------------------------------------
-// Stub IPty — captures onData/onExit listeners and records writes.
-// ---------------------------------------------------------------------------
-
-interface ExitListener {
-  (e: { exitCode: number; signal?: number }): void;
-}
-
-class FakePty {
-  // pid 0 (falsy) so AbstractCliManager.killProcess takes the simple
-  // process.kill() fallback and never runs the real `ps`/`kill` process-tree
-  // shell calls in tests.
-  readonly pid = 0;
-  readonly process = 'claude';
-  readonly cols = 80;
-  readonly rows = 30;
-  readonly handleFlowControl = false;
-  readonly writes: string[] = [];
-  private dataListeners: Array<(d: string) => void> = [];
-  private exitListeners: ExitListener[] = [];
-  killed = false;
-
-  onData = (cb: (d: string) => void): { dispose(): void } => {
-    this.dataListeners.push(cb);
-    return { dispose: () => undefined };
-  };
-
-  onExit = (cb: ExitListener): { dispose(): void } => {
-    this.exitListeners.push(cb);
-    return { dispose: () => undefined };
-  };
-
-  write(data: string): void {
-    this.writes.push(data);
-  }
-
-  resize(): void {
-    // no-op
-  }
-
-  clear(): void {
-    // no-op
-  }
-
-  kill(): void {
-    this.killed = true;
-  }
-
-  pause(): void {
-    // no-op
-  }
-
-  resume(): void {
-    // no-op
-  }
-
-  on(): void {
-    // no-op (deprecated event surface)
-  }
-
-  /** Test driver: fire the captured onExit listeners. */
-  fireExit(exitCode: number): void {
-    for (const cb of this.exitListeners) cb({ exitCode });
-  }
-
-  /** Test driver: push a raw chunk through every captured onData listener. */
-  fireData(chunk: string): void {
-    for (const cb of this.dataListeners) cb(chunk);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Fake TranscriptSource — lets the test push normalized lines + fire turn-end.
