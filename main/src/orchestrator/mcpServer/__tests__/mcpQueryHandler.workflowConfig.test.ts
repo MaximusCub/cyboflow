@@ -308,6 +308,36 @@ describe('McpQueryHandler workflow/variant config', () => {
     expect(data.definition).not.toEqual(WORKFLOW_DEFINITIONS.sprint);
   });
 
+  it('get_workflow stays MIX-FREE — a non-claude runtime_mix never reaches the definition', async () => {
+    // Runtime-mix plan D1: the mix is materialized only into a RUN's frozen spec
+    // at createRun. The read path (this tool) returns the level-resolved SOURCE
+    // graph, so the round-trip into update_workflow can never bake mix-generated
+    // runtime pins into the custom slot. The stamp itself IS reported.
+    const row = workflowRow({ runtime_mix: 'codex-primary' });
+    const { cfg } = makeFakeConfig({
+      getById: () => row,
+      getEffectiveDefinition: () =>
+        resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level),
+    });
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
+    const { socket, writes } = makeSocketDouble();
+    await handler.handleMessage(
+      { type: 'mcp-get-workflow', requestId: 'r1', runId: 'run-quick', workflowId: 'wf-global-sprint' },
+      socket,
+    );
+    const res = parseLastWrite(writes);
+    expect(res.ok).toBe(true);
+    const data = res.data as { workflow: Record<string, unknown>; definition: WorkflowDefinition };
+    // Identical to the level-only resolution (standard = the aligned-defaults
+    // pins, no runtime routing) — the mix contributed nothing.
+    expect(data.definition).toEqual(
+      applyTuningPreset(WORKFLOW_DEFINITIONS.sprint, 'sprint', 'standard'),
+    );
+    const configs = Object.values(data.definition.agentConfigs ?? {});
+    expect(configs.length).toBeGreaterThan(0);
+    expect(configs.every((c) => c.runtime === undefined)).toBe(true);
+  });
+
   it('create_variant WITHOUT definition_json snapshots the current definition', async () => {
     const { cfg, calls } = makeFakeConfig();
     const handler = new McpQueryHandler(dbAdapter(db), undefined, { workflowConfig: cfg });
