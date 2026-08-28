@@ -110,6 +110,7 @@ vi.mock('../../../trpc/client', () => ({
         resetSpec: { mutate: vi.fn() },
         createCustom: { mutate: vi.fn() },
         setTuningLevel: { mutate: vi.fn() },
+        setRuntimeMix: { mutate: vi.fn() },
       },
       agents: {
         list: { query: vi.fn() },
@@ -178,6 +179,7 @@ const mockUpdateSpec = vi.mocked(trpc.cyboflow.workflows.updateSpec.mutate);
 const mockResetSpec = vi.mocked(trpc.cyboflow.workflows.resetSpec.mutate);
 const mockCreateCustom = vi.mocked(trpc.cyboflow.workflows.createCustom.mutate);
 const mockSetTuningLevel = vi.mocked(trpc.cyboflow.workflows.setTuningLevel.mutate);
+const mockSetRuntimeMix = vi.mocked(trpc.cyboflow.workflows.setRuntimeMix.mutate);
 const mockTuningLevelUsage = vi.mocked(trpc.cyboflow.insights.tuningLevelUsage.query);
 const mockVariantCreate = vi.mocked(trpc.cyboflow.variants.create.mutate);
 const mockAgentsList = vi.mocked(trpc.cyboflow.agents.list.query);
@@ -201,6 +203,7 @@ beforeEach(() => {
   mockResetSpec.mockResolvedValue({ ok: true });
   mockCreateCustom.mockResolvedValue(structuredClone(NEW_CUSTOM_ROW));
   mockSetTuningLevel.mockResolvedValue({ ok: true });
+  mockSetRuntimeMix.mockResolvedValue({ ok: true });
   // Default: no custom agents. Tests that need one override this per-case.
   mockAgentsList.mockResolvedValue([]);
   mockRunStart.mockResolvedValue({
@@ -1286,6 +1289,61 @@ describe('WorkflowEditorModal — tuning level selector', () => {
       fireEvent.click(screen.getByTestId('editor-back-to-tuning'));
     });
     expect(screen.getByTestId('workflow-tuning-page')).toBeInTheDocument();
+  });
+});
+
+describe('WorkflowEditorModal — runtime mix dial', () => {
+  it('renders the mix dial seeded with the row\'s runtime_mix', async () => {
+    seedRow({ runtime_mix: 'codex-primary' });
+    await renderTuningPage();
+
+    expect(screen.getByTestId('runtime-mix-dial')).toBeInTheDocument();
+    expect(screen.getByTestId('runtime-mix-segment-codex-primary')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('selecting a segment stamps the mix via setRuntimeMix and moves the selection, staying on the simple page', async () => {
+    const { onSaved, onMutated } = await renderTuningPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('runtime-mix-segment-codex-primary'));
+    });
+
+    expect(mockSetRuntimeMix).toHaveBeenCalledWith({
+      workflowId: EDIT_WORKFLOW_ID,
+      mix: 'codex-primary',
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('runtime-mix-segment-codex-primary')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
+    );
+    expect(screen.getByTestId('runtime-mix-segment-claude')).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    // A dial click stays on the simple page and never fires onSaved (the modal
+    // stays open for a dial click, unlike a save).
+    expect(screen.getByTestId('workflow-tuning-page')).toBeInTheDocument();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onMutated).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+  });
+
+  it('surfaces a failed mix write inline', async () => {
+    // A non-Error rejection exercises the fallback message.
+    mockSetRuntimeMix.mockRejectedValue('provider unavailable');
+    await renderTuningPage();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('runtime-mix-segment-codex'));
+    });
+
+    expect(await screen.findByTestId('editor-error')).toHaveTextContent(
+      'Could not change the runtime mix',
+    );
   });
 });
 

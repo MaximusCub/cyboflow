@@ -61,6 +61,12 @@ import {
   TUNING_LEVELS,
   type TuningLevel,
 } from '../../../../shared/tuning/workflowTuning';
+import {
+  DEFAULT_RUNTIME_MIX,
+  VERIFICATION_AGENT_KEYS,
+  resolveEffectiveDefinitionWithMix,
+  type RuntimeMix,
+} from '../../../../shared/tuning/runtimeMix';
 import type { AgentEntry, AgentRunTarget } from '../../../../shared/types/agents';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
@@ -182,6 +188,8 @@ export function WorkflowEditorModal({
   const [view, setView] = useState<'simple' | 'advanced'>('advanced');
   /** The workflow's stamped tuning level (edit mode); the dial's selection. */
   const [level, setLevel] = useState<TuningLevel>(DEFAULT_TUNING_LEVEL);
+  /** The workflow's stamped runtime mix (edit mode); the second dial's selection. */
+  const [runtimeMix, setRuntimeMix] = useState<RuntimeMix>(DEFAULT_RUNTIME_MIX);
   /**
    * The source row's `spec_json` — the CUSTOM slot. Kept so level switching can
    * re-derive the effective definition client-side (the same shared transform
@@ -275,6 +283,14 @@ export function WorkflowEditorModal({
    */
   const hasTuningDial = mode === 'edit' && isCyboflowWorkflowName(sourceName);
   const hasCustomDefinition = hasCustomSpecSlot(sourceSpecJson);
+  /**
+   * Grey the runtime-mix dial's two cross-provider segments — the flow's
+   * verification class (`VERIFICATION_AGENT_KEYS`) is empty, so
+   * `claude-primary`/`codex-primary` would route nothing.
+   */
+  const mixedRuntimeDisabled = isCyboflowWorkflowName(sourceName)
+    ? VERIFICATION_AGENT_KEYS[sourceName].size === 0
+    : false;
 
   /**
    * Per-level token estimates for the simple page's dial (plan D8), fetched
@@ -341,6 +357,7 @@ export function WorkflowEditorModal({
         setSourceName(row.name);
         setSourceSpecJson(row.spec_json);
         setLevel(row.tuning_level);
+        setRuntimeMix(row.runtime_mix);
         // A built-in opens on the dial; a custom flow has no dial and lands on
         // the blueprint editor exactly as it always has.
         setView(isCyboflowWorkflowName(row.name) ? 'simple' : 'advanced');
@@ -367,6 +384,7 @@ export function WorkflowEditorModal({
       setSourceName('');
       setSourceSpecJson(null);
       setLevel(DEFAULT_TUNING_LEVEL);
+      setRuntimeMix(DEFAULT_RUNTIME_MIX);
       setView('advanced');
       seed(initialDefinition ?? SKELETON_DEFINITION, initialName ? initialName + '-copy' : '');
     };
@@ -458,14 +476,18 @@ export function WorkflowEditorModal({
   // ── Tuning levels (the simple page) ─────────────────────────────────────────
 
   /**
-   * The SELECTED level's effective definition — what the phase strip renders.
-   * Derived through the SHARED transform, never hand-maintained: a preset level
-   * resolves `applyTuningPreset(builtin, …)`, `'custom'` resolves the slot. Null
-   * only for an unresolvable custom flow, which the strip states plainly.
+   * The SELECTED level's effective definition, ROUTED through the selected
+   * runtime mix — what the phase strip renders. Derived through the SHARED
+   * transform, never hand-maintained: a preset level resolves
+   * `applyTuningPreset(builtin, …)`, `'custom'` resolves the slot, then the mix
+   * overlays its provider routing (mix-free when `runtimeMix === 'claude'`).
+   * Null only for an unresolvable custom flow, which the strip states plainly.
+   * This memo feeds ONLY the simple page's phase strip — `baselineDefinition`
+   * and `reseedFromLevel` stay mix-free by design (plan D1).
    */
   const effectiveDefinition = useMemo(
-    () => resolveEffectiveDefinition(sourceName, sourceSpecJson, level),
-    [sourceName, sourceSpecJson, level],
+    () => resolveEffectiveDefinitionWithMix(sourceName, sourceSpecJson, level, runtimeMix),
+    [sourceName, sourceSpecJson, level, runtimeMix],
   );
 
   /**
@@ -521,6 +543,34 @@ export function WorkflowEditorModal({
       }
     },
     [level, workflowId, reseedFromLevel, onMutated],
+  );
+
+  /**
+   * Stamp a new runtime mix (one cheap write). Deliberately does NOT call
+   * `reseedFromLevel` — the mix must never touch the Advanced canvas: every
+   * persisted-read seam (including the Advanced editor's own seed) stays
+   * mix-free by design, so a mix flip changes only the stamp and the simple
+   * page's preview strip (plan `docs/plans/workflow-runtime-mix.md` D1).
+   */
+  const handleSelectRuntimeMix = useCallback(
+    async (next: RuntimeMix) => {
+      if (next === runtimeMix || actionInFlightRef.current) return;
+      actionInFlightRef.current = true;
+      setError(null);
+      setNotice(null);
+      setIsBusy(true);
+      try {
+        await trpc.cyboflow.workflows.setRuntimeMix.mutate({ workflowId, mix: next });
+        setRuntimeMix(next);
+        onMutated?.(workflowId);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Could not change the runtime mix');
+      } finally {
+        setIsBusy(false);
+        actionInFlightRef.current = false;
+      }
+    },
+    [runtimeMix, workflowId, onMutated],
   );
 
   /**
@@ -988,10 +1038,13 @@ export function WorkflowEditorModal({
             definition={effectiveDefinition}
             baselineDefinition={baselineDefinition}
             agentRunTargets={agentRunTargets}
+            runtimeMix={runtimeMix}
+            mixedRuntimeDisabled={mixedRuntimeDisabled}
             busy={isBusy}
             onSelectLevel={(next) => void handleSelectLevel(next)}
             onOpenAdvanced={() => setView('advanced')}
             onDeleteCustom={() => setDeleteCustomOpen(true)}
+            onSelectRuntimeMix={(next) => void handleSelectRuntimeMix(next)}
             estimateLabels={estimateLabels}
           />
         ) : (

@@ -3,10 +3,12 @@
  * default view for a built-in flow (plan `docs/plans/workflow-tuning-levels.md`
  * §4).
  *
- * One dial (Efficient / Standard / Thorough / Custom) over a strip showing what
- * that level actually runs — diffed against Standard, so what a preset TAKES
- * AWAY is as visible as what it keeps — plus the two doors out: the advanced
- * editor, and deleting the custom definition when one exists.
+ * TWO dials stack here: the tuning level (Efficient / Standard / Thorough /
+ * Custom) and, below it, the runtime mix (`docs/plans/workflow-runtime-mix.md`
+ * D4) — which provider runs each step. Under both sits a strip showing what
+ * the selected level actually runs — diffed against Standard, so what a preset
+ * TAKES AWAY is as visible as what it keeps — plus the two doors out: the
+ * advanced editor, and deleting the custom definition when one exists.
  *
  * Deliberately presentational — the host modal owns every mutation, the busy
  * latch and the error surface, so this page has no tRPC import and stays
@@ -15,7 +17,9 @@
 import type { AgentRunTarget } from '../../../../shared/types/agents';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
+import type { RuntimeMix } from '../../../../shared/tuning/runtimeMix';
 import { TuningLevelDial } from './TuningLevelDial';
+import { RuntimeMixDial } from './RuntimeMixDial';
 import { TuningModelLegend, TuningPhaseStrip } from './TuningPhaseStrip';
 
 export interface WorkflowTuningPageProps {
@@ -29,11 +33,16 @@ export interface WorkflowTuningPageProps {
   baselineDefinition: WorkflowDefinition | null;
   /** Per-agent catalogue run targets — the strip's model-tag fallback. */
   agentRunTargets?: Readonly<Record<string, AgentRunTarget>>;
+  /** The workflow's selected runtime mix. */
+  runtimeMix: RuntimeMix;
+  /** Grey ONLY the mix's two cross-provider segments — the flow has no verification class. */
+  mixedRuntimeDisabled: boolean;
   /** True while a level write / reset is in flight. */
   busy: boolean;
   onSelectLevel: (level: TuningLevel) => void;
   onOpenAdvanced: () => void;
   onDeleteCustom: () => void;
+  onSelectRuntimeMix: (mix: RuntimeMix) => void;
   /** Optional per-level estimate lines (a later phase's `run_usage` medians). */
   estimateLabels?: Partial<Record<TuningLevel, string>>;
 }
@@ -44,10 +53,13 @@ export function WorkflowTuningPage({
   definition,
   baselineDefinition,
   agentRunTargets,
+  runtimeMix,
+  mixedRuntimeDisabled,
   busy,
   onSelectLevel,
   onOpenAdvanced,
   onDeleteCustom,
+  onSelectRuntimeMix,
   estimateLabels,
 }: WorkflowTuningPageProps): React.JSX.Element {
   return (
@@ -65,6 +77,13 @@ export function WorkflowTuningPage({
         onCustomUnavailable={onOpenAdvanced}
         busy={busy}
         estimateLabels={estimateLabels}
+      />
+
+      <RuntimeMixDial
+        mix={runtimeMix}
+        mixedDisabled={mixedRuntimeDisabled}
+        onSelect={onSelectRuntimeMix}
+        busy={busy}
       />
 
       <div className="flex flex-col gap-3">
