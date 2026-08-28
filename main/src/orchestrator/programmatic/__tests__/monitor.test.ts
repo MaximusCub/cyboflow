@@ -6,15 +6,19 @@ import {
   buildTriagePrompt,
   buildAnswerPrompt,
   buildActionAnswerPrompt,
+  buildLaneTriagePrompt,
   parseTriageAdvice,
   parseConverseOutput,
+  parseLaneTriageOutput,
   MONITOR_TRIAGE_SCHEMA,
   MONITOR_CONVERSE_SCHEMA,
+  MONITOR_LANE_TRIAGE_SCHEMA,
   type HistoryReader,
   type MonitorContext,
   type MonitorHistory,
   type MonitorSession,
   type MonitorActions,
+  type LaneTriageRequest,
 } from '../monitor';
 import type { StructuredQueryFn, TextQueryFn } from '../monitorQuery';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
@@ -1710,6 +1714,388 @@ describe('DefaultMonitorSession.converse — two-phase confirmation gate', () =>
       { role: 'user', text: 'add a task to fix the flaky test' },
       { role: 'assistant', text: 'plain answer' },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane triage (autonomous sprint-lane rescue)
+// ---------------------------------------------------------------------------
+
+/** A canonical lane-triage request; override any field per test. */
+function laneReq(p: Partial<LaneTriageRequest> = {}): LaneTriageRequest {
+  return {
+    taskRef: 'TASK-014',
+    itemId: 'item-14',
+    stepId: 'task-verify',
+    attempt: 3,
+    failureKind: 'task-verify',
+    errorExcerpt: 'FAIL: expected the exporter to emit UTC timestamps',
+    innerStepIds: ['implement', 'write-tests', 'code-review', 'task-verify'],
+    taskTitle: 'Export timestamps as UTC',
+    taskBody: '## AC\n- The exporter emits ISO-8601 UTC timestamps.',
+    ...p,
+  };
+}
+
+describe('MONITOR_LANE_TRIAGE_SCHEMA', () => {
+  it('enforces the three-verdict enum, requires verdict + reason, and forbids extra fields', () => {
+    const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<string, { enum?: string[] }>;
+    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry']);
+    expect(MONITOR_LANE_TRIAGE_SCHEMA.required).toEqual(['verdict', 'reason']);
+    expect(MONITOR_LANE_TRIAGE_SCHEMA.additionalProperties).toBe(false);
+    // The rescue-only fields exist but are NOT schema-required — parseLaneTriageOutput
+    // enforces them per-verdict with a fail-safe downgrade instead of an SDK error.
+    for (const key of ['targetStepId', 'guidance', 'taskBody']) expect(props[key]).toBeDefined();
+  });
+});
+
+describe('buildLaneTriagePrompt', () => {
+  const sprintCtx: MonitorContext = { ...ctx, workflowName: 'sprint' };
+  const history: MonitorHistory = {
+    conversation: [assistantMsg('fanning out over tasks')],
+    steps: [stepRow({ stepId: 'execute-tasks', outcome: 'failed', error: 'a task lane failed' })],
+    lanes: [laneRow({ taskId: 'TASK-014', status: 'running', currentStepId: 'task-verify', attempts: 3 })],
+  };
+
+  it('presents the lane, the failure, the inner chain, and the current task body', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('SUPERVISOR');
+    expect(p).toContain('TASK-014');
+    expect(p).toContain('Export timestamps as UTC');
+    // The CURRENT task body — the acceptance criteria an adjust verdict would rewrite.
+    expect(p).toContain('The exporter emits ISO-8601 UTC timestamps.');
+    // Failing step + attempt + failure kind + error excerpt.
+    expect(p).toContain('`task-verify`');
+    expect(p).toContain('attempt 3');
+    expect(p).toContain('task-verify gate kept returning FAIL');
+    expect(p).toContain('expected the exporter to emit UTC timestamps');
+    // The lane's inner chain, in order.
+    expect(p).toContain('`implement` → `write-tests` → `code-review` → `task-verify`');
+  });
+
+  it('reuses the shared digests (step timeline, lane section, recent conversation)', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('execute-tasks'); // step timeline digest
+    expect(p).toContain('fanning out over tasks'); // conversation digest
+    expect(p).toContain('Sprint task lanes'); // laneSection
+    expect(p).toContain('trust these lanes, not the step timeline');
+    expect(p).toContain('Read/Grep/Glob'); // read-only investigation encouraged
+  });
+
+  it('states the verdict contract with give_up as the default and guidance required', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('"give_up"');
+    expect(p).toContain('"retry"');
+    expect(p).toContain('"adjust_and_retry"');
+    expect(p).toContain('the DEFAULT');
+    expect(p).toContain('Choose this whenever you are unsure');
+    expect(p).toContain('"try again" is not guidance');
+    // adjust_and_retry's evidence + minimal-edit contract.
+    expect(p).toContain('CONFLICT with repo reality');
+    expect(p).toContain('file:line');
+    expect(p).toContain('FULL replacement body');
+    expect(p).toContain('never silently drop a security- or correctness-relevant one');
+  });
+
+  it('carries the autonomous-execution notice and the targetStepId constraint', () => {
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).toContain('AUTONOMOUS EXECUTION');
+    expect(p).toContain('no human confirmation');
+    expect(p).toContain('review queue');
+    expect(p).toContain('rescued at most once');
+    expect(p).toContain('at or before the failing step');
+    // The default target is named explicitly (the first inner step).
+    expect(p).toContain('default to the FIRST inner step (`implement`)');
+  });
+
+  it('degrades gracefully with an empty chain / body / error excerpt', () => {
+    const p = buildLaneTriagePrompt(
+      sprintCtx,
+      history,
+      laneReq({ innerStepIds: [], taskBody: '   ', errorExcerpt: '' }),
+    );
+    expect(p).toContain('(unknown)');
+    expect(p).toContain('(empty)');
+    expect(p).toContain('(no error text captured)');
+    expect(p).toContain('(`(none)`)');
+  });
+});
+
+describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
+  it('parses a well-formed retry', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'retry', reason: 'the fixture is stale', targetStepId: 'write-tests', guidance: 'regenerate the fixture' },
+        laneReq(),
+      ),
+    ).toEqual({ verdict: 'retry', targetStepId: 'write-tests', guidance: 'regenerate the fixture', reason: 'the fixture is stale' });
+  });
+
+  it('parses a well-formed adjust_and_retry', () => {
+    expect(
+      parseLaneTriageOutput(
+        {
+          verdict: 'adjust_and_retry',
+          reason: 'exporter.ts:42 has no UTC mode',
+          targetStepId: 'implement',
+          guidance: 'narrow the AC to local time',
+          taskBody: '## AC\n- The exporter emits local timestamps.',
+        },
+        laneReq(),
+      ),
+    ).toEqual({
+      verdict: 'adjust_and_retry',
+      targetStepId: 'implement',
+      guidance: 'narrow the AC to local time',
+      taskBody: '## AC\n- The exporter emits local timestamps.',
+      reason: 'exporter.ts:42 has no UTC mode',
+    });
+  });
+
+  it('keeps an explicit give_up (with its reason)', () => {
+    expect(parseLaneTriageOutput({ verdict: 'give_up', reason: 'genuinely broken' }, laneReq())).toEqual({
+      verdict: 'give_up',
+      reason: 'genuinely broken',
+    });
+    expect(parseLaneTriageOutput({ verdict: 'give_up' }, laneReq())).toEqual({ verdict: 'give_up' });
+  });
+
+  it('downgrades malformed / unknown output to give_up', () => {
+    for (const bad of [null, undefined, 'garbage', 42, {}, { verdict: 'nope' }, { verdict: 'retry ' }]) {
+      expect(parseLaneTriageOutput(bad, laneReq()).verdict).toBe('give_up');
+    }
+    expect(parseLaneTriageOutput(null, laneReq()).reason).toContain('unparseable');
+    expect(parseLaneTriageOutput({ verdict: 'nope' }, laneReq()).reason).toContain('unrecognized');
+  });
+
+  it('downgrades a retry/adjust with blank or non-string guidance to give_up', () => {
+    for (const guidance of [undefined, '', '   ', 42]) {
+      for (const verdict of ['retry', 'adjust_and_retry']) {
+        const d = parseLaneTriageOutput(
+          { verdict, reason: 'r', targetStepId: 'implement', guidance, taskBody: 'body' },
+          laneReq(),
+        );
+        expect(d.verdict).toBe('give_up');
+        expect(d.reason).toContain('without guidance');
+      }
+    }
+  });
+
+  it('downgrades an unknown targetStepId to give_up', () => {
+    const d = parseLaneTriageOutput(
+      { verdict: 'retry', reason: 'r', targetStepId: 'not-a-step', guidance: 'do it differently' },
+      laneReq(),
+    );
+    expect(d.verdict).toBe('give_up');
+    expect(d.reason).toContain('unusable target step');
+    // A non-string target is equally unusable.
+    expect(
+      parseLaneTriageOutput({ verdict: 'retry', reason: 'r', targetStepId: 7, guidance: 'g' }, laneReq()).verdict,
+    ).toBe('give_up');
+  });
+
+  it('downgrades a target AFTER the failing step to give_up (a rescue must not skip the failure)', () => {
+    // `code-review` is a real inner step but comes AFTER the failing `implement`.
+    const d = parseLaneTriageOutput(
+      { verdict: 'retry', reason: 'r', targetStepId: 'code-review', guidance: 'g' },
+      laneReq({ stepId: 'implement', failureKind: 'inner-step' }),
+    );
+    expect(d.verdict).toBe('give_up');
+    // ...but at-or-before the failing step is accepted.
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'retry', reason: 'r', targetStepId: 'write-tests', guidance: 'g' },
+        laneReq({ stepId: 'code-review', failureKind: 'code-review' }),
+      ).verdict,
+    ).toBe('retry');
+  });
+
+  it('allows the whole chain when the failing step is not itself an inner step (merge gate)', () => {
+    const d = parseLaneTriageOutput(
+      { verdict: 'retry', reason: 'r', targetStepId: 'task-verify', guidance: 'g' },
+      laneReq({ stepId: 'awaiting-verify', failureKind: 'merge-gate' }),
+    );
+    expect(d).toMatchObject({ verdict: 'retry', targetStepId: 'task-verify' });
+  });
+
+  it('defaults an absent/blank targetStepId to the FIRST inner step', () => {
+    for (const targetStepId of [undefined, '', '   ']) {
+      expect(
+        parseLaneTriageOutput({ verdict: 'retry', reason: 'r', guidance: 'g', targetStepId }, laneReq()),
+      ).toMatchObject({ verdict: 'retry', targetStepId: 'implement' });
+    }
+  });
+
+  it('gives up when the lane has no inner chain to re-drive from', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'retry', reason: 'r', guidance: 'g' },
+        laneReq({ innerStepIds: [] }),
+      ).verdict,
+    ).toBe('give_up');
+  });
+
+  it('downgrades adjust_and_retry with a blank taskBody to a plain retry (guidance survives)', () => {
+    for (const taskBody of [undefined, '', '   ', 42]) {
+      expect(
+        parseLaneTriageOutput(
+          { verdict: 'adjust_and_retry', reason: 'r', targetStepId: 'implement', guidance: 'narrow the AC', taskBody },
+          laneReq(),
+        ),
+      ).toEqual({ verdict: 'retry', targetStepId: 'implement', guidance: 'narrow the AC', reason: 'r' });
+    }
+  });
+
+  it('tolerates a missing/non-string reason on a rescue verdict', () => {
+    expect(
+      parseLaneTriageOutput({ verdict: 'retry', targetStepId: 'implement', guidance: 'g' }, laneReq()),
+    ).toEqual({ verdict: 'retry', targetStepId: 'implement', guidance: 'g', reason: '' });
+  });
+});
+
+describe('DefaultMonitorSession.triageLane', () => {
+  it('reads the history fresh, runs the lane schema query, and returns a parsed rescue', async () => {
+    const { reader, reads } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      verdict: 'retry',
+      reason: 'the fixture is stale',
+      targetStepId: 'write-tests',
+      guidance: 'regenerate the fixture from the new schema',
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      model: 'opus',
+    });
+    const controller = new AbortController();
+
+    const decision = await session.triageLane(laneReq(), controller.signal);
+
+    expect(decision).toEqual({
+      verdict: 'retry',
+      targetStepId: 'write-tests',
+      guidance: 'regenerate the fixture from the new schema',
+      reason: 'the fixture is stale',
+    });
+    expect(reads).toEqual(['run-1']);
+    const args = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(args.schema).toBe(MONITOR_LANE_TRIAGE_SCHEMA);
+    expect(args.cwd).toBe('/wt');
+    expect(args.model).toBe('opus');
+    expect(args.signal).toBe(controller.signal);
+    expect(args.prompt).toContain('TASK-014');
+    // Announcement BEFORE the decision turn, both as assistant turns.
+    expect(injected.map((m) => m.role)).toEqual(['assistant', 'assistant']);
+    expect(injected[0].text).toContain('TASK-014');
+    expect(injected[0].text).toContain('Triaging the lane');
+    expect(injected[1].text).toContain('rescue');
+    expect(injected[1].text).toContain('`write-tests`');
+    expect(injected[1].text).toContain('regenerate the fixture from the new schema');
+  });
+
+  it('reports an adjust_and_retry verdict as an ADJUSTED-body rescue', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      verdict: 'adjust_and_retry',
+      reason: 'exporter.ts:42 has no UTC mode',
+      targetStepId: 'implement',
+      guidance: 'narrow the AC to local time',
+      taskBody: '## AC\n- local timestamps',
+    });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.triageLane(laneReq());
+
+    expect(decision).toEqual({
+      verdict: 'adjust_and_retry',
+      targetStepId: 'implement',
+      guidance: 'narrow the AC to local time',
+      taskBody: '## AC\n- local timestamps',
+      reason: 'exporter.ts:42 has no UTC mode',
+    });
+    expect(injected[1].text).toContain('ADJUSTED task body');
+    expect(injected[1].text).toContain('exporter.ts:42');
+  });
+
+  it('reports a give_up verdict without claiming a rescue', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ verdict: 'give_up', reason: 'the requirement is genuinely unimplementable here' });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.triageLane(laneReq());
+
+    expect(decision).toEqual({ verdict: 'give_up', reason: 'the requirement is genuinely unimplementable here' });
+    expect(injected[1].text).toContain('no rescue');
+    expect(injected[1].text).toContain('genuinely unimplementable');
+    expect(injected[1].text).not.toContain('re-drive');
+  });
+
+  it('fails-soft to give_up (with a chat note) when the query throws', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.triageLane(laneReq());
+
+    expect(decision.verdict).toBe('give_up');
+    expect(decision.reason).toContain('lane triage failed');
+    // The failure announcement still rendered, plus an explicit could-not-run note.
+    expect(injected).toHaveLength(2);
+    expect(injected[1].text).toContain('could not run');
+    expect(injected[1].text).toContain('sdk down');
+  });
+
+  it('fails-soft to give_up when the history read throws', async () => {
+    const reader: HistoryReader = { read: vi.fn().mockRejectedValue(new Error('db gone')) };
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery: vi.fn(), textQuery: vi.fn() });
+
+    expect((await session.triageLane(laneReq())).verdict).toBe('give_up');
+  });
+
+  it('never throws out of triageLane when injectEvent throws', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ verdict: 'retry', reason: 'r', targetStepId: 'implement', guidance: 'g' });
+    const injectEvent = (): void => {
+      throw new Error('bridge gone');
+    };
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    await expect(session.triageLane(laneReq())).resolves.toMatchObject({ verdict: 'retry' });
+  });
+
+  it('serializes against converse so a rescue never interleaves with a human exchange', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    // A SLOW lane-triage query: were triageLane not on converse's sendChain, the
+    // human's user turn + reply would inject between its two turns.
+    const structuredQuery: StructuredQueryFn = vi.fn().mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ verdict: 'give_up', reason: 'genuine' }), 20),
+        ),
+    );
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('human reply');
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery, injectEvent });
+
+    const triage = session.triageLane(laneReq());
+    const chat = session.converse('what happened?');
+    await Promise.all([triage, chat]);
+
+    expect(injected.map((m) => m.role)).toEqual(['assistant', 'assistant', 'user', 'assistant']);
+    expect(injected[1].text).toContain('no rescue');
+    expect(injected[2].text).toBe('what happened?');
+    expect(injected[3].text).toBe('human reply');
   });
 });
 

@@ -186,6 +186,193 @@ export function parseTriageAdvice(structured: unknown): TriageAdvice {
 }
 
 // ---------------------------------------------------------------------------
+// Lane triage schema + parsing (autonomous sprint-lane rescue)
+// ---------------------------------------------------------------------------
+
+/**
+ * JSON schema the SDK `outputFormat` enforces for a structured LANE-triage verdict —
+ * the monitor's decision about a sprint fan-out lane that exhausted its automatic
+ * budget. `additionalProperties: false` so the SDK rejects extra fields.
+ *
+ * Only `verdict` + `reason` are schema-required: `targetStepId` / `guidance` /
+ * `taskBody` are verdict-specific and enforced (with a fail-safe DOWNGRADE, never an
+ * error) by `parseLaneTriageOutput`.
+ */
+export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdict', 'reason'],
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['give_up', 'retry', 'adjust_and_retry'],
+      description:
+        'give_up = let the lane fail (the DEFAULT when unsure); retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first.',
+    },
+    reason: {
+      type: 'string',
+      description:
+        '2-4 sentences: why this verdict. For adjust_and_retry, cite the file:line evidence that the task’s criteria conflict with repo reality.',
+    },
+    targetStepId: {
+      type: 'string',
+      description:
+        'retry / adjust_and_retry (REQUIRED in practice): the INNER lane step id to re-drive from. Must be one of the lane’s listed inner step ids, at or before the failing step.',
+    },
+    guidance: {
+      type: 'string',
+      description:
+        'retry / adjust_and_retry (REQUIRED in practice): what the lane must do DIFFERENTLY on the next attempt. "Try again" is not guidance.',
+    },
+    taskBody: {
+      type: 'string',
+      description:
+        'adjust_and_retry only (REQUIRED there): the FULL replacement task body, minimally edited — never silently drop a security- or correctness-relevant criterion.',
+    },
+  },
+};
+
+/**
+ * Which budget-exhaustion site in a lane's inner chain produced the failure. Purely
+ * descriptive (it is rendered into the prompt so the monitor knows what kind of
+ * evidence to look for); the controller decides which sites consult lane triage.
+ */
+export type LaneFailureKind = 'inner-step' | 'task-verify' | 'code-review' | 'merge-gate';
+
+/**
+ * Everything the monitor needs to triage ONE failing sprint fan-out lane. Assembled
+ * by the host/controller (the brain reads no lane state itself beyond the history
+ * snapshot). `innerStepIds` is the lane's configured inner chain IN ORDER — it is the
+ * ONLY allow-list `parseLaneTriageOutput` accepts a `targetStepId` from, so a caller
+ * that supplies an empty chain gets an unconditional `give_up` (fail-safe: with no
+ * known step to re-drive from, a rescue is not expressible).
+ */
+export interface LaneTriageRequest {
+  /** The task's display ref (e.g. `TASK-014`) — what the chat turns name. */
+  taskRef: string;
+  /** The batch item / task id the controller keys its per-item rescue cap on. */
+  itemId: string;
+  /** The inner step that failed (usually, but not necessarily, in `innerStepIds`). */
+  stepId: string;
+  /** 1-based lane attempt that just exhausted its budget. */
+  attempt: number;
+  failureKind: LaneFailureKind;
+  /** The error / verdict text (already excerpted by the caller — rendered verbatim). */
+  errorExcerpt: string;
+  /** The lane's configured inner chain, in execution order. */
+  innerStepIds: string[];
+  taskTitle: string;
+  /** The task's CURRENT body — the acceptance criteria the lane's agents work from. */
+  taskBody: string;
+}
+
+/**
+ * Let the lane settle `failed` — the fail-safe default. `reason` is optional so a
+ * host can construct a bare `{ verdict: 'give_up' }` (e.g. a kill switch) without
+ * inventing prose; the brain always fills it in so the chat turn is informative.
+ */
+export interface LaneGiveUpDecision {
+  verdict: 'give_up';
+  reason?: string;
+}
+
+/** Re-drive the lane from `targetStepId` with `guidance`, leaving the task body alone. */
+export interface LaneRetryDecision {
+  verdict: 'retry';
+  targetStepId: string;
+  guidance: string;
+  reason: string;
+}
+
+/**
+ * Replace the task's body with `taskBody`, THEN re-drive the lane from
+ * `targetStepId` with `guidance`. The host executes both autonomously and audits the
+ * edit via a non-blocking review-queue finding.
+ */
+export interface LaneAdjustAndRetryDecision {
+  verdict: 'adjust_and_retry';
+  targetStepId: string;
+  guidance: string;
+  taskBody: string;
+  reason: string;
+}
+
+/** The parsed, host-safe lane-triage verdict (every field a rescue needs is present). */
+export type LaneTriageDecision = LaneGiveUpDecision | LaneRetryDecision | LaneAdjustAndRetryDecision;
+
+/** Build the fail-safe `give_up` decision carrying a machine-authored reason. */
+function laneGiveUp(reason: string): LaneGiveUpDecision {
+  return { verdict: 'give_up', reason };
+}
+
+/**
+ * Resolve the model's `targetStepId` against the lane's configured inner chain, or
+ * `null` when it is unusable (the caller then downgrades to `give_up`).
+ *
+ * - An EMPTY chain is always `null`: there is no step a rescue could name.
+ * - ABSENT / blank ⇒ the FIRST inner step (typically `implement`) — the documented default.
+ * - A non-string ⇒ `null`.
+ * - A string must be one of the inner ids AT OR BEFORE the failing step. Re-driving a
+ *   lane to a step AFTER the failure would skip the very work that failed, so such a
+ *   target is treated as unusable rather than silently clamped. When the failing step
+ *   is not itself in the chain (e.g. a merge-gate failure), the whole chain is allowed.
+ */
+function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | null {
+  const ids = req.innerStepIds;
+  if (ids.length === 0) return null;
+  const failingIdx = ids.indexOf(req.stepId);
+  const allowed = failingIdx >= 0 ? ids.slice(0, failingIdx + 1) : ids;
+  if (raw === undefined || raw === null) return allowed[0];
+  if (typeof raw !== 'string') return null;
+  if (raw.trim().length === 0) return allowed[0];
+  return allowed.includes(raw) ? raw : null;
+}
+
+/**
+ * Parse the SDK's structured lane-triage output into a host-safe `LaneTriageDecision`.
+ * Lenient and never throws; every unusable shape DOWNGRADES along a fail-safe ladder,
+ * because the conservative outcome (letting the lane fail into the human gate) is
+ * always available and a half-specified rescue is not:
+ *
+ *   1. non-object / null / unknown `verdict`            ⇒ give_up
+ *   2. `give_up`                                        ⇒ give_up (reason kept when present)
+ *   3. `retry`/`adjust_and_retry` with blank `guidance` ⇒ give_up (a rescue with
+ *      nothing to do differently is just a wasted attempt)
+ *   4. `targetStepId` unknown / after the failing step / no chain to pick from
+ *      ⇒ give_up (see `resolveLaneTargetStep`)
+ *   5. `adjust_and_retry` with a blank `taskBody`       ⇒ DOWNGRADE to `retry` — the
+ *      guidance still carries the substance, and an empty body would wipe the task's
+ *      acceptance criteria
+ *   6. otherwise ⇒ the verdict as given (`reason` defaults to '' when non-string)
+ */
+export function parseLaneTriageOutput(structured: unknown, req: LaneTriageRequest): LaneTriageDecision {
+  if (typeof structured !== 'object' || structured === null) {
+    return laneGiveUp('unparseable lane triage verdict — letting the lane fail');
+  }
+  const o = structured as Record<string, unknown>;
+  if (o.verdict === 'give_up') {
+    return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}) };
+  }
+  if (o.verdict !== 'retry' && o.verdict !== 'adjust_and_retry') {
+    return laneGiveUp('unrecognized lane triage verdict — letting the lane fail');
+  }
+  if (!isNonEmptyString(o.guidance)) {
+    return laneGiveUp('lane triage asked for a retry without guidance — letting the lane fail');
+  }
+  const targetStepId = resolveLaneTargetStep(o.targetStepId, req);
+  if (targetStepId === null) {
+    return laneGiveUp('lane triage named an unusable target step — letting the lane fail');
+  }
+  const guidance = o.guidance;
+  const reason = typeof o.reason === 'string' ? o.reason : '';
+  if (o.verdict === 'retry' || !isNonEmptyString(o.taskBody)) {
+    // adjust_and_retry with no replacement body downgrades to a plain rescue.
+    return { verdict: 'retry', targetStepId, guidance, reason };
+  }
+  return { verdict: 'adjust_and_retry', targetStepId, guidance, taskBody: o.taskBody, reason };
+}
+
+// ---------------------------------------------------------------------------
 // History digesting (compact, prompt-friendly)
 // ---------------------------------------------------------------------------
 
@@ -324,6 +511,74 @@ If it helps, investigate the worktree with your read-only tools (Read/Grep/Glob)
 - "fail"     — the failure is definitive and retrying won't help; recommend ending the run (a human confirms before it ends).
 
 Return only the structured { decision, rationale } object. The rationale should be 2-4 sentences explaining your reasoning.`;
+}
+
+/**
+ * One-line description of what each failure kind means, so the monitor knows what
+ * evidence to go looking for in the worktree before it decides.
+ */
+const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
+  'inner-step': 'an inner lane step kept failing until its retry/loopback budget ran out',
+  'task-verify': 'the task-verify gate kept returning FAIL until its loopback budget ran out',
+  'code-review': 'code review kept reporting blocking defects until its loopback budget ran out',
+  'merge-gate': 'the visual merge gate rejected this lane',
+};
+
+/**
+ * Compose the LANE-TRIAGE prompt for one sprint fan-out lane that exhausted its
+ * automatic budget. Pure (output depends only on its args). Mirrors
+ * `buildTriagePrompt`'s framing (SUPERVISOR of the run; host code runs the steps) and
+ * reuses the SAME digest scaffolding (`digestSteps` + `laneSection` +
+ * `digestConversation`), then adds the per-lane evidence the outer triage prompt has
+ * no notion of: the task's ref/title/CURRENT body, the lane's inner chain, the failing
+ * step + attempt + failure kind, and the error excerpt.
+ *
+ * Three things the prompt must be explicit about, because the host acts on the answer
+ * with NO human confirmation:
+ *   - the give_up DEFAULT (an unsure monitor must not burn a rescue),
+ *   - the AUTONOMOUS-EXECUTION notice (nothing here is a suggestion; it also states
+ *     the audit trail + the one-rescue-per-lane budget, so the model can calibrate),
+ *   - the `targetStepId` constraint (an inner id, at or before the failing step),
+ *     which `parseLaneTriageOutput` enforces by downgrading to give_up.
+ */
+export function buildLaneTriagePrompt(
+  ctx: MonitorContext,
+  history: MonitorHistory,
+  req: LaneTriageRequest,
+): string {
+  const chain = req.innerStepIds.length > 0 ? req.innerStepIds.map((id) => `\`${id}\``).join(' → ') : '(unknown)';
+  const defaultTarget = req.innerStepIds[0] ?? '(none)';
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide whether to RESCUE it or let it fail.
+
+Failing lane: **${req.taskRef}** — ${req.taskTitle}
+Failure kind: \`${req.failureKind}\` — ${LANE_FAILURE_KIND_LABELS[req.failureKind]}
+Failing step: \`${req.stepId}\` (attempt ${req.attempt})
+This lane's inner step chain, in order: ${chain}
+
+Error / verdict excerpt:
+${req.errorExcerpt.trim().length > 0 ? req.errorExcerpt : '(no error text captured)'}
+
+Current task body — the acceptance criteria this lane's agents are working from:
+---
+${req.taskBody.trim().length > 0 ? req.taskBody : '(empty)'}
+---
+
+Step timeline so far:
+${digestSteps(history.steps)}${laneSection(history)}
+
+Recent conversation:
+${digestConversation(history.conversation)}
+
+Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the code, the tests, and repo reality actually match what this task asks for. Then decide ONE verdict and return it as structured output:
+- "give_up"          — the DEFAULT. The failure looks genuine, and another attempt — even with fresh guidance — would not change the outcome. Choose this whenever you are unsure; the run's human gate picks the task up from there.
+- "retry"            — a concrete, DIFFERENT approach is likely to succeed. \`guidance\` is REQUIRED and must say what to do DIFFERENTLY; "try again" is not guidance and the host will reject it (downgrading your verdict to give_up).
+- "adjust_and_retry" — ONLY when you have concrete evidence that the task's acceptance criteria CONFLICT with repo reality (cite the file:line evidence in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
+
+AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane is rescued at most once), so spend it only where it will genuinely change the outcome.
+
+\`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry". It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
+
+Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
 }
 
 /**
@@ -1113,6 +1368,25 @@ export interface MonitorSession {
   answer(question: string, signal?: AbortSignal): Promise<string>;
 
   /**
+   * Triage ONE sprint fan-out LANE that exhausted its automatic budget, and decide
+   * whether the host should rescue it (re-drive it from an earlier inner step, with
+   * guidance and optionally an adjusted task body) or let it settle `failed`. Reads
+   * the whole history fresh, runs a structured query, returns the parsed verdict.
+   * Fail-soft: any error → `{ verdict: 'give_up' }`.
+   *
+   * UNLIKE `triage`, this method OWNS its chat rendering (the failure announcement
+   * and the decision turn) — the host must NOT inject its own turns for it, or the
+   * user sees the same event twice. It is serialized on the same chain as `converse`
+   * so an autonomous rescue can never interleave its turns with a human exchange.
+   *
+   * OPTIONAL on the interface for the same reason as `converse`: the many faked
+   * sessions across the test suite (and any session built without a lane-capable
+   * brain) simply omit it, and the host treats an absent method exactly like a
+   * `give_up` — the pre-existing behavior.
+   */
+  triageLane?(req: LaneTriageRequest, signal?: AbortSignal): Promise<LaneTriageDecision>;
+
+  /**
    * Conduct one full chat exchange in the run's unified Chat pane (the human seam
    * the tRPC `cyboflow.monitor.send` mutation drives — see Slice E). Owns the
    * inject→answer→inject orchestration so the router stays thin:
@@ -1177,6 +1451,34 @@ const ANSWER_FAILED =
 
 /** Rendered when the monitor returns a successful-but-empty answer (so a turn always renders). */
 const NO_ANSWER = 'I could not produce an answer for that.';
+
+/** The `reason` carried on the fail-soft `give_up` when lane triage itself blew up. */
+const LANE_TRIAGE_FAILED = 'lane triage failed; letting the lane fail';
+
+/**
+ * The chat turn announcing that a lane exhausted its budget, injected BEFORE the
+ * (potentially slow) triage query so the user sees the failure the moment it happens
+ * rather than only once the monitor has made up its mind.
+ */
+function laneFailureAnnouncement(req: LaneTriageRequest): string {
+  return `⚠ **${req.taskRef}** (${req.taskTitle}) failed at \`${req.stepId}\` — ${req.failureKind}, attempt ${req.attempt}. Triaging the lane…`;
+}
+
+/**
+ * The chat turn reporting the monitor's lane verdict. Phrased as a DECISION, not a
+ * completed act: the host executes it (and may still downgrade an adjust to a plain
+ * rescue if the task edit is refused), so this turn must never claim success itself.
+ */
+function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecision): string {
+  switch (decision.verdict) {
+    case 'give_up':
+      return `✖ **${req.taskRef}**: no rescue — letting the lane fail.${decision.reason ? ` ${decision.reason}` : ''}`;
+    case 'retry':
+      return `▶ **${req.taskRef}**: rescue — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
+    case 'adjust_and_retry':
+      return `▶ **${req.taskRef}**: rescue with an ADJUSTED task body — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
+  }
+}
 
 /**
  * The default `MonitorSession` over the fakeable query fns + a `HistoryReader`. Each
@@ -1245,6 +1547,70 @@ export class DefaultMonitorSession implements MonitorSession {
         error: err instanceof Error ? err.message : String(err),
       });
       return { decision: 'escalate', rationale: 'monitor failed; escalating' };
+    }
+  }
+
+  /**
+   * Triage one failing sprint lane (see `MonitorSession.triageLane`). Serialized on
+   * the SAME `sendChain` as `converse` — unlike `triage`, this method injects chat
+   * turns of its own, and an autonomous rescue fires without anyone's involvement, so
+   * it could otherwise land in the middle of a human's inject(user) → answer →
+   * inject(assistant) sequence. `triage` needs no such serialization: it injects
+   * nothing (the HOST renders its rationale, see ProgrammaticRunHost.triageFailure).
+   * The chain tail swallows outcomes so one failure never poisons later exchanges.
+   */
+  async triageLane(req: LaneTriageRequest, signal?: AbortSignal): Promise<LaneTriageDecision> {
+    const exchange = this.sendChain.then(() => this.triageLaneOnce(req, signal));
+    this.sendChain = exchange.then(
+      () => undefined,
+      () => undefined,
+    );
+    return exchange;
+  }
+
+  /**
+   * One lane-triage exchange (serialized by `triageLane`): announce the failure →
+   * read the whole history fresh → structured query → parse → announce the decision.
+   * Fail-soft at every step: a thrown history read / query / parse yields `give_up`
+   * plus an explanatory chat note, so a broken monitor degrades to exactly the
+   * pre-triage behavior (the lane settles failed) instead of stranding the walk.
+   */
+  private async triageLaneOnce(req: LaneTriageRequest, signal?: AbortSignal): Promise<LaneTriageDecision> {
+    this.tryInject(buildAssistantTextEvent(laneFailureAnnouncement(req)));
+    try {
+      const history = await this.history.read(this.ctx.runId);
+      const prompt = buildLaneTriagePrompt(this.ctx, history, req);
+      const structured = await this.structuredQuery({
+        prompt,
+        schema: MONITOR_LANE_TRIAGE_SCHEMA,
+        cwd: this.ctx.worktreePath,
+        ...(this.model ? { model: this.model } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      const decision = parseLaneTriageOutput(structured, req);
+      this.logger?.info('[Monitor] lane triage verdict', {
+        runId: this.ctx.runId,
+        taskRef: req.taskRef,
+        stepId: req.stepId,
+        verdict: decision.verdict,
+        reason: decision.reason ?? '',
+      });
+      this.tryInject(buildAssistantTextEvent(laneDecisionSummary(req, decision)));
+      return decision;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn('[Monitor] lane triage failed; letting the lane fail', {
+        runId: this.ctx.runId,
+        taskRef: req.taskRef,
+        stepId: req.stepId,
+        error: message,
+      });
+      this.tryInject(
+        buildAssistantTextEvent(
+          `⚠ ${req.taskRef}: lane triage could not run (${message}) — letting the lane fail.`,
+        ),
+      );
+      return laneGiveUp(LANE_TRIAGE_FAILED);
     }
   }
 
