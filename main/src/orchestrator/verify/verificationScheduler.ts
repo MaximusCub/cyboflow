@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
 import { emitSeamError } from '../telemetrySink';
-import { classifyErrorPattern } from '../programmatic/systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from '../programmatic/systemicError';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
   CaptureContext,
@@ -5258,6 +5258,12 @@ export class VerificationScheduler {
         verifyType: row.verify_type,
         ...(extra.backend ? { backend: extra.backend } : {}),
         errorClass: verifyErrorClass,
+        // An UNCLASSIFIED verify failure is otherwise blind: the message is
+        // withheld above and `other`/`unknown` says nothing about which failure
+        // it was. The shape+digest split it without shipping the text — the last
+        // `other`-emitting seam to be wired for this (cf. stepResultStore,
+        // monitorQuery, claudeCodeManager).
+        ...unclassifiedErrorTags(verifyErrorClass, extra.error),
       });
     }
     const deliveredOk = await this.deliver(row, status, verdict, fileNames, input, extra);

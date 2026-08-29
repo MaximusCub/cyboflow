@@ -41,6 +41,7 @@ import {
 } from '../verificationScheduler';
 import { Mutex } from '../../../utils/mutex';
 import { setSeamErrorSink } from '../../telemetrySink';
+import { digestErrorSkeleton } from '../../programmatic/systemicError';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import {
   PlaywrightBackend,
@@ -2541,6 +2542,54 @@ describe('VerificationScheduler — verify-request-failed seam gating (seam J)',
 
     expect(rowStatus(db, id).status).toBe('skipped');
     expect(verifyReports()).toHaveLength(0); // the whole point: no error event on a benign skip
+  });
+
+  // The digest split, wired at this seam last: an `other`/`unknown` verify
+  // failure is otherwise blind, because the error text is deliberately withheld
+  // from the exception message. Shape + digest say WHICH failure it was without
+  // shipping the text.
+  it('tags an UNCLASSIFIED failure with the error shape + digest', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, throwOnCapture: true, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    enqueueRow(db, { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(verifyReports()[0].tags).toMatchObject({
+      errorClass: 'other',
+      errorShape: 'one-line-short',
+      errorDigest: digestErrorSkeleton('capture boom'),
+    });
+  });
+
+  it('adds NO shape/digest to a CLASSIFIED failure (the class already says what happened)', async () => {
+    const econnreset: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        throw new Error('ECONNRESET');
+      },
+    };
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: econnreset },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    enqueueRow(db, { chain: ['capturePage'] });
+    await sched.drain();
+
+    const tags = verifyReports()[0].tags ?? {};
+    expect(tags.errorClass).toBe('net-econn-codes');
+    expect(tags.errorShape).toBeUndefined();
+    expect(tags.errorDigest).toBeUndefined();
   });
 
   it('does NOT report a PASS', async () => {
