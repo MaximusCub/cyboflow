@@ -104,6 +104,38 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     pattern: /oauth[\s_-]*token(?:[\s_-]*has)?[\s_-]*expired/i,
   },
   {
+    // The verb comes FIRST in the CLI's own wording, so `auth-failed` above —
+    // which wants the failure word AFTER "auth" — misses every one of these.
+    // Harvested verbatim from the shipped CLI binary: "Failed to authenticate",
+    // "Failed to authenticate. ", "Failed to authenticate through the broker: "
+    // and "Failed to authenticate: OAuth session expired and could not be
+    // refreshed" (digest d1a52bbe — 52 events in one user's 8-minute cascade on
+    // 0.2.8, every one of them classified `other`, so the run was never parked
+    // as systemic and the monitor was asked to triage a dead login).
+    name: 'auth-failed-to-authenticate',
+    pattern: /failed to (?:re-?)?authenticate/i,
+  },
+  {
+    // The expiry family the CLI surfaces when a login is no longer usable:
+    // "OAuth session expired and could not be refreshed", "Session expired.
+    // Please run /login to sign in again.", "Your session has expired. Please
+    // reauthenticate.", "SSO session expired. Run: …". `auth-oauth-expired`
+    // above only knows the word "token".
+    //
+    // The lookbehind excludes the CLI's MCP transport chatter ("MCP session
+    // expired (server no longer recognizes session ID), triggering
+    // reconnection"), which reconnects in-process and is not a login failure.
+    name: 'auth-session-expired',
+    pattern: /(?<!mcp )\bsession (?:has )?expired\b/i,
+  },
+  {
+    // ": Token refresh failed" / "Design token refresh failed" — a refresh that
+    // cannot complete is the same terminal auth condition as an expired session,
+    // one step earlier.
+    name: 'auth-token-refresh-failed',
+    pattern: /token refresh failed|failed to refresh (?:the )?(?:oauth |access |auth )?token/i,
+  },
+  {
     // The real mid-run Anthropic shape: `API Error: 401
     // {"type":"error","error":{"type":"authentication_error","message":"..."}}`
     // — neither 'authentication failed' nor a bare '401' (no 'unauthorized' word)
