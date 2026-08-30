@@ -95,6 +95,7 @@ describe('TerminalSessionManager killProcessTree — poll-until-dead', () => {
       // unconditionally, this test would time out (vitest's default test
       // timeout is far below 60s) instead of completing quickly.
       graceMs: 60_000,
+      platform: 'linux',
     });
 
     await manager.killProcessTree(4242);
@@ -121,6 +122,7 @@ describe('TerminalSessionManager killProcessTree — poll-until-dead', () => {
       execCommand,
       pollIntervalMs: 10,
       graceMs: 50,
+      platform: 'linux',
     });
 
     await manager.killProcessTree(4242);
@@ -151,10 +153,43 @@ describe('TerminalSessionManager killProcessTree — poll-until-dead', () => {
       execCommand,
       pollIntervalMs: 5,
       graceMs: 1000,
+      platform: 'linux',
     });
 
     await manager.killProcessTree(4242);
 
     expect(execCommand).toHaveBeenCalledWith('kill -9 4243');
+  });
+
+  it('win32 ladder: taskkill without /F, bounded poll, then taskkill /T /F', async () => {
+    const execCommand = vi.fn<(command: string) => Promise<{ stdout: string }>>(() =>
+      Promise.resolve({ stdout: '' }),
+    );
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
+    // Alive through the graceful poll (forcing the /F step), dead after.
+    let probeCalls = 0;
+    const isPidAlive = vi.fn<(pid: number) => boolean>(() => {
+      probeCalls += 1;
+      return probeCalls <= 2;
+    });
+
+    const manager = makeManager({
+      listProcessTable: () => Promise.resolve([]),
+      isPidAlive,
+      sendSignal,
+      execCommand,
+      pollIntervalMs: 5,
+      graceMs: 60_000,
+      platform: 'win32',
+    });
+
+    await manager.killProcessTree(4242);
+
+    // Graceful attempt first, then the forceful tree kill — no POSIX signals.
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T');
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T /F');
+    expect(sendSignal).not.toHaveBeenCalled();
+    // Early exit once the probe reports death (no 60s wait).
+    expect(probeCalls).toBeLessThanOrEqual(4);
   });
 });

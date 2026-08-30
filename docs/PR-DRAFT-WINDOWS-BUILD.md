@@ -11,6 +11,7 @@ fork, fork at raise time.
   1. `733112aa` — build(windows): land native modules on Electron ABI via version bumps
   2. `b2990db4` — build(windows): win packaging pipeline — config, scripts, portable assets
   3. `dfda8dba` — feat(windows): win32 runtime substrate — MCP named pipe, shell, PTY, process ops
+  4. (round 2) — feat(windows): process-management parity, dev-mode, capture fallback, test suite green
 
 ---
 
@@ -59,6 +60,21 @@ branch or a portability fix):
    registered as `node "<path>"` (a bare `.js` under cmd.exe resolves via
    file association).
 
+4. **Process-management parity (round 2).** A shared PowerShell
+   `Win32_Process` text-listing stand-in (`winProcessTable.ts`) feeds the five
+   `ps`-parsing sweeps (CodexBrokerReaper, terminal orphan detection, the MCP
+   orphan tripwire with proper etime, PrototypeServerReaper) with their
+   parsers untouched; stop/kill ladders in run/terminal managers gained a
+   taskkill fast path (`/T`, bounded poll, unconditional `/F`, zombie
+   verification) with a `platform` test seam; PrototypeServerReaper path
+   matching normalizes separators so backslash command lines match;
+   `OrchSocketServer.isSocketPathIntact` handles pipes (no false "socket
+   missing" health alarm); the updater is platform-gated (macOS-only feed —
+   reports `supported: false` instead of erroring); `pnpm dev` runs on
+   Windows via a cross-platform launcher (`scripts/dev-electron.mjs`);
+   `native-screenshot` gains a whole-screen PowerShell capture stand-in
+   (peekaboo is macOS-only; the `--app` deviation is stated in its output).
+
 ### Verification (measured on a real Windows 11 x64 host, no MSVC)
 
 - `pnpm typecheck` clean; `pnpm lint` 0 errors; `pnpm test:build` green
@@ -67,11 +83,16 @@ branch or a portability fix):
   verifyArtifact gains the win `.exe` floor case).
 - Covering unit tests for every touched runtime module pass on Windows
   (114/114, incl. the platform-aware hook-command expectations).
-- better-sqlite3 bump: the full `main/src/database` suite ran under host node
-  with the node-v137 win32 prebuild — 586/625 assertions pass; **all 39
-  failures are one pre-existing Windows-only pattern** (`afterEach`
-  `rmSync` of a temp dir with open SQLite handles — EPERM on Windows, legal
-  on POSIX). No assertion, ABI or SQL failures.
+- better-sqlite3 bump: the full `main/src/database` suite runs green on
+  Windows — **625/625**. (The first pass showed 39 Windows-only failures,
+  all one pattern: `afterEach` deleting a temp dir whose SQLite handles were
+  not yet closed — EPERM on Windows, legal on POSIX. Fixed in-repo: 12
+  migration tests close the service before the delete; the rest use a
+  Windows-safe `cleanupDbTestDir` helper. POSIX behavior unchanged.)
+- PTY verified end-to-end: `pty.spawn` of real cmd.exe and powershell.exe
+  under the packaged Electron binary, echo round-trip + kill.
+- The PowerShell screen-capture stand-in was exercised live (produces a real
+  PNG).
 - End-to-end: `electron-builder --win --x64` produces an unsigned NSIS
   installer; the unpacked build launches, CDP answers (`cyboflow/0.2.9 …
   Electron/37.6.0`), the React UI fully renders, DB migrations run on the
@@ -81,14 +102,13 @@ branch or a portability fix):
 
 ### Degradations / known limits (documented in docs/WINDOWS-BUILD.md)
 
-- `@steipete/peekaboo-mcp` is darwin-only — native-screen verification has no
-  bundled capture on Windows.
+- `@steipete/peekaboo-mcp` is darwin-only — `attest window` has no Windows
+  equivalent (fails loudly); `--app`-scoped captures fall back to full-screen
+  with an explicit note in the driver output.
 - The NSIS floor for `.exe` artifacts is 50 MB (NSIS compresses harder than a
   DMG); `afterSign`'s .app checks remain mac-only.
-- 39 pre-existing Windows-only test-cleanup failures (same EPERM class,
-  test infra, not product code).
-- The updater has no Windows feed yet — checks log-and-continue until a
-  `latest.yml` exists.
+- The updater has no Windows feed yet — platform-gated off (`supported:
+  false`), not erroring.
 
 ### Reviewer notes
 

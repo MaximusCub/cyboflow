@@ -4,6 +4,7 @@ import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
+import { execWindowsProcessTable } from './winProcessTable';
 
 interface TerminalSession {
   pty: pty.IPty;
@@ -44,6 +45,8 @@ export interface TerminalSessionManagerOptions {
    * ~2s (NOT 200ms) — give shells a real chance to exit cleanly. Defaults to 2000ms.
    */
   graceMs?: number;
+  /** Test seam: which kill ladder to run. Defaults to the host platform. */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -112,6 +115,11 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
  * this works on both macOS and Linux.
  */
 function defaultListProcessTable(): Promise<ProcessTableRow[]> {
+  if (process.platform === 'win32') {
+    // Windows has no `ps`; the PowerShell stand-in emits the same line shape,
+    // so the parser below is used unchanged.
+    return execWindowsProcessTable('pid-ppid').then(parseProcessTable);
+  }
   return new Promise<ProcessTableRow[]>((resolve, reject) => {
     execFile(
       'ps',
@@ -164,6 +172,7 @@ export class TerminalSessionManager extends EventEmitter {
   private readonly execCommand: (command: string) => Promise<ExecResult>;
   private readonly pollIntervalMs: number;
   private readonly graceMs: number;
+  private readonly platform: NodeJS.Platform;
 
   constructor(options: TerminalSessionManagerOptions = {}) {
     super();
@@ -175,6 +184,7 @@ export class TerminalSessionManager extends EventEmitter {
     this.execCommand = options.execCommand ?? defaultExecCommand;
     this.pollIntervalMs = options.pollIntervalMs ?? 100;
     this.graceMs = options.graceMs ?? 2000;
+    this.platform = options.platform ?? process.platform;
   }
 
   async createTerminalSession(sessionId: string, worktreePath: string): Promise<void> {
@@ -348,6 +358,47 @@ export class TerminalSessionManager extends EventEmitter {
   private async killProcessTree(pid: number): Promise<boolean> {
     // First, get all descendant PIDs before we start killing
     const descendantPids = await this.getAllDescendantPids(pid);
+
+    // Windows: no process groups, no POSIX signals — `kill`/`pkill` below are
+    // all no-ops there. `taskkill /T` (optionally /F) takes the whole tree in
+    // one call, which is the Windows contract for everything the POSIX ladder
+    // below achieves.
+    if (this.platform === 'win32') {
+      // Graceful attempt first (without /F, GUI apps may close cleanly).
+      try {
+        await this.execCommand(`taskkill /PID ${pid} /T`);
+      } catch (error) {
+        // Process might already be dead
+      }
+      // Poll for early exit, bounded by the same grace window as POSIX. The
+      // poll only ends the WAIT — the /F kill below still fires unconditionally
+      // (fail-soft belt-and-braces, mirroring the POSIX SIGKILL).
+      {
+        const deadline = Date.now() + this.graceMs;
+        while (Date.now() < deadline) {
+          if (!this.probeAlive(pid)) break;
+          await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
+        }
+      }
+      // Forceful: /F kills the tree immediately.
+      try {
+        await this.execCommand(`taskkill /PID ${pid} /T /F`);
+      } catch (error) {
+        // Process might already be dead
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const remainingPids = await this.getAllDescendantPids(pid);
+      if (remainingPids.length > 0) {
+        console.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
+        this.emit('zombie-processes-detected', {
+          sessionId: null,
+          pids: remainingPids,
+          message: `Failed to terminate ${remainingPids.length} child processes. Please manually kill PIDs: ${remainingPids.join(', ')}`
+        });
+        return false;
+      }
+      return true;
+    }
 
     let success = true;
 
