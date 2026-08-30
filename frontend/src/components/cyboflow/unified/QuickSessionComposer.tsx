@@ -3,6 +3,7 @@ import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
 import { errorText } from '../../../utils/errorText';
+import { kbdHint } from '../../../utils/platform';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { EffortPill } from './EffortPill';
@@ -456,12 +457,12 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
 
 
   const placeholder = interactive
-    ? 'Message the live session…  (⌘↵ to send)'
+    ? `Message the live session…  (${kbdHint('mod', 'Enter')} to send)`
     : activeQuestion != null
-      ? 'Answer the question…  (⌘↵ to send)'
+      ? `Answer the question…  (${kbdHint('mod', 'Enter')} to send)`
       : activeSession.status === 'waiting'
-        ? 'Enter your response…  (⌘↵ to send)'
-        : 'Write a command…  (⌘↵ to send)';
+        ? `Enter your response…  (${kbdHint('mod', 'Enter')} to send)`
+        : `Write a command…  (${kbdHint('mod', 'Enter')} to send)`;
 
   const modelLabel = interactive
     ? null

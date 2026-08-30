@@ -23,6 +23,7 @@ import { useFileDiffData } from '../../hooks/useFileDiffData';
 import { useFileContentData } from '../../hooks/useFileContentData';
 import { MarkdownPreview } from '../MarkdownPreview';
 import type { DiffHunk, HunkLine, ParsedFileDiff } from '../../utils/parseFileHunks';
+import { pathBasename } from '../../utils/pathBasename';
 import type { FileTabStatus } from '../../../../shared/types/centerPane';
 
 const RAIL = 'var(--color-bg-secondary)';
@@ -51,11 +52,14 @@ interface FileTabRendererProps {
 }
 
 function basename(p: string): string {
-  const parts = p.split('/');
-  return parts[parts.length - 1] || p;
+  // Separator-agnostic: tab file paths may carry native (Windows) separators.
+  return pathBasename(p) || p;
 }
 function dirname(p: string): string {
-  const i = p.lastIndexOf('/');
+  // Trailing separator is part of the display ("dir/ file"), so unlike
+  // parentPath this slices past it — but the last separator of EITHER kind
+  // must be found, or the dir prefix disappears on Windows paths.
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
   return i === -1 ? '' : p.slice(0, i + 1);
 }
 function isMarkdown(p: string): boolean {
