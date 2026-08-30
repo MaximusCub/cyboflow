@@ -26,6 +26,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   InteractiveSettingsWriter,
+  hookCommand,
   resolveInlineGatingHooks,
   resolveShellHookScriptPath,
   resolveStopHookScriptPath,
@@ -100,13 +101,13 @@ describe('resolveInlineGatingHooks', () => {
     expect(fragment.Stop).toHaveLength(1);
     const group = fragment.Stop[0];
     expect(group.matcher).toBeUndefined();
-    expect(group.hooks).toEqual([{ type: 'command', command: stopHookPath, timeout: 10 }]);
+    expect(group.hooks).toEqual([{ type: 'command', command: hookCommand(stopHookPath), timeout: 10 }]);
   }
 
   /** The AskUserQuestion notify entry every fragment carries, regardless of permissionMode. */
   function expectQuestionEntry(group: HookMatcherGroup | undefined): void {
     expect(group?.matcher).toBe('AskUserQuestion');
-    expect(group?.hooks).toEqual([{ type: 'command', command: questionHookPath, timeout: 10 }]);
+    expect(group?.hooks).toEqual([{ type: 'command', command: hookCommand(questionHookPath), timeout: 10 }]);
   }
 
   it.each([undefined, 'approve', 'default', 'acceptEdits'] as const)(
@@ -120,7 +121,7 @@ describe('resolveInlineGatingHooks', () => {
       expect(fragment.PreToolUse).toHaveLength(2);
       const gate = fragment.PreToolUse![0];
       expect(gate.matcher).toBe('*');
-      expect(gate.hooks).toEqual([{ type: 'command', command: hookPath, timeout: 86_400 }]);
+      expect(gate.hooks).toEqual([{ type: 'command', command: hookCommand(hookPath), timeout: 86_400 }]);
       expectQuestionEntry(fragment.PreToolUse![1]);
       expectStopEntry(fragment);
     },

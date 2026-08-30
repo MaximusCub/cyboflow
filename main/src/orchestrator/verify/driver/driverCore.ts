@@ -90,7 +90,7 @@
  * real filesystem, or a real child process; `driverCli.ts` is its only
  * caller.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -1383,7 +1383,18 @@ async function defaultSpawnDetachedShell(args: {
   await mkdir(dirname(args.logPath), { recursive: true });
   const fd = openSync(args.logPath, 'a');
   try {
-    const child = spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd] });
+    // `detached: true` + unref is the POSIX detached-shape (new session via
+    // setsid). On Windows the same flag puts the child in a NEW PROCESS GROUP
+    // (no setsid), and there is no `sh` — cmd.exe /d /s /c is the interpreter
+    // that runs the command line; the tree is reaped via taskkill in
+    // defaultKillPid above.
+    const isWindows = process.platform === 'win32';
+    const child = isWindows
+      ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', args.command], {
+          detached: true,
+          stdio: ['ignore', fd, fd],
+        })
+      : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd] });
     child.unref();
     if (!child.pid) {
       throw new Error('failed to spawn the serve command: no pid assigned');
@@ -1441,6 +1452,19 @@ function defaultIsProcessAlive(pid: number): boolean {
 
 function defaultKillPid(pid: number, signal: NodeJS.Signals): void {
   try {
+    // A NEGATIVE pid means "kill the whole process group" on POSIX. Node on
+    // Windows rejects negative pids outright (EINVAL), and `detached: true`
+    // gives the child its own process group there, so the tree kill is done
+    // with `taskkill /T /F` on the positive pid instead — the Windows
+    // equivalent of taking down the group. Callers pass -pid only on POSIX
+    // semantics; both sign shapes land here.
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/pid', String(Math.abs(pid)), '/T', '/F'], {
+        stdio: 'ignore',
+        timeout: 10_000,
+      });
+      return;
+    }
     process.kill(pid, signal);
   } catch {
     // already gone — stop is best-effort.

@@ -1212,6 +1212,41 @@ export class SessionManager extends EventEmitter {
   private getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
 
+    if (process.platform === 'win32') {
+      // `ps` does not exist on Windows. One PowerShell call fetches the whole
+      // (pid, ppid) table, which is walked breadth-first here — the same
+      // best-effort contract as the POSIX recursion below, without a
+      // subprocess per tree level.
+      try {
+        const output = execSync(
+          'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"',
+          { encoding: 'utf8', timeout: 15_000 }
+        );
+        const childrenByParent = new Map<number, number[]>();
+        for (const line of output.split('\n').slice(1)) {
+          const match = line.match(/^"?(\d+)"?,"?(\d+)"?/);
+          if (!match) continue;
+          const pid = Number(match[1]);
+          const ppid = Number(match[2]);
+          const children = childrenByParent.get(ppid);
+          if (children) children.push(pid);
+          else childrenByParent.set(ppid, [pid]);
+        }
+        const queue = [parentPid];
+        while (queue.length > 0) {
+          const current = queue.pop() as number;
+          for (const child of childrenByParent.get(current) ?? []) {
+            descendants.push(child);
+            queue.push(child);
+          }
+        }
+      } catch (error) {
+        // Best-effort, same as the POSIX branch: a failed walk degrades to a
+        // partial kill list, never an error.
+      }
+      return descendants;
+    }
+
     try {
       // Use ps to get children on macOS/Unix
       const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });

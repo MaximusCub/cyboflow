@@ -31,7 +31,44 @@ export class ShellDetector {
   }
 
   private static detectShell(): ShellInfo {
+    if (process.platform === 'win32') {
+      return this.detectWindowsShell();
+    }
     return this.detectUnixShell();
+  }
+
+  /**
+   * Windows shell detection. Windows PowerShell 5.1 (`powershell.exe`) ships
+   * with every supported Windows host at a fixed location, so it is the
+   * guaranteed fallback; PowerShell 7 (`pwsh.exe`) is preferred when the user
+   * installed it and put it on PATH. cmd.exe is deliberately not used as the
+   * default interactive substrate: no `-c`-style command execution and a much
+   * weaker scripting surface for the flow agents.
+   */
+  private static detectWindowsShell(): ShellInfo {
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    const systemPowerShell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+    // pwsh.exe: probe PATH the cheap way (no subprocess) and fall through to
+    // the always-present system PowerShell.
+    const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    for (const dir of pathDirs) {
+      const candidate = path.join(dir, 'pwsh.exe');
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return { path: candidate, name: 'pwsh', args: this.getShellArgs('pwsh') };
+      } catch {
+        // Not here — keep scanning.
+      }
+    }
+
+    if (fs.existsSync(systemPowerShell)) {
+      return { path: systemPowerShell, name: 'powershell', args: this.getShellArgs('powershell') };
+    }
+
+    // cmd.exe is always present — last-resort so a spawn always has a target.
+    const cmd = path.join(systemRoot, 'System32', 'cmd.exe');
+    return { path: cmd, name: 'cmd', args: [] };
   }
 
   private static detectUnixShell(): ShellInfo {
@@ -110,6 +147,9 @@ export class ShellDetector {
       case 'zsh':
       case 'fish':
         return ['-i']; // Interactive mode
+      case 'pwsh':
+      case 'powershell':
+        return ['-NoLogo']; // Skip the banner in interactive PTY sessions
       default:
         return [];
     }
@@ -122,6 +162,15 @@ export class ShellDetector {
    */
   static getShellCommandArgs(command: string): { shell: string; args: string[] } {
     const shellInfo = this.getDefaultShell();
+    if (process.platform === 'win32') {
+      // PowerShell: -NoProfile avoids profile scripts slowing/derailing every
+      // command; -NonInteractive keeps the command from dropping into a REPL
+      // if the script awaits input.
+      return {
+        shell: shellInfo.path,
+        args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command],
+      };
+    }
     return { shell: shellInfo.path, args: ['-c', command] };
   }
 

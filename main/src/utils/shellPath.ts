@@ -42,16 +42,53 @@ let cachedPath: string | null = null;
 let isFirstCall: boolean = true;
 
 /**
- * Get the path separator (colon on macOS/Unix)
+ * Get the path separator (colon on macOS/Unix, semicolon on Windows)
  */
 function getPathSeparator(): string {
-  return ':';
+  return path.delimiter;
+}
+
+/**
+ * Windows PATH assembly. There is no login-shell discovery to do — GUI apps
+ * already inherit the user's PATH from the registry, and `powershell -c 'echo
+ * $PATH'` would only return what we already have. Just normalize the current
+ * PATH and append the npm global shim directory (the Windows analogue of the
+ * POSIX additional-paths sweep below).
+ */
+function getWindowsPath(): string {
+  const pathSep = path.delimiter;
+  const combinedPaths = new Set<string>((process.env.PATH || '').split(pathSep));
+
+  // npm's global bin directory (where npm puts .cmd shims) — not always on PATH.
+  const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  const npmGlobalBin = path.join(appData, 'npm');
+  if (fs.existsSync(npmGlobalBin)) {
+    combinedPaths.add(npmGlobalBin);
+  }
+
+  // User-configured additional paths, same semantics as the POSIX branch.
+  const userAdditionalPaths = getAdditionalPaths();
+  for (const p of userAdditionalPaths) {
+    combinedPaths.add(p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p);
+  }
+
+  const result = Array.from(combinedPaths).filter(p => p).join(pathSep);
+  console.log(`[ShellPath] Windows PATH assembled (${result.split(pathSep).length} entries)`);
+  return result;
 }
 
 /**
  * Get the user's shell PATH by executing their shell
  */
 export function getShellPath(): string {
+  if (process.platform === 'win32') {
+    if (cachedPath && !isFirstCall) {
+      return cachedPath;
+    }
+    isFirstCall = false;
+    cachedPath = getWindowsPath();
+    return cachedPath;
+  }
   // In packaged apps, always refresh PATH on first call to avoid cached restricted PATH
   if (cachedPath && !isFirstCall) {
     console.log('[ShellPath] Using cached PATH');
@@ -358,18 +395,27 @@ export function findExecutableInPath(executable: string): string | null {
 
   let searchedPaths = 0;
   for (const dir of paths) {
-    const fullPath = path.join(dir, executable);
     searchedPaths++;
-    try {
-      // In-process executability check — no /bin/sh fork per PATH directory.
-      // Was execSync('test -x "<fullPath>"') here, which forked a subprocess
-      // per candidate per call and stormed the process table for callers that
-      // resolve executables on every spawn (see findNodeExecutable).
-      fs.accessSync(fullPath, fs.constants.X_OK);
-      console.log(`[ShellPath] Found executable at: ${fullPath}`);
-      return fullPath;
-    } catch {
-      // Not found in this directory, or not executable
+    // On Windows, executables carry suffixes: `node` means node.exe, and npm
+    // installs .cmd shims. Probe the bare name (for suffix-less files) plus
+    // the Windows-specific suffixes; on POSIX only the bare name exists.
+    const candidates = [executable];
+    if (process.platform === 'win32') {
+      candidates.push(`${executable}.exe`, `${executable}.cmd`);
+    }
+    for (const candidate of candidates) {
+      const fullPath = path.join(dir, candidate);
+      try {
+        // In-process executability check — no /bin/sh fork per PATH directory.
+        // Was execSync('test -x "<fullPath>"') here, which forked a subprocess
+        // per candidate per call and stormed the process table for callers that
+        // resolve executables on every spawn (see findNodeExecutable).
+        fs.accessSync(fullPath, fs.constants.X_OK);
+        console.log(`[ShellPath] Found executable at: ${fullPath}`);
+        return fullPath;
+      } catch {
+        // Not found in this directory, or not executable
+      }
     }
   }
 

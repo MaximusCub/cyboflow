@@ -96,8 +96,8 @@ export const VERIFY_AGENT_ALLOWED_TOOLS: readonly string[] = ['Bash', 'Read', 'G
 
 /** Subdir under VERIFY_ARTIFACTS_DIR holding the driver wrapper script (co-located with the driver's pid file). */
 const DRIVER_STATE_DIR = '.driver';
-/** The wrapper script the agent invokes as `$VERIFY_DRIVER`. */
-const DRIVER_SCRIPT_NAME = 'verify-driver.sh';
+/** The wrapper script the agent invokes as `$VERIFY_DRIVER` (a .cmd on Windows). */
+const DRIVER_SCRIPT_NAME = process.platform === 'win32' ? 'verify-driver.cmd' : 'verify-driver.sh';
 
 // ---------------------------------------------------------------------------
 // SDK-query seam (the module under test injects a fake — NO SDK import here)
@@ -1661,7 +1661,12 @@ const defaultWriteDriverScript = async (
   // ELECTRON_RUN_AS_NODE makes the packaged Electron binary (process.execPath, the
   // findNodeExecutable fallback in a packaged app) behave as plain node; harmless
   // for a real node. `exec` so the driver process replaces the shell (clean signals).
-  const body = `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
+  // On Windows there is no /bin/sh — a .cmd wrapper does the same job (set the
+  // env var, forward every argument). Node 24 refuses to spawn .cmd files
+  // directly (EINVAL), so defaultStopDriver routes through cmd.exe there.
+  const body = process.platform === 'win32'
+    ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${nodePath}" "${driverCliPath}" %*\r\n`
+    : `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
   await writeFile(scriptPath, body, 'utf8');
   await chmod(scriptPath, 0o755);
   return scriptPath;
@@ -1672,7 +1677,13 @@ const defaultStopDriver = async (
   env: Record<string, string>,
 ): Promise<void> => {
   try {
-    await execFileAsync(driverScriptPath, ['stop'], { env: { ...process.env, ...env }, timeout: 20_000 });
+    // Node on Windows refuses to spawn .cmd/.bat files directly (EINVAL), so
+    // the wrapper is executed through cmd.exe there — the same interpreter the
+    // agent's own shell uses for $VERIFY_DRIVER.
+    const [file, args] = process.platform === 'win32'
+      ? [process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', driverScriptPath, 'stop']]
+      : [driverScriptPath, ['stop']];
+    await execFileAsync(file, args, { env: { ...process.env, ...env }, timeout: 20_000 });
   } catch {
     // best-effort — the reaper + port probe are the real backstop.
   }
