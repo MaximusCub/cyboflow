@@ -63,7 +63,7 @@ blocking mocked-SDK job for `main/src/services/panels/claude/` changes.
 pnpm typecheck        # must be clean
 pnpm lint             # 0 errors (warnings are non-gating)
 pnpm test:unit        # main + frontend vitest, schema parity, build scripts
-pnpm test:integration # 18 mocked-SDK *.itest.ts
+pnpm test:integration # the mocked-SDK *.itest.ts suite
 
 # Packaged-app smoke tier (blocking since 2026-08-14): drives the built bundle
 # via Playwright _electron.launch(). e2e:prereqs rebuilds native modules for the

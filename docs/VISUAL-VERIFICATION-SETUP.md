@@ -166,14 +166,7 @@ real display to appear on screen. For headless code-change validation use
 `pnpm test:unit`; for visual verification use `visual_macos` via Peekaboo
 against a running `pnpm dev` (see above).
 
-The `pretest:e2e` hook rebuilds `better-sqlite3` for the Electron ABI so the
-launched app can load it, which leaves the module on the wrong ABI for
-host-side `vitest` runs. That is now restored automatically the next time you
-run `pnpm test:unit` / `pnpm test:integration`; only a direct `npx vitest run`
-needs `node scripts/ensure-sqlite-abi.mjs host` by hand.
-
-Likewise, `pnpm dev` ensures the Electron ABI before launching, so a dev app
-started right after a unit-test run no longer dies on `NODE_MODULE_VERSION`.
-
-See `docs/ARCHITECTURE.md` → "The better-sqlite3 ABI ping-pong" for the full
+The `pretest:e2e` hook rebuilds `better-sqlite3` for the Electron ABI, which the
+next `pnpm test:unit` / `pnpm test:integration` / `pnpm dev` restores automatically —
+see `docs/ARCHITECTURE.md` → "The better-sqlite3 ABI ping-pong" for the full
 contract, and "Build & Run" for the e2e contract.
