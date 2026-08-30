@@ -167,8 +167,13 @@ const defaultSpawn: SpawnAppServerProcess = (command, args, options) => {
     stdio: ['pipe', 'pipe', 'pipe'],
     // Lead a fresh process group so teardown can reap the whole tree
     // (app-server + its MCP-bridge / MCP-server node children) via a
-    // negative-pid group signal instead of orphaning them.
-    detached: true,
+    // negative-pid group signal instead of orphaning them. On Windows there
+    // is no process group — teardown is `taskkill /T` on the positive pid —
+    // and `detached`'s DETACHED_PROCESS leaves codex.exe console-less, which
+    // makes it allocate its own VISIBLE console (the black window flash
+    // during provider detection under the Windows-Terminal default), so the
+    // flag is win32-conditional.
+    ...(process.platform === 'win32' ? {} : { detached: true }),
     windowsHide: true,
   });
 };
