@@ -269,16 +269,14 @@ export class RunCommandManager extends EventEmitter {
   }
 
   /**
-   * Kill a process and all its descendants
-   * Returns true if successful, false if zombie processes remain
+   * Kill a process and all its descendants. Returns true if successful, false
+   * if zombie processes remain.
    *
-   * The win32 taskkill ladder (graceful /T → grace window → /T /F →
-   * per-descendant /F → verification) lives in utils/platformProcess.ts
-   * (killTree) — it used to be duplicated here, in AbstractCliManager and
-   * terminalSessionManager. This site contributes its runner/probe seams, its
-   * fixed (non-polling) 2s grace window and its zombie-event reporting; the
-   * POSIX ladder below stays here because its shape (pgid lookup + group
-   * enumeration + fixed 10s wait) is genuinely this site's own.
+   * The win32 arm delegates to the shared ladder in utils/platformProcess.ts
+   * (killTree), preserving this site's fixed (non-polling) 2s grace window and
+   * zombie-event reporting; the POSIX ladder below stays here because its
+   * shape (pgid lookup + group enumeration + fixed 10s wait) is genuinely this
+   * site's own.
    */
   private async killProcessTree(pid: number, commandName: string): Promise<boolean> {
     // `windowsHide: true` — every taskkill/kill/pkill here must never flash a

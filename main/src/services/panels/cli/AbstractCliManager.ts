@@ -1161,16 +1161,14 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
-   * Kill a process and all its descendants
+   * Kill a process and all its descendants.
    *
-   * The win32 taskkill ladder (graceful /T → bounded grace poll → /T /F →
-   * per-descendant /F → verification) lives in utils/platformProcess.ts
-   * (killTree) — it used to be duplicated here, in runCommandManager and
-   * terminalSessionManager. This site contributes its runner/probe seams, its
-   * zombie reporting (process names via getProcessInfo, emitted as CLI output)
-   * and its final pty-kill fallback; the POSIX ladder below stays here because
-   * its shape (no pgid lookup — the pty child is its own group leader — and a
-   * fixed 200ms grace) is genuinely this site's own.
+   * The win32 arm delegates to the shared ladder in utils/platformProcess.ts
+   * (killTree), preserving this site's zombie reporting (process names via
+   * getProcessInfo, emitted as CLI output) and final pty-kill fallback; the
+   * POSIX ladder below stays here because its shape (no pgid lookup — the pty
+   * child is its own group leader — and a fixed 200ms grace) is genuinely this
+   * site's own.
    */
   protected async killProcessTree(pid: number, panelId: string, sessionId: string): Promise<boolean> {
     const descendantPids = this.getAllDescendantPids(pid);
