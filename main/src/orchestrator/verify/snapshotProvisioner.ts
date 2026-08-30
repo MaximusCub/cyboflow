@@ -348,29 +348,10 @@ async function cloneDependencyDir(
   exec: DepExec,
   logger?: LoggerLike,
 ): Promise<void> {
-  // Windows has no `cp` to shell out to (and the packaged app cannot assume a
-  // Git-for-Windows `cp.exe` on PATH), so the clone is done in-process. The
-  // symlink-preservation contract above is carried by `verbatimSymlinks` —
-  // links are recreated as links, exactly as BSD `cp -R` does on POSIX.
-  if (process.platform === 'win32') {
-    try {
-      await fsPromises.cp(src, dest, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
-      return;
-    } catch (err) {
-      await removeInsideSnapshot(snapshotWorktreePath, dest, logger);
-      // One retry from a clean destination — mirroring the POSIX ladder's
-      // remove-then-retry, without the clonefile attempt.
-      try {
-        await fsPromises.cp(src, dest, { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false });
-        return;
-      } catch (retryErr) {
-        throw new Error(
-          `fs.cp failed for ${src}: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
-        );
-      }
-    }
-  }
-
+  // Windows has no `cp` to shell out to; `defaultDepExec` translates these two
+  // argv into an in-process junction-preserving copy there (depPreparer.ts).
+  // Running the ladder THROUGH the injected seam keeps that seam the one
+  // authoritative failure point on every platform.
   const cloned = await exec('cp', ['-Rc', src, dest], {
     cwd: snapshotWorktreePath,
     timeoutMs: CLONE_TIMEOUT_MS,
