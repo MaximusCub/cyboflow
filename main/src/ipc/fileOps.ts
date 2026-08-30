@@ -4,6 +4,7 @@ import * as os from 'os';
 import { glob } from 'glob';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { runGitAsync, runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
+import { normalizePathSeparators } from '../utils/posixPath';
 import type { AppServices } from './types';
 import type { WorkspaceFileOpsLike, FileItem } from '../orchestrator/trpc/contracts/workspaceFileOps';
 
@@ -739,7 +740,7 @@ export function createFileOps(
             // with '/'), while path.relative is platform-native (backslashes on
             // Windows). Normalize once for MATCHING — the reported path stays
             // exactly what path.relative produced.
-            const relativeMatchPath = relativePath.replace(/\\/g, '/');
+            const relativeMatchPath = normalizePathSeparators(relativePath);
 
             // Skip worktree directories
             if (relativeMatchPath.includes('worktrees/') || relativeMatchPath.startsWith('worktrees/')) {
