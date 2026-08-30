@@ -111,7 +111,7 @@ describe('findNodeExecutable', () => {
       mockExecSync.mockReturnValue(`${firstHit}\r\nD:\\elsewhere\\node.exe\r\n`);
 
       const resolved = await findNodeExecutable();
-      expect(mockExecSync).toHaveBeenCalledWith('where node', { encoding: 'utf8' });
+      expect(mockExecSync).toHaveBeenCalledWith('where node', { encoding: 'utf8', windowsHide: true });
       expect(resolved).toBe(firstHit);
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });

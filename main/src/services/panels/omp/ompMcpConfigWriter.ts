@@ -198,6 +198,7 @@ function ensureWorktreeExcludesOmpDir(worktreePath: string, logger?: Logger): vo
     const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
       cwd: worktreePath,
       encoding: 'utf8',
+      windowsHide: true,
       // Pin git's message language the same way workflowBundleInstall does,
       // so a locale-dependent "not a git repository" message never surprises
       // a caller trying to distinguish "no repo" from a real failure here —

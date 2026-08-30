@@ -208,7 +208,7 @@ function defaultListProcesses(): Promise<McpOrphanProcess[]> {
       ['-axo', 'pid=,ppid=,etime=,command='],
       // Command lines can be long; 16 MiB is comfortably above any realistic
       // full process table (mirrors CodexBrokerReaper's default lister).
-      { maxBuffer: 16 * 1024 * 1024 },
+      { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));

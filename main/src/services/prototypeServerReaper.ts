@@ -93,7 +93,7 @@ function defaultListProcesses(): Promise<ProcessInfo[]> {
       ['-axo', 'pid=,command='],
       // Command lines can be long; 16 MiB is comfortably above any realistic
       // full process table.
-      { maxBuffer: 16 * 1024 * 1024 },
+      { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));

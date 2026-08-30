@@ -92,7 +92,7 @@ function defaultDependencies(): GitFinderDependencies {
     whereGit: () => {
       try {
         const command = process.platform === 'win32' ? 'where git' : 'which git';
-        const firstLine = execSync(command, { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+        const firstLine = execSync(command, { encoding: 'utf8', windowsHide: true }).trim().split(/\r?\n/)[0];
         return firstLine || null;
       } catch {
         return null;

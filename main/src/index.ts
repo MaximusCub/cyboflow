@@ -2087,11 +2087,11 @@ async function initializeServices(): Promise<boolean> {
       // the project ROOT (baselines are durable at root, not the run worktree).
       if (written.length > 0) {
         try {
-          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe' });
+          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe', windowsHide: true });
           execFileSync(
             resolveGitCommand(),
             ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
-            { cwd: projectRoot, stdio: 'pipe' },
+            { cwd: projectRoot, stdio: 'pipe', windowsHide: true },
           );
         } catch (err) {
           // A git failure (no repo / nothing changed) is logged but does not undo the

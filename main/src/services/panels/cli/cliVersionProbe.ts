@@ -89,6 +89,7 @@ function defaultRunCommand(
     encoding: 'utf8',
     timeout: VERSION_PROBE_TIMEOUT_MS,
     env,
+    windowsHide: true,
     ...(options?.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
 }

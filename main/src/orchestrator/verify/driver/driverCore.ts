@@ -557,7 +557,7 @@ async function runWindowsScreenCapture(
       const child = spawn(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-OutPath', outPath],
-        { stdio: ['ignore', 'ignore', 'pipe'] },
+        { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
       );
       let stderr = '';
       child.stderr?.on('data', (d: Buffer) => {
@@ -1438,7 +1438,7 @@ async function defaultSpawnDetachedChromium(args: {
       '--no-sandbox',
       `--user-data-dir=${args.userDataDir}`,
     ],
-    { detached: true, stdio: 'ignore' },
+    { detached: true, stdio: 'ignore', windowsHide: true },
   );
   child.unref();
   if (!child.pid) {
@@ -1478,8 +1478,9 @@ async function defaultSpawnDetachedShell(args: {
       ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', args.command], {
           detached: true,
           stdio: ['ignore', fd, fd],
+          windowsHide: true,
         })
-      : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd] });
+      : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
     child.unref();
     if (!child.pid) {
       throw new Error('failed to spawn the serve command: no pid assigned');
@@ -1547,6 +1548,7 @@ function defaultKillPid(pid: number, signal: NodeJS.Signals): void {
       spawnSync('taskkill', ['/pid', String(Math.abs(pid)), '/T', '/F'], {
         stdio: 'ignore',
         timeout: 10_000,
+        windowsHide: true,
       });
       return;
     }
@@ -1576,7 +1578,7 @@ async function defaultHttpGet(url: string, timeoutMs: number): Promise<{ status:
  */
 function defaultRunPeekaboo(bin: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     let settled = false;

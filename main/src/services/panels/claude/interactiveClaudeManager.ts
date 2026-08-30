@@ -878,6 +878,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       const raw = execSync(`${quoteForShellString(resolveGitCommand())} rev-parse --git-path info/exclude`, {
         cwd: worktreePath,
         encoding: 'utf-8',
+        windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
       if (raw.length === 0) return;

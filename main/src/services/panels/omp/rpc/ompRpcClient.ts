@@ -186,6 +186,7 @@ const defaultSpawn: SpawnOmpRpcProcess = (command, args, options) => {
     // Lead a fresh process group so teardown reaps OMP's own children (MCP
     // servers, tool subprocesses) instead of orphaning them.
     detached: true,
+    windowsHide: true,
   });
 };
 

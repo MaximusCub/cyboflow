@@ -75,6 +75,7 @@ const defaultGitExec: GitExec = async (args, cwd) => {
     encoding: 'utf8',
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: GIT_MAX_BUFFER,
+    windowsHide: true,
   });
   return stdout;
 };

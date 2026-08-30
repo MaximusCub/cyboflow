@@ -136,6 +136,7 @@ export class LogsManager {
     const childProcess = spawn(command, [], {
       cwd,
       shell: true,
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: shellPath
@@ -201,7 +202,7 @@ export class LogsManager {
       try {
         const output = execSync(
           `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000 }
+          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
         );
         return collectDescendantPids(parentPid, parseProcessTable(output));
       } catch (error) {
@@ -210,7 +211,7 @@ export class LogsManager {
     }
 
     try {
-      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
+      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8', windowsHide: true });
       const pids = output.split('\n')
         .map(line => parseInt(line.trim()))
         .filter(pid => !isNaN(pid));
@@ -264,7 +265,7 @@ export class LogsManager {
       // Use shell command as ultimate fallback (kill -9 cannot be caught or ignored)
       const killCmd = `kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`;
       await new Promise<void>((resolve) => {
-        exec(killCmd, () => {
+        exec(killCmd, { windowsHide: true }, () => {
           // Ignore errors - processes might already be dead
           resolve();
         });

@@ -128,7 +128,10 @@ export abstract class AbstractCliManager extends EventEmitter {
   private readonly deliberatelyKilledPanels = new Set<string>();
   protected availabilityCache: AvailabilityCache | null = null;
   protected readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes cache
-  protected readonly execAsync = promisify(exec);
+  // Wrapped (rather than a bare promisify(exec)) so every kill-ladder call
+  // passes windowsHide — a packaged Windows app must never flash a conhost.
+  protected readonly execAsync = async (command: string): Promise<{ stdout: string; stderr: string }> =>
+    promisify(exec)(command, { windowsHide: true });
 
   constructor(
     protected sessionManager: import('../../sessionManager').SessionManager,
@@ -1104,7 +1107,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       try {
         const output = execSync(
           `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000 }
+          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
         );
         return collectDescendantPids(parentPid, parseProcessTable(output));
       } catch (error) {
@@ -1120,7 +1123,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       // descendants on macOS (the primary ship platform).
       const result = execSync(
         `pgrep -P ${parentPid} 2>/dev/null || true`,
-        { encoding: 'utf8' }
+        { encoding: 'utf8', windowsHide: true }
       );
 
       const pids = result.split('\n')
@@ -1179,7 +1182,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       try {
         const result = execSync(
           `ps -p ${pid} -o comm= 2>/dev/null || true`,
-          { encoding: 'utf8' }
+          { encoding: 'utf8', windowsHide: true }
         );
         const name = result.trim();
         processInfo.push({ pid, name: name || 'unknown' });
