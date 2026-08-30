@@ -59,6 +59,9 @@ async function initFixtureRepo(dir: string): Promise<void> {
   git(dir, ['init', '-q']);
   git(dir, ['config', 'user.email', 'test@cyboflow.dev']);
   git(dir, ['config', 'user.name', 'Cyboflow Test']);
+  // The fixtures assert exact file bytes ('v1\n'); a host with core.autocrlf=true
+  // would CRLF-convert the snapshot's checkout and break every byte comparison.
+  git(dir, ['config', 'core.autocrlf', 'false']);
   await fsPromises.writeFile(path.join(dir, 'README.md'), 'v1\n');
   git(dir, ['add', '.']);
   git(dir, ['commit', '-q', '-m', 'init']);
@@ -220,7 +223,7 @@ describe('snapshotProvisioner', () => {
 
         const found = await findDependencyDirs(dir);
         const relFound = found.map((f) => path.relative(dir, f)).sort();
-        expect(relFound).toEqual(['node_modules', 'sub/node_modules'].sort());
+        expect(relFound).toEqual(['node_modules', path.join('sub', 'node_modules')].sort());
         expect(relFound).not.toContain(path.join('node_modules', 'node_modules'));
 
         const snapshotSha = await captureSnapshotSha(dir);
@@ -253,63 +256,70 @@ describe('snapshotProvisioner', () => {
       });
     });
 
-    it('a pnpm WORKSPACE link inside a cloned mirror resolves against the SNAPSHOT source — not the live worktree, not the mirror (§7.2 finding 6)', async () => {
-      await withTempDir('snapshot-provisioner-', async (dir) => {
-        const worktree = path.join(dir, 'worktree');
-        await fsPromises.mkdir(worktree, { recursive: true });
-        await initFixtureRepo(worktree);
-        await addPreparerInputs(worktree);
+    // POSIX-only fixture, deliberately: the subject is a RELATIVE workspace
+    // symlink preserved verbatim through both copies. Windows cannot create one
+    // without symlink privilege (EPERM), and its junction equivalent is
+    // absolute-only, so there is no relative workspace link there to preserve.
+    it.skipIf(process.platform === 'win32')(
+      'a pnpm WORKSPACE link inside a cloned mirror resolves against the SNAPSHOT source — not the live worktree, not the mirror (§7.2 finding 6)',
+      async () => {
+        await withTempDir('snapshot-provisioner-', async (dir) => {
+          const worktree = path.join(dir, 'worktree');
+          await fsPromises.mkdir(worktree, { recursive: true });
+          await initFixtureRepo(worktree);
+          await addPreparerInputs(worktree);
 
-        // The workspace shape that broke: `frontend` depends on the local
-        // `shared` package, and pnpm expresses that as a RELATIVE symlink out of
-        // node_modules into WORKSPACE SOURCE — not into the `.pnpm` store.
-        await fsPromises.mkdir(path.join(worktree, 'shared'), { recursive: true });
-        await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'committed at the snapshot sha\n');
-        await fsPromises.mkdir(path.join(worktree, 'frontend'), { recursive: true });
-        await fsPromises.writeFile(path.join(worktree, 'frontend', 'package.json'), JSON.stringify({ name: 'fe' }));
-        git(worktree, ['add', 'shared/mod.js', 'frontend/package.json']);
-        git(worktree, ['commit', '-q', '-m', 'workspace source']);
-        const snapshotSha = await captureSnapshotSha(worktree);
+          // The workspace shape that broke: `frontend` depends on the local
+          // `shared` package, and pnpm expresses that as a RELATIVE symlink out of
+          // node_modules into WORKSPACE SOURCE — not into the `.pnpm` store.
+          await fsPromises.mkdir(path.join(worktree, 'shared'), { recursive: true });
+          await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'committed at the snapshot sha\n');
+          await fsPromises.mkdir(path.join(worktree, 'frontend'), { recursive: true });
+          await fsPromises.writeFile(path.join(worktree, 'frontend', 'package.json'), JSON.stringify({ name: 'fe' }));
+          git(worktree, ['add', 'shared/mod.js', 'frontend/package.json']);
+          git(worktree, ['commit', '-q', '-m', 'workspace source']);
+          const snapshotSha = await captureSnapshotSha(worktree);
 
-        await fsPromises.mkdir(path.join(worktree, 'frontend', 'node_modules'), { recursive: true });
-        await fsPromises.symlink('../../shared', path.join(worktree, 'frontend', 'node_modules', 'shared'), 'dir');
-        await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
+          await fsPromises.mkdir(path.join(worktree, 'frontend', 'node_modules'), { recursive: true });
+          await fsPromises.symlink('../../shared', path.join(worktree, 'frontend', 'node_modules', 'shared'), 'dir');
+          await fsPromises.mkdir(path.join(worktree, 'node_modules'), { recursive: true });
 
-        // A sibling lane edits the workspace source AFTER the recorded sha. If
-        // the link resolved into the live worktree we would read this string;
-        // reading the committed one is the proof it resolved into the snapshot.
-        await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'uncommitted sibling-lane edit\n');
+          // A sibling lane edits the workspace source AFTER the recorded sha. If
+          // the link resolved into the live worktree we would read this string;
+          // reading the committed one is the proof it resolved into the snapshot.
+          await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'uncommitted sibling-lane edit\n');
 
-        const baseDir = path.join(dir, 'verify-deps');
-        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
+          const baseDir = path.join(dir, 'verify-deps');
+          const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
 
-        const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
-        try {
-          const linkPath = path.join(provision.worktreePath, 'frontend', 'node_modules', 'shared');
+          const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
+          try {
+            const linkPath = path.join(provision.worktreePath, 'frontend', 'node_modules', 'shared');
 
-          // The link survived both copies VERBATIM — dereferencing it anywhere
-          // along the way would have re-pinned the snapshot to foreign source.
-          expect((await fsPromises.lstat(linkPath)).isSymbolicLink()).toBe(true);
-          expect(await fsPromises.readlink(linkPath)).toBe('../../shared');
+            // The link survived both copies VERBATIM — dereferencing it anywhere
+            // along the way would have re-pinned the snapshot to foreign source.
+            expect((await fsPromises.lstat(linkPath)).isSymbolicLink()).toBe(true);
+            expect(await fsPromises.readlink(linkPath)).toBe('../../shared');
 
-          // …and it resolves to the SNAPSHOT's checked-out `shared/`.
-          expect(await fsPromises.realpath(linkPath)).toBe(
-            await fsPromises.realpath(path.join(provision.worktreePath, 'shared')),
-          );
-          expect(await fsPromises.readFile(path.join(linkPath, 'mod.js'), 'utf8')).toBe(
-            'committed at the snapshot sha\n',
-          );
+            // …and it resolves to the SNAPSHOT's checked-out `shared/`.
+            expect(await fsPromises.realpath(linkPath)).toBe(
+              await fsPromises.realpath(path.join(provision.worktreePath, 'shared')),
+            );
+            expect(await fsPromises.readFile(path.join(linkPath, 'mod.js'), 'utf8')).toBe(
+              'committed at the snapshot sha\n',
+            );
 
-          // The mirror could never have satisfied this link: it holds
-          // dependencies and deliberately no source, so `<mirror>/shared` does
-          // not exist. That is finding 6 stated as a fixture fact — before the
-          // clone, this link pointed here and dangled.
-          expect(await exists(path.join(await soleMirrorRoot(baseDir), 'shared'))).toBe(false);
-        } finally {
-          await provision.dispose();
-        }
-      });
-    });
+            // The mirror could never have satisfied this link: it holds
+            // dependencies and deliberately no source, so `<mirror>/shared` does
+            // not exist. That is finding 6 stated as a fixture fact — before the
+            // clone, this link pointed here and dangled.
+            expect(await exists(path.join(await soleMirrorRoot(baseDir), 'shared'))).toBe(false);
+          } finally {
+            await provision.dispose();
+          }
+        });
+      },
+    );
 
     it('clones from the PREPARED MIRROR when a prepared set exists (§7.2), and snapshot writes reach neither the mirror nor the worktree', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {

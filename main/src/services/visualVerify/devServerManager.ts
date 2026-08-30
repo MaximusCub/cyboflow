@@ -19,7 +19,8 @@
  * Spawn pattern mirrors AbstractCliManager.spawnPtyProcess / killProcessTree:
  *  - optional `build` runs first, awaited to completion (a non-zero exit aborts).
  *  - `start` is spawned long-lived with `${PORT}` interpolated + the PORT env var
- *    set, in its OWN process group (detached) so the whole tree can be signalled.
+ *    set, in its OWN process group on POSIX (detached) so the whole tree can be
+ *    signalled.
  *  - readiness = the `readyWhen` token appearing in stdout/stderr (default
  *    fallback: a basic HTTP poll on baseUrl) — whichever resolves first.
  *  - teardown (release()) = graceful SIGTERM on the process GROUP, then a SIGKILL
@@ -148,7 +149,11 @@ export class DevServerManager implements DevServerProvider {
     const child = spawn(startCommand, {
       cwd,
       shell: true,
-      detached: true, // own process group → kill(-pid) reaches the whole tree.
+      // `detached` buys the POSIX process-group kill in signalTree. On Windows
+      // there are no process groups — teardown goes through taskkill /T /F —
+      // and DETACHED_PROCESS measurably severs the spawned tree's stdio pipes,
+      // so a readyWhen token could never arrive. POSIX behavior is unchanged.
+      detached: process.platform !== 'win32',
       windowsHide: true,
       env: { ...process.env, PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -196,7 +201,9 @@ export class DevServerManager implements DevServerProvider {
       const child = spawn(command, {
         cwd,
         shell: true,
-        detached: true,
+        // Same platform split as the start spawn above: Windows teardown is
+        // taskkill-based, and detached severs the build's stdio pipes there.
+        detached: process.platform !== 'win32',
         windowsHide: true,
         env: { ...process.env, PORT: String(port) },
         stdio: ['ignore', 'pipe', 'pipe'],
