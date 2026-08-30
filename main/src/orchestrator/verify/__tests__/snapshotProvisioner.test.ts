@@ -38,14 +38,16 @@ function git(cwd: string, args: string[]): string {
 }
 
 /**
- * An exec seam for VerifyDepPreparer that performs `cp` FOR REAL (see the file
- * header — a JS-level copy would rewrite relative symlinks and invalidate the
- * workspace-link case) and treats the Electron rebuild as a no-op: the
- * preparer's own suite proves its mechanics, and here it only has to produce a
- * real mirror on disk for the snapshot to clone from.
+ * An exec seam for VerifyDepPreparer that performs the CLONE RUNGS for real —
+ * `cp` on POSIX (see the file header — a JS-level copy would rewrite relative
+ * symlinks and invalidate the workspace-link case), robocopy on Windows — both
+ * via the production `defaultDepExec` — and treats the Electron rebuild as a
+ * no-op: the preparer's own suite proves its mechanics, and here it only has
+ * to produce a real mirror on disk for the snapshot to clone from.
  */
-function realCpDepExec(): DepExec {
-  return async (cmd, args, opts) => (cmd === 'cp' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' });
+function realCloneDepExec(): DepExec {
+  return async (cmd, args, opts) =>
+    cmd === 'cp' || cmd === 'robocopy' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' };
 }
 
 /** Adds the lockfile + package.json the preparer keys on (uncommitted is fine — it reads the live worktree). */
@@ -290,7 +292,7 @@ describe('snapshotProvisioner', () => {
           await fsPromises.writeFile(path.join(worktree, 'shared', 'mod.js'), 'uncommitted sibling-lane edit\n');
 
           const baseDir = path.join(dir, 'verify-deps');
-          const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
+          const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCloneDepExec() });
 
           const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
           try {
@@ -331,7 +333,7 @@ describe('snapshotProvisioner', () => {
         await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
 
         const baseDir = path.join(dir, 'verify-deps');
-        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCloneDepExec() });
         const snapshotSha = await captureSnapshotSha(worktree);
 
         const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
@@ -367,7 +369,7 @@ describe('snapshotProvisioner', () => {
         await fsPromises.writeFile(path.join(worktree, 'node_modules', 'marker.txt'), 'live-marker\n');
 
         const baseDir = path.join(dir, 'verify-deps');
-        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCpDepExec() });
+        const depPreparer = new VerifyDepPreparer({ baseDir, exec: realCloneDepExec() });
         const snapshotSha = await captureSnapshotSha(worktree);
 
         const provision = await provisionSnapshot({ runWorktreePath: worktree, snapshotSha, depPreparer });
@@ -431,7 +433,10 @@ describe('snapshotProvisioner', () => {
           },
         });
         try {
-          // It tried clonefile first, then the plain recursive copy…
+          // It tried clonefile first, then the plain recursive copy — on every
+          // platform. The production default TRANSLATES these rungs on Windows
+          // (no `cp` binary there), but an injected exec is the seam itself and
+          // is consulted verbatim on both.
           expect(cpArgs.map((a) => a[1])).toEqual(['-Rc', '-R']);
           // …and then left the dir absent, which surfaces downstream as an
           // honest build failure. A symlink here would be the §7.2 hazard
