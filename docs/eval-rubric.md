@@ -1,6 +1,6 @@
 # Code-Review Eval — Full Evaluation Checklist (rubric v1.2)
 
-> Draft for review. This is the concrete per-dimension checklist an **independent, out-of-loop judge** runs against the frozen pre-human diff snapshot a workflow produced. It measures how workflow variants perform. Output = overall /100 + per-dimension sub-scores.
+> **SHIPPED — source of truth for `main/src/orchestrator/eval/rubric.ts`.** This is the concrete per-dimension checklist an **independent, out-of-loop judge** runs against the frozen pre-human diff snapshot a workflow produced. `rubric.ts` declares itself the frozen, data-only transcription of this document (`RUBRIC_VERSION = '1.2'`, matching the header below); edit here first, then port the change into `rubric.ts` and its faithfulness tests. Output = overall /100 + per-dimension sub-scores.
 
 > **v1.2** adds an 8th dimension — **Efficiency & Economy** (weight 10, 6 sub-checks) — owning ECONOMY OF MECHANISM. Four of its sub-checks are MOVES that preserve the rubric's sole-owner de-dup discipline (DES-3 → EFF-1, MTN-8 → EFF-2, MTN-5 → EFF-3, COR-9 → EFF-4); EFF-5 (dead weight) and EFF-6 (mechanism proportionality) are net-new. Donor dimensions keep their surviving sub-check numbers — the gaps at DES-3 / MTN-5 / MTN-8 / COR-9 are intentional so existing cross-references stay valid. Weights rebalanced to 24/18/14/11/8/8/7/10. See the Revision history for the full rationale.
 
