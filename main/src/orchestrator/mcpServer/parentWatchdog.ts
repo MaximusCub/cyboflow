@@ -7,7 +7,7 @@
  * when the Electron main process dies, not when the server's spawner does. Between
  * those two moments the server is a live process that nothing can reach and nothing
  * will kill. A single long-running app accumulated 40 such orphans (214 MB) in one
- * uptime. See PLAN-mcp-orphan-reaper.md §2.
+ * uptime. See docs/archive/mcp-orphan-reaper-plan.md §2.
  *
  * WHY PPID, AND WHY IT IS THE PRIMARY SIGNAL RATHER THAN A BACKSTOP. On macOS this
  * has no false-positive class. Darwin has no subreaper API, so an orphan reparents

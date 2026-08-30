@@ -1,10 +1,10 @@
 # PLAN: orphaned `cyboflowMcpServer` processes — root cause + self-termination fix
 
-> **Revision 5 — IMPLEMENTED.** Shipped across five commits (`65dd4fd4`…`59902d1a`) plus the
-> round-4 review fixes. Two defects found after implementation are recorded inline: the age gate
-> measured the wrong quantity (§7), and the production tripwire was constructed without a logger,
-> so it observed correctly and reported to nobody — its `logger` is now a required constructor
-> argument, making that instance impossible to build.
+> **Revision 5 — IMPLEMENTED.** Shipped across commits `047375f5e`, `f1a9909d9`, `8cdeffffa`
+> (2026-08-12) plus the round-4 review fixes. Two defects found after implementation are
+> recorded inline: the age gate measured the wrong quantity (§7), and the production tripwire
+> was constructed without a logger, so it observed correctly and reported to nobody — its
+> `logger` is now a required constructor argument, making that instance impossible to build.
 >
 > Rev 1 proposed an external `ps` reaper and called the root cause unknown.
 > Rev 2 established the root cause from source and moved the fix inside the server. Rev 3

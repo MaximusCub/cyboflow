@@ -1,5 +1,9 @@
 # Timestamp Handling Guidelines
 
+> **HISTORICAL — Crystal-era guide.** Preserved for reference to the fork baseline.
+> For cyboflow's current architecture (orchestrator, entity model, review queue, dual-substrate
+> seam) see `docs/ARCHITECTURE.md`, which is the source of truth.
+
 ⚠️ **IMPORTANT**: Proper timestamp handling is critical for the application to function correctly, especially for prompt duration calculations.
 
 ## Overview

@@ -12,6 +12,11 @@
 | OS | Darwin 25.2.0 (macOS Sequoia 26 beta) |
 | Branch | `soloflow/run-20260514-153933-SPRINT-008` |
 
+> **Screenshot caveat:** The four screenshots this report cites (`panel-stream-1.png`,
+> `review-queue-intercept.png`, `review-queue-deny.png`, `panel-resume.png` under
+> `docs/screenshots/sdk-migration/`) were captured during the smoke but never committed to the
+> repo — treat the cited evidence as described-but-unavailable.
+
 > **Autonomous-execution caveat:** This smoke was run by an autonomous executor
 > (Claude Sonnet 4.6) without a human operating the Electron UI.  Signals that
 > require live UI interaction (panel create/prompt/stream, review-queue intercept,

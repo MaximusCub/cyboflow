@@ -1,5 +1,9 @@
 # Diff Viewer CSS Troubleshooting
 
+> **HISTORICAL — Crystal-era guide.** Preserved for reference to the fork baseline.
+> For cyboflow's current architecture (orchestrator, entity model, review queue, dual-substrate
+> seam) see `docs/ARCHITECTURE.md`, which is the source of truth.
+
 ⚠️ **IMPORTANT**: The diff viewer (react-diff-viewer-continued) has specific CSS requirements that can be tricky to debug.
 
 ## Common Issue: No Scrollbars on Diff Viewer
