@@ -1,28 +1,19 @@
 /**
- * winProcessTable — Windows stand-ins for the `ps` text listings the
- * process-management code parses.
+ * winProcessTable — the Windows stand-in for `ps` text listings.
  *
- * Several modules (`processTable.ts`, `terminalSessionManager.ts`,
- * `mcpOrphanTripwire.ts`, `prototypeServerReaper.ts`) shell out to
- * `ps -axo …` and parse the LINES with their own regexes. `ps` does not exist
- * on Windows, so every one of those sweeps silently no-ops there. Rather than
- * teach each parser a new input format, this module runs ONE PowerShell query
- * (Get-CimInstance Win32_Process) and prints the same
- * `pid [ppid [etime]] command` LINE SHAPES the existing parsers already
- * accept — the parsing code stays untouched and platform-blind.
+ * `ps` does not exist on Windows, so every `ps -axo …` sweep silently no-ops
+ * there. This module runs ONE PowerShell query (Get-CimInstance Win32_Process)
+ * and prints the same `pid [ppid [etime]] command` line shapes the POSIX
+ * parsers already accept, so parsing code stays platform-blind.
  *
- * Output contract per format (leading fields space-separated, command last —
- * exactly the whitespace-run shapes the POSIX parsers match):
- *   pid-ppid             → `123 456`
- *   pid-command          → `123 C:\...\node.exe server.js`
- *   pid-ppid-command     → `123 456 C:\...`
- *   pid-ppid-etime-command → `123 456 mm:ss C:\...` (etime in the three macOS
- *     shapes: mm:ss | hh:mm:ss | dd-hh:mm:ss — see parseEtime)
+ * Line contract (leading fields space-separated, command last):
+ *   pid-ppid               → `123 456`
+ *   pid-command            → `123 C:\...\node.exe server.js`
+ *   pid-ppid-command       → `123 456 C:\...`
+ *   pid-ppid-etime-command → `123 456 mm:ss C:\...` (macOS etime shapes)
  *
- * Kernel/system processes can have a null CommandLine; the format operator
- * renders that as an empty field, which the parsers tolerate (they only need
- * the numeric columns). Lines are newline-separated; a command line cannot
- * itself contain a newline.
+ * A null CommandLine renders as an empty field — the parsers only need the
+ * numeric columns.
  */
 import { execFile } from 'node:child_process';
 

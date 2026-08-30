@@ -1,24 +1,14 @@
 /**
- * Shared host-process-table parsing and walking helpers.
+ * Shared host-process-table parsing and walking helpers — one parser and one
+ * walker for the reapers (codexBrokerReaper, vitestOrphanReaper) and the kill
+ * ladders (terminalSessionManager, sessionManager, runCommandManager,
+ * logsManager) rather than one per caller. Matching is plain JS over parsed
+ * rows rather than `pkill -f <regex>`: the paths involved carry regex
+ * metacharacters, and a mis-escaped kill pattern is not a risk worth taking.
  *
- * The reapers ({@link CodexBrokerReaper} for detached `openai-codex` broker
- * daemons, {@link VitestOrphanReaper} for abandoned vitest pool workers) need to
- * turn `ps` output into rows and expand a set of root pids into the full
- * descendant tree so a leaked parent's children go with it. The kill ladders
- * (`terminalSessionManager`, `sessionManager`, `runCommandManager`,
- * `logsManager`) need the same walk over the two-column `pid ppid` shape plus a
- * synchronous table fetch. Both shapes and the tree walk live here so there is
- * one parser and one walker to reason about rather than one per caller.
- *
- * Matching is deliberately plain JS over parsed rows rather than
- * `pkill -f <regex>`: the paths involved can carry regex metacharacters, and a
- * mis-escaped pattern in a kill command is not a mistake worth risking.
- *
- * This module is deliberately platform-BLIND: it only parses and walks text
- * shapes. The platform choice (which subprocess produces those lines, and how
- * trees get killed) lives in utils/platformProcess.ts — the one strategy
- * module for host process operations. The async/sync listers and the taskkill
- * primitives used to live here and moved there verbatim.
+ * Deliberately platform-BLIND: only text shapes are parsed and walked here.
+ * The platform choice (which subprocess produces the lines, how trees die)
+ * lives in utils/platformProcess.ts.
  */
 
 /** A single process row parsed from `ps` output. */

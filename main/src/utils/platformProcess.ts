@@ -5,31 +5,23 @@
  * The windows-build stack grew one `process.platform === 'win32'` arm per call
  * site (five copies of the same PowerShell-table descendant walk, four copies
  * of the same taskkill ladder, two copies of the `ps`-vs-PowerShell table
- * fetch). An adversarial review's verdict: a per-call-site arm extending a
- * visible POSIX ladder is acceptable, but DUPLICATED logic is not. This module
- * owns every platform branch for the three primitives the kill ladders need:
+ * fetch); duplicated logic was judged unacceptable where per-call-site arms
+ * extending a visible POSIX ladder are fine. So the platform branches live
+ * here, and only here:
  *
  *   - {@link listProcessTable} / {@link listPidPpidTable} /
- *     {@link listPidPpidTableSync} — full/pair process-table listings
- *     (`ps -axo …` on POSIX, the PowerShell stand-in from winProcessTable.ts
- *     on win32). Moved here verbatim from services/processTable.ts, which
- *     keeps only the platform-blind parsing/walking helpers.
- *   - {@link collectDescendantPids} — the whole descendant-tree enumeration
- *     (platform table fetch + walk), absorbing the per-call-site
- *     `getAllDescendantPids` copies.
- *   - {@link killWindowsTree} (fire-and-forget `taskkill /T /F`),
- *     {@link killPidSync} (synchronous taskkill for execSync-shaped code) and
- *     {@link killTree} (the graceful → poll → forceful ladder shared by
- *     RunCommandManager / AbstractCliManager / TerminalSessionManager).
+ *     {@link listPidPpidTableSync} — process-table listings (`ps -axo …` on
+ *     POSIX, the winProcessTable.ts stand-in on win32).
+ *   - {@link collectDescendantPids} — descendant-tree enumeration (table
+ *     fetch + walk).
+ *   - {@link killWindowsTree}, {@link killPidSync}, {@link killTree} — the
+ *     fire-and-forget, synchronous, and ladder-shaped tree kills.
  *
- * Deliberately NOT here: the per-site zombie EVENT emission, log wording and
- * grace-poll timings that differ between ladders stay at the call sites as
- * injection hooks ({@link KillTreeOptions}) — this module owns the platform
- * choice and the ladder shape, the sites own their reporting.
- *
- * Every primitive takes a `platform` option (the
- * `TerminalSessionManagerOptions.platform` DI-seam template) so tests pin a
- * platform regardless of the host.
+ * Per-site zombie emission, log wording and grace timings stay at the call
+ * sites via {@link KillTreeOptions} hooks — this module owns the platform
+ * choice and the ladder shape, the sites own their reporting. Every primitive
+ * takes a `platform` option (the `TerminalSessionManagerOptions.platform`
+ * DI-seam template) so tests pin a platform regardless of the host.
  */
 import { exec, execFile, execSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -168,17 +160,14 @@ function defaultPosixChildPids(parentPid: number): number[] {
  *
  * win32: one synchronous PowerShell (pid, ppid) table fetch
  * ({@link listPidPpidTableSync}) walked by the shared BFS in
- * services/processTable.ts — the arm all five historical call sites ran
- * byte-identically. POSIX: the historical per-level recursion (DFS, so kill
- * order matches what the call sites did before consolidation), over the
- * injected or default one-level lister.
+ * services/processTable.ts. POSIX: the historical per-level recursion (DFS,
+ * so kill order matches the pre-consolidation call sites) over the injected
+ * or default one-level lister.
  *
- * Both arms are cycle-safe (a pid is never visited twice), never traverse or
- * include pid ≤ 1 (never chase launchd/kernel), and never include the root.
- * Guards mirror the strictest historical caller: a non-positive or
- * non-integer root returns []. Fail-soft by contract — a failed fetch or walk
- * step reports through `onWalkError` and degrades to a partial list, never a
- * throw.
+ * Both arms are cycle-safe, never traverse or include pid ≤ 1, and never
+ * include the root; a non-positive or non-integer root returns []. Fail-soft
+ * by contract — a failed fetch or walk step reports through `onWalkError` and
+ * degrades to a partial list, never a throw.
  */
 export function collectDescendantPids(rootPid: number, opts: CollectDescendantPidsOptions = {}): number[] {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
@@ -221,18 +210,12 @@ export function collectDescendantPids(rootPid: number, opts: CollectDescendantPi
 // ---------------------------------------------------------------------------
 
 /**
- * Forcefully kill a Windows process tree: `taskkill /PID <pid> /T /F`.
- *
- * Windows has no process-group semantics through `process.kill` — a negative-pid
- * call fails (EINVAL) and the caller would fall through to a bare child kill,
- * orphaning the MCP bridges/servers the child spawned. `taskkill /T` is the
- * platform's whole-tree contract: it walks the PPID chain at call time.
- *
- * Fire-and-forget and fail-soft: a pid that is already dead (or access-denied)
- * rejects and is ignored, exactly like the POSIX `kill -9` fallbacks it stands
- * in for. The signal the caller intended is irrelevant here — Windows console
- * processes have no catchable SIGTERM, so the tree kill is always forceful.
- * (Moved verbatim from services/processTable.ts.)
+ * Forcefully kill a Windows process tree, fire-and-forget:
+ * `taskkill /PID <pid> /T /F`. Windows has no process-group semantics through
+ * `process.kill` (a negative pid fails EINVAL, orphaning spawned bridges/
+ * servers); `taskkill /T` walks the PPID chain at call time instead. Fail-soft:
+ * an already-dead or access-denied pid is ignored, like the POSIX `kill -9`
+ * fallbacks it stands in for.
  */
 export function killWindowsTree(pid: number): void {
   execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {
@@ -338,27 +321,20 @@ function defaultIsPidAlive(pid: number): boolean {
  * ladder, false when survivors remain (after {@link KillTreeOptions.onSurvivors}
  * ran) or the ladder threw.
  *
- * win32 — the taskkill ladder (the one RunCommandManager, AbstractCliManager
- * and TerminalSessionManager each carried a copy of):
- *   1. graceful `taskkill /PID <pid> /T` (GUI apps may close cleanly; console
- *      apps always "fail" this step — expected),
- *   2. the grace window (bounded poll or fixed sleep per {@link graceMode}),
- *   3. forceful `taskkill /PID <pid> /T /F`,
- *   4. per-descendant `taskkill /PID <child> /F` for every up-front enumerated
- *      descendant still alive — taskkill /T walks the PPID chain at call time,
- *      so a shell that died between steps 1 and 3 (or a pid reused in that
- *      window) can orphan children the tree walk can no longer see,
- *   5. verification: 500ms settle, re-enumerate, one direct forced kill per
- *      survivor (taskkill /T cannot see a child whose parent link it can no
- *      longer walk), 200ms settle, re-check — survivors at this point are
- *      reported via {@link onSurvivors} and fail the ladder.
+ * win32 — the taskkill ladder formerly duplicated across runCommandManager,
+ * AbstractCliManager and terminalSessionManager: graceful `/T`, the grace
+ * window, `/T /F`, per-descendant `/F` for up-front enumerated children still
+ * alive (taskkill /T walks the PPID chain at call time, so a shell that died
+ * mid-ladder can orphan children the walk can no longer see), then a
+ * verification pass (500ms settle, re-enumerate, direct kill per survivor,
+ * 200ms, re-check).
  *
- * POSIX — the SIGTERM → process-group ladder (TerminalSessionManager's shape,
- * its historical owner): SIGTERM the root, look up its real pgid
- * (`ps -o pgid=`), `kill -TERM -<pgid>`, a bounded dual probe (root AND group)
- * that returns the moment both are dead, then SIGKILL the root, `kill -9
- * -<pgid>`, every enumerated descendant, and a `pkill -9 -P` sweep before the
- * same 500ms verification pass.
+ * POSIX — the SIGTERM → process-group ladder (terminalSessionManager's
+ * historical shape): SIGTERM the root, look up its real pgid, `kill -TERM
+ * -<pgid>`, a bounded dual probe (root AND group), SIGKILL the root and group,
+ * kill every enumerated descendant, a `pkill -9 -P` sweep, then the same
+ * 500ms verification (no survivors re-kill pass — preserving the POSIX
+ * ladder's shape exactly).
  */
 export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise<boolean> {
   const platform = opts.platform ?? process.platform;

@@ -182,12 +182,20 @@ export class ShellDetector {
   static getShellCommandArgs(command: string): { shell: string; args: string[] } {
     const shellInfo = this.getDefaultShell();
     if (process.platform === 'win32') {
-      // PowerShell: -NoProfile avoids profile scripts slowing/derailing every
-      // command; -NonInteractive keeps the command from dropping into a REPL
-      // if the script awaits input.
+      // -EncodedCommand (base64 of the UTF-16LE command string) instead of
+      // -Command: `command` carries user content — quoted paths, nested
+      // quotes — that -Command's argv quoting cannot survive verbatim, while
+      // the encoded form reaches PowerShell byte-exact. -NonInteractive keeps
+      // a script awaiting input from dropping into a REPL.
       return {
         shell: shellInfo.path,
-        args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command],
+        args: [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          Buffer.from(command, 'utf16le').toString('base64'),
+        ],
       };
     }
     return { shell: shellInfo.path, args: ['-c', command] };
@@ -198,13 +206,11 @@ export class ShellDetector {
    * environment variables assigned first, then the command lines run in
    * order — in the dialect {@link getShellCommandArgs} routes to.
    *
-   * POSIX (unchanged output): `export K='v' && line1 && line2`.
-   * Windows routes to PowerShell, where `export` does not exist and `&&` is a
-   * parse error on the PowerShell 5.1 every Windows host ships (only PS 7+
-   * supports it) — so a POSIX-shaped string NEVER executes there. The win32
-   * form assigns through the env provider (`$env:K = 'v'`, embedded single
-   * quotes doubled — PowerShell's own escaping) and separates statements with
-   * `;`. `platform` is injectable so tests can pin either dialect anywhere.
+   * POSIX: `export K='v' && line1 && line2`. PowerShell has no `export` and
+   * the PS 5.1 every Windows host ships cannot parse `&&`, so the win32 form
+   * assigns via the env provider (embedded single quotes doubled —
+   * PowerShell's own escaping) and joins with `;`. `platform` is injectable
+   * so tests pin either dialect anywhere.
    */
   static buildCommandString(
     envVars: Record<string, string>,

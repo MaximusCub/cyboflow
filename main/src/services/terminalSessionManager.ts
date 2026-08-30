@@ -256,16 +256,13 @@ export class TerminalSessionManager extends EventEmitter {
   }
 
   /**
-   * Kill a process and all its descendants
-   * Returns true if successful, false if zombie processes remain
+   * Kill a process and all its descendants. Returns true if successful, false
+   * if zombie processes remain.
    *
-   * Both platform ladders live in utils/platformProcess.ts (killTree) — the
-   * win32 taskkill ladder and the POSIX SIGTERM → process-group ladder used to
-   * be duplicated here, in runCommandManager and AbstractCliManager. This site
-   * contributes its seams (execCommand / isPidAlive / sendSignal / the
-   * injected process-table lister) and its zombie-event reporting; the platform
-   * choice and the ladder shape live in the module, routed by this class's
-   * `platform` option.
+   * Both platform ladders live in utils/platformProcess.ts (killTree); this
+   * site contributes its seams (execCommand / isPidAlive / sendSignal / the
+   * injected process-table lister) and its zombie-event reporting, routed by
+   * this class's `platform` option.
    */
   private async killProcessTree(pid: number): Promise<boolean> {
     // First, get all descendant PIDs before we start killing
