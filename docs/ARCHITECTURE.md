@@ -17,7 +17,7 @@ differentiator.
 
 Launch, Planner, Sprint, and Ship write the app's own DB-canonical **3-table entity model** (`ideas` /
 `epics` / `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or
-`TASK-NNN.md` files. All entities share a single 4-stage board (see "Data Model"). The
+`TASK-NNN.md` files. All entities share a single 5-stage board (see "Data Model"). The
 `__quick__` sentinel flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
@@ -54,13 +54,25 @@ dropped, its prose preserved under `docs/workflows-future/` for a future rebuild
 `Orchestrator` (`main/src/orchestrator/Orchestrator.ts`) is the single lifecycle entry
 point for the cyboflow main process. It is constructed via constructor injection. The
 dependency bag (`OrchestratorDeps` in `main/src/orchestrator/types.ts`) has three required
-collaborators and two optional narrow interfaces:
+collaborators and four optional narrow interfaces:
 
 - **`db: DatabaseLike`** — narrow interface over better-sqlite3; no concrete import.
 - **`logger: LoggerLike`** — structured log surface (info/warn/error/debug).
 - **`runQueues: RunQueueRegistry`** — per-run mutation queue; `drainAll()` is awaited in `stop()`.
 - **`claudeManager?: ClaudeManagerLike`** *(optional)* — narrow `hasActiveRunForId(runId)` interface used by `StuckDetector` to classify `orphan_pty` reasons. When omitted, that classification is effectively disabled.
-- **`permissionServer?: PermissionServerLike`** *(optional)* — narrow `hasClientForRun(runId)` interface used by `StuckDetector` to classify `stale_socket` reasons. When omitted, `stale_socket` classification is disabled with a one-time WARN. The concrete socket bridge is now live as `OrchSocketServer` (the orchestrator-side half of the Cyboflow MCP IPC link, wired in `index.ts`).
+- **`applyReviewItem?`** *(optional)* — the review-item write chokepoint, used at orchestrator
+  start to drain legacy idle-session review items. When omitted, that one-time drain is skipped.
+- **`omp?: OmpControlPlaneAdapter`** *(optional)* — read-only OMP fleet adapter; when omitted,
+  the orchestrator layer has no OMP awareness.
+- **`stuckEvents?: StuckEventSink`** *(optional)* — sink for `runs:stuck` notifications forwarded
+  to the renderer; when omitted the detector still writes the DB and emits telemetry, only the
+  renderer push is skipped.
+
+There is no `permissionServer` dependency: the `stale_socket` `StuckReason` rung it would have
+backed was examined and deliberately **retired** on 2026-08-21 rather than left disabled — the
+condition it hunts for cannot survive to be observed (see the "RETIRED RUNG" note on
+`StuckReason` in `stuckDetector.ts`). The concrete socket bridge itself is live as
+`OrchSocketServer` (the orchestrator-side half of the Cyboflow MCP IPC link, wired in `index.ts`).
 
 `start()` is idempotent; `stop()` drains all run queues before resolving.
 
@@ -75,61 +87,52 @@ without transitive imports from `electron`, `better-sqlite3`, or any service in
 `main/src/services/*`. This keeps the orchestrator extractable to a standalone Node process
 for the team-tier v2 target (ROADMAP-001 §6.3).
 
-**Documented exception:** `main/src/orchestrator/runEventBridge.ts` imports `EventRouter`,
-`RawEventsSink`, and `TypedEventNarrowing` from `main/src/services/streamParser` at value
-position. This is the ONLY accepted exception, permitted because `streamParser` itself has
-clean runtime imports today (zod + `node:events`; `better-sqlite3` is type-only). If
-`streamParser` ever pulls in `electron` or `better-sqlite3` at value position,
-`runEventBridge.ts` must switch to constructor injection. Do NOT add value imports from
-`services/*` to any other file under `orchestrator/**` without extending this list.
+**Frozen exemptions.** `standaloneInvariant.test.ts` holds the exact set of files still allowed
+to import `electron` or a `services/*` value at value position — a list that may shrink but not
+grow (a stale entry fails the test). `runEventBridge.ts` is NOT on it: its former
+`services/streamParser` import relocated to `shared/streamParser` (alongside `encodeCwd`,
+`modelContext`, and `agentProviderGuard`), clearing that exemption entirely. The three still
+frozen:
+
+- **`trpc/ipcAdapter.ts`** — the Electron host adapter binding the orchestrator tRPC router to
+  `BrowserWindow` IPC; a standalone service substitutes a different transport adapter rather
+  than extracting this one.
+- **`mcpServer/scriptPath.ts`** — needs `app.isPackaged`, and is consumed BY services
+  (`claudeCodeManager`, `interactiveClaudeManager`, `mcpOrphanTripwire`) at no-arg call sites, so
+  the dependency runs the other way and injection would thread through five chains.
+- **`verify/codexVerificationAgentQuery.ts`** — runtime use of the Codex app-server schema
+  helper and usage observer; the Codex provider surface lives entirely under
+  `services/panels/codex`.
+
+Do NOT add value imports from `services/*` to any other file under `orchestrator/**` without
+extending this list.
 
 #### Entity write chokepoints (single-writer-via-orchestrator)
 
-Two single-table write chokepoints own ALL mutations to the entity and review tables. Both
-key a per-PROJECT `p-queue({concurrency: 1})` (entity refs + version bumps are project-scoped),
-mirror each other's structure, and uphold the standalone-typecheck invariant (`DatabaseLike`
-injected, no `electron` / `better-sqlite3` / `services/*` imports):
+Four single-table write chokepoints own ALL mutations to their table — nothing UPDATEs
+`ideas`/`epics`/`tasks`/`review_items`/`artifacts`/`idea_components` directly. Each keys a
+per-PROJECT `p-queue({concurrency: 1})`, mutates + appends an `entity_events` delta inside one
+transaction, and emits its changed-event AFTER commit, upholding the standalone-typecheck
+invariant (`DatabaseLike` injected, no `electron` / `better-sqlite3` / `services/*` imports); the
+queue/transaction/emit mechanics are canonical in `docs/CODE-PATTERNS.md` → "Entity-aware write
+chokepoint" — this section frames only what each one owns:
 
-- **`taskChangeRouter.ts` (`TaskChangeRouter.applyChange`)** — the SINGLE write chokepoint for
-  the 3-table entity model. Every entity write (GUI tRPC, orchestrator lifecycle, run close-out,
-  `cyboflow_*` MCP agent tools) routes through it; nothing UPDATEs `ideas` / `epics` / `tasks`
-  directly. Each `applyChange` atomically (1) mutates the correct entity table and (2) appends a
-  per-field delta row to `entity_events`, minting the per-`(entity_type, entity_id)` `seq` UNIQUE
-  **inside** the same transaction, then emits a `TaskChangedEvent` on `taskChangeEvents` after
-  commit. It is **entity-aware**: table identity is the discriminator, so the change carries an
-  `entityType` (optional on the update path — resolved by id lookup across the three tables when
-  omitted). Lineage (`parent_epic_id` task→epic, `originating_idea_id` epic/task→idea) is both
-  FK-enforced and validated/cycle-checked in the router. Decomposing an idea stamps
-  `ideas.decomposed_at` (taking it OFF the board, reachable only via children) with **no
-  cascade** — children carry the flow. The create seam stamps `epics`/`tasks.approved_at`
-  PENDING (`NULL` = backend-invisible + sprint-ineligible) for plan-gated runs and visible
-  (`now`) otherwise; after a child-task write settles it re-enters the queue to roll a parent
-  epic's stage up via `recomputeEpicStage` (migration 042 — see "Data Model").
-- **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE normal-write
-  chokepoint for `review_items`. Sprint-agent findings via MCP, manual human tasks, and user
-  triage resolve/dismiss route through it. The sanctioned exception is folded run-pause co-writes
-  in `reviewItemListing.ts`: approval/question/human-gate code writes the review item
-  synchronously inside the same transaction as the legacy gate row so both commit or roll back
-  together. Those helpers still append the same `entity_events` deltas and emit through
-  `emitReviewItemChangedById` after commit, so readers see the same shape. `promote-to-task` is
-  NOT handled here: it is a two-chokepoint triage operation (resolve the item via this router AND
-  mint a real task via `TaskChangeRouter`) orchestrated in the `reviewItems` tRPC router so each
-  router stays single-table.
-- **`artifactRouter.ts` (`ArtifactRouter.apply`)** — the SINGLE write chokepoint for the run-scoped
-  `artifacts` table (migration 029). Backs the tabbed center pane's artifact tabs (idea spec,
-  decomposed stories, screenshots, ui prototype, generic live canvas). `apply(projectId, change)`
-  handles `create` (UPSERT by `(run_id, atype)` — so orchestrator auto-mint is idempotent), `update`
-  (enrich), and `commit` (flip to committed); `pruneSessionOnly(projectId, runIds)` drops a closing
-  session's uncommitted artifacts. Each write appends a delta to `entity_events` with
-  `entity_type='artifact'` (migration 029 widened the CHECK) and emits an `ArtifactChangedEvent`
-  after commit. Writers that route through it: the `cyboflow.artifacts` tRPC router (commit), the
-  `cyboflow_report_artifact`/`cyboflow_commit_artifact` MCP tools, and the orchestrator auto-mint
-  (`autoMintArtifacts.handleStepCompletion`, hooked fail-soft into `stepTransitionBridge` when a
-  completed step declares `WorkflowStep.outputArtifact`). Templated artifacts (idea-spec,
-  decomposed-stories) re-derive their content from the entity model on read; canvas artifacts
-  (ui-prototype/generic) carry a `payload_json` (e.g. a localhost dev-server URL embedded by
-  `LiveCanvasEmbed`). Session-only artifacts are pruned on session dismiss (`artifactLifecycle`);
-  committed ones persist.
+- **`taskChangeRouter.ts` (`TaskChangeRouter.applyChange`)** — the 3-table entity model
+  (`ideas`/`epics`/`tasks`). Entity-aware (table identity is the discriminator, resolved by id
+  lookup when the caller omits it); lineage (`parent_epic_id`, `originating_idea_id`) is
+  FK-enforced and cycle-checked. See "Off-board buckets" below for the `decomposed_at`/
+  `approved_at` visibility stamps this chokepoint also owns.
+- **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — `review_items`. The sanctioned
+  exception is the folded run-pause co-write in `reviewItemListing.ts`: approval/question/
+  human-gate code writes the review item synchronously inside the same transaction as the legacy
+  gate row, so both commit or roll back together, still emitting through the same
+  `entity_events`/`emitReviewItemChangedById` contract. `promote-to-task` is a two-chokepoint
+  operation (resolves here AND mints a task via `TaskChangeRouter`), orchestrated in the
+  `reviewItems` tRPC router.
+- **`artifactRouter.ts` (`ArtifactRouter.apply`)** — the run-scoped `artifacts` table (migration
+  035); see "Run artifacts" below.
+- **`ideaComponentRouter.ts` (`IdeaComponentRouter.applyChange`)** — the `idea_components` ledger
+  (migration 101) tracking each idea's idea-spec/prototype/architecture/epics/stories progress.
 
 #### Visual verification (`main/src/orchestrator/verify/`)
 
@@ -233,7 +236,7 @@ worktree cut from the worktree being removed. Fail-soft on both paths: the
 verification queue is downstream of the run's terminal state and never blocks
 a close-out.
 
-The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–2
+The setup-flow layer (`docs/proposals/verification-setup-flow.md`, phases 0–3
 implemented) sits on top of the agent engine: failures are classified
 `env | deliverable | ambiguous` (`failureClassifier.ts` — env requires
 harness-derived evidence and converts a blocking FAIL into a lane-advancing
@@ -273,9 +276,10 @@ Core business logic services. Key components:
   `cyboflow_system_design.md` §3, "What the fork provides directly usable"). Still owns the
   PTY spawn path (`spawnPtyProcess`); several
   live concrete subclasses extend it today: `ClaudeCodeManager` (SDK substrate),
-  `InteractiveClaudeManager`, `CodexPtyManager` and `CodexSdkManager`
-  (`panels/codex/`), and `DemoCliManager`. Contrast with `AbstractAIPanelManager`
-  (`panels/ai/AbstractAIPanelManager.ts`) and `BaseAIPanelHandler`
+  `InteractiveClaudeManager`, the per-provider PTY+SDK manager pairs
+  (`CodexPtyManager`/`CodexSdkManager` in `panels/codex/`, `OmpPtyManager`/`OmpSdkManager` in
+  `panels/omp/`, `PiPtyManager`/`PiSdkManager` in `panels/pi/`), and `DemoCliManager`. Contrast
+  with `AbstractAIPanelManager` (`panels/ai/AbstractAIPanelManager.ts`) and `BaseAIPanelHandler`
   (`main/src/ipc/baseAIPanelHandler.ts`), which ARE collapse candidates — Crystal-era
   Claude+Codex UI scaffolding.
 - **`panels/claude/interactiveClaudeManager.ts`** — The **interactive (subscription-billed)**
@@ -284,14 +288,18 @@ Core business logic services. Key components:
   `-p` flag, no stream-json output flag) and recovers structured panel fidelity out of band via
   a `TranscriptTailSource`. `workflow_runs.substrate` ('sdk' | 'interactive') is stamped at
   launch and dispatched by the `SubstrateDispatchFacade`.
-- **`panels/codex/codexPtyManager.ts` / `panels/codex/codexSdkManager.ts`** — Codex is a
-  second **agent provider**, not just a CLI tool: `AgentProvider = 'claude' | 'codex'`
-  (`shared/types/agentRuntime.ts`). `CodexPtyManager` runs Codex as an interactive PTY
+- **`panels/codex/codexPtyManager.ts` / `panels/codex/codexSdkManager.ts`** — Codex is one of
+  four **agent providers**, not just a CLI tool: `AGENT_PROVIDERS = ['claude', 'codex', 'omp',
+  'pi']` (`shared/types/agentRuntime.ts`). `CodexPtyManager` runs Codex as an interactive PTY
   quick-session runtime; `CodexSdkManager` runs it through Codex's embedded SDK workflow
   runtime (its App Server protocol). Both extend `AbstractCliManager` and are registered/routed
   via `cliManagerFactory.ts`. Per-agent workflow runtime pins come from a workflow
   definition's `agentConfigs` overlay (`WorkflowAgentConfig.runtime === 'codex-sdk'` +
   `codexModel`, `shared/types/workflows.ts`).
+- **`panels/omp/ompPtyManager.ts` / `panels/omp/ompSdkManager.ts`** and
+  **`panels/pi/piPtyManager.ts` / `panels/pi/piSdkManager.ts`** — the third and fourth agent
+  providers, OMP and pi, each following the same interactive-PTY / embedded-SDK-workflow split
+  as Codex above and registered the same way via `cliManagerFactory.ts`.
 
 #### Interactive-substrate workflow step tracking
 
@@ -533,8 +541,9 @@ Two parallel surfaces are wired today:
 2. **tRPC via `trpc-electron`** under `main/src/orchestrator/trpc/` — the root `appRouter`
    in `router.ts` exposes all procedures under a single `cyboflow` namespace
    (`cyboflow.runs.*`, `cyboflow.approvals.*`, `cyboflow.workflows.*`, `cyboflow.events.*`,
-   `cyboflow.health.*`). The renderer uses the typed tRPC client via the bridge wired in
-   `main/src/preload.ts:2` (`exposeElectronTRPC`) and attached in `index.ts:686`.
+   `cyboflow.health.*`). The renderer uses the typed tRPC client via the bridge wired by
+   `exposeElectronTRPC()` in `main/src/preload.ts` and attached by
+   `attachOrchestratorTrpcToWindow` in `main/src/index.ts`.
 
 The tRPC surface is now the canonical transport for all `cyboflow.*` channels. The
 `trpc-cutover-and-legacy-tree-cleanup` epic (TASK-713 through TASK-717) completed the
@@ -605,14 +614,11 @@ All procedures are consumed by their respective Zustand stores and React compone
   `ArtifactTabRenderer` (+ `LiveCanvasEmbed` for ui-prototype). Per-session tab state lives in the
   in-memory `centerPaneStore` (keyed by the run's parent session). The dock collapses via
   `display:none` and NEVER unmounts `RunBottomPane`/`InteractiveTerminalView` (xterm keep-alive).
-- **`stores/`** — Zustand slices, one per domain:
-  - Crystal-baseline: `sessionStore`, `panelStore`, `configStore`, `navigationStore`,
-    `errorStore`, `sessionHistoryStore`, `sessionPreferencesStore`, `slashCommandStore`.
-  - Cyboflow-era: `cyboflowStore` (workflows & runs), `activeRunsStore`, `centerPaneStore`
-    (per-session run-center-pane tabs/dock/right-tab, in-memory), `mcpHealthStore`
-    (sidebar dot), `questionStore`, `backlogStore` (the 3-table entity board buckets),
-    `reviewQueueStore` + `reviewQueueSlice` + `reviewItemsSlice` (the unified review-queue inbox
-    across finding/permission/decision/human_task — the product differentiator).
+- **`stores/`** — Zustand slices, one per domain. The directory listing is the source of truth
+  (36 files today, one hand-maintained list would rot); worth naming: `backlogStore` (the
+  3-table entity board buckets) and `reviewQueueStore` + `reviewQueueSlice` +
+  `reviewItemsSlice` (the unified review-queue inbox across finding/permission/decision/
+  human_task — the product differentiator). See `frontend/src/stores/` for the current set.
 - **`utils/api.ts`** — Thin IPC call wrapper used by all frontend components for raw IPC.
 - **`utils/cyboflowApi.ts`** — Helper for the raw `cyboflow:*` channels.
 - **`trpc/client.ts`** *(via `trpc-electron` client)* — Typed entry point for
@@ -639,25 +645,24 @@ cross-package concern.
   for native module rebuilds against Electron's Node ABI.
 - **React 19 + Vite 6** — Renderer. Tailwind CSS for styling; `clsx` + `tailwind-merge` via `cn()`.
 - **Zustand 5** — Renderer state. One slice per domain; no Redux.
-- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. The data dir resolves per kind in
-  `getCyboflowDirectory()` (`main/src/utils/cyboflowDirectory.ts`): packaged Stable →
-  `~/.cyboflow`, packaged Dev DMG → `~/.cyboflow_dev_dmg`, `pnpm dev` → `~/.cyboflow_dev`.
-  The legacy `~/.crystal/` path has already been removed.
-- **@anthropic-ai/claude-agent-sdk 0.3.201** — In-process Claude Code invocation via `query()`
+- **better-sqlite3 11.7.0** — SQLite, synchronous, WAL mode. Data-dir resolution is per-kind
+  (`getCyboflowDirectory()`, `main/src/utils/cyboflowDirectory.ts`) — see `docs/UPDATES.md` for
+  the full table. The legacy `~/.crystal/` path has already been removed.
+- **@anthropic-ai/claude-agent-sdk 0.3.224** — In-process Claude Code invocation via `query()`
   and `PreToolUse` hooks for approval routing. This is the live path; no `claude` CLI binary
   is spawned.
 - **@openai/codex 0.144.3** — Direct dependency (both root and `main/package.json`) that
   bundles per-platform native `codex` CLI executables (resolved by
   `panels/codex/codexExecutablePath.ts`), not merely a thin API client. `CodexPtyManager` /
-  `CodexSdkManager` (`panels/codex/`) spawn it as an external process — the second agent
-  provider alongside Claude (see **Services**). It is asar-unpacked
+  `CodexSdkManager` (`panels/codex/`) spawn it as an external process — one of four agent
+  providers alongside Claude, OMP, and pi (see **Services**). It is asar-unpacked
   (`node_modules/@openai/codex*/**` in `package.json` `build.asarUnpack`) so the packaged app can
   execute the bundled binary outside the archive.
 - **@homebridge/node-pty-prebuilt-multiarch 0.12.0** — PTY sessions. Pre-built binaries;
   rebuilt for Electron ABI by `electron-builder install-app-deps` postinstall. Used today
   only by `terminalSessionManager`, `terminalPanelManager`, and `runCommandManager` —
   **not** by Claude.
-- **@modelcontextprotocol/sdk 1.12.1** — For the cyboflow MCP server (runs as a stdio
+- **@modelcontextprotocol/sdk 1.29.0** — For the cyboflow MCP server (runs as a stdio
   subprocess; entry point asar-unpacked, see below).
 - **trpc-electron 0.1.2** — Typed `electron-trpc` bridge between the renderer client and
   the main-process `appRouter`.
@@ -719,47 +724,38 @@ the type discriminator (no `type` column):
 Each table carries its own columns plus a single markdown `body` column, a `priority`, a
 `category` classification (`'feature' | 'bug' | 'chore'`, default `'feature'` — migration
 059, mirroring `priority`), a `version` (optimistic concurrency), and a
-`(board_id, stage_id)` placement onto **one shared board**. Migration `042_collapse_board` narrowed the board to **4 canonical stages** kept at
-their original positions (seeded by migration 042 and `seedDefaultBoard`); they form a union
-view across all three entity types:
+`(board_id, stage_id)` placement onto **one shared board**. Migration `042_collapse_board` narrowed the board to 4 canonical stages, and
+migration `066_in_development_stage` re-introduced the derived position-7 **In development**
+stage — **5 canonical stages** today, kept at their original positions (seeded by
+`seedDefaultBoard`); they form a union view across all three entity types:
 
 | # | Stage | Owner | Notes |
 |---|-------|-------|-------|
 | 1 | Idea | idea | Raw input captured · decomposed ideas leave the board (see `decomposed_at`) |
 | 6 | Ready for development | epic / task | Approved · queued — entities are CREATED here on plan approval |
+| 7 | In development | epic / task | Derived, never hand-set — recomputed from run associations (see `docs/CODE-PATTERNS.md` → "Derived-stage recompute follow-ons") |
 | 9 | Done | epic / task | Merged & archived — terminal; an epic rolls up here once all its children are Done |
 | 10 | Won't do | any | terminal · hidden by default |
 
-> **Removed positions: 2,3,4,5,7,8,12.** The former intermediate planning stages
+> **Removed positions: 2,3,4,5,8,12.** The former intermediate planning stages
 > (Research / Idea spec / Epics extracted / Tasks extracted) and the `derived`
-> In-development / Ready-to-merge stages are now invisible app state rather than board
-> columns; the old position-12 `Decomposed` terminal is now the `ideas.decomposed_at` stamp,
+> Ready-to-merge stage are now invisible app state rather than board columns (position-7
+> In development returned via migration 066); the old position-12 `Decomposed` terminal is now the `ideas.decomposed_at` stamp,
 > and position-11 `Archived` was already removed by `024_archive_in_place` (in-place
 > `archived_at` flag). Stages are DATA rows in `board_stages` (no enum/CHECK); the entity
 > `stage_id` FK is `ON DELETE RESTRICT`, so 042 RELOCATES every occupant of a removed
 > position to a kept stage on the same board BEFORE deleting the row (mirrors 024).
 
-**Off-board buckets (042).** Three nullable TEXT stamps replace the dropped intermediate
-stages and gate backend visibility:
-
-- **`ideas.decomposed_at`** — a stamped idea is OFF the board (decomposed; reachable only via
-  its children, surfaced through the "open root idea" back-link on epic/task cards).
-  Retirement is EXCLUSIVELY gate-driven — the approve-plan gate retires the planner's root
-  idea — and decomposition has NO cascade: children carry the flow.
-- **`epics.approved_at` / `tasks.approved_at`** — `NULL` = PENDING = backend-invisible +
-  sprint-INELIGIBLE until plan approval. This is the deferred-materialization model: the
-  planner CREATES entities pending, and the approve-plan gate REVEALS them — per entity,
-  through the chokepoint's orchestrator-only `approved` toggle, so each reveal broadcasts a
-  `TaskChangedEvent` and a mounted board updates live. Every non-plan-gated create is visible
-  immediately. The eligibility filter at `SprintLaneStore.createForRun` (the single
-  sprint-materialization chokepoint) drops any task whose `approved_at IS NULL`; the
-  user-facing `runs.start` pre-check is strict and rejects mixed selections outright.
-- **`workflow_runs.plan_approved_at`** — stamped when a run's approve-plan gate is approved.
-  The `applyChange` create seam reads it to decide pending-vs-visible. Draft cleanup is
-  REJECT-only at the gate (a Revise / cap-trim answer keeps the drafts for in-place
-  adjustment) and triple-gated on cancel/dismiss teardown (`deleteRunCreatedEntities`:
-  plan-gated run + `plan_approved_at IS NULL` + per-entity `approved_at IS NULL`), so an
-  approved run's revealed entities — and every non-plan-gated run's visible creates — survive.
+**Off-board buckets (042).** Three nullable TEXT stamps replace the dropped intermediate stages
+and gate backend visibility: **`ideas.decomposed_at`** (a decomposed idea leaves the board,
+reachable only via children, gate-driven, no cascade), **`epics`/`tasks.approved_at`** (`NULL` =
+PENDING = backend-invisible + sprint-ineligible until the approve-plan gate REVEALS it per
+entity through the chokepoint's `approved` toggle), and **`workflow_runs.plan_approved_at`** (the
+create seam's pending-vs-visible switch; draft cleanup is REJECT-only at the gate and
+triple-gated on cancel/dismiss teardown). The deferred-materialization mechanics — the reveal
+toggle, `SprintLaneStore.createForRun`'s eligibility filter, the `runs.start` mixed-selection
+rejection — are canonical in `docs/CODE-PATTERNS.md` → "Entity-aware write chokepoint" →
+"Off-board buckets (migration 042)".
 
 **Pending-draft terminal lifecycle.** A plan-gated run's PENDING drafts land in exactly one
 bucket at every terminal state — zero permanent zombies:
@@ -781,7 +777,7 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
 - **`entity_events`** — polymorphic append-only audit log (`entity_type IN
   ('idea','epic','task','review_item','artifact')`, `entity_id`, per-`(entity_type, entity_id)`
   UNIQUE `seq`, `kind`, `actor`, optional `run_id`, `changes_json`). Replaces the old task-scoped
-  `task_events`. Written ONLY inside the chokepoints' transactions. (Migration 029 widened the CHECK
+  `task_events`. Written ONLY inside the chokepoints' transactions. (Migration 035 widened the CHECK
   to add `'artifact'` via a recreate-rename — editing migration 015 in place would never re-run on a
   migrated DB, and SQLite cannot `ALTER` a CHECK.)
 - **Task satellites** — `task_acceptance_criteria`, `task_dependencies`, `task_files`,
@@ -839,7 +835,7 @@ it from `sessions:get-delivery-state`, which pairs that DB stamp with a git prob
 (`WorktreeManager.getBranchLandingState`) covering fast-forward, cherry-pick, and squash
 landings.
 
-#### Run artifacts (migration 029)
+#### Run artifacts (migration 035)
 
 - **`artifacts`** — run-scoped deliverables surfaced as center-pane tabs + a right-rail Artifacts
   panel. One row per `(run_id, atype)` (`atype IN
@@ -1119,14 +1115,14 @@ guard: measure the artifact, never infer its ABI from which command last ran.
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.
 
-Packaging/releases follow `docs/RELEASE-RUNBOOK.md` — per-arch DMGs; `build:mac:universal`
-currently fails on the bundled `claude` / `codex` binaries.
+Packaging/releases: per-arch DMGs; `build:mac:universal` currently fails — see
+`docs/RELEASE-RUNBOOK.md`.
 
 ### asarUnpack contract
 
 Anything executed as a real file — a spawned subprocess script, a native binary,
 a `dlopen`ed addon — cannot live inside the ASAR archive and must be listed in
-`package.json` `build.asarUnpack`. The six current entries and why each exists:
+`package.json` `build.asarUnpack`. The current entries and why each exists:
 
 - `node_modules/**/*.node` — native addons (`better-sqlite3`, `node-pty`
   prebuilds) must be real files for `dlopen`.
@@ -1136,6 +1132,10 @@ a `dlopen`ed addon — cannot live inside the ASAR archive and must be listed in
 - `node_modules/@openai/codex*/**` — the bundled per-platform `codex` CLI
   binaries (resolved through `app.asar.unpacked` by
   `panels/codex/codexExecutablePath.ts`).
+- `node_modules/@steipete/peekaboo-mcp/**` — the retired-in-place legacy
+  visual-verify capture backend's bundled Peekaboo CLI
+  (`main/src/services/visualVerify/peekabooExecutablePath.ts`), still
+  asar-unpacked for the `CYBOFLOW_VERIFY_LEGACY=1` rollback path.
 - `main/dist/main/src/orchestrator/mcpServer/**/*.js` — `cyboflowMcpServer.js`,
   spawned as an external `node` subprocess (the per-session Cyboflow MCP
   server; the worked example below).
@@ -1208,7 +1208,7 @@ the SDK-query factories receive their resolved `claudeExecutablePath`.
 See `docs/cyboflow_system_design.md` §2 (stack), §3 (fork rationale, cuts), §4 (principles).
 Key standing decisions: macOS-only v1; no Redis; deterministic worktree names;
 orchestrator self-contained inside Electron main (extractable to Node service for team tier).
-The original v1 "no Codex" cut was later reversed — Codex now ships as a second agent
-provider alongside Claude (see **Services**).
+The original v1 "no Codex" cut was later reversed — Codex now ships as an agent provider
+alongside Claude, joined since by OMP and pi (see **Services**).
 Telemetry is opt-out + anonymized: errors (Sentry) only from packaged builds, usage (Aptabase)
 only from releases, all error payloads scrubbed of code/paths/prompts (see **Telemetry**).
