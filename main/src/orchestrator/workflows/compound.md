@@ -14,9 +14,11 @@ one of three actionable buckets:
 
 - **quick** — an immediate fix small enough for a single agent to apply in-place
   in the worktree right now.
-- **doc** — an instruction-file edit, in one of two rungs: **`doc:claude-md`** (a
-  CLAUDE.md edit — the strictest bar in this flow, capped at ONE per run, expected
-  outcome zero) or **`doc:reference`** (a `docs/*.md` edit, incl. CODE-PATTERNS.md /
+- **doc** — an instruction-file edit, in one of two rungs: **`doc:claude-md`** (an
+  edit to the always-loaded instruction layer — `docs/AGENT-GUIDE.md` for shared
+  rules, the thin `CLAUDE.md` / `AGENTS.md` entry files for runtime-specific ones;
+  the strictest bar in this flow, capped at ONE per run, expected outcome zero) or
+  **`doc:reference`** (any other `docs/*.md` edit, incl. CODE-PATTERNS.md /
   ARCHITECTURE.md — a lower bar, but still above "useful color"). Once approved at
   the approve-learnings gate either is applied in-place at write-back like any other
   edit — it is NOT filed as its own per-edit `decision`.
@@ -243,8 +245,10 @@ ENRICHES it, so you can refine the doc as you go.
   `### CLAUDE.md edits` / `### Doc edits` / `### Tasks`, in that order, one entry
   per learning.
 - **`### CLAUDE.md edits` is its own section and is never folded into
-  `### Doc edits`.** CLAUDE.md is loaded into every session of every flow, so its
-  edits get the human's undivided attention: list each one with the exact file +
+  `### Doc edits`.** This section covers the always-loaded instruction layer
+  (`docs/AGENT-GUIDE.md` + the `CLAUDE.md` / `AGENTS.md` entry files), which is
+  loaded into every session of every flow, so its edits get the human's undivided
+  attention: list each one with the exact file +
   section, the verbatim wording, what text it replaces, and its answers to the five
   admission questions (see the compounder's "Instruction-file edits carry their own,
   much higher bar"). At most ONE per run. When there are none — the expected outcome

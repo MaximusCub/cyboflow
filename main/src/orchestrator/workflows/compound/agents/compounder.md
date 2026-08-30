@@ -59,7 +59,11 @@ lines already there. There are two rungs, strictest first.
 
 ### Rung 1 — CLAUDE.md (the strictest bar in this flow)
 
-The repo-root `CLAUDE.md` is loaded into EVERY session of every flow, so its budget
+This rung is the always-loaded instruction layer: `docs/AGENT-GUIDE.md` (the shared
+guide every runtime loads — imported by repo-root `CLAUDE.md`, read first per
+`AGENTS.md`) plus those two thin runtime entry files. A rule that applies to every
+agent lands in AGENT-GUIDE.md; a rule for one runtime only lands in `CLAUDE.md` or
+`AGENTS.md`. This layer is loaded into EVERY session of every flow, so its budget
 is the scarcest in the project. A directory-scoped `CLAUDE.md` is one notch looser
 but still sits above the docs bar. Propose a CLAUDE.md edit ONLY when ALL FIVE hold
 — if you cannot answer all five in one sentence each, it is not a CLAUDE.md edit:
@@ -86,7 +90,7 @@ candidates both look worthy, propose only the higher-impact one and discard the
 other with that as the reason. When in doubt: discard it, or downgrade it to a
 `docs/*.md` edit or a `task`.
 
-### Rung 2 — reference docs (`docs/*.md`, incl. CODE-PATTERNS.md, ARCHITECTURE.md)
+### Rung 2 — reference docs (`docs/*.md`, incl. CODE-PATTERNS.md, ARCHITECTURE.md — but NOT `docs/AGENT-GUIDE.md`, which is rung 1)
 
 A lower bar than CLAUDE.md, but still a real one — these are loaded on demand and
 also decay as they grow. Propose one only when it:
