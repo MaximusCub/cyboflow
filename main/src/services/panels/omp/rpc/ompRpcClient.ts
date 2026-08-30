@@ -184,8 +184,12 @@ const defaultSpawn: SpawnOmpRpcProcess = (command, args, options) => {
     env: options.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     // Lead a fresh process group so teardown reaps OMP's own children (MCP
-    // servers, tool subprocesses) instead of orphaning them.
-    detached: true,
+    // servers, tool subprocesses) instead of orphaning them. On Windows the
+    // group does not exist (teardown is `taskkill /T`) and `detached`'s
+    // DETACHED_PROCESS makes the console-less app server allocate its own
+    // VISIBLE console — the black window flash — so the flag is
+    // win32-conditional (mirrors codex appServer/client.ts).
+    ...(process.platform === 'win32' ? {} : { detached: true }),
     windowsHide: true,
   });
 };
