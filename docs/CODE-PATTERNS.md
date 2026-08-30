@@ -303,8 +303,8 @@ Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards
 
 These rules all guard the same failure mode: a type declaration that drifts from the runtime
 shape on the other side of an IPC/tRPC boundary, so a field is silently dropped instead of
-caught by the compiler. `CLAUDE.md` points here before any IPC touch; the rules, case studies,
-and audit greps live here.
+caught by the compiler. The agent guide (`docs/AGENT-GUIDE.md`) points here before any IPC
+touch; the rules, case studies, and audit greps live here.
 
 - **`IPCResponse<T>` callers must pass an explicit `T`** — never rely on the default. The
   wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults
