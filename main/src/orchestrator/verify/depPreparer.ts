@@ -192,8 +192,56 @@ export type DepExec = (
   opts: { cwd: string; timeoutMs: number },
 ) => Promise<{ code: number; out: string }>;
 
+/**
+ * Windows stand-in for the POSIX `cp -R`/`cp -Rc` clone rungs: there is no `cp`
+ * binary on Windows, so without this every dependency clone ENOENT'd and the
+ * snapshot provisioned WITHOUT the dir — fail-soft, but a guaranteed downstream
+ * build failure on every Windows verification. A recursive copy that preserves
+ * links VERBATIM, matching the BSD `cp -R` semantics documented on the POSIX
+ * rungs: directory links are re-created as JUNCTIONS (no privilege needed —
+ * pnpm's Windows workspace shape), file links need symlink privilege and fail
+ * the copy like any other unclonable filesystem. A copied junction keeps its
+ * ABSOLUTE target, exactly like an absolute symlink does under `cp -R` on
+ * POSIX.
+ */
+async function copyDirVerbatimWin32(src: string, dest: string): Promise<void> {
+  await fsPromises.mkdir(dest, { recursive: true });
+  for (const entry of await fsPromises.readdir(src, { withFileTypes: true })) {
+    const from = path.join(src, entry.name);
+    const to = path.join(dest, entry.name);
+    if (entry.isSymbolicLink()) {
+      const target = await fsPromises.readlink(from);
+      const targetsDirectory = await fsPromises
+        .stat(from)
+        .then((s) => s.isDirectory())
+        .catch(() => false);
+      await fsPromises.symlink(target, to, targetsDirectory ? 'junction' : 'file');
+    } else if (entry.isDirectory()) {
+      await copyDirVerbatimWin32(from, to);
+    } else {
+      await fsPromises.copyFile(from, to);
+    }
+  }
+}
+
 /** The production exec: `execFile` with stdout+stderr merged into `out` and every failure mapped to a code. */
 export const defaultDepExec: DepExec = async (cmd, args, opts) => {
+  // `cp` does not exist on Windows: translate the exact argv the two clone
+  // rungs pass (`['-Rc'|'-R', src, dest]`) to an in-process verbatim copy.
+  // Anything else (notably the electron-builder rebuild) still goes to execFile.
+  if (
+    process.platform === 'win32' &&
+    cmd === 'cp' &&
+    args.length === 3 &&
+    (args[0] === '-R' || args[0] === '-Rc')
+  ) {
+    try {
+      await copyDirVerbatimWin32(args[1], args[2]);
+      return { code: 0, out: '' };
+    } catch (err) {
+      return { code: 1, out: err instanceof Error ? err.message : String(err) };
+    }
+  }
   try {
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd: opts.cwd,
