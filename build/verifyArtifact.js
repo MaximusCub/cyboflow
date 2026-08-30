@@ -8,9 +8,15 @@
  * hook fires once per produced artifact and fails the build when a `.dmg` or
  * `.zip` comes out below the floor.
  *
- * Only `.dmg` and `.zip` are checked. The other artifacts electron-builder
- * emits alongside them — `.blockmap`, `latest-mac.yml` — are metadata that is
- * legitimately tiny.
+ * On Windows the same stub class applies to the NSIS installer, so `.exe`
+ * artifacts are held to their own floor — lower than the mac one, because NSIS
+ * compresses far harder than a DMG: a real Cyboflow installer lands well under
+ * 100 MB. (build/afterSign.js no-ops off-mac, so this hook is the only bundle
+ * check a Windows build gets.)
+ *
+ * `.dmg`/`.zip`/`.exe` are the only checked extensions. The other artifacts
+ * electron-builder emits alongside them — `.blockmap`, `latest*.yml` — are
+ * metadata that is legitimately tiny.
  *
  * A thrown error here fails the build: app-builder-lib's AsyncEventEmitter
  * awaits user hooks without a try/catch (out/util/asyncEventEmitter.js), so the
@@ -25,10 +31,16 @@ const fs = require('fs');
 
 /** Real per-arch DMGs are ~130-200 MB; a stub is three orders smaller. */
 const DEFAULT_MIN_ARTIFACT_BYTES = 100 * 1024 * 1024;
+/**
+ * Windows floor. NSIS/7z-compresses Electron's ~250 MB runtime to a fraction,
+ * so the bar must sit lower than the mac floor while still ordering of
+ * magnitude above any stub.
+ */
+const DEFAULT_MIN_WIN_ARTIFACT_BYTES = 50 * 1024 * 1024;
 
 const SKIP_ENV_VAR = 'CYBOFLOW_SKIP_BUNDLE_CHECKS';
 
-const VERIFIED_EXTENSIONS = ['.dmg', '.zip'];
+const VERIFIED_EXTENSIONS = ['.dmg', '.zip', '.exe'];
 
 /** Is this produced artifact a distributable whose size we can hold to a floor? */
 function shouldVerifyArtifact(file) {
@@ -65,7 +77,10 @@ function verifyArtifactFile(file, minBytes = DEFAULT_MIN_ARTIFACT_BYTES) {
 exports.default = async function(context) {
   const { file, packager } = context;
 
-  if (packager && packager.platform && packager.platform.name !== 'mac') {
+  const platformName = packager && packager.platform && packager.platform.name;
+  const isMac = platformName === 'mac';
+  const isWin = platformName === 'win';
+  if (!isMac && !isWin) {
     return;
   }
 
@@ -81,7 +96,7 @@ exports.default = async function(context) {
     return;
   }
 
-  const failure = verifyArtifactFile(file);
+  const failure = verifyArtifactFile(file, isWin ? DEFAULT_MIN_WIN_ARTIFACT_BYTES : DEFAULT_MIN_ARTIFACT_BYTES);
   if (failure) {
     throw new Error(`ArtifactBuildCompleted: ${failure}`);
   }
@@ -94,6 +109,7 @@ exports.default = async function(context) {
 
 exports._helpers = {
   DEFAULT_MIN_ARTIFACT_BYTES,
+  DEFAULT_MIN_WIN_ARTIFACT_BYTES,
   SKIP_ENV_VAR,
   VERIFIED_EXTENSIONS,
   shouldVerifyArtifact,

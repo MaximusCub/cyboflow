@@ -77,6 +77,8 @@
     "build:mac:dev:arm64": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && BUILD_VARIANT=dev pnpm run inject-build-info && BUILD_VARIANT=dev BUILD_ARCH=arm64 node scripts/configure-build.js && electron-builder --mac --arm64 --publish never --config build/electron-builder.generated.json",
     "build:mac:dev:x64": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && BUILD_VARIANT=dev pnpm run inject-build-info && BUILD_VARIANT=dev BUILD_ARCH=x64 node scripts/configure-build.js && electron-builder --mac --x64 --publish never --config build/electron-builder.generated.json",
     "release:mac:dev": "CYBOFLOW_BUILD_ENV=dev pnpm run build:mac:dev && BUILD_VARIANT=dev pnpm run publish:r2",
+    "build:win": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js --platform win --arch x64 && electron-builder --win --x64 --publish never --config build/electron-builder.generated.json",
+    "build:win:dev": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js --platform win --arch x64 --variant dev && electron-builder --win --x64 --publish never --config build/electron-builder.generated.json",
     "publish:r2": "node scripts/publish-update.mjs",
     "preview": "pnpm run --filter frontend preview",
     "lint": "pnpm run -r lint",
@@ -160,6 +162,7 @@
     "asarUnpack": [
       "node_modules/**/*.node",
       "node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**",
+      "node_modules/@anthropic-ai/claude-agent-sdk-win32-*/**",
       "node_modules/@openai/codex*/**",
       "node_modules/@steipete/peekaboo-mcp/**",
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
@@ -189,6 +192,15 @@
       ],
       "artifactName": "${productName}-${version}-macOS-${arch}.${ext}",
       "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib}"
+    },
+    "win": {
+      "icon": "main/assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis"
+        }
+      ],
+      "artifactName": "${productName}-${version}-Windows-${arch}.${ext}"
     },
     "publish": {
       "provider": "generic",

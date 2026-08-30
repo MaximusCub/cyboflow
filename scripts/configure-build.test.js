@@ -51,6 +51,7 @@ function runCase(label, envOverrides, assertFn) {
     'APPLE_APP_PASSWORD',
     'BUILD_VARIANT',
     'BUILD_ARCH',
+    'BUILD_PLATFORM',
   ];
 
   for (const key of managedKeys) {
@@ -211,6 +212,53 @@ try {
 }
 
 try {
+  // Case D2 is pure: exercises the Windows lean-packaging plan on every host
+  // regardless of which optional agent packages are installed there.
+  const { getWinPackagingPlan } = require('./configure-build.js');
+  for (const targetArch of ['x64', 'arm64']) {
+    const otherArch = targetArch === 'x64' ? 'arm64' : 'x64';
+    const plan = getWinPackagingPlan(targetArch);
+    assert(plan !== null, `a ${targetArch} win lean-packaging plan should exist`);
+    assert(plan.requiredBinaries.length === 2, 'both agent binaries should be required');
+    assert(
+      plan.requiredBinaries.some(
+        (entry) => entry.packageName === `@anthropic-ai/claude-agent-sdk-win32-${targetArch}` &&
+          entry.relativePath.endsWith('claude.exe')
+      ),
+      `the ${targetArch} Windows Claude binary (claude.exe) should be required`
+    );
+    const codexTriple = targetArch === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
+    assert(
+      plan.requiredBinaries.some((entry) =>
+        entry.relativePath.includes(`codex-win32-${targetArch}`) &&
+        entry.relativePath.includes(`vendor${path.sep}${codexTriple}${path.sep}bin${path.sep}codex.exe`)
+      ),
+      `the ${targetArch} Windows Codex binary (codex.exe, ${codexTriple}) should be required`
+    );
+    assert(
+      plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**`) &&
+        plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-win32-${otherArch}/**`),
+      `foreign Claude packages (darwin, other win32 arch) should be excluded for ${targetArch}`
+    );
+    assert(
+      plan.exclusions.includes(`!node_modules/@openai/codex-linux-x64/**`) &&
+        plan.exclusions.includes(`!node_modules/@openai/codex-darwin-x64/**`),
+      'foreign Codex operating-system packages should be excluded'
+    );
+    assert(
+      !plan.exclusions.includes(`!node_modules/@openai/codex-win32-${targetArch}/**`) &&
+        !plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-win32-${targetArch}/**`),
+      'the target win32 packages must not be excluded'
+    );
+  }
+  assert(getWinPackagingPlan(undefined) === null, 'an unset architecture should preserve win packaging');
+  console.log('\nPASS: Case D2 (win Claude/Codex packaging plans)');
+} catch (err) {
+  console.error('FAIL: Case D2 — ' + err.message);
+  failed = true;
+}
+
+try {
   // Case E applies the plan to the generated config. The preflight requires both
   // TARGET binaries on disk, so only run when this darwin host has both packages.
   const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
@@ -257,6 +305,48 @@ try {
   }
 } catch (err) {
   console.error('FAIL: Case E — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F: a full Windows configureBuild run. Like Case E, the preflight
+  // requires the TARGET win32 binaries on disk, so only run on a host that
+  // actually installed them (a Windows dev box).
+  const claudeWinBinary = path.join(
+    __dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe'
+  );
+  const codexWinBinary = path.join(
+    __dirname, '..', 'node_modules', '@openai', 'codex-win32-x64',
+    'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'
+  );
+  if (fs.existsSync(claudeWinBinary) && fs.existsSync(codexWinBinary)) {
+    runCase(
+      'Case F: BUILD_PLATFORM=win (Windows packaging posture)',
+      { BUILD_PLATFORM: 'win', BUILD_ARCH: 'x64' },
+      function (config) {
+        assert(config.npmRebuild === false, 'win build must package the prebuilt .node files, not rebuild');
+        assert(
+          config.win && config.win.artifactName === '${productName}-${version}-Windows-${arch}.${ext}',
+          'the win artifactName should be the stable-variant convention'
+        );
+        assert(config.appId === 'com.cyboflow.app', 'win stable build keeps the stable appId');
+        assert(
+          Array.isArray(config.files) && config.files.includes('!node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**'),
+          'win files should exclude the darwin Claude package'
+        );
+        assert(
+          !config.files.includes('!node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**'),
+          'win files must not exclude the target win32-x64 Claude package'
+        );
+        // The Apple signing posture must be left untouched for a win build.
+        assert(config.mac.notarize === true, 'win build should not mutate the mac notarize field');
+      }
+    );
+  } else {
+    console.log('\n--- Case F: skipped (win32 agent binaries are not installed on this host) ---');
+  }
+} catch (err) {
+  console.error('FAIL: Case F — ' + err.message);
   failed = true;
 }
 

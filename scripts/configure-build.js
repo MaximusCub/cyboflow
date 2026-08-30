@@ -15,6 +15,17 @@
  *   - Signing/notarization posture is toggled based on the presence of Apple credentials.
  *   - When BUILD_VARIANT=dev, the dev appId / productName / artifactName / publish URL
  *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:dev).
+ *
+ * Windows (BUILD_PLATFORM=win, normally passed as `node scripts/configure-build.js
+ * --platform win --arch x64` by the build:win scripts):
+ *   - Requires build.win instead of build.mac; the mac signing posture is skipped.
+ *   - npmRebuild is turned OFF: the Windows build lands native modules on the
+ *     Electron ABI via prebuild-install (see docs/WINDOWS-BUILD.md) and
+ *     electron-builder must package those .node files as-is, not rebuild them
+ *     (a rebuild needs MSVC, which a Windows dev host may not have). Set
+ *     CYBOFLOW_WIN_NPM_REBUILD=1 to restore electron-builder's rebuild step.
+ *   - The lean-packaging plan keeps win32 agent binaries and excludes the
+ *     darwin/linux ones, mirroring the mac plan.
  */
 
 const fs = require('fs');
@@ -74,6 +85,52 @@ function getLeanPackagingPlan(targetArch) {
 }
 
 /**
+ * The Windows counterpart to getLeanPackagingPlan: a Windows installer needs
+ * only the matching win32 agent packages, and the darwin/linux ones are dead
+ * weight (and would ride into the asar unchecked). Binary layouts verified on
+ * disk: claude-agent-sdk-win32-<arch>/claude.exe and
+ * codex-win32-<arch>/vendor/<triple>/bin/codex.exe.
+ */
+function getWinPackagingPlan(targetArch) {
+  if (targetArch !== 'x64' && targetArch !== 'arm64') {
+    return null;
+  }
+
+  const targetSuffix = `win32-${targetArch}`;
+  const codexTargetTriple = targetArch === 'x64'
+    ? 'x86_64-pc-windows-msvc'
+    : 'aarch64-pc-windows-msvc';
+
+  return {
+    requiredBinaries: [
+      {
+        label: 'Claude Code',
+        packageName: `@anthropic-ai/claude-agent-sdk-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@anthropic-ai', `claude-agent-sdk-${targetSuffix}`, 'claude.exe'
+        ),
+      },
+      {
+        label: 'Codex',
+        packageName: `@openai/codex-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@openai', `codex-${targetSuffix}`,
+          'vendor', codexTargetTriple, 'bin', 'codex.exe'
+        ),
+      },
+    ],
+    exclusions: [
+      ...CLAUDE_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@anthropic-ai/claude-agent-sdk-${suffix}/**`),
+      ...CODEX_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@openai/codex-${suffix}/**`),
+    ],
+  };
+}
+
+/**
  * Warn — loudly, but do not fail — when the bundled screen-capture binary is
  * absent from node_modules.
  *
@@ -116,8 +173,10 @@ function configureBuild() {
   const canSign = !signingDisabled && hasAppleCertificate;
   const canNotarize = canSign && hasAppleId && hasTeamId && hasAppPassword;
   const isDev = process.env.BUILD_VARIANT === 'dev';
+  const isWin = process.env.BUILD_PLATFORM === 'win';
 
   console.log('Environment check:');
+  console.log(`  - Target Platform: ${isWin ? 'win' : 'mac'}`);
   console.log(`  - Signing Disabled: ${signingDisabled ? '✓' : '✗'}`);
   console.log(`  - Apple Certificate: ${hasAppleCertificate ? '✓' : '✗'}`);
   console.log(`  - Apple ID: ${hasAppleId ? '✓' : '✗'}`);
@@ -130,30 +189,38 @@ function configureBuild() {
   // Read the canonical config from package.json (source of truth — not mutated)
   const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
 
-  if (!packageJson.build || !packageJson.build.mac) {
+  if (!packageJson.build || (!isWin && !packageJson.build.mac)) {
     console.error('Error: No macOS build configuration found in package.json');
+    process.exit(1);
+  }
+  if (isWin && !packageJson.build.win) {
+    console.error('Error: No Windows build configuration found in package.json');
     process.exit(1);
   }
 
   // Deep-clone so the source package.json is never touched
   const config = JSON.parse(JSON.stringify(packageJson.build));
 
-  // Configure macOS signing posture based on capabilities
-  config.mac.notarize = canNotarize;
+  // Configure macOS signing posture based on capabilities. A win build has no
+  // Apple posture to adjust — the signing credentials above are darwin-only
+  // and the win config carries no hardenedRuntime/entitlements to mutate.
+  if (!isWin) {
+    config.mac.notarize = canNotarize;
 
-  if (!canSign) {
-    console.log('Configuring for unsigned build...');
-    config.mac.hardenedRuntime = false;
-    // Keep gatekeeperAssess false so unsigned apps can run locally
-    config.mac.gatekeeperAssess = false;
-    delete config.mac.entitlements;
-    delete config.mac.entitlementsInherit;
-  } else {
-    console.log('Configuring for signed build...');
-    config.mac.hardenedRuntime = true;
-    config.mac.gatekeeperAssess = false;
-    config.mac.entitlements = 'build/entitlements.mac.plist';
-    config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
+    if (!canSign) {
+      console.log('Configuring for unsigned build...');
+      config.mac.hardenedRuntime = false;
+      // Keep gatekeeperAssess false so unsigned apps can run locally
+      config.mac.gatekeeperAssess = false;
+      delete config.mac.entitlements;
+      delete config.mac.entitlementsInherit;
+    } else {
+      console.log('Configuring for signed build...');
+      config.mac.hardenedRuntime = true;
+      config.mac.gatekeeperAssess = false;
+      config.mac.entitlements = 'build/entitlements.mac.plist';
+      config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
+    }
   }
 
   // Dev-variant overrides (previously inline --config.* flags on build:mac:dev).
@@ -163,28 +230,51 @@ function configureBuild() {
     config.appId = 'com.cyboflow.app.dev';
     config.productName = 'Cyboflow Dev';
     config.mac.artifactName = 'Cyboflow-Dev-${version}-macOS-${arch}.${ext}';
+    if (isWin && config.win) {
+      config.win.artifactName = 'Cyboflow-Dev-${version}-Windows-${arch}.${ext}';
+    }
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
+  }
+
+  // Windows ships hand-placed prebuilt native modules (better-sqlite3 and
+  // node-pty on the Electron ABI via prebuild-install — docs/WINDOWS-BUILD.md).
+  // electron-builder must package those .node files as-is; a rebuild here
+  // would (a) need MSVC, which a Windows dev host may not have, and (b)
+  // clobber the verified prebuilds. CYBOFLOW_WIN_NPM_REBUILD=1 restores the
+  // rebuild step for hosts that do have a toolchain.
+  if (isWin) {
+    const winNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD === '1';
+    config.npmRebuild = winNpmRebuild;
+    console.log(`Windows packaging: npmRebuild=${config.npmRebuild}` +
+      (winNpmRebuild ? '' : ' (prebuilt .node files are packaged as-is; set CYBOFLOW_WIN_NPM_REBUILD=1 to rebuild)'));
   }
 
   // Lean per-arch packaging. Both agent distributions ship their native CLIs
   // as optional per-platform/arch packages. electron-builder bundles
   // node_modules wholesale, and a cross-arch dev box (or a forced install that
   // materializes every optionalDependency) can have all of them present. A
-  // macOS DMG needs only the matching darwin package for each agent. Exclude
-  // every foreign native package and fail fast if either target binary is
-  // absent, which would otherwise silently break that runtime after release.
+  // macOS DMG needs only the matching darwin package for each agent — and a
+  // Windows installer only the matching win32 package. Exclude every foreign
+  // native package and fail fast if either target binary is absent, which
+  // would otherwise silently break that runtime after release.
   // BUILD_ARCH unset / 'universal' leaves files untouched.
   const targetArch = process.env.BUILD_ARCH;
-  const leanPackagingPlan = getLeanPackagingPlan(targetArch);
+  const leanPackagingPlan = isWin
+    ? getWinPackagingPlan(targetArch)
+    : getLeanPackagingPlan(targetArch);
   if (leanPackagingPlan) {
+    const leanPlatform = isWin ? 'Windows' : 'macOS';
     for (const required of leanPackagingPlan.requiredBinaries) {
       const targetBinary = path.join(__dirname, '..', required.relativePath);
       if (fs.existsSync(targetBinary)) continue;
       console.error(
         `Error: the ${targetArch} ${required.label} binary is missing ` +
-          `(${required.packageName}). A ${targetArch} build would ship without it ` +
-          `and break that agent runtime. ` +
-          `Run "pnpm run install:darwin-cross" before a cross-arch build.`
+          `(${required.packageName}). A ${targetArch} ${leanPlatform} build would ` +
+          `ship without it and break that agent runtime. ` +
+          (isWin
+            ? `Run "pnpm install" on the Windows host (its os/cpu constraints ` +
+              `materialize the win32 optional packages).`
+            : `Run "pnpm run install:darwin-cross" before a cross-arch build.`)
       );
       process.exit(1);
     }
@@ -193,8 +283,8 @@ function configureBuild() {
       ...leanPackagingPlan.exclusions,
     ];
     console.log(
-      `Lean packaging: keeping only darwin-${targetArch} agent binaries; ` +
-        `excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
+      `Lean packaging: keeping only ${isWin ? 'win32' : 'darwin'}-${targetArch} ` +
+        `agent binaries; excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
     );
   }
 
@@ -206,14 +296,36 @@ function configureBuild() {
 
   const relPath = path.relative(path.join(__dirname, '..'), GENERATED_CONFIG_PATH);
   console.log(`Build configuration written to ${relPath}`);
-  console.log(`Notarization: ${config.mac.notarize ? 'enabled' : 'disabled'}`);
-  console.log(`Hardened Runtime: ${config.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+  if (!isWin) {
+    console.log(`Notarization: ${config.mac.notarize ? 'enabled' : 'disabled'}`);
+    console.log(`Hardened Runtime: ${config.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+  }
 
   return config;
 }
 
 if (require.main === module) {
+  // CLI arg form (--platform/--arch/--variant) exists so package.json scripts
+  // never need POSIX `VAR=value cmd` env syntax, which breaks on Windows' cmd
+  // shell. It simply feeds the same env vars the mac scripts set inline.
+  const argv = process.argv.slice(2);
+  const takeValue = (flag) => {
+    const idx = argv.indexOf(flag);
+    if (idx === -1) return undefined;
+    const value = argv[idx + 1];
+    if (!value || value.startsWith('--')) {
+      console.error(`Error: ${flag} needs a value`);
+      process.exit(2);
+    }
+    return value;
+  };
+  const platform = takeValue('--platform');
+  const arch = takeValue('--arch');
+  const variant = takeValue('--variant');
+  if (platform !== undefined) process.env.BUILD_PLATFORM = platform;
+  if (arch !== undefined) process.env.BUILD_ARCH = arch;
+  if (variant !== undefined) process.env.BUILD_VARIANT = variant;
   configureBuild();
 }
 
-module.exports = { configureBuild, getLeanPackagingPlan, GENERATED_CONFIG_PATH };
+module.exports = { configureBuild, getLeanPackagingPlan, getWinPackagingPlan, GENERATED_CONFIG_PATH };

@@ -955,32 +955,34 @@ async function caseV() {
   await caseD();
   await caseE();
   if (process.platform === 'darwin') {
-    // Cases F–K exercise REAL macOS `codesign`/`lipo` against Mach-O
-    // fixtures (and dlopen a host-ABI addon); on Linux CI they can only fail
-    // for platform reasons, which proves nothing about the verification
-    // logic they exist to pin.
+    // Cases F–V exercise REAL macOS `codesign`/`lipo`/`plutil` against
+    // Mach-O fixtures (and dlopen a host-ABI addon). The fixtures also
+    // symlink the host binary into a fake .app, which Windows only permits
+    // with admin/Developer-Mode privileges. On any non-darwin host they can
+    // only fail for platform reasons, which proves nothing about the
+    // verification logic they exist to pin — the hook itself no-ops there.
     await caseF();
     await caseG();
     await caseH();
     await caseI();
     await caseJ();
     await caseK();
+    await caseL();
+    await caseM();
+    await caseN();
+    await caseO();
+    await caseP();
+    await caseQ();
+    await caseR();
+    await caseS();
+    await caseT();
+    await caseU();
+    await caseV();
   } else {
     console.log(
-      `SKIP: cases F-K are darwin-only (host is ${process.platform}); codesign/lipo/Mach-O probes cannot run here.`,
+      `SKIP: cases F-V are darwin-only (host is ${process.platform}); codesign/lipo/Mach-O probes cannot run here.`,
     );
   }
-  await caseL();
-  await caseM();
-  await caseN();
-  await caseO();
-  await caseP();
-  await caseQ();
-  await caseR();
-  await caseS();
-  await caseT();
-  await caseU();
-  await caseV();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
