@@ -1,4 +1,7 @@
-<!-- Produced 2026-07-03 by a multi-agent design workflow (5 readers / 3 designers / 3 judges / 1 synthesis). Status: PROPOSED, not yet implemented. -->
+<!-- ARCHIVED — shipped. Landed 2026-07-03, the same day this doc was produced (commit 151156f8b:
+     parallel blocking `integration` CI job, `pnpm test:integration`, fakeSdk.ts + sdkContract.test.ts).
+     Kept for historical context only; the "PROPOSED, not yet implemented" framing below is no
+     longer current. Produced by a multi-agent design workflow (5 readers / 3 designers / 3 judges / 1 synthesis). -->
 
 # CI Gate + Mocked-SDK Integration Suite — Final Recommendation
 

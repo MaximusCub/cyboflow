@@ -1,5 +1,10 @@
 # Design: experiment arms × ship materialize — in-arm eligibility, board promotion, and grading are three different things
 
+> **ARCHIVED — shipped.** Option A (below) landed as commit `eddbab468` "fix: unblock A/B
+> ship-arm materialize by splitting approved_at from board visibility", the same day this design
+> was written. This document is kept for historical context only; the "no code changed" framing
+> below is no longer current.
+
 **Status:** proposal (read-only design task, no code changed)
 **Date:** 2026-07-13
 **Bug:** a ship-flow A/B experiment arm dies at step 10 `materialize-batch` with `ship_no_tasks_to_materialize`, because the arm's tasks are still `approved_at NULL` when `cyboflow_create_sprint_batch` runs. Both arms of the observed experiment were backend-stuck identically; the "opus arm limped, sonnet arm hard-blocked" difference was purely agent-side error handling of the same tool error — a symptom, not a fix surface.

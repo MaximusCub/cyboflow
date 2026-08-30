@@ -9,7 +9,7 @@
 > in its commit: (a) Item 2's per-attempt failure-TEXT accumulator (the controller
 > retains none today, so the gate summary surfaces ref/step/attempts but not the
 > error text); (b) Item 3's choice landed on 3a (mint-time `audience` column,
-> migration 082); (c) ship.md's orchestrated closing-stage prose was left as-is
+> migration 085); (c) ship.md's orchestrated closing-stage prose was left as-is
 > (its default programmatic path is covered by the composer).
 **Origin:** an ORCHESTRATED sprint run parked on a blocking finding whose body was
 a code-review `## Blocking` defect for TASK-107. The finding offered `Resolve &

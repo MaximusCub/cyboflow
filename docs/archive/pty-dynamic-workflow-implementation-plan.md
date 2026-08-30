@@ -9,10 +9,18 @@ records the outcome, states what was built, and states what must be redesigned
 before any of the rest is worth writing.
 
 Status: **Planks A–C (defect fixes), D–G (the redesign), and H (firm gates +
-batching) built and green, default OFF. All three CLI assumptions VERIFIED
-against claude 2.1.231** — see "CLI assumptions" below, including a fourth
-finding (dispatch is permission-gated, and only `auto` works) that must be
-handled before the mode is switched on.
+batching) built and green.** All three CLI assumptions VERIFIED against claude
+2.1.231 — see "CLI assumptions" below, including a fourth finding (dispatch is
+permission-gated, and only `auto` works) that this doc says must be handled
+before the mode is switched on.
+>
+> **Update, 2026-08-20 (4 days after this doc's last edit):** shipped ON by
+> default for all interactive runs, unconditionally — commit `53fa98556`
+> ("feat: ship fan-out dynamic-workflow dispatch ON for interactive runs"),
+> `INTERACTIVE_FAN_OUT_DISPATCH_DEFAULT = 'workflow'`
+> (`shared/types/fanOutDispatch.ts`). The `agentPermissionMode === 'auto'`-only
+> gate this doc recommends below was **not** applied — `configManager.ts`'s
+> `getFanOutDispatch()` floors to the default with no permission-mode check.
 
 ---
 

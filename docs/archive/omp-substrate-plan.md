@@ -1,9 +1,17 @@
 # Cyboflow → OMP-aware → OMP-capable: implementation plan
 
-Status: **ready to begin the rebuild, NOT ready to claim capability.**
-The four read-adapter files exist and are verified but are untracked and unwired.
-This plan sequences the work so every phase is independently reviewable and
-shippable, with the authority model settled before any command is implemented.
+Status: **SUPERSEDED by the as-built OMP Prime bridge.** This plan's Phase 0/1
+read-adapter design shipped, but the codebase moved well past it — into a full
+command-adapter/bridge/principal system (`ompBridgeClient.ts`,
+`ompBridgeCommandAdapter.ts`, `ompSupervisedAdapter.ts`, `ompPrincipal.ts`,
+`ompSessionManager.ts`, landed via squash commit `603827f11`) that this plan does
+not describe. For the governing design, see
+`docs/proposals/omp-phase4-coexistence-adr.md` (coexistence decision, §6 increment
+status) and `docs/proposals/omp-provider-integration.md` (the third-provider
+integration this bridge work now sits alongside). Kept here
+as the historical record of the original phased plan and its ground-truth
+research; do not treat the phase numbering or "untracked and unwired" framing
+below as current.
 
 ## Ground truth (verified against the live tree)
 

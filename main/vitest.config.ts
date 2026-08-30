@@ -43,7 +43,7 @@ export default defineConfig({
       // suite and run report-only by e2e.yml's flake-watch job, which sets
       // CYBOFLOW_RUN_QUARANTINE=1 to lift this exclude (the quarantined files
       // still match `include`, so this exclude is the only gate). See
-      // docs/plans/ci-gate-mocked-sdk-integration.md "Flake quarantine".
+      // docs/archive/ci-gate-mocked-sdk-integration.md "Flake quarantine".
       ...(process.env.CYBOFLOW_RUN_QUARANTINE ? [] : ['**/*.quarantine.test.ts']),
     ],
     setupFiles: ['./src/test/setup.ts'],

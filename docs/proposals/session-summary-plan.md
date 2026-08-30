@@ -1,6 +1,7 @@
 # Implementation plan: idle-gated quick-session summaries (rolling summary + append-only history)
 
-Status: PROPOSAL v2 — revised per Codex adversarial review (2026-07-23), not yet implemented.
+Status: **IMPLEMENTED**, with live follow-ups through 2026-08-26 — see §10 ("RESOLVED
+2026-08-26": Codex/OMP quick sessions now covered on the SDK substrate).
 Scope: Claude-runtime quick sessions only (v1). Author session: curious-stream-20260723.
 
 Review log:

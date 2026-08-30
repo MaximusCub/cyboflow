@@ -1,6 +1,9 @@
 # Proposal: per-agent / per-session MCP & Plugin toggles + Workflows-page sections
 
-Status: **proposal / not yet scheduled.** Author: research-driven (multi-agent investigation, 2026-06-26).
+Status: **SHIPPED.** Author: research-driven (multi-agent investigation, 2026-06-26).
+Migrations 038 (`agent_mcp_access`) / 039 (`session_mcp_plugins`). All 5 slices in the
+companion `mcp-plugin-toggles-impl-plan.md` landed. The "Scope decisions (locked)"
+section below remains accurate as design rationale.
 
 ## 1. Goal
 

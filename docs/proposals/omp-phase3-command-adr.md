@@ -1,11 +1,16 @@
 # ADR: OMP Phase 3 — transport reality check, supervisor identity, and the apply go/no-go
 
+> **Superseded on the transport question by `omp-phase4-coexistence-adr.md` §1**
+> (the OMP Prime bridge shipped the surface this ADR found missing). §3's NO-GO
+> verdict below is historical; §2's non-negotiables and §5's apply/discard
+> gating rules remain valid and load-bearing.
+
 Status: **NO-GO for Phase 3 command implementation.** The transport prerequisite
 does not exist in the producer today. This ADR records the decision, the
 falsification test that would re-open it, and the identity + gating rules that
 apply once it re-opens.
 
-It settles the three prerequisites `docs/proposals/omp-substrate-plan.md`
+It settles the three prerequisites `docs/archive/omp-substrate-plan.md`
 §Phase 3 names as blocking — transport, supervisor identity, PASS-bound apply —
 and corrects two errors in that section (a speculative transport surface that
 does not exist, and an apply/discard gating asymmetry).
@@ -57,7 +62,7 @@ against an assumed surface.
 
 ---
 
-## 3. Decision 1 — transport: NO-GO
+## 3. Decision 1 — transport: NO-GO (historical — see superseded banner above)
 
 **Decision:** Phase 3 command implementation does **not** proceed. Cyboflow
 does **not** invent a control-plane transport.

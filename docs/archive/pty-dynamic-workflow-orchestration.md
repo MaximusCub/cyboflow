@@ -1,5 +1,10 @@
 # PTY workflow runs as dynamic workflows (feasibility)
 
+> **SUPERSEDED.** This feasibility assessment's Option B recommendation was built
+> and shipped — see `pty-dynamic-workflow-implementation-plan.md` for what was
+> actually implemented (and its own status for what's still gated). Left below
+> for historical context; do not treat "nothing built" as current.
+
 Status: **feasibility assessment — nothing built.** Investigation only; no
 production code changed on this branch.
 

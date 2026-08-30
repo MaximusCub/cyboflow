@@ -5,7 +5,7 @@ quick-session agent-runtime picker, backed by a separate `OmpSessionManager` tha
 **beside** the `AbstractCliManager` family and is **fail-closed** on the Phase-3 bridge
 config. Workflow-step execution on OMP is a named follow-up increment, not v1.
 
-This is the coexistence decision `omp-substrate-plan.md` §Phase 4 gates: whether
+This is the coexistence decision `docs/archive/omp-substrate-plan.md` §Phase 4 gates: whether
 `AgentProvider`/`AbstractCliManager` can be extended so a Cyboflow session *runs on OMP
 as a substrate*. It follows the Phase-3 ADR and does not re-open its transport decision —
 it records that the Phase-3 gate has now cleared on the consumer side.
@@ -159,8 +159,12 @@ drops every column it fails to list (`status_message`, added imperatively by
 `database.ts`, is the live example) and restates 103's CHECK lists from memory —
 un-widening `omp-sdk`/`omp-pty` on exactly the installs that use them.
 
-**Status:** increment 1 (types) and increment 2 (adapter `send`/`read`/`state`) are
-landed and gate-green. Increments 3-5 are pending.
+**Status:** all five increments landed and gate-green. Increments 1-2 landed with
+this ADR; increments 3-4 landed via squash commit `603827f11` (the branch-local
+commits that authored them were squashed at merge, so they aren't reachable by
+hash from `main` — the squash commit is). Increment 5 (tests) is covered per-file
+rather than by one dedicated suite: `ompSessionManager.test.ts` (37 tests) and
+`SubstrateSelector.ompFlipped.test.tsx` exercise increments 3-4 directly.
 
 - **Increment 1 (this ADR + types):** land `agentRuntime.ts` widening (provider `omp`,
   session runtime `omp-fleet`, label, `providerForRuntime`, disabled-pattern) *together*
@@ -168,10 +172,11 @@ landed and gate-green. Increments 3-5 are pending.
 - **Increment 2 (adapter):** extend `OmpCommandAdapter` + `OmpBridgeCommandAdapter` with
   `send`/`read`/`state` (the chat-lifecycle tools), verified against the live bridge
   response shapes.
-- **Increment 3 (manager):** `OmpSessionManager` beside the four managers.
-- **Increment 4 (wiring + picker):** dispatch lane + quick-session picker entry,
-  gated by availability.
-- **Increment 5 (tests + full gate).**
+- **Increment 3 (manager):** ✅ shipped. `OmpSessionManager` beside the four managers
+  (`main/src/orchestrator/omp/ompSessionManager.ts`).
+- **Increment 4 (wiring + picker):** ✅ shipped. Dispatch lane + quick-session picker
+  entry, gated by availability (`frontend/src/components/cyboflow/SubstrateSelector.tsx`).
+- **Increment 5 (tests + full gate):** ✅ shipped, per-file rather than one dedicated suite.
 
 ## 7. Out of scope
 

@@ -1,9 +1,15 @@
 # Implementation plan: per-agent / per-session MCP & Plugin toggles
 
-Companion to `docs/proposals/mcp-plugin-toggles.md` (read that first for feasibility + decisions).
+Status: **SHIPPED.** All 5 slices landed; the migration numbers below (035/036) were
+renumbered at merge to **038**/**039** exactly as §"Migration numbers" anticipated —
+see `main/src/database/migrations/038_agent_mcp_access.sql` and
+`039_session_mcp_plugins.sql`.
+
+Companion to `docs/archive/mcp-plugin-toggles.md` (read that first for feasibility + decisions).
 This plan is sliced into **5 atomic commits**, each independently gate-greenable (`pnpm typecheck`
 + `pnpm test:unit`). All line numbers are from the `falcon-ristra` worktree at authoring time;
-re-confirm before editing. Verbatim stubs below are copy-pasteable.
+re-confirm before editing. Verbatim stubs below are copy-pasteable (as historical record —
+the shipped code, not these stubs, is now the source of truth for exact file:line detail).
 
 ## Locked decisions (from the proposal)
 

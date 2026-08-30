@@ -2,7 +2,14 @@
 
 Date: 2026-07-08
 Updated: 2026-07-10
-Status: Codex SDK quick sessions and workflow launch are wired through app-server; Codex PTY remains quick-session-only
+Status: SHIPPED. Codex workflow launch, restart recovery, question routing, and
+provider-appropriate prompt compilation all landed after the 2026-07-10 update above
+(commits `e3eb98f0c`, `22f86217e`, `ec83239d7`, `49b69ab43`, `b959cdef3`, 2026-07-08
+through 2026-07-14) — `codex-sdk` is a full member of `WORKFLOW_LAUNCHABLE_RUNTIMES`
+(`shared/types/agentRuntime.ts`) and Planner/Sprint/Compound/Ship all run on it. Codex
+PTY remains quick-session-only, unchanged. The "Current v1 implementation decisions,"
+"Still gated," and Rollout Plan sections below are the pre-ship snapshot; see
+"Implementation Status (as shipped)" for what actually landed.
 
 ## Summary
 
@@ -58,9 +65,10 @@ Current v1 implementation decisions:
   name, and manager/factory compatibility name. It now means "the structured
   Codex workflow runtime" and dispatches to app-server; it is not a claim about
   the underlying npm SDK.
-- Workflow launches remain Claude-only. `codex-sdk` rows remain readable and
-  internally dispatchable, but new Codex workflow launch and restart requests
-  are rejected at the UI, tRPC, and registry boundaries.
+- ~~Workflow launches remain Claude-only~~ — SHIPPED (`e3eb98f0c`, 2026-07-08).
+  `codex-sdk` is a normal member of `WORKFLOW_LAUNCHABLE_RUNTIMES`; Codex workflow
+  launch and restart requests are accepted at the UI, tRPC, and registry
+  boundaries.
 - Quick sessions may use `codex-pty` for an interactive terminal-style Codex
   experience. Quick-session `codex-sdk` chat is not wired.
 - Native app-server approvals and nested per-thread MCP configuration are proven
@@ -71,7 +79,7 @@ Current v1 implementation decisions:
   `account/read` preflight before starting or resuming a thread and rejects API-key
   or malformed account state. API-key auth remains a later product/billing decision.
 
-## Implementation Status
+## Implementation Status (as shipped)
 
 Completed foundations:
 
@@ -98,17 +106,22 @@ Completed foundations:
   validates the exact version, platform target, manifest, executable, and bundled
   PATH directory without falling back to an arbitrary system command.
 
-Still gated:
+Formerly gated, now shipped (all landed 2026-07-09 through 2026-07-14, after this
+doc's last "Updated" stamp):
 
-- Compiling each built-in workflow into provider-appropriate Codex prompts rather
-  than passing Claude-specific delegation and question instructions through.
+- Compiling each built-in workflow into provider-appropriate Codex prompts
+  (`CODEX_WORKFLOW_ENVELOPE` in `main/src/orchestrator/workflowPromptRenderer.ts`,
+  commit `b959cdef3`) rather than passing Claude-specific delegation and question
+  instructions through.
 - Host-owned human gates with contract coverage for pause, response, resume,
-  cancellation, and failure.
-- MCP workflow-progress contracts for step reporting, entity/finding writes, and
-  artifact reporting across Planner, Sprint, Compound, and Ship.
+  cancellation, and failure (`22f86217e` runs workflows through app-server;
+  `49b69ab43` recovers them after restart).
+- Question routing for MCP workflow-progress contracts — step reporting,
+  entity/finding writes, and artifact reporting across Planner, Sprint, Compound,
+  and Ship (`ec83239d7`).
 
-Until those contracts pass, Cyboflow must not expose Codex workflows or describe
-an internal Codex turn fixture as workflow support.
+Codex workflows are exposed and supported in production; this is no longer an
+internal-only fixture.
 
 ## Goals
 
@@ -761,7 +774,7 @@ Exit criteria:
 - Codex usage renders with provider-normalized usage and cost fields.
 - A Codex PTY quick session can launch and close without participating in workflow execution.
 
-### Phase 3: Prompt Compilation, Human Gates, And Workflow Progress (Next)
+### Phase 3: Prompt Compilation, Human Gates, And Workflow Progress (Complete)
 
 - Compile effective workflow prompts and agents for Codex rather than sending
   Claude `Agent` / `AskUserQuestion` instructions or `.claude/agents` bundles.
@@ -772,22 +785,31 @@ Exit criteria:
 - Verify artifact reporting.
 - Verify pause, resume, cancellation, failure, and host-owned human-gate behavior.
 
-Exit criteria:
+Exit criteria (met):
 
-- Planner/Sprint/Compound/Ship pass provider-specific prompt and human-gate contract tests and advance through the same MCP-driven workflow progress path under Codex.
+- Planner/Sprint/Compound/Ship pass provider-specific prompt and human-gate contract tests and advance through the same MCP-driven workflow progress path under Codex. Prompt compilation shipped as `CODEX_WORKFLOW_ENVELOPE` (`main/src/orchestrator/workflowPromptRenderer.ts`, commit `b959cdef3`); question routing shipped via `ec83239d7`; run-through-app-server and restart recovery shipped via `22f86217e` and `49b69ab43`.
 - A session returns to its original default chat agent after workflow completion, failure, or cancellation.
 
-### Phase 4: Review Queue Approval Bridge Hardening
+### Phase 4: Review Queue Approval Bridge Hardening (Complete)
 
 - Keep Codex app-server approval requests routed to `ApprovalRouter`.
 - Verify command, file-change, and MCP approval/rejection/cancellation cases against real workflow prompts.
 - Verify blocking `review_items` recover correctly across app restart.
 
-Exit criteria:
+Exit criteria (met):
 
-- Permission cards behave the same as Claude cards from the user's point of view.
+- Permission cards behave the same as Claude cards from the user's point of view. Blocking `review_items` recover across app restart per `49b69ab43`; Codex workflows have run in production against real workflow prompts since Phase 3 shipped.
 
-### Phase 5: Mixed-Provider Workflow Steps
+### Phase 5: Mixed-Provider Workflow Steps (superseded by a coarser mechanism)
+
+> Shipped, but not in the per-step inherit-session/inherit-workflow shape this
+> section originally proposed. What actually landed: (a) a per-agent
+> `agentConfigs` overlay (`WorkflowDefinition.agentConfigs` in
+> `shared/types/workflows.ts`) that can pin an individual step's agent to a
+> different provider/runtime/model, and (b) a whole-workflow `runtime_mix` dial
+> (`'claude' | 'claude-primary' | 'codex-primary' | 'codex'`, materialized at
+> `createRun`) that routes execute/review roles across providers without a
+> per-step selector UI. The bullets below are the original, superseded design.
 
 - Add workflow default and per-step agent config shape.
 - Add explicit inherit-session and inherit-workflow selector states.

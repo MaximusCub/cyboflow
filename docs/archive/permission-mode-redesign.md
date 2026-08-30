@@ -1,6 +1,10 @@
 # Permission-Mode Redesign — Implementation Plan
 
-> Status: PROPOSAL (awaiting sign-off). Produced by a multi-agent design pass (4 parallel investigations → synthesis → 3 adversarial critics → reconciliation). Branch: falcon-ristra. Do not implement until the open questions in §9 are signed off.
+> **ARCHIVED — shipped.** All 8 slices landed 2026-06-29, the same day this doc was authored
+> (migration `040_session_chat_run_id.sql`; `permissionModeResolver.ts`). This document is kept
+> for historical context only; the "awaiting sign-off" framing below is no longer current.
+>
+> Produced by a multi-agent design pass (4 parallel investigations → synthesis → 3 adversarial critics → reconciliation). Branch: falcon-ristra.
 
 ---
 

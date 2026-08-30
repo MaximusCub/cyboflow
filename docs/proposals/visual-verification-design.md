@@ -1,6 +1,9 @@
 # cyboflow Layered Visual Verification — Architecture & Plan
 
-Status: **DESIGN APPROVED — decisions locked, implementation not yet started.**
+Status: **Built, then superseded.** This design's capture/judge core was implemented and has
+since been replaced by `verification-agent-redesign.md` (the scheduler spine, merge gate, and
+delivery chokepoints from this design are retained — see that doc's "What survives"). Left below
+for historical context; do not treat "implementation not yet started" as current.
 Branch: `visual-verify` (off `main@d9be8e84`). Source design pass: workflow `wf_902f979c-94c`.
 
 Visual verification turns the dead-end `cyboflow-visual-verify` subagent (today:
