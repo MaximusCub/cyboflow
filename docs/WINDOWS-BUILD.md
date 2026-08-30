@@ -85,7 +85,62 @@ trying to rebuild them (see M1).
 
 ## M1 — build pipeline
 
-(see sections below, appended as completed)
+### Portability fixes
+
+- `main/package.json` `copy:assets` used `mkdirp` + `cp` with shell globs —
+  POSIX-only, killed `pnpm build:main` on Windows. Replaced with
+  `main/scripts/copy-assets.js` (fs.cpSync/readdirSync, CommonJS like the
+  sibling build helpers). `copy-workflow-assets.js` and
+  `mark-hooks-executable.js` were already portable.
+- The other build-chain scripts (`inject-build-info.js` = git only;
+  `bundle-mcp-server.mjs` / `bundle-preload.mjs` = pure node) verified portable.
+
+### Win packaging config
+
+- `package.json` gains a `build.win` section: `icon: main/assets/icon.ico`
+  (verified to contain a 256×256 layer — no regeneration needed), NSIS target,
+  `artifactName: ${productName}-${version}-Windows-${arch}.${ext}`.
+- `asarUnpack` gains `node_modules/@anthropic-ai/claude-agent-sdk-win32-*/**`
+  — without it `claude.exe` stays inside the asar and cannot execute
+  (`claudeExecutablePath.ts` already picks `claude.exe` on win32).
+- `scripts/configure-build.js` gains a Windows branch, selected by
+  `BUILD_PLATFORM=win` (normally via new CLI flags `--platform/--arch/--variant`
+  so package.json scripts never need POSIX `VAR=x cmd` env syntax, which cmd
+  cannot run):
+  - validates `build.win` instead of `build.mac`; mac signing posture skipped;
+  - **`npmRebuild: false`** — packages the hand-placed Electron-ABI prebuilds
+    as-is (a rebuild would need MSVC and would clobber the verified
+    binaries). Opt back in with `CYBOFLOW_WIN_NPM_REBUILD=1`;
+  - Windows lean-packaging plan (`getWinPackagingPlan`): keeps only
+    `win32-<arch>` agent packages, excludes darwin/linux ones, preflight
+    requires `claude-agent-sdk-win32-<arch>/claude.exe` and
+    `codex-win32-<arch>/vendor/<triple>/bin/codex.exe` on disk
+    (`x86_64-pc-windows-msvc` for x64);
+  - dev variant overrides mirror the mac ones (`Cyboflow-Dev-${version}-Windows-...`).
+- `build/afterSign.js` already no-ops off-mac — unchanged. (Consequence:
+  no arch/ABI/size verification of the .app-equivalent on Windows; see
+  `verifyArtifact` below for the distributable-level check.)
+- `build/verifyArtifact.js`: `.exe` (NSIS) artifacts now get a size floor of
+  **50 MB** — lower than the 100 MB mac floor because NSIS compresses much
+  harder; still orders of magnitude above a stub. The floor follows the
+  platform, not the extension.
+- `scripts/configure-build.test.js`: new pure Case D2 (win lean plans) and
+  conditional Case F (full win configureBuild on hosts with the win32 agent
+  binaries installed). `build/afterSign.test.js`: cases F–V (mac-only
+  codesign/lipo/plutil fixtures, which also symlink node.exe — a privilege
+  Windows denies without admin/Developer Mode) are now gated to darwin like
+  they always had to be for Linux CI; cases A–E still run everywhere.
+- Scripts: `build:win` and `build:win:dev` mirror `build:mac:*` except they
+  **skip `pnpm run electron:rebuild`** (compiles better-sqlite3 — unavailable
+  without MSVC; the prebuilds are already in place from M0) and pass
+  `--win --x64 --publish never`.
+
+### Gate results (measured, on the Windows host)
+
+- `pnpm run test:build` — all green (afterSign 23 passed, verifyArtifact 26
+  passed, configure-build all cases incl. D2 + F).
+- `pnpm run typecheck` — clean.
+- `pnpm run lint` — 0 errors (200 pre-existing warnings).
 
 ## M2 — launch verification
 
