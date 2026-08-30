@@ -60,6 +60,7 @@
  * unreported until the next hourly tick.
  */
 import { execFile } from 'node:child_process';
+import { execWindowsProcessTable } from './winProcessTable';
 import { resolveMcpServerScriptPath } from '../orchestrator/mcpServer/scriptPath';
 import { PARENT_WATCHDOG_INTERVAL_MS } from '../orchestrator/mcpServer/parentWatchdog';
 import type { LoggerLike } from '../orchestrator/types';
@@ -195,6 +196,12 @@ export function parseMcpOrphanPsOutput(stdout: string): McpOrphanProcess[] {
 
 /** Default process lister: `ps -axo pid=,ppid=,etime=,command=` (see macOS gotcha above — NOT `etimes`). */
 function defaultListProcesses(): Promise<McpOrphanProcess[]> {
+  if (process.platform === 'win32') {
+    // Windows has no `ps`; the PowerShell stand-in emits pid/ppid/etime/
+    // command lines in the same shape (etime in the macOS mm:ss / hh:mm:ss /
+    // dd-hh:mm:ss forms), so the parser below is used unchanged.
+    return execWindowsProcessTable('pid-ppid-etime-command').then(parseMcpOrphanPsOutput);
+  }
   return new Promise<McpOrphanProcess[]>((resolve, reject) => {
     execFile(
       'ps',

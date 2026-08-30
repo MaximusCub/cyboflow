@@ -12,6 +12,7 @@
  * mis-escaped pattern in a kill command is not a mistake worth risking.
  */
 import { execFile } from 'node:child_process';
+import { execWindowsProcessTable } from './winProcessTable';
 
 /** A single process row parsed from `ps` output. */
 export interface ProcessRow {
@@ -80,6 +81,11 @@ export function collectProcessTree(rootPids: number[], procs: ProcessRow[]): Set
 
 /** Default process lister: `ps -axo pid=,ppid=,command=` (no header, all processes). */
 export function listProcessTable(): Promise<ProcessRow[]> {
+  if (process.platform === 'win32') {
+    // Windows has no `ps`; the PowerShell stand-in emits the same line shape,
+    // so the parser below is used unchanged.
+    return execWindowsProcessTable('pid-ppid-command').then(parsePsOutput);
+  }
   return new Promise<ProcessRow[]>((resolve, reject) => {
     execFile(
       'ps',

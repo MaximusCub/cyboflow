@@ -299,22 +299,116 @@ extraction just works there.
   `59421148`); nothing pushed, no PR raised (see
   `docs/PR-DRAFT-WINDOWS-BUILD.md` for the prepared upstream PR).
 
-## What works / what degrades — summary
+## Round 2 — Windows parity improvements
+
+A second pass closed the remaining functional gaps found by auditing every
+`ps`/`kill`/`pkill`/`pgid` call site in the main process:
+
+### Process management parity
+
+- **`winProcessTable.ts` (new)** — one PowerShell query
+  (`Get-CimInstance Win32_Process`) printing `ps`-COMPATIBLE text lines
+  (`pid [ppid [etime]] command`). Five previously `ps`-only listings now work
+  on Windows with their parsers untouched: `processTable.listProcessTable`
+  (CodexBrokerReaper), `terminalSessionManager.defaultListProcessTable`,
+  `mcpOrphanTripwire` (including proper `etime` in the three macOS shapes),
+  and `prototypeServerReaper`. The orphan-detection and reaper sweeps are no
+  longer silent no-ops on Windows.
+- **Stop/kill ladders** (`runCommandManager.killProcessTree`,
+  `terminalSessionManager.killProcessTree`): win32 fast path —
+  `taskkill /PID <pid> /T` (graceful attempt) → bounded poll →
+  `taskkill /PID <pid> /T /F` (unconditional, mirroring the POSIX fail-soft
+  SIGKILL) → zombie verification via the (Windows-capable) descendant walk.
+  The POSIX `kill`/`pkill` ladder was dead weight there (every step failed
+  and was swallowed). Both managers take a `platform` test seam so the
+  ladders are unit-testable on every host.
+- **`prototypeServerReaper`**: match needles and command lines are both
+  normalized to forward slashes (identity on POSIX) so Windows backslash
+  paths match the `/prototype` segment logic.
+
+### Updater
+
+`AppUpdater.init()/check()` are platform-gated (`darwin` only, via an
+injectable `platform` test seam). There is no Windows feed (`latest.yml`) yet
+— previously every check logged a hard ENOENT; now it logs once at boot and
+reports `supported: false` to the UI. Revisit when a Windows feed ships.
+
+### Health probe
+
+`OrchSocketServer.isSocketPathIntact()` handles the named-pipe endpoint:
+a pipe cannot be unlinked, so instead of the (always-false on Windows) inode
+re-stat it reports whether the server is still listening — no false
+"socket file is missing" alarm in the UI health readout.
+
+### Dev mode on Windows
+
+`pnpm dev` was POSIX-only (`${VAR:-default}` expansion + `env -u NODE_OPTIONS`
+do not run in cmd). New `scripts/dev-electron.mjs` launcher: waits for Vite,
+strips NODE_OPTIONS, spawns the real Electron binary with the same
+`--cdp/--inspect/--perf` flag mapping. `dev`, `electron-dev`,
+`electron-dev:custom` and `dev:perf` now run identically on macOS and Windows.
+
+### Verification driver: native screen capture on Windows
+
+`native-screenshot` now has a Windows executable path — a PowerShell
+System.Drawing capture of the whole virtual screen
+(`runWindowsScreenCapture` in driverCore.ts), injected as a
+`runWindowsCapture` dep seam and platform-gated. Honest deviation: peekaboo
+`--app` scoping has no Windows equivalent, so the capture is always
+full-screen and says so in its output. Verified live: the script produces a
+real PNG on this host.
+
+### PTY terminals verified end-to-end
+
+node-pty 0.14.1's conpty binaries were exercised under the real Electron
+binary: `pty.spawn('cmd.exe')` and `pty.spawn('powershell.exe')` both start,
+echo round-trips (`PTY-OK` probe), and `kill()` works. Terminal panels are
+functional on Windows, not merely packaged.
+
+### Database suite green on Windows
+
+The 39 Windows-only `afterEach` EPERM failures are fixed:
+
+- 12 migration tests: the service variable was declared inside the `try` but
+  `rmSync` ran in `finally` — the declaration is hoisted and
+  `svc?.close()` runs before the delete (correct on every platform).
+- 7 files whose services are unreachable from `afterEach`: new
+  `cleanupDbTestDir.ts` helper — plain `rmSync` first; on a Windows sharing
+  violation it RENAMES the dir (rename needs no access to open files) and
+  best-effort deletes the renamed copy, with a `.dbtest-leak-` marker swept
+  on the next call so a finalizer-lag window never accumulates.
+
+Result: **`main/src/database`: 625/625 passing on Windows** (host-ABI
+better-sqlite3 12.11.1). POSIX behavior unchanged (the helper rethrows
+non-win32 failures).
+
+### Operational note (this host)
+
+`scripts/ensure-sqlite-abi.mjs` must be run with the WINDOWS node
+(`cmd.exe /c node scripts\ensure-sqlite-abi.mjs <target>`) — running it with
+WSL-side node probes/resolves the module from the Linux side and wedges the
+swap lock behind a doomed rebuild. The machinery self-heals (stale-lock
+breakout) but the flip must be Windows-side.
+
+## What works / what degrades — summary (post round 2)
 
 **Works:** install + launch; UI fully renders; SQLite (sessions, backlog,
 migrations) on Electron-ABI prebuilds; bundled `claude.exe` resolves and
-spawns (SDK substrate); `cyboflow_*` MCP tools over the per-user named pipe;
-flow/verification drivers (cmd wrapper, taskkill tree reaping, PowerShell
-process walks); PowerShell-default shell substrate; PATH resolution
-incl. npm shims; updater checks fail soft.
+spawns (SDK substrate — auth is a per-host login); `cyboflow_*` MCP tools
+over the per-user named pipe; flow/verification drivers (cmd wrapper,
+taskkill tree reaping, PowerShell process tables); PowerShell-default shell
+substrate; PTY terminal panels (verified end-to-end via conpty); orphan
+reapers + MCP tripwire (PowerShell stand-ins for `ps`); `native-screenshot`
+(whole-screen PowerShell capture); database test suite 625/625 on Windows;
+`pnpm dev` on Windows; updater correctly reports "not supported" instead of
+erroring.
 
-**Degrades:** no bundled peekaboo (darwin-only optional dep) — no native
-screen capture on Windows; no Windows update feed yet (checks log-and-continue);
-39 pre-existing Windows-only test-cleanup failures (`afterEach` `rmSync` on
-open SQLite handles — EPERM; test infra, not product code); `afterSign`
-bundle arch/ABI checks remain mac-only (NSIS `.exe` has a 50 MB floor via
-`verifyArtifact`); PTY-terminal panels depend on node-pty 0.14.1 conpty
-(binaries packaged, not exercised end-to-end in this trial).
+**Degrades:** no bundled peekaboo (darwin-only) — native-screen `attest
+window` has no Windows equivalent (fails loudly; scheduler gate already
+refers native-screen to probed hosts only); `--app`-scoped captures fall back
+to full-screen; no Windows update feed yet (updater disabled, not erroring);
+`afterSign` bundle arch/ABI checks remain mac-only (NSIS `.exe` has a 50 MB
+floor via `verifyArtifact`).
 
 **Known limitation:** x64-only for v1 (host arch AMD64); arm64 Windows needs
-`BUILD_ARCH=arm64` equivalents and prebuilds to be verified.
+`BUILD_ARCH=arm64` equivalents and prebuild verification.

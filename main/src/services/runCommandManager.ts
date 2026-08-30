@@ -272,6 +272,43 @@ export class RunCommandManager extends EventEmitter {
     const descendantPids = this.getAllDescendantPids(pid);
     this.logger?.info(`Found ${descendantPids.length} descendant processes for PID ${pid}: ${descendantPids.join(', ')}`);
 
+    // Windows: no process groups and no POSIX signals — the pgid lookup and
+    // the `kill`/`pkill` ladder below are all no-ops there. `taskkill /T`
+    // (optionally /F) takes the whole tree in one call, which is the Windows
+    // contract for everything the POSIX ladder achieves.
+    if (process.platform === 'win32') {
+      let success = true;
+      try {
+        // Graceful attempt first (without /F, GUI apps may close cleanly).
+        try {
+          await execAsync(`taskkill /PID ${pid} /T`);
+        } catch (error) {
+          this.logger?.verbose(`Graceful taskkill for ${pid} did not settle (expected for console apps): ${error}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        try {
+          await execAsync(`taskkill /PID ${pid} /T /F`);
+        } catch (error) {
+          // Process might already be dead
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const remainingPids = this.getAllDescendantPids(pid);
+        if (remainingPids.length > 0) {
+          this.logger?.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
+          success = false;
+          this.emit('zombie-processes-detected', {
+            commandName,
+            pids: remainingPids,
+            message: `Failed to terminate ${remainingPids.length} child processes from command "${commandName}". Please manually kill PIDs: ${remainingPids.join(', ')}`
+          });
+        }
+      } catch (error) {
+        this.logger?.error('Error in Windows killProcessTree:', error as Error);
+        success = false;
+      }
+      return success;
+    }
+
     // Find the process group ID and kill all processes in that group
     let pgid: number | null = null;
     try {

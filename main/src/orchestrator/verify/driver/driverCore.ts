@@ -441,6 +441,14 @@ export interface DriverDeps {
    * the spawn error in its detail, never an unhandled throw.
    */
   runPeekaboo(bin: string, args: string[], timeoutMs: number): Promise<string>;
+  /**
+   * Test seam: which platform's capture path `native-screenshot` runs.
+   * Defaults to the host platform — the peekaboo CLI is macOS-only, so
+   * Windows resolves the `runWindowsCapture` stand-in instead.
+   */
+  platform?: NodeJS.Platform;
+  /** Windows capture stand-in; injectable so tests need not spawn PowerShell. */
+  runWindowsCapture?: (outPath: string, timeoutMs: number) => Promise<void>;
   /** Write `.driver/attest.json` (creating the dotdir) — the runner's attestation source of truth. */
   writeAttestFile(path: string, record: DriverAttestRecord): Promise<void>;
   stdout(line: string): void;
@@ -510,6 +518,72 @@ export function peekabooListWindowsArgs(app: string): string[] {
  */
 export function peekabooCaptureArgs(outPath: string, appTarget?: string): string[] {
   return appTarget ? ['image', '--app', appTarget, '--path', outPath] : ['image', '--path', outPath];
+}
+
+/**
+ * Windows stand-in for `peekaboo image`: a PowerShell capture of the whole
+ * VIRTUAL SCREEN via System.Drawing, written to the same `--path` target the
+ * peekaboo invocation would have used. Peekaboo is macOS-only, so without
+ * this the driver's observe surface (`native-screenshot`) has no Windows
+ * executable path at all.
+ *
+ * Honest deviation: peekaboo `--app <target>` scopes the capture to one
+ * application's window; there is no cheap Windows equivalent, so this always
+ * captures every screen. A caller that named an appTarget gets the capture
+ * plus a note in the output — the evidence is WIDER than requested, never
+ * narrower.
+ */
+async function runWindowsScreenCapture(
+  outPath: string,
+  timeoutMs: number,
+): Promise<void> {
+  await mkdir(dirname(outPath), { recursive: true });
+  const scriptPath = `${outPath}.capture.ps1`;
+  const script = [
+    'param([string]$OutPath)',
+    'Add-Type -AssemblyName System.Drawing;',
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen;',
+    '$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height;',
+    '$g = [System.Drawing.Graphics]::FromImage($bmp);',
+    '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size);',
+    '$bmp.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png);',
+    '$g.Dispose();',
+    '$bmp.Dispose();',
+  ].join('\n');
+  await writeFile(scriptPath, script, 'utf8');
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-OutPath', outPath],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      let stderr = '';
+      child.stderr?.on('data', (d: Buffer) => {
+        stderr += String(d);
+      });
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        reject(new Error('windows screen capture timed out'));
+      }, timeoutMs);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        if (code === 0 && existsSync(outPath)) resolve();
+        else reject(new Error(`windows screen capture failed (exit ${code}): ${stderr.trim().slice(-400)}`));
+      });
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  } finally {
+    await rm(scriptPath, { force: true }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,9 +1243,20 @@ async function nativeScreenshotCommand(
 ): Promise<number> {
   try {
     await deps.ensureDir(artifactsDir);
+    const outPath = join(artifactsDir, command.name);
+    if ((deps.platform ?? process.platform) === 'win32') {
+      // Peekaboo is macOS-only; capture via PowerShell instead (whole virtual
+      // screen — see runWindowsScreenCapture for the honest --app deviation).
+      await (deps.runWindowsCapture ?? runWindowsScreenCapture)(outPath, PEEKABOO_TIMEOUT_MS);
+      deps.stdout(
+        `ok: native screenshot ${command.name}` +
+          (command.appTarget ? ' (full virtual screen; --app scoping is macOS-only)' : ''),
+      );
+      return 0;
+    }
     await deps.runPeekaboo(
       resolvePeekabooBin(env),
-      peekabooCaptureArgs(join(artifactsDir, command.name), command.appTarget),
+      peekabooCaptureArgs(outPath, command.appTarget),
       PEEKABOO_TIMEOUT_MS,
     );
     deps.stdout(`ok: native screenshot ${command.name}`);
