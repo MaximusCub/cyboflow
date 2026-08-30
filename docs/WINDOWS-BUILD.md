@@ -416,3 +416,22 @@ floor via `verifyArtifact`).
 
 **Known limitation:** x64-only for v1 (host arch AMD64); arm64 Windows needs
 `BUILD_ARCH=arm64` equivalents and prebuild verification.
+
+## Addendum — the last flash: DETACHED_PROCESS + Windows Terminal default
+
+Traced with a Win32_Process poller during a live first-run walk: clicking into
+the default-runtime step spawned the bundled codex.exe with
+`detached: true + windowsHide: true`. On Windows, `detached` becomes
+DETACHED_PROCESS (no console at all); codex.exe then allocates its OWN console,
+which — with the "Let Windows decide" default-terminal setting handing consoles
+to Windows Terminal — renders as a black window flash. The non-detached
+claude.exe SDK spawn with the same `windowsHide` never flashed, isolating
+`detached` as the trigger. Fix: app-server spawns (codex, OMP rpc) are
+win32-conditional — no `detached` there (teardown is `taskkill /T`, which never
+needed the group); POSIX keeps detached + negative-pid group kills.
+
+Diagnostic tooling kept in `.bridge/` (git-excluded): the hidden command bridge
+(`wrun.sh`) and the visible-console pollers (`win-poll*.ps1` — a console window
+"exists" only when its process has a nonzero MainWindowHandle; CREATE_NO_WINDOW
+children still get a windowless conhost, so process presence alone proves
+nothing).
