@@ -57,7 +57,7 @@ export function getDemoBareRemotePath(): string {
  * with spaces survives both sh and cmd.exe.
  */
 function git(cwd: string, args: string): void {
-  execSync(`${quoteForShellString(resolveGitCommand())} ${args}`, { cwd, stdio: 'pipe' });
+  execSync(`${quoteForShellString(resolveGitCommand())} ${args}`, { cwd, stdio: 'pipe', windowsHide: true });
 }
 
 /**
@@ -67,7 +67,7 @@ function git(cwd: string, args: string): void {
  * (`C:\\Users\\...`) would reach git literally.
  */
 function gitArgv(cwd: string, args: string[]): void {
-  execFileSync(resolveGitCommand(), args, { cwd, stdio: 'pipe' });
+  execFileSync(resolveGitCommand(), args, { cwd, stdio: 'pipe', windowsHide: true });
 }
 
 /**

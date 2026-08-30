@@ -149,6 +149,7 @@ export class DevServerManager implements DevServerProvider {
       cwd,
       shell: true,
       detached: true, // own process group → kill(-pid) reaches the whole tree.
+      windowsHide: true,
       env: { ...process.env, PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -196,6 +197,7 @@ export class DevServerManager implements DevServerProvider {
         cwd,
         shell: true,
         detached: true,
+        windowsHide: true,
         env: { ...process.env, PORT: String(port) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });

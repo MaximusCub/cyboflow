@@ -200,6 +200,7 @@ export const defaultDepExec: DepExec = async (cmd, args, opts) => {
       encoding: 'utf8',
       timeout: opts.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
     });
     return { code: 0, out: `${stdout}${stderr}` };
   } catch (err) {

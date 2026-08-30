@@ -1512,6 +1512,7 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
     await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD'], {
       cwd: worktreePath,
       timeout: 30_000,
+      windowsHide: true,
     });
     return false;
   } catch (err) {
@@ -1606,6 +1607,7 @@ const defaultListeningPidForPort = async (port: number): Promise<number | null> 
   try {
     const { stdout } = await execFileAsync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
       timeout: BINDING_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     const first = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
     if (first === undefined) return null;
@@ -1629,6 +1631,7 @@ const defaultProcessInfo = async (pid: number): Promise<{ pgid: number; command:
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'pgid=,command=', '-p', String(pid)], {
       timeout: BINDING_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     const line = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
     if (line === undefined) return null;
@@ -1684,7 +1687,7 @@ const defaultStopDriver = async (
     const [file, args] = process.platform === 'win32'
       ? [process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', driverScriptPath, 'stop']]
       : [driverScriptPath, ['stop']];
-    await execFileAsync(file, args, { env: { ...process.env, ...env }, timeout: 20_000 });
+    await execFileAsync(file, args, { env: { ...process.env, ...env }, timeout: 20_000, windowsHide: true });
   } catch {
     // best-effort — the reaper + port probe are the real backstop.
   }

@@ -93,6 +93,7 @@ function ensureBundleExcluded(worktreePath: string, extraPatterns: string[], log
     const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
       cwd: worktreePath,
       encoding: 'utf8',
+      windowsHide: true,
       // Pin git's message language for isNotAGitRepositoryError, and capture
       // stderr rather than letting the child's `fatal:` line leak to the app's
       // own stderr on the (expected) non-repo path.

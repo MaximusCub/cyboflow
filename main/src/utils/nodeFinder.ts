@@ -119,7 +119,7 @@ async function resolveNodeExecutable(): Promise<string> {
     // existsSync('...node.exe\r') then fails even though the file is there.
     // (The trailing-.trim() that used to run first only cleaned the FINAL
     // line of the output, not the first.)
-    const nodePath = execSync(whichCommand, { encoding: 'utf8' })
+    const nodePath = execSync(whichCommand, { encoding: 'utf8', windowsHide: true })
       .split(/\r?\n/)
       .map((line) => line.trim())
       .find((line) => line.length > 0);
@@ -141,7 +141,7 @@ async function resolveNodeExecutable(): Promise<string> {
  */
 export async function testNodeExecutable(nodePath: string): Promise<boolean> {
   try {
-    execSync(`"${nodePath}" --version`, { encoding: 'utf8', timeout: 2000 });
+    execSync(`"${nodePath}" --version`, { encoding: 'utf8', timeout: 2000, windowsHide: true });
     return true;
   } catch {
     return false;

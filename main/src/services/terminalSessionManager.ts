@@ -84,7 +84,10 @@ function defaultSendSignal(pid: number, signal: NodeJS.Signals): void {
   process.kill(pid, signal);
 }
 
-const execAsync = promisify(exec);
+// Wrapped (rather than a bare promisify(exec)) so the default shell-command
+// runner passes windowsHide — a packaged Windows app must never flash a conhost.
+const execAsync = async (command: string): Promise<{ stdout: string; stderr: string }> =>
+  promisify(exec)(command, { windowsHide: true });
 
 /** Default shell-command runner: the real `child_process.exec`. */
 async function defaultExecCommand(command: string): Promise<ExecResult> {

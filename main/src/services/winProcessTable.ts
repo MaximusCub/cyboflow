@@ -75,7 +75,7 @@ export function execWindowsProcessTable(format: WinProcessLineFormat): Promise<s
       ['-NoProfile', '-NonInteractive', '-Command', buildWindowsProcessTableScript(format)],
       // Full-table command lines can total multiple MB; 64 MiB is comfortably
       // above any realistic table.
-      { maxBuffer: 64 * 1024 * 1024, timeout: 30_000 },
+      { maxBuffer: 64 * 1024 * 1024, timeout: 30_000, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));

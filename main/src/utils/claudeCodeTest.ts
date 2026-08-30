@@ -69,6 +69,7 @@ export async function detectClaudeBinary(
       const { stdout } = await execFileAsync(command, args, {
         timeout: VERSION_TIMEOUT_MS,
         env,
+        windowsHide: true,
         ...(verbatim ? { windowsVerbatimArguments: true } : {}),
       });
       return stdout;

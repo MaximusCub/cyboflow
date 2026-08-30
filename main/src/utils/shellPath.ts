@@ -153,6 +153,7 @@ export function getShellPath(): string {
         shellPath = execSync(fullCommand, {
           encoding: 'utf8',
           timeout: 10000,
+          windowsHide: true,
           env: {
             PATH: minimalPath,
             SHELL: shell,
@@ -171,6 +172,7 @@ export function getShellPath(): string {
           shellPath = execSync(shellCommand, {
             encoding: 'utf8',
             timeout: 10000,
+            windowsHide: true,
             env: {
               PATH: minimalPath,
               SHELL: shell,
@@ -191,6 +193,7 @@ export function getShellPath(): string {
         shellPath = execSync(`${shell} -c 'echo $PATH'`, {
           encoding: 'utf8',
           timeout: 2000,
+          windowsHide: true,
           env: process.env
         }).trim();
         console.log(`[ShellPath] Quick PATH retrieval succeeded`);
@@ -200,6 +203,7 @@ export function getShellPath(): string {
         shellPath = execSync(shellCommand, {
           encoding: 'utf8',
           timeout: 10000,
+          windowsHide: true,
           env: process.env
         }).trim();
         console.log(`[ShellPath] Login shell PATH retrieval succeeded`);
@@ -221,6 +225,7 @@ export function getShellPath(): string {
       const npmBin = execSync('npm bin -g', {
         encoding: 'utf8',
         timeout: 2000,
+        windowsHide: true,
         stdio: ['pipe', 'pipe', 'ignore']
       }).trim();
       if (npmBin) additionalPaths.push(npmBin);
@@ -233,6 +238,7 @@ export function getShellPath(): string {
       const yarnBin = execSync('yarn global bin', {
         encoding: 'utf8',
         timeout: 2000,
+        windowsHide: true,
         stdio: ['pipe', 'pipe', 'ignore']
       }).trim();
       if (yarnBin) additionalPaths.push(yarnBin);

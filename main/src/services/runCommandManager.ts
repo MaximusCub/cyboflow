@@ -259,7 +259,7 @@ export class RunCommandManager extends EventEmitter {
       try {
         const output = execSync(
           `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000 }
+          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
         );
         return collectDescendantPids(parentPid, parseProcessTable(output));
       } catch (error) {
@@ -271,7 +271,7 @@ export class RunCommandManager extends EventEmitter {
     try {
       const result = require('child_process').execSync(
         `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
-        { encoding: 'utf8' }
+        { encoding: 'utf8', windowsHide: true }
       );
 
       const pids = result.split('\n')
@@ -307,7 +307,10 @@ export class RunCommandManager extends EventEmitter {
    * Returns true if successful, false if zombie processes remain
    */
   private async killProcessTree(pid: number, commandName: string): Promise<boolean> {
-    const execAsync = promisify(exec);
+    // `windowsHide: true` — every taskkill/kill/pkill here must never flash a
+    // conhost window when the packaged app runs windowless on Windows.
+    const execAsync = (command: string): Promise<{ stdout: string; stderr: string }> =>
+      promisify(exec)(command, { windowsHide: true });
 
     // First, get all descendant PIDs before we start killing
     const descendantPids = this.getAllDescendantPids(pid);

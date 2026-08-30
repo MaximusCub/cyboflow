@@ -169,6 +169,7 @@ const defaultSpawn: SpawnAppServerProcess = (command, args, options) => {
     // (app-server + its MCP-bridge / MCP-server node children) via a
     // negative-pid group signal instead of orphaning them.
     detached: true,
+    windowsHide: true,
   });
 };
 

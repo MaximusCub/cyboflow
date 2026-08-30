@@ -229,6 +229,7 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
           {
             cwd: session.worktreePath,
             shell: true,
+            windowsHide: true,
             env: {
               ...process.env,
               PATH: shellPath  // Use enhanced PATH that includes user's shell PATH

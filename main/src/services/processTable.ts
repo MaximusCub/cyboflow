@@ -158,7 +158,7 @@ export function listProcessTable(): Promise<ProcessRow[]> {
       ['-axo', 'pid=,ppid=,command='],
       // Command lines can be long; 16 MiB is comfortably above any realistic
       // full process table.
-      { maxBuffer: 16 * 1024 * 1024 },
+      { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));
@@ -182,7 +182,7 @@ export function listPidPpidTable(): Promise<ProcessTableRow[]> {
       'ps',
       ['-axo', 'pid=,ppid='],
       // The full process table can be large; 16 MiB comfortably covers it.
-      { maxBuffer: 16 * 1024 * 1024 },
+      { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));
@@ -209,11 +209,11 @@ export function listPidPpidTableSync(): ProcessTableRow[] {
       `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
       // Full tables can total multiple MB; 64 MiB is comfortably above any
       // realistic one, matching execWindowsProcessTable's budget.
-      { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024 },
+      { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     );
     return parseProcessTable(output);
   }
-  return parseProcessTable(execSync('ps -axo pid=,ppid=', { encoding: 'utf8' }));
+  return parseProcessTable(execSync('ps -axo pid=,ppid=', { encoding: 'utf8', windowsHide: true }));
 }
 
 /**
@@ -230,7 +230,7 @@ export function listPidPpidTableSync(): ProcessTableRow[] {
  * processes have no catchable SIGTERM, so the tree kill is always forceful.
  */
 export function killWindowsTree(pid: number): void {
-  execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => {
+  execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {
     // Already dead / no permission — nothing left to reap here.
   });
 }

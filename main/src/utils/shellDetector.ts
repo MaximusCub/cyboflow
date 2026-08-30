@@ -102,7 +102,7 @@ export class ShellDetector {
     if (process.platform === 'darwin') {
       try {
         const username = os.userInfo().username;
-        const result = execSync(`dscl . -read /Users/${username} UserShell`, { encoding: 'utf8' });
+        const result = execSync(`dscl . -read /Users/${username} UserShell`, { encoding: 'utf8', windowsHide: true });
         const match = result.match(/UserShell:\s*(.+)/);
         if (match && match[1]) {
           const shellPath = match[1].trim();

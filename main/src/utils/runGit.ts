@@ -110,6 +110,7 @@ export function runGit(cwd: string, args: string[], options: RunGitOptions = {})
     encoding: 'utf8',
     maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
     env: buildCommandEnv(options.env),
+    windowsHide: true,
   });
 }
 
@@ -142,6 +143,7 @@ export async function runToolCapture(
     env: buildCommandEnv(options.env),
     signal: options.signal,
     timeout: options.timeout,
+    windowsHide: true,
   });
   return { stdout, stderr };
 }

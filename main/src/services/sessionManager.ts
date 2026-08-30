@@ -1053,6 +1053,7 @@ export class SessionManager extends EventEmitter {
       cwd: workingDirectory,
       stdio: 'pipe',
       detached: true, // Create a new process group
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: shellPath
@@ -1189,6 +1190,7 @@ export class SessionManager extends EventEmitter {
     const shellPath = getShellPath();
     return execAsync(command, {
       ...options,
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: shellPath
@@ -1225,7 +1227,7 @@ export class SessionManager extends EventEmitter {
       try {
         const output = execSync(
           `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000 }
+          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
         );
         return collectDescendantPids(parentPid, parseProcessTable(output));
       } catch (error) {
@@ -1235,7 +1237,7 @@ export class SessionManager extends EventEmitter {
 
     try {
       // Use ps to get children on macOS/Unix
-      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
+      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8', windowsHide: true });
       const pids = output.split('\n')
         .map(line => parseInt(line.trim()))
         .filter(pid => !isNaN(pid));
@@ -1310,7 +1312,7 @@ export class SessionManager extends EventEmitter {
           }
 
           // Kill the entire process group using negative PID
-          exec(`kill -TERM -${process.pid}`, (error) => {
+          exec(`kill -TERM -${process.pid}`, { windowsHide: true }, (error) => {
             if (error) {
               console.warn(`Error sending SIGTERM to process group: ${error.message}`);
             }
@@ -1333,7 +1335,7 @@ export class SessionManager extends EventEmitter {
             }
 
             // Kill the process group with SIGKILL
-            exec(`kill -9 -${process.pid}`, (error) => {
+            exec(`kill -9 -${process.pid}`, { windowsHide: true }, (error) => {
               if (error) {
                 console.warn(`Error sending SIGKILL to process group: ${error.message}`);
                 addSessionLog(sessionId, 'warn', `[Warning: Could not kill process group: ${error.message}]`, 'System');
@@ -1347,7 +1349,7 @@ export class SessionManager extends EventEmitter {
             let alreadyDeadCount = 0;
 
             descendantPids.forEach(pid => {
-              exec(`kill -9 ${pid}`, (error) => {
+              exec(`kill -9 ${pid}`, { windowsHide: true }, (error) => {
                 if (error) {
                   alreadyDeadCount++;
                 } else {
@@ -1367,7 +1369,7 @@ export class SessionManager extends EventEmitter {
             });
 
             // Final cleanup attempt using pkill
-            exec(`pkill -9 -P ${process.pid}`, () => {
+            exec(`pkill -9 -P ${process.pid}`, { windowsHide: true }, () => {
               // Ignore errors - processes might already be dead
             });
 
@@ -1427,7 +1429,7 @@ export class SessionManager extends EventEmitter {
 
     addSessionLog(sessionId, 'info', `[Forcefully terminating process ${pid} and its tree (taskkill)]`, 'System');
 
-    exec(`taskkill /PID ${pid} /T /F`, (error) => {
+    exec(`taskkill /PID ${pid} /T /F`, { windowsHide: true }, (error) => {
       if (error) {
         console.warn(`Error killing process tree ${pid}: ${error.message}`);
       }
@@ -1466,7 +1468,7 @@ export class SessionManager extends EventEmitter {
         if (pending === 0) verifyAndFinish();
         return;
       }
-      exec(`taskkill /PID ${childPid} /F`, (error) => {
+      exec(`taskkill /PID ${childPid} /F`, { windowsHide: true }, (error) => {
         if (!error) killedCount += 1;
         pending -= 1;
         if (pending === 0) verifyAndFinish();

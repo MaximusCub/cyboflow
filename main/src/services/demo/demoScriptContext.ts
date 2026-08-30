@@ -349,7 +349,7 @@ export class DemoScriptContext {
     // argv-array spawn (not a shell string): works with git off the GUI PATH
     // (gitExeFinder) and passes the identity/`-m` values verbatim — a shell
     // string would need quoting that cmd.exe and sh disagree about.
-    execFileSync(resolveGitCommand(), ['add', '-A'], { cwd, stdio: 'pipe' });
+    execFileSync(resolveGitCommand(), ['add', '-A'], { cwd, stdio: 'pipe', windowsHide: true });
     execFileSync(
       resolveGitCommand(),
       [
@@ -358,7 +358,7 @@ export class DemoScriptContext {
         '-c', 'commit.gpgsign=false',
         'commit', '-m', message,
       ],
-      { cwd, stdio: 'pipe' },
+      { cwd, stdio: 'pipe', windowsHide: true },
     );
   }
 
