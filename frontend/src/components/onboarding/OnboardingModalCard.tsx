@@ -38,8 +38,8 @@ interface OnboardingModalCardProps {
 /**
  * The 468×512 centered onboarding card (the modal steps). Fixed compact header
  * (terracotta) except step 0's hero, a scrolling body, and a fixed footer:
- * Skip · dots · Back · primary. The scrim captures pointer events but does NOT
- * dismiss — onboarding is gated, not click-away closable.
+ * Skip tour · dots · Back · primary. The scrim captures pointer events but does
+ * NOT dismiss — onboarding is gated, not click-away closable.
  */
 export function OnboardingModalCard({
   step,
@@ -101,9 +101,10 @@ export function OnboardingModalCard({
             type="button"
             onClick={onSkip}
             data-testid="onboarding-skip"
+            title="Exit the tour — resume later from the rail"
             className="border-none bg-transparent py-2 pl-0 pr-2 text-[10px] font-semibold uppercase tracking-[.1em] text-text-tertiary transition-colors hover:text-text-primary"
           >
-            Skip
+            Skip tour
           </button>
           <OnboardingDots
             step={step}

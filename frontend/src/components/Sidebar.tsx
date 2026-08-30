@@ -10,13 +10,14 @@ import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 import { useConfigStore } from '../stores/configStore';
 import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
-import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
+import { resumeLandingStep, skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import {
   ONBOARDING_ANCHOR_ATTR,
   ONBOARDING_ANCHORS,
   visibleStepNumber,
   visibleStepTotal,
+  wizardConfigureAnchorsPresent,
 } from '../utils/onboarding';
 
 interface SidebarProps {
@@ -104,8 +105,18 @@ export const Sidebar = memo(function Sidebar({
   // The tour may skip its one conditional step, so "Step n of N" has to count
   // what this run actually shows (skippedStepSet returns stable identities).
   const onboardingSkipped = useOnboardingStore((state) => skippedStepSet(state));
+  const onboardingSkippedDoSteps = useOnboardingStore((state) => state.skippedDoSteps);
   const showResumeSetup =
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
+  // The wizard-Configure pointer steps (7-9) rewind to 6 on resume ONLY when
+  // their anchors are actually gone. The answer decides both the label below
+  // and (re-probed fresh at click time) the resume() call, so the button never
+  // advertises a step a rewind won't land on.
+  const resumeAnchorsMissing =
+    showResumeSetup && onboardingStep >= 7 && onboardingStep <= 9
+      ? !wizardConfigureAnchorsPresent()
+      : false;
+  const resumeStep = resumeLandingStep(onboardingStep, resumeAnchorsMissing, onboardingSkippedDoSteps);
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
@@ -257,7 +268,14 @@ export const Sidebar = memo(function Sidebar({
           >
             <button
               type="button"
-              onClick={() => useOnboardingStore.getState().resume()}
+              onClick={() =>
+                useOnboardingStore.getState().resume({
+                  // Re-probe at click time (the render-time probe above drives
+                  // the label; the wizard may have opened/closed since) so the
+                  // keep-step vs rewind decision is never made on stale DOM.
+                  wizardAnchorsMissing: !wizardConfigureAnchorsPresent(),
+                })
+              }
               data-testid="onboarding-resume-setup"
               className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-hover"
             >
@@ -270,7 +288,7 @@ export const Sidebar = memo(function Sidebar({
               <span className="min-w-0 flex-1">
                 <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
                 <span className="block text-[10px] text-text-secondary">
-                  Step {visibleStepNumber(onboardingStep, onboardingSkipped)} of{' '}
+                  Step {visibleStepNumber(resumeStep, onboardingSkipped)} of{' '}
                   {visibleStepTotal(onboardingSkipped)}
                 </span>
               </span>

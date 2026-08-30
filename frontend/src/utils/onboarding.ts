@@ -50,6 +50,22 @@ export const ONBOARDING_ANCHORS = {
   humanReview: 'human-review',
 } as const;
 
+/**
+ * Whether ANY of the wizard-Configure anchors (tour steps 7-9's targets) is
+ * currently mounted. The Sidebar's "Resume setup" button probes this at click
+ * time and passes the answer to store.resume({ wizardAnchorsMissing }) — a
+ * resume with the wizard still open keeps the step, a cold re-entry rewinds
+ * to 6. Any-of-three because the Configure page renders all three selectors
+ * together, but the probe must not care which one a given step anchors.
+ */
+export function wizardConfigureAnchorsPresent(): boolean {
+  return [
+    ONBOARDING_ANCHORS.substrateSelect,
+    ONBOARDING_ANCHORS.sessionPermission,
+    ONBOARDING_ANCHORS.modelSelect,
+  ].some((id) => document.querySelector(`[${ONBOARDING_ANCHOR_ATTR}="${id}"]`) !== null);
+}
+
 export const ONBOARDING_STEP_COUNT = 13;
 
 /** Steps rendered as the centered modal card. */

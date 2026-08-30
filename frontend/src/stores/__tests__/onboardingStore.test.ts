@@ -6,9 +6,11 @@
  * step (shown only when step 1 left 2+ providers activated), coach-step
  * advance-by-doing rules (anchorActioned / realEvent), the Configure pointer
  * steps (7-9: next() advances, the last pointer parks pending), dot/goTo
- * maxVisited clamping, and the skip↔resume round trip. All transitions are
- * synchronous — the async side effects live in OnboardingGate and are not
- * exercised here.
+ * maxVisited clamping, the skip↔resume round trip (anchor-aware: the 7-9
+ * rewind only fires when the wizard-Configure anchors are reported missing),
+ * and skipStep() — the per-step escape that records a do-step as skipped and
+ * advances. All transitions are synchronous — the async side effects live in
+ * OnboardingGate and are not exercised here.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import type {
@@ -24,6 +26,7 @@ import {
   migratePersistedOnboarding,
   migrateV1StepIndex,
   migrateV2StepIndex,
+  resumeLandingStep,
   skippedStepSet,
   clampResumeStep,
 } from '../onboardingStore';
@@ -62,6 +65,7 @@ function reset(): void {
     defaultProvider: null,
     multiRuntime: true,
     hydrated: false,
+    skippedDoSteps: new Set(),
   });
 }
 
@@ -616,6 +620,103 @@ describe('onboardingStore — forceNext (anchor-lost escape)', () => {
   });
 });
 
+describe('onboardingStore — skipStep (per-step escape)', () => {
+  beforeEach(reset);
+
+  it('marks the do-step skipped AND advances like forceNext (6→7, 10→11, 11→12)', () => {
+    for (const [from, to] of [[6, 7], [10, 11], [11, 12]] as const) {
+      reset();
+      useOnboardingStore.setState({ status: 'active', step: from, maxVisitedStep: from });
+      s().skipStep();
+      expect(s().status).toBe('active');
+      expect(s().step).toBe(to);
+      expect(s().maxVisitedStep).toBe(to);
+      expect(isStepSkipped(from, s())).toBe(true);
+      expect(s().skippedDoSteps.has(from)).toBe(true);
+    }
+  });
+
+  it('skipping step 10 does NOT park pending — a skip has no wait left in it', () => {
+    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
+    s().skipStep();
+    expect(s().status).toBe('active'); // anchorActioned would park pending here
+    expect(s().step).toBe(11);
+  });
+
+  it('is a no-op on pointer steps (7-9 keep Next), modal steps, and when not active', () => {
+    for (const step of [0, 3, 7, 8, 9, 12]) {
+      reset();
+      useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
+      s().skipStep();
+      expect(s().step).toBe(step);
+      expect(s().skippedDoSteps.size).toBe(0);
+    }
+    reset();
+    useOnboardingStore.setState({ status: 'pending', step: 10, maxVisitedStep: 10 });
+    s().skipStep();
+    expect(s().status).toBe('pending');
+    expect(s().step).toBe(10);
+  });
+
+  it('a skipped do-step leaves the numbering/dots set and is stepped over by navigation', () => {
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
+    s().skipStep(); // → 7, 6 recorded
+    const skipped = skippedStepSet(s());
+    expect(skipped.has(6)).toBe(true);
+    // next()/back()/goTo must all refuse to land on it again.
+    s().back(); // 7 → 5 (steps over the skipped 6)
+    expect(s().step).toBe(5);
+    s().next();
+    expect(s().step).toBe(7); // steps over 6 again
+    s().goTo(6);
+    expect(s().step).toBe(7); // a dot the tour no longer renders
+    s().goTo(5);
+    expect(s().step).toBe(5);
+    // multiRuntime skip (step 2) and the user skip coexist in ONE set.
+    useOnboardingStore.setState({ multiRuntime: false, step: 3, maxVisitedStep: 7 });
+    expect(skippedStepSet(s()).has(2)).toBe(true);
+    expect(skippedStepSet(s()).has(6)).toBe(true);
+  });
+
+  it('skippedStepSet keeps a stable identity between skipStep calls (no fresh Set per read)', () => {
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
+    s().skipStep();
+    expect(skippedStepSet(s())).toBe(skippedStepSet(s()));
+    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
+    s().skipStep();
+    const set = skippedStepSet(s());
+    expect([...set].sort((a, b) => a - b)).toEqual([6, 10]);
+    expect(skippedStepSet(s())).toBe(set);
+  });
+
+  it('begin() clears recorded skip-step decisions for a clean replay', () => {
+    useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7, skippedDoSteps: new Set([6]) });
+    s().begin(false);
+    expect(s().skippedDoSteps.size).toBe(0);
+  });
+
+  it('hydrate restores skippedDoSteps from an additive v3 snapshot; older snapshots start empty', () => {
+    s().hydrate({ version: 3, status: 'skipped', step: 11, skippedDoSteps: [6, 10] }, 0);
+    expect(s().status).toBe('skipped');
+    expect(s().step).toBe(11);
+    expect(s().skippedDoSteps.has(6)).toBe(true);
+    expect(s().skippedDoSteps.has(10)).toBe(true);
+
+    reset();
+    s().hydrate({ version: 3, status: 'skipped', step: 11 }, 0);
+    expect(s().skippedDoSteps.size).toBe(0);
+
+    reset();
+    s().hydrate({ version: 2, status: 'skipped', step: 11 }, 0);
+    expect(s().skippedDoSteps.size).toBe(0);
+  });
+
+  it('migratePersistedOnboarding passes a v3 snapshot’s skippedDoSteps through untouched', () => {
+    const v3 = { version: 3 as const, status: 'active' as const, step: 4, skippedDoSteps: [10] };
+    expect(migratePersistedOnboarding(v3)).toEqual(v3);
+  });
+});
+
 describe('onboardingStore — goTo / skip / resume', () => {
   beforeEach(reset);
 
@@ -669,6 +770,69 @@ describe('onboardingStore — goTo / skip / resume', () => {
     useOnboardingStore.setState({ status: 'pending', step: 8, maxVisitedStep: 8 });
     s().resume();
     expect(s().step).toBe(6);
+  });
+
+  it('resume KEEPS a Configure pointer step when the caller reports the wizard anchors alive', () => {
+    // Resuming while the wizard is still open: the anchors are on screen, so
+    // the old unconditional rewind would yank the user back off live targets.
+    for (const step of [7, 8, 9]) {
+      reset();
+      useOnboardingStore.setState({ status: 'skipped', step, maxVisitedStep: 9 });
+      s().resume({ wizardAnchorsMissing: false });
+      expect(s().status).toBe('active');
+      expect(s().step).toBe(step);
+      expect(s().maxVisitedStep).toBe(9); // untouched — no rewind
+    }
+  });
+
+  it('resume with anchors alive keeps a pending pointer step too', () => {
+    useOnboardingStore.setState({ status: 'pending', step: 9, maxVisitedStep: 9 });
+    s().resume({ wizardAnchorsMissing: false });
+    expect(s().status).toBe('active');
+    expect(s().step).toBe(9);
+  });
+
+  it('resume with an explicit anchors-missing report still rewinds 7-9 to 6', () => {
+    useOnboardingStore.setState({ status: 'skipped', step: 9, maxVisitedStep: 9 });
+    s().resume({ wizardAnchorsMissing: true });
+    expect(s().step).toBe(6);
+    expect(s().maxVisitedStep).toBe(6);
+  });
+
+  it('resumeLandingStep mirrors resume(): rewind only for 7-9 with anchors missing', () => {
+    expect(resumeLandingStep(6, true)).toBe(6); // below the band — never rewinds
+    expect(resumeLandingStep(7, true)).toBe(6);
+    expect(resumeLandingStep(9, true)).toBe(6);
+    expect(resumeLandingStep(10, true)).toBe(10); // above the band
+    for (const step of [7, 8, 9]) {
+      expect(resumeLandingStep(step, false)).toBe(step); // anchors alive — keep
+    }
+    // A user-skipped 6 is never re-offered: the landing walks past the pointers.
+    expect(resumeLandingStep(7, true, new Set([6]))).toBe(10);
+    expect(resumeLandingStep(9, true, new Set([6, 10]))).toBe(11);
+    expect(resumeLandingStep(7, true, new Set([6, 10, 11]))).toBe(12); // 12 is never skippable
+    expect(resumeLandingStep(7, false, new Set([6]))).toBe(7); // anchors alive — keep
+  });
+
+  it('resume rewind steps over a user-skipped step 6 — a declined step is never re-offered', () => {
+    // Skip 6 → at 7 → skip the tour → resume later with the wizard closed.
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
+    s().skipStep(); // -> 7, 6 recorded
+    s().skip(); // skipped, step kept
+    s().resume(); // default: anchors missing (the wizard closed meanwhile)
+    expect(s().status).toBe('active');
+    expect(s().step).toBe(10); // not 6 (declined) and not 7-9 (anchors gone)
+    expect(s().maxVisitedStep).toBe(10);
+    // A skipped 10 too: the landing walks to the next non-skipped step.
+    useOnboardingStore.setState({
+      status: 'skipped',
+      step: 8,
+      maxVisitedStep: 9,
+      skippedDoSteps: new Set([6, 10]),
+    });
+    s().resume();
+    expect(s().step).toBe(11);
+    expect(s().maxVisitedStep).toBe(11);
   });
 
   it('dismiss permanently completes the tour from skipped or pending', () => {
