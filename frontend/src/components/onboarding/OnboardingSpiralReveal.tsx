@@ -17,9 +17,9 @@ import {
  * the app sharpens into view across the modal run rather than in one beat.
  *
  * The reveal completes at REVEAL_COMPLETE_STEP, NOT at the end of the tour.
- * Steps 5–10 are coachmarks anchored to real UI (quick-session card, model
+ * Steps 6–11 are coachmarks anchored to real UI (quick-session card, model
  * picker, ship chip); they cannot point into a covered or blurred app, so the
- * last tile must be gone and blur must be 0 the moment step 5 renders. Step 11's
+ * last tile must be gone and blur must be 0 the moment step 6 renders. Step 12's
  * card then sits over a fully sharp app. Past that the component renders null —
  * a lingering `backdrop-filter: blur(0)` layer still costs a GPU pass.
  *

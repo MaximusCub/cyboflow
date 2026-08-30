@@ -47,10 +47,14 @@ vi.mock('../../../trpc/client', () => ({
 vi.mock('../IdeaPickerModal', () => ({
   IdeaPickerModal: (props: {
     isOpen: boolean;
+    defaultMode?: 'new' | 'pick';
+    showIdeaExplainer?: boolean;
     onPicked: (ids: string[], opts?: { separateIdeaIds: string[] }) => void;
   }) =>
     props.isOpen ? (
       <>
+        <span data-testid={`mock-idea-picker-mode-${props.defaultMode ?? 'pick'}`} />
+        <span data-testid={`mock-idea-picker-explainer-${String(props.showIdeaExplainer === true)}`} />
         <button data-testid="mock-pick-idea" onClick={() => props.onPicked(['idea-x'])}>
           pick idea
         </button>
@@ -96,6 +100,7 @@ vi.mock('../../../stores/dynamicWorkflowStore', () => ({
 }));
 
 import { QuickSessionCanvas } from '../QuickSessionCanvas';
+import { useOnboardingStore } from '../../../stores/onboardingStore';
 import type { Session } from '../../../types/session';
 import type { DynamicWorkflowRunState } from '../../../../../shared/types/dynamicWorkflows';
 
@@ -674,5 +679,57 @@ describe('QuickSessionCanvas — interactive (PTY) add-workflow routing', () => 
 
     expect(onAdd).toHaveBeenCalledTimes(1);
     expect(onBrowseAll).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The /ship chip's accent must fire on tour step 10 only — these tests pin the
+// wiring to the real zustand store (driven via setState, reset per test).
+// ---------------------------------------------------------------------------
+
+describe('QuickSessionCanvas — onboarding tour accent (tour step 10 = /ship chip)', () => {
+  const SHIP_CATALOGUE = [...WORKFLOWS, { id: 'wf-ship', name: 'ship', spec_json: '' }];
+
+  beforeEach(() => {
+    useOnboardingStore.setState({ status: 'idle', step: 0, maxVisitedStep: 0, hydrated: true });
+    mockListQuery.mockResolvedValue(SHIP_CATALOGUE);
+  });
+
+  it('tour step 10 (status active) → the /ship chip renders the accent and the coachmark anchor', async () => {
+    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10, hydrated: true });
+    renderCanvas();
+    const ship = await waitFor(() => screen.getByTestId('quick-session-launch-ship'));
+    expect(within(ship).getByText('Start here')).toBeInTheDocument();
+    expect(ship.getAttribute('style')).toContain('inset 3px 0 0');
+    expect(ship.getAttribute('style')).toContain('1.4px solid var(--color-interactive-primary)');
+    // The coachmark anchors to the ship chip ONLY — sibling chips stay plain.
+    expect(ship).toHaveAttribute('data-onboarding', 'ship-chip');
+    const sprint = screen.getByTestId('quick-session-launch-sprint');
+    expect(sprint).not.toHaveAttribute('data-onboarding');
+    expect(within(sprint).queryByText('Start here')).not.toBeInTheDocument();
+  });
+
+  it('tour step 8 (a wizard-Configure pointer) → no accent anywhere', async () => {
+    useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8, hydrated: true });
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-ship'));
+    expect(screen.queryByText('Start here')).not.toBeInTheDocument();
+  });
+
+  it('tour parked at step 10 (the /ship click parks pending) → the idea gate opens on "New idea" with the explainer', async () => {
+    useOnboardingStore.setState({ status: 'pending', step: 10, maxVisitedStep: 10, hydrated: true });
+    renderCanvas();
+    fireEvent.click(await screen.findByTestId('quick-session-launch-ship'));
+    // The gate opens before any launch.
+    expect(mockLaunch).not.toHaveBeenCalled();
+    expect(screen.getByTestId('mock-idea-picker-mode-new')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-idea-picker-explainer-true')).toBeInTheDocument();
+  });
+
+  it('no tour in progress (idle) → the idea gate opens in pick mode without the explainer', async () => {
+    renderCanvas();
+    fireEvent.click(await screen.findByTestId('quick-session-launch-ship'));
+    expect(screen.getByTestId('mock-idea-picker-mode-pick')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-idea-picker-explainer-false')).toBeInTheDocument();
   });
 });
