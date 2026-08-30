@@ -1056,8 +1056,9 @@ seeded specs (`cyboflow-picker.spec.ts`, `standalone-terminal-panels.spec.ts`) b
 to create the DB, then `seedProject()` inserts a project row directly via the `/usr/bin/sqlite3`
 CLI (present on every macOS runner; better-sqlite3 can't be imported host-side post-rebuild).
 `test:e2e` is **NOT** the headless code-change AC gate — it needs a real display. Run it locally
-on macOS, or via the report-only nightly `.github/workflows/e2e.yml` (macOS runner), which flips
-to blocking once green two consecutive runs.
+on macOS, or via `.github/workflows/e2e.yml` (macOS runner): its full tier runs nightly
+report-only, while the minimal smoke tier (`test:ci:minimal`) is a blocking required PR check
+("E2E smoke (macOS)", promoted 2026-08-14) and part of the release gate.
 
 ### The better-sqlite3 ABI ping-pong
 
