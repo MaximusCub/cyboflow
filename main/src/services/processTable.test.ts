@@ -13,10 +13,9 @@ import { spawn } from 'node:child_process';
 import {
   parseProcessTable,
   collectDescendantPids,
-  listPidPpidTableSync,
-  killWindowsTree,
   type ProcessTableRow,
 } from './processTable';
+import { listPidPpidTableSync, killWindowsTree } from '../utils/platformProcess';
 
 /** Signal-0 liveness probe (mirrors the production EPERM semantics). */
 function isAlive(pid: number): boolean {

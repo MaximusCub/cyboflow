@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess, exec, execSync } from 'child_process';
+import { spawn, ChildProcess, exec } from 'child_process';
 import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
@@ -14,8 +14,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
-import { collectDescendantPids, parseProcessTable } from './processTable';
-import { buildWindowsProcessTableScript } from './winProcessTable';
+import { collectDescendantPids } from '../utils/platformProcess';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -1211,46 +1210,17 @@ export class SessionManager extends EventEmitter {
    * Recursively gets all descendant PIDs of a parent process.
    * This handles deeply nested process trees where processes spawn children
    * that spawn their own children, etc.
-   * 
+   *
+   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
+   * win32, per-level `ps --ppid` recursion on POSIX) lives in
+   * utils/platformProcess.ts; a failed walk stays silent here, degrading to a
+   * partial kill list exactly as before.
+   *
    * @param parentPid The parent process ID
    * @returns Array of all descendant PIDs
    */
   private getAllDescendantPids(parentPid: number): number[] {
-    const descendants: number[] = [];
-
-    if (process.platform === 'win32') {
-      // `ps` does not exist on Windows. One PowerShell call fetches the whole
-      // (pid, ppid) table — the same query the async process-table helpers run —
-      // which the shared processTable.ts helpers parse and walk. Best-effort,
-      // same as the POSIX branch: a failed walk degrades to a partial kill
-      // list, never an error.
-      try {
-        const output = execSync(
-          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
-        );
-        return collectDescendantPids(parentPid, parseProcessTable(output));
-      } catch (error) {
-        return [];
-      }
-    }
-
-    try {
-      // Use ps to get children on macOS/Unix
-      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8', windowsHide: true });
-      const pids = output.split('\n')
-        .map(line => parseInt(line.trim()))
-        .filter(pid => !isNaN(pid));
-
-      for (const pid of pids) {
-        descendants.push(pid);
-        descendants.push(...this.getAllDescendantPids(pid));
-      }
-    } catch (error) {
-      // Command might fail if no children exist, which is fine
-    }
-
-    return descendants;
+    return collectDescendantPids(parentPid);
   }
 
   /**

@@ -342,7 +342,8 @@ describe('DevServerManager — win32 tree teardown', () => {
       expect(pid).toBeTypeOf('number');
 
       // Positive control via the shared process table: the grandchild exists.
-      const { collectDescendantPids, listPidPpidTableSync } = await import('../../processTable');
+      const { collectDescendantPids } = await import('../../processTable');
+      const { listPidPpidTableSync } = await import('../../../utils/platformProcess');
       let grandkids: number[] = [];
       for (let i = 0; i < 15 && grandkids.length === 0; i++) {
         await new Promise((r) => setTimeout(r, 200));

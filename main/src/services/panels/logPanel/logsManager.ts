@@ -1,11 +1,10 @@
-import { ChildProcess, spawn, exec, execSync } from 'child_process';
+import { ChildProcess, spawn, exec } from 'child_process';
 import { ToolPanel, LogsPanelState } from '../../../../../shared/types/panels';
 import { panelManager } from '../../panelManager';
 import { addSessionLog, cleanupSessionLogs } from '../../../ipc/logs';
 import { mainWindow } from '../../../index';
 import { getShellPath } from '../../../utils/shellPath';
-import { collectDescendantPids, parseProcessTable } from '../../processTable';
-import { buildWindowsProcessTableScript } from '../../winProcessTable';
+import { collectDescendantPids } from '../../../utils/platformProcess';
 
 export class LogsManager {
   private static instance: LogsManager;
@@ -189,42 +188,14 @@ export class LogsManager {
    * Get all descendant PIDs of a process recursively
    * @param parentPid The parent process ID
    * @returns Array of all descendant PIDs
+   *
+   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
+   * win32, per-level `ps --ppid` recursion on POSIX) lives in
+   * utils/platformProcess.ts; this walker stays silent on a failed walk,
+   * degrading to a partial kill list exactly as before.
    */
   private getAllDescendantPids(parentPid: number): number[] {
-    const descendants: number[] = [];
-
-    if (process.platform === 'win32') {
-      // `ps` does not exist on Windows. One PowerShell call fetches the whole
-      // (pid, ppid) table — the same query the async process-table helpers
-      // run — which the shared processTable.ts helpers parse and walk.
-      // Best-effort, same as the POSIX branch: a failed walk degrades to a
-      // partial kill list, never an error.
-      try {
-        const output = execSync(
-          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
-        );
-        return collectDescendantPids(parentPid, parseProcessTable(output));
-      } catch (error) {
-        return [];
-      }
-    }
-
-    try {
-      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8', windowsHide: true });
-      const pids = output.split('\n')
-        .map(line => parseInt(line.trim()))
-        .filter(pid => !isNaN(pid));
-
-      for (const pid of pids) {
-        descendants.push(pid);
-        descendants.push(...this.getAllDescendantPids(pid));
-      }
-    } catch (error) {
-      // Command might fail if no children exist, which is fine
-    }
-
-    return descendants;
+    return collectDescendantPids(parentPid);
   }
 
   /**

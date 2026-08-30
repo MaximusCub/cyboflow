@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import { killWindowsTree } from '../../../processTable';
+import { killWindowsTree } from '../../../../utils/platformProcess';
 import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
