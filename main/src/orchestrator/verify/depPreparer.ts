@@ -566,13 +566,30 @@ export class VerifyDepPreparer {
   }
 
   /**
-   * Clone one dependency dir. `cp -Rc` asks APFS for clonefile (copy-on-write:
-   * near-zero time and disk until something writes). `-c` is macOS-only and
-   * clonefile is refused across filesystems, so ANY failure retries as a plain
-   * recursive copy — slower, identical result. A partial destination from the
-   * failed attempt is removed first so the retry starts clean.
+   * Clone one dependency dir. On POSIX, `cp -Rc` asks APFS for clonefile
+   * (copy-on-write: near-zero time and disk until something writes). `-c` is
+   * macOS-only and clonefile is refused across filesystems, so ANY failure
+   * retries as a plain recursive copy — slower, identical result. A partial
+   * destination from the failed attempt is removed first so the retry starts
+   * clean.
+   *
+   * Windows has no `cp` (and the packaged app cannot assume a Git-for-Windows
+   * `cp.exe` on PATH), so it clones with robocopy — shipped with the OS — whose
+   * exit codes are a BITMASK: anything below 8 is a success flavor
+   * (1=files copied, 2=extra dest files, 4=mismatched attributes); 8+ are
+   * real failures.
    */
   private async cloneDir(src: string, dest: string, cwd: string): Promise<void> {
+    if (process.platform === 'win32') {
+      const copied = await this.deps.exec(
+        'robocopy',
+        [src, dest, '/E', '/NFL', '/NDL', '/NJH', '/NP', '/NS', '/NC'],
+        { cwd, timeoutMs: CLONE_TIMEOUT_MS },
+      );
+      if (copied.code < 8) return;
+      throw new Error(`robocopy failed for ${src} (code ${copied.code}): ${copied.out}`);
+    }
+
     const cloned = await this.deps.exec('cp', ['-Rc', src, dest], { cwd, timeoutMs: CLONE_TIMEOUT_MS });
     if (cloned.code === 0) return;
 

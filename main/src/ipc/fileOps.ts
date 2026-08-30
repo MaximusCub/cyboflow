@@ -461,10 +461,16 @@ export function createFileOps(
 
           // Use git show to get file content at specific revision. argv form (no
           // shell), with END_OF_OPTIONS pinning the spec into a value position.
+          // Git's `<rev>:<path>` object spec always uses forward slashes as
+          // separators — on Windows, path.normalize emits native backslashes
+          // that git treats as literal filename characters, so the spec never
+          // matches. Only remap on win32: on POSIX a backslash is a legitimate
+          // (literal) filename character and must be preserved.
+          const gitObjectPath = path.sep === '\\' ? normalizedPath.replace(/\\/g, '/') : normalizedPath;
           const { stdout } = await runGitCapture(session.worktreePath, [
             'show',
             END_OF_OPTIONS,
-            `${revision}:${normalizedPath}`,
+            `${revision}:${gitObjectPath}`,
           ]);
 
           return { success: true, content: stdout };
