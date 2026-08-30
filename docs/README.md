@@ -21,23 +21,23 @@ carries only runtime-specific notes.
 | [`SHELL-LAYOUT.md`](SHELL-LAYOUT.md) | Renderer shell geometry and navigation state |
 | [`PERFORMANCE.md`](PERFORMANCE.md) | CPU/memory harness, baselines, measurement traps |
 | [`PROVENANCE.md`](PROVENANCE.md) | Fork lineage (Crystal 0.3.5); never merge from Nimbalyst |
-| [`cyboflow_system_design.md`](cyboflow_system_design.md) | Original product spec and scope decisions (predates several shipped flows) |
-| [`ARCHITECTURE-diagram.md`](ARCHITECTURE-diagram.md) | Companion diagram to ARCHITECTURE.md — currently stale (2026-08 audit); trust the prose doc |
+| [`eval-rubric.md`](eval-rubric.md) | The code-review eval rubric — spec of record for `main/src/orchestrator/eval/rubric.ts` |
+| [`cyboflow_system_design.md`](cyboflow_system_design.md) | Historical MVP-era product spec (banner inside); ARCHITECTURE.md is current truth |
 | `signing/`, `packaging/` | Apple signing setup + Gatekeeper checklist; root-deps policy |
 
 ## Design-time docs
 
-`proposals/`, `plans/`, `design/`, `ideas/` hold point-in-time design documents. Many
-describe work that has **since shipped** while still carrying a stale "PROPOSED"/"not
-started" status banner (2026-08 audit; a status/relocation sweep is pending) — trust
-`git log` and the code over a file's Status line.
+`proposals/`, `plans/`, `design/`, `ideas/` hold point-in-time design documents. Shipped
+and superseded ones move to `archive/` — except those still cited by section number from
+source-code comments, which stay put with an updated status banner. Every file here carries
+a current Status line (swept 2026-08); when in doubt, `git log` and the code outrank a
+banner.
 
 ## Historical
 
-- `archive/` — shipped/superseded docs, moved here per the policy in `archive/README.md`.
+- `archive/` — shipped/superseded docs (including the pre-fork `initial_research/`), moved
+  here per the policy in `archive/README.md`.
 - `crystal-legacy/` — Crystal-era guides; historical reference, not current truth.
-- `initial_research/` — pre-fork stack/architecture research (conclusions absorbed into
-  PROVENANCE.md and ARCHITECTURE.md).
 - `workflows-future/`, `probes/`, `prototypes/`, `screenshots/`, `protoflow-design/` —
   flow-prose ideas, finished probe records, design mockups and capture assets.
   `protoflow-design/` is the source of the live design tokens.

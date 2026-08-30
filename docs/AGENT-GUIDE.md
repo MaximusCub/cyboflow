@@ -42,7 +42,8 @@ Full index: `docs/README.md`. The load-bearing ones:
   SDK sessions, build/test mechanics.
 - `docs/CODE-PATTERNS.md` — canonical patterns: entity-write chokepoints, IPC type-parity
   rules, `@cyboflow-hidden`, localStorage key migrations, test conventions.
-- `docs/cyboflow_system_design.md` — product spec and scope decisions.
+- `docs/cyboflow_system_design.md` — the MVP-era product spec and scope decisions
+  (historical; where it disagrees with `docs/ARCHITECTURE.md`, the latter wins).
 - `docs/RELEASE-RUNBOOK.md` + `docs/signing/APPLE_DEVELOPER_SETUP.md` — load before any
   build, packaging, or release task.
 - `docs/UPDATES.md` — the R2 update channel, feed mechanics, and per-variant data-dir
