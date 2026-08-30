@@ -241,4 +241,80 @@ on the Windows host and verified from both sides:
 
 ## M4 — wrap-up
 
-(pending)
+### Artifacts (measured)
+
+| Artifact | Size | Notes |
+|---|---|---|
+| `dist-electron/Cyboflow-0.2.9-Windows-x64.exe` | 259.3 MB | Unsigned NSIS installer (one-click, per-user install — no UAC needed) |
+| `dist-electron/Cyboflow-0.2.9-Windows-x64.exe.blockmap` | 0.3 MB | electron-builder differential-update metadata |
+| `dist-electron/win-unpacked/` | 1111 MB | Unpacked app (launch-verify target) |
+| `dist-electron/win-unpacked/Cyboflow.exe` | — | launches with UI, MCP pipe, sqlite, claude.exe — see M2/M3 |
+
+A `latest.yml` also appears next to the artifacts (the generic publish config
+emits it even with `--publish never`); nothing is uploaded anywhere.
+
+### To install / run on Windows (the one command)
+
+```
+C:\Dev\cyboflow\dist-electron\Cyboflow-0.2.9-Windows-x64.exe
+```
+Double-click (installs per-user under `%LOCALAPPDATA%\Programs`, no admin
+required) and launch from the Start menu. For development without installing:
+`C:\Dev\cyboflow\dist-electron\win-unpacked\Cyboflow.exe`.
+
+### The winCodeSign cache workaround (IMPORTANT for future Windows builds)
+
+The NSIS target (unlike `--dir`) needs electron-builder's winCodeSign cache
+for rcedit (exe icon/metadata). Its `winCodeSign-2.6.0.7z` contains two
+**darwin symlinks** that 7-Zip cannot create without admin/Windows Developer
+Mode, and app-builder treats the 7z exit code as fatal — an endless
+download/extract/retry loop (the two benign symlink warnings seen in `--dir`
+runs become hard failures for NSIS).
+
+Fix applied on this host (no elevation): manually extract the already-downloaded
+archive into the final cache name app-builder expects —
+
+```bat
+cd %LOCALAPPDATA%\electron-builder\Cache\winCodeSign
+C:\Dev\cyboflow\node_modules\.pnpm\7zip-bin@5.2.0\node_modules\7zip-bin\win\x64\7za.exe x winCodeSign-2.6.0.7z -owinCodeSign-2.6.0 -y
+```
+
+(the two `darwin\10.12\lib\*.dylib` symlink sub-items error out and are
+irrelevant on Windows; everything app-builder uses — `rcedit-x64.exe`,
+`windows-10`, … — extracts fine). Subsequent NSIS runs see the final dir and
+skip the download entirely. Alternative if this ever recurs: set
+`signAndEditExecutable: false` in `build.win` — the installer still gets the
+right icon, but the loose `Cyboflow.exe` keeps the generic Electron one.
+
+Other mitigations for hosts with Developer Mode enabled: none needed — the
+extraction just works there.
+
+### Final gate (measured)
+
+- `pnpm typecheck` — clean. `pnpm lint` — 0 errors (202 pre-existing warnings).
+- `pnpm test:build` — green (afterSign 23 passed, verifyArtifact 26 passed,
+  configure-build all cases).
+- Launch verification + runtime checks — see M2/M3.
+- All work committed locally on `windows-build` (4 commits on top of
+  `59421148`); nothing pushed, no PR raised (see
+  `docs/PR-DRAFT-WINDOWS-BUILD.md` for the prepared upstream PR).
+
+## What works / what degrades — summary
+
+**Works:** install + launch; UI fully renders; SQLite (sessions, backlog,
+migrations) on Electron-ABI prebuilds; bundled `claude.exe` resolves and
+spawns (SDK substrate); `cyboflow_*` MCP tools over the per-user named pipe;
+flow/verification drivers (cmd wrapper, taskkill tree reaping, PowerShell
+process walks); PowerShell-default shell substrate; PATH resolution
+incl. npm shims; updater checks fail soft.
+
+**Degrades:** no bundled peekaboo (darwin-only optional dep) — no native
+screen capture on Windows; no Windows update feed yet (checks log-and-continue);
+39 pre-existing Windows-only test-cleanup failures (`afterEach` `rmSync` on
+open SQLite handles — EPERM; test infra, not product code); `afterSign`
+bundle arch/ABI checks remain mac-only (NSIS `.exe` has a 50 MB floor via
+`verifyArtifact`); PTY-terminal panels depend on node-pty 0.14.1 conpty
+(binaries packaged, not exercised end-to-end in this trial).
+
+**Known limitation:** x64-only for v1 (host arch AMD64); arm64 Windows needs
+`BUILD_ARCH=arm64` equivalents and prebuilds to be verified.
