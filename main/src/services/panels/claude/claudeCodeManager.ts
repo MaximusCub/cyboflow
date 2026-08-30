@@ -1190,7 +1190,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    *
    * Constructed in the constructor body after super() so this.logger is
    * available — passing the logger enables verbose Zod-failure diagnostics
-   * per the CLAUDE.md optional-logger rule.
+   * per the CODE-PATTERNS.md optional-logger rule.
    */
   private readonly narrowing: TypedEventNarrowing;
 

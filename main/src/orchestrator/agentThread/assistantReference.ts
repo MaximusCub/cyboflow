@@ -16,7 +16,7 @@
  * reasoning that governs `agentThreadPrompt.ts`.
  *
  * Every body is USER-FACING truth distilled from the product docs (repo
- * `CLAUDE.md`, `docs/cyboflow_system_design.md`, `docs/ARCHITECTURE.md`, and the
+ * `docs/AGENT-GUIDE.md` (imported by repo `CLAUDE.md`), `docs/cyboflow_system_design.md`, `docs/ARCHITECTURE.md`, and the
  * five `workflows/*.md` prompt bodies) — what the feature is, how a user drives
  * it, the gates they will see, the artifacts it produces, and practical
  * caveats. It deliberately carries NO internal code structure (no file paths,

@@ -21,7 +21,7 @@
  * Singleton lifecycle mirrors TaskChangeRouter (initialize / getInstance /
  * _resetForTesting). Pass the optional `logger` at initialize time from
  * main/src/index.ts — omitting it silently disables the store's diagnostics
- * (CLAUDE.md optional-logger rule).
+ * (CODE-PATTERNS.md optional-logger rule).
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', or any concrete service in main/src/services/*. The DB is

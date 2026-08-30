@@ -1866,7 +1866,7 @@ export class McpQueryHandler {
    * @param db     Orchestrator DB surface.
    * @param logger Optional structured logger. Passed through for connect /
    *               disconnect / precondition diagnostics on the shell-approval
-   *               path (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   *               path (CODE-PATTERNS.md optional-logger rule: pass it, don't omit it).
    * @param deps   Optional callback deps otherwise unreachable from this layer
    *               (see McpQueryHandlerDeps). Defaults to `{}` — every member is
    *               individually optional, so omitting this arg entirely (as every
@@ -2293,7 +2293,7 @@ export class McpQueryHandler {
    *     validated steps; its `null` there means the row vanished mid-flight.
    *
    * Pass `undefined` for the bridge logger arg — this class holds no LoggerLike
-   * and must not fabricate one (CLAUDE.md silent-no-op rule applies only to
+   * and must not fabricate one (CODE-PATTERNS.md silent-no-op rule applies only to
    * loggers actually in scope; the bridge falls back to console.warn).
    */
   private async handleReportStep(

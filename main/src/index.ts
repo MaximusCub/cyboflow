@@ -1983,7 +1983,7 @@ async function initializeServices(): Promise<boolean> {
   // injected (structurally, as narrow slices) into RunLauncher (createForRun at
   // sprint launch), RunExecutor (lane task ids for the `# Sprint tasks` prompt
   // block), and the runs-router lane dep-bag below. The cyboflow_update_sprint_task
-  // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CLAUDE.md
+  // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CODE-PATTERNS.md
   // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
 
@@ -3279,7 +3279,7 @@ async function initializeServices(): Promise<boolean> {
   // 'output'/'exit' events, re-emitting them on itself — so the SAME facade serves
   // as RunExecutor's single `source` EventEmitter (which is bound once at
   // construction and cannot be swapped per run). One object satisfies both seams.
-  // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
+  // cyboflowLogger is PASSED (CODE-PATTERNS.md optional-logger rule).
   // Assign the module-level binding (declared near the other shared services) so
   // the run dep-bag wiring in app.whenReady() can reach the SAME facade instance
   // for the live-input relay (IDEA-030 / TASK-817).

@@ -56,7 +56,7 @@ interface SettingsLocal {
 export class InteractiveMcpEnabler {
   /**
    * @param logger Optional structured logger. Passed through for enable/skip
-   *   diagnostics (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   *   diagnostics (CODE-PATTERNS.md optional-logger rule: pass it, don't omit it).
    */
   constructor(private readonly logger?: LoggerLike) {}
 

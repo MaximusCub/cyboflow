@@ -185,7 +185,7 @@ export interface BacklogTaskItem {
    * back as null on epics/tasks (no `decomposed_at` column). REQUIRED on every
    * constructor: the frontend visibility selectors compare `!== null`, so an
    * `undefined` from an emit path silently flips visibility (the silent-drop
-   * class — see CLAUDE.md IPC/type-parity rules).
+   * class — see docs/CODE-PATTERNS.md IPC/type-parity rules).
    */
   decomposed_at: string | null;
   /**

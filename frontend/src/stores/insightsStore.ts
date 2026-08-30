@@ -60,7 +60,7 @@
  * backend hiccup degrades gracefully instead of blanking the dashboard.
  *
  * The subscription `onData` callbacks are typed by AppRouter inference (no local
- * payload interface, no `(evt: unknown)` — CLAUDE.md rule); the callbacks ignore
+ * payload interface, no `(evt: unknown)` — CODE-PATTERNS.md rule); the callbacks ignore
  * the payload entirely and only use the event as a debounce trigger.
  */
 import { useMemo } from 'react';
@@ -731,7 +731,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       // the same signals landingStore/activeRunsStore use; each can change a run
       // outcome (→ stats/usage) or the review inbox (→ summary/findings) without
       // a per-project review-item delta. onData payloads are AppRouter-inferred
-      // (CLAUDE.md rule); we ignore the payload and only debounce a refresh.
+      // (CODE-PATTERNS.md rule); we ignore the payload and only debounce a refresh.
       lifecycleSubs.push(
         trpc.cyboflow.events.onRunStatusChanged.subscribe(undefined, {
           onData: () => scheduleRefresh(),

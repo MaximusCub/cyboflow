@@ -251,7 +251,7 @@ export function applyTaskChangeToList(
 
 /**
  * Fetch the project list over IPC and map to the minimal refs the board needs.
- * The IPCResponse<T> is annotated explicitly (CLAUDE.md rule) so a handler
+ * The IPCResponse<T> is annotated explicitly (CODE-PATTERNS.md rule) so a handler
  * shape change fails typecheck here rather than silently at runtime. Throws on
  * a failed response so the caller's full-sync catch handles it uniformly.
  */

@@ -30,7 +30,7 @@
  *
  * onData payload is AppRouter-inferred (ArtifactChangedEvent) — written as
  * `onData: (event) => …`. NEVER a local event type or `unknown` + shape guard
- * (CLAUDE.md hard rule).
+ * (CODE-PATTERNS.md hard rule).
  *
  * Which hook to use: this run-scoped hook is for a specific run's deliverables
  * (e.g. the run right-rail panel scoped to one flow run). For anything keyed by

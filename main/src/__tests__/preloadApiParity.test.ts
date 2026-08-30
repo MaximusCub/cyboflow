@@ -132,7 +132,7 @@ describe('preload ↔ api.ts contextBridge parity (B11 + C6)', () => {
       }
     }
     // If this fails, api.ts calls a bridge path the preload never exposed — the
-    // exact silent-drop IPC class CLAUDE.md warns about.
+    // exact silent-drop IPC class CODE-PATTERNS.md warns about.
     expect(missing).toEqual([]);
   });
 });

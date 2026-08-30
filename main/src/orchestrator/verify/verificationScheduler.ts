@@ -10,7 +10,7 @@
  *
  * Singleton lifecycle mirrors SprintLaneStore / TaskChangeRouter (initialize /
  * getInstance / _resetForTesting). Pass `logger` at initialize time from
- * main/src/index.ts — omitting it silently disables diagnostics (CLAUDE.md
+ * main/src/index.ts — omitting it silently disables diagnostics (CODE-PATTERNS.md
  * optional-logger rule).
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',

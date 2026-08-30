@@ -26,7 +26,7 @@
  * and `runUnifiedMessagesListing.ts` use (no 'electron' / 'better-sqlite3' /
  * concrete-service pull-in).
  *
- * Logger note (per project CLAUDE.md): the optional `logger` is THREADED into
+ * Logger note (per project CODE-PATTERNS.md): the optional `logger` is THREADED into
  * `TypedEventNarrowing` (adapting `verbose` → `debug`, as `LoggerLike` has no
  * `verbose`) so its diagnostics are not silently dropped.
  */

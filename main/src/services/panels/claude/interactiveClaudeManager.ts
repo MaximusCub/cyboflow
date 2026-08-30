@@ -404,7 +404,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * Narrower owned by this manager. Every transcript line flows through
    * `narrowing.narrow()` before reaching the EventRouter. Constructed in the
    * constructor after super() so this.logger is available — passing the logger
-   * enables verbose Zod-failure diagnostics per the CLAUDE.md optional-logger
+   * enables verbose Zod-failure diagnostics per the CODE-PATTERNS.md optional-logger
    * rule (omitting it silently no-ops observability).
    */
   private readonly narrowing: TypedEventNarrowing;
@@ -414,7 +414,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * PreToolUse `'*'` shell-approval hook on spawn (gated by the writer's own
    * permissionMode opt-out) and strips it on teardown. Constructed in the
    * constructor after super() so this.logger is available — the logger is
-   * PASSED (adapted to LoggerLike) per the CLAUDE.md optional-logger rule
+   * PASSED (adapted to LoggerLike) per the CODE-PATTERNS.md optional-logger rule
    * (omitting it silently no-ops the writer's write/skip/remove diagnostics).
    */
   private readonly settingsWriter: InteractiveSettingsWriter;
@@ -426,7 +426,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * human to answer it in an app-driven run). Restores parity with the SDK
    * substrate's unconditional `getBaseProjectMcpServers` injection. Runs on
    * EVERY spawn (NOT gated by permissionMode — the modal blocks even in ignore
-   * mode). Logger PASSED (CLAUDE.md optional-logger rule).
+   * mode). Logger PASSED (CODE-PATTERNS.md optional-logger rule).
    */
   private readonly mcpEnabler: InteractiveMcpEnabler;
 
@@ -437,7 +437,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * invokable unit (IDEA-013 rung-(ii)). Merge-safe + namespaced (`cyboflow-*`):
    * write clears the prior cyboflow set, remove strips ONLY cyboflow files. The
    * SDK manager constructs its own twin so the bundle reaches both substrates.
-   * Logger PASSED via toLoggerLike (CLAUDE.md optional-logger rule).
+   * Logger PASSED via toLoggerLike (CODE-PATTERNS.md optional-logger rule).
    */
   private readonly bundleWriter: WorkflowBundleWriter;
 
@@ -461,7 +461,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       throw new TypeError('[InteractiveClaudeManager] db argument is required; RawEventsSink cannot operate without a database handle.');
     }
     this.narrowing = new TypedEventNarrowing(this.logger);
-    // PASS the logger to the writer (CLAUDE.md optional-logger rule). The
+    // PASS the logger to the writer (CODE-PATTERNS.md optional-logger rule). The
     // manager's Logger surface exposes verbose/info/warn/error but NOT `debug`,
     // so adapt it to LoggerLike at the call site (debug -> verbose) rather than
     // omitting it, which would silently no-op the writer's diagnostics. The shim
@@ -1320,7 +1320,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     // Start the TranscriptTailSource (TASK-807). Each normalized line flows
     // narrow -> router.emitForRun(runId) -> emit('output', ...) field-identical
-    // to the SDK envelope. The logger is PASSED (CLAUDE.md optional-logger rule).
+    // to the SDK envelope. The logger is PASSED (CODE-PATTERNS.md optional-logger rule).
     const tailSource = this.createTranscriptSource(worktreePath, {
       // Late recovery: the transcript appeared AFTER the soft discovery timeout,
       // so the structured pipeline has now attached mid-session. Re-persist the
@@ -1552,7 +1552,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   /**
    * Factory for the TranscriptSource. Overridable in tests to inject a fake
    * source with zero PTY/FS coupling. Production constructs a real
-   * TranscriptTailSource with the logger PASSED (CLAUDE.md optional-logger rule).
+   * TranscriptTailSource with the logger PASSED (CODE-PATTERNS.md optional-logger rule).
    */
   protected createTranscriptSource(
     worktreePath: string,

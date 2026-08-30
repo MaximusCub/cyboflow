@@ -67,7 +67,7 @@ export interface ShellHookResult {
  * Minimal logger surface for connect/disconnect/skip diagnostics. Mirrors
  * orchestrator LoggerLike but is injectable so the production entry point can
  * pass a stderr-backed logger (stdout is reserved for the verdict JSON) and
- * tests can pass a spy. CLAUDE.md optional-logger rule: it is PASSED, not
+ * tests can pass a spy. CODE-PATTERNS.md optional-logger rule: it is PASSED, not
  * omitted, on the production path.
  */
 export interface ShellHookLogger {

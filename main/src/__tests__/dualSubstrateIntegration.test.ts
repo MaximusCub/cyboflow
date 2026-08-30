@@ -22,7 +22,7 @@
  * runEventBridge with a real better-sqlite3 DB for raw_events persistence, and
  * the real buildStepTransitionEvent for current_step_id writes.
  *
- * Gated in pnpm test:unit (vitest run) — NEVER pnpm test:e2e (CLAUDE.md).
+ * Gated in pnpm test:unit (vitest run) — NEVER pnpm test:e2e (docs/AGENT-GUIDE.md).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
