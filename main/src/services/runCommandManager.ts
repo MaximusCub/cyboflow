@@ -5,10 +5,9 @@ import type { DatabaseService } from '../database/database';
 import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
-import { exec, execSync } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
-import { collectDescendantPids, parseProcessTable } from './processTable';
-import { buildWindowsProcessTableScript } from './winProcessTable';
+import { collectDescendantPids, killTree } from '../utils/platformProcess';
 
 interface RunProcess {
   process: pty.IPty;
@@ -245,48 +244,15 @@ export class RunCommandManager extends EventEmitter {
   /**
    * Get all descendant PIDs of a parent process recursively
    * This is critical for ensuring all child processes are killed
+   *
+   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
+   * win32, per-level `ps --ppid` recursion on POSIX) lives in
+   * utils/platformProcess.ts; this site contributes only its warning logging.
    */
   private getAllDescendantPids(parentPid: number): number[] {
-    const descendants: number[] = [];
-
-    if (process.platform === 'win32') {
-      // `ps` does not exist on Windows — the `ps -o pid= --ppid N` call below
-      // throws there (through cmd.exe), so this always returned [] and the
-      // win32 zombie check in killProcessTree falsely reported success. One
-      // PowerShell call fetches the whole (pid, ppid) table — the same query
-      // the async process-table helpers run — which the shared
-      // processTable.ts helpers parse and walk.
-      try {
-        const output = execSync(
-          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-          { encoding: 'utf8', timeout: 15_000, windowsHide: true }
-        );
-        return collectDescendantPids(parentPid, parseProcessTable(output));
-      } catch (error) {
-        this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
-        return [];
-      }
-    }
-
-    try {
-      const result = require('child_process').execSync(
-        `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
-        { encoding: 'utf8', windowsHide: true }
-      );
-
-      const pids = result.split('\n')
-        .map((line: string) => parseInt(line.trim()))
-        .filter((pid: number) => !isNaN(pid) && pid !== parentPid);
-
-      for (const pid of pids) {
-        descendants.push(pid);
-        descendants.push(...this.getAllDescendantPids(pid));
-      }
-    } catch (error) {
-      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
-    }
-
-    return [...new Set(descendants)];
+    return collectDescendantPids(parentPid, {
+      onWalkError: (error) => this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error),
+    });
   }
 
   /**
@@ -305,6 +271,14 @@ export class RunCommandManager extends EventEmitter {
   /**
    * Kill a process and all its descendants
    * Returns true if successful, false if zombie processes remain
+   *
+   * The win32 taskkill ladder (graceful /T → grace window → /T /F →
+   * per-descendant /F → verification) lives in utils/platformProcess.ts
+   * (killTree) — it used to be duplicated here, in AbstractCliManager and
+   * terminalSessionManager. This site contributes its runner/probe seams, its
+   * fixed (non-polling) 2s grace window and its zombie-event reporting; the
+   * POSIX ladder below stays here because its shape (pgid lookup + group
+   * enumeration + fixed 10s wait) is genuinely this site's own.
    */
   private async killProcessTree(pid: number, commandName: string): Promise<boolean> {
     // `windowsHide: true` — every taskkill/kill/pkill here must never flash a
@@ -321,61 +295,28 @@ export class RunCommandManager extends EventEmitter {
     // (optionally /F) takes the whole tree in one call, which is the Windows
     // contract for everything the POSIX ladder achieves.
     if (process.platform === 'win32') {
-      let success = true;
-      try {
-        // Graceful attempt first (without /F, GUI apps may close cleanly).
-        try {
-          await execAsync(`taskkill /PID ${pid} /T`);
-        } catch (error) {
+      return killTree(pid, {
+        descendantPids,
+        execCommand: execAsync,
+        isPidAlive: (probePid) => this.isPidAlive(probePid),
+        // This ladder historically slept the grace window unconditionally (no
+        // probe) — preserved exactly via the fixed grace mode.
+        graceMode: 'fixed',
+        graceMs: 2000,
+        listDescendants: () => this.getAllDescendantPids(pid),
+        onGracefulError: (error) => {
           this.logger?.verbose(`Graceful taskkill for ${pid} did not settle (expected for console apps): ${error}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        try {
-          await execAsync(`taskkill /PID ${pid} /T /F`);
-        } catch (error) {
-          // Process might already be dead
-        }
-        // taskkill /T walks the PPID chain at call time, so children a dying
-        // shell orphaned between the graceful and /F calls can survive it.
-        // Force every descendant enumerated up-front that is still alive.
-        for (const childPid of descendantPids) {
-          try {
-            if (this.isPidAlive(childPid)) {
-              await execAsync(`taskkill /PID ${childPid} /F`);
-            }
-          } catch (error) {
-            // Already dead / no permission — the verification pass below decides.
-          }
-        }
-        await new Promise(resolve => setTimeout(resolve, 500));
-        let remainingPids = this.getAllDescendantPids(pid);
-        if (remainingPids.length > 0) {
-          // Survivors found: one direct forced kill each — taskkill /T cannot
-          // see a child whose parent link it can no longer walk — then re-check.
-          for (const survivorPid of remainingPids) {
-            try {
-              await execAsync(`taskkill /PID ${survivorPid} /F`);
-            } catch (error) {
-              // Already dead / no permission — the re-check below decides.
-            }
-          }
-          await new Promise(resolve => setTimeout(resolve, 200));
-          remainingPids = this.getAllDescendantPids(pid);
-        }
-        if (remainingPids.length > 0) {
+        },
+        onSurvivors: (remainingPids) => {
           this.logger?.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
-          success = false;
           this.emit('zombie-processes-detected', {
             commandName,
             pids: remainingPids,
             message: `Failed to terminate ${remainingPids.length} child processes from command "${commandName}". Please manually kill PIDs: ${remainingPids.join(', ')}`
           });
-        }
-      } catch (error) {
-        this.logger?.error('Error in Windows killProcessTree:', error as Error);
-        success = false;
-      }
-      return success;
+        },
+        onError: (error) => this.logger?.error('Error in Windows killProcessTree:', error as Error),
+      });
     }
 
     // Find the process group ID and kill all processes in that group

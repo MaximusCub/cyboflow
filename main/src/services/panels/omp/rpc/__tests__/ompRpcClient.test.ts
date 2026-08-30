@@ -10,7 +10,8 @@ import {
   type OmpRpcProcess,
   type SpawnOmpRpcProcess,
 } from '../ompRpcClient';
-import { collectDescendantPids, listPidPpidTableSync } from '../../../../processTable';
+import { collectDescendantPids } from '../../../../processTable';
+import { listPidPpidTableSync } from '../../../../../utils/platformProcess';
 import { OMP_RPC_MODE_ARGS, OMP_RPC_UI_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
 
 class FakeOmpProcess extends EventEmitter implements OmpRpcProcess {

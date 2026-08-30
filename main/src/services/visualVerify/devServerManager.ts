@@ -42,7 +42,7 @@
  * (verificationScheduler.ts) or by leaving the kill switch set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { killWindowsTree } from '../processTable';
+import { killWindowsTree } from '../../utils/platformProcess';
 import type { DeliverableVerifyConfig } from '../../../../shared/types/visualVerification';
 import type {
   DevServerHandle,

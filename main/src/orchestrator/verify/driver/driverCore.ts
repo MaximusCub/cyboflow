@@ -90,7 +90,8 @@
  * real filesystem, or a real child process; `driverCli.ts` is its only
  * caller.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { killPidSync } from '../../../utils/platformProcess';
 import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -1543,13 +1544,10 @@ function defaultKillPid(pid: number, signal: NodeJS.Signals): void {
     // gives the child its own process group there, so the tree kill is done
     // with `taskkill /T /F` on the positive pid instead — the Windows
     // equivalent of taking down the group. Callers pass -pid only on POSIX
-    // semantics; both sign shapes land here.
+    // semantics; both sign shapes land here. The synchronous taskkill
+    // primitive lives in utils/platformProcess.ts.
     if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/pid', String(Math.abs(pid)), '/T', '/F'], {
-        stdio: 'ignore',
-        timeout: 10_000,
-        windowsHide: true,
-      });
+      killPidSync(pid);
       return;
     }
     process.kill(pid, signal);

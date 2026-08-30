@@ -26,7 +26,7 @@
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { killWindowsTree } from '../../../processTable';
+import { killWindowsTree } from '../../../../utils/platformProcess';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';

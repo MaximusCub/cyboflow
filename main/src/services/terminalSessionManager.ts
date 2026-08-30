@@ -2,14 +2,10 @@ import { EventEmitter } from 'events';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
+import { killTree, listPidPpidTable } from '../utils/platformProcess';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import {
-  collectDescendantPids,
-  listPidPpidTable,
-  parseProcessTable,
-  type ProcessTableRow,
-} from './processTable';
+import { collectDescendantPids, parseProcessTable, type ProcessTableRow } from './processTable';
 
 // The (pid, ppid) table helpers moved to processTable.ts (one parser/walker for
 // every kill ladder); re-exported here so the injected-test seams and the
@@ -55,8 +51,9 @@ export interface TerminalSessionManagerOptions {
 }
 
 /**
- * Default process lister — the shared two-column table from processTable.ts
- * (`ps -axo pid=,ppid=` on POSIX, the PowerShell stand-in on win32).
+ * Default process lister — the shared two-column table from
+ * utils/platformProcess.ts (`ps -axo pid=,ppid=` on POSIX, the PowerShell
+ * stand-in on win32).
  */
 const defaultListProcessTable = listPidPpidTable;
 
@@ -259,188 +256,38 @@ export class TerminalSessionManager extends EventEmitter {
   }
 
   /**
-   * Poll every `pollIntervalMs` for up to `graceMs` after SIGTERM, returning as
-   * soon as both the main pid and its process group are dead. A probe that
-   * throws is treated as "still alive" so the grace window elapses safely
-   * rather than short-circuiting to a premature SIGKILL.
-   */
-  private async waitForExit(pid: number, pgid: number): Promise<void> {
-    const deadline = Date.now() + this.graceMs;
-    while (Date.now() < deadline) {
-      if (!this.probeAlive(pid) && !this.probeAlive(-pgid)) {
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
-    }
-  }
-
-  private probeAlive(pid: number): boolean {
-    try {
-      return this.isPidAlive(pid);
-    } catch {
-      return true;
-    }
-  }
-
-  /**
    * Kill a process and all its descendants
    * Returns true if successful, false if zombie processes remain
+   *
+   * Both platform ladders live in utils/platformProcess.ts (killTree) — the
+   * win32 taskkill ladder and the POSIX SIGTERM → process-group ladder used to
+   * be duplicated here, in runCommandManager and AbstractCliManager. This site
+   * contributes its seams (execCommand / isPidAlive / sendSignal / the
+   * injected process-table lister) and its zombie-event reporting; the platform
+   * choice and the ladder shape live in the module, routed by this class's
+   * `platform` option.
    */
   private async killProcessTree(pid: number): Promise<boolean> {
     // First, get all descendant PIDs before we start killing
     const descendantPids = await this.getAllDescendantPids(pid);
 
-    // Windows: no process groups, no POSIX signals — `kill`/`pkill` below are
-    // all no-ops there. `taskkill /T` (optionally /F) takes the whole tree in
-    // one call, which is the Windows contract for everything the POSIX ladder
-    // below achieves.
-    if (this.platform === 'win32') {
-      // Graceful attempt first (without /F, GUI apps may close cleanly).
-      try {
-        await this.execCommand(`taskkill /PID ${pid} /T`);
-      } catch (error) {
-        // Process might already be dead
-      }
-      // Poll for early exit, bounded by the same grace window as POSIX. The
-      // poll only ends the WAIT — the /F kill below still fires unconditionally
-      // (fail-soft belt-and-braces, mirroring the POSIX SIGKILL).
-      {
-        const deadline = Date.now() + this.graceMs;
-        while (Date.now() < deadline) {
-          if (!this.probeAlive(pid)) break;
-          await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
-        }
-      }
-      // Forceful: /F kills the tree immediately.
-      try {
-        await this.execCommand(`taskkill /PID ${pid} /T /F`);
-      } catch (error) {
-        // Process might already be dead
-      }
-      // taskkill /T walks the PPID chain at call time, so a shell that died
-      // between the graceful and /F calls — or a pid that was reused in that
-      // window — can orphan children the tree walk can no longer see. Force
-      // every descendant enumerated up-front that is still alive.
-      for (const childPid of descendantPids) {
-        try {
-          if (this.probeAlive(childPid)) {
-            await this.execCommand(`taskkill /PID ${childPid} /F`);
-          }
-        } catch (error) {
-          // Already dead / no permission — the verification pass below decides.
-        }
-      }
-      await new Promise(resolve => setTimeout(resolve, 500));
-      let remainingPids = await this.getAllDescendantPids(pid);
-      if (remainingPids.length > 0) {
-        // Survivors found: one direct forced kill each — taskkill /T cannot see
-        // a child whose parent link it can no longer walk — then re-verify.
-        for (const survivorPid of remainingPids) {
-          try {
-            await this.execCommand(`taskkill /PID ${survivorPid} /F`);
-          } catch (error) {
-            // Already dead / no permission — the re-check below decides.
-          }
-        }
-        await new Promise(resolve => setTimeout(resolve, 200));
-        remainingPids = await this.getAllDescendantPids(pid);
-      }
-      if (remainingPids.length > 0) {
+    return killTree(pid, {
+      platform: this.platform,
+      descendantPids,
+      execCommand: (command) => this.execCommand(command),
+      isPidAlive: (probePid) => this.isPidAlive(probePid),
+      sendSignal: (signalPid, signal) => this.sendSignal(signalPid, signal),
+      graceMs: this.graceMs,
+      pollIntervalMs: this.pollIntervalMs,
+      listDescendants: () => this.getAllDescendantPids(pid),
+      onSurvivors: (remainingPids) => {
         console.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
         this.emit('zombie-processes-detected', {
           sessionId: null,
           pids: remainingPids,
           message: `Failed to terminate ${remainingPids.length} child processes. Please manually kill PIDs: ${remainingPids.join(', ')}`
         });
-        return false;
-      }
-      return true;
-    }
-
-    let success = true;
-
-    try {
-      // macOS/Unix: First, try SIGTERM for graceful shutdown
-      try {
-        this.sendSignal(pid, 'SIGTERM');
-      } catch (error) {
-        console.warn('SIGTERM failed:', error);
-      }
-
-      // Kill the entire process group using negative PID
-      // First, find the actual process group ID
-      let pgid = pid;
-      try {
-        const pgidResult = await this.execCommand(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
-        const foundPgid = parseInt(pgidResult.stdout.trim());
-        if (!isNaN(foundPgid)) {
-          pgid = foundPgid;
-        }
-      } catch (error) {
-        // Use original PID as fallback
-      }
-
-      try {
-        await this.execCommand(`kill -TERM -${pgid}`);
-      } catch (error) {
-        console.warn(`Error sending SIGTERM to process group: ${error}`);
-      }
-
-      // Poll for early exit instead of unconditionally sleeping the full grace
-      // window — return the moment both the main pid and its process group are
-      // gone, bounded at ~2s (reviewed: NOT 200ms — give shells a real chance to
-      // exit cleanly) before forcing SIGKILL below.
-      await this.waitForExit(pid, pgid);
-
-      // Now forcefully kill the main process
-      try {
-        this.sendSignal(pid, 'SIGKILL');
-      } catch (error) {
-        // Process might already be dead
-      }
-
-      // Kill the process group with SIGKILL
-      try {
-        await this.execCommand(`kill -9 -${pgid}`);
-      } catch (error) {
-        console.warn(`Error sending SIGKILL to process group: ${error}`);
-      }
-
-      // Kill all known descendants individually to be sure
-      for (const childPid of descendantPids) {
-        try {
-          await this.execCommand(`kill -9 ${childPid}`);
-        } catch (error) {
-          // Process already terminated
-        }
-      }
-
-      // Final cleanup attempt using pkill
-      try {
-        await this.execCommand(`pkill -9 -P ${pid}`);
-      } catch (error) {
-        // Ignore errors - processes might already be dead
-      }
-
-      // Verify all processes are actually dead
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const remainingPids = await this.getAllDescendantPids(pid);
-
-      if (remainingPids.length > 0) {
-        console.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
-        success = false;
-
-        this.emit('zombie-processes-detected', {
-          sessionId: null,
-          pids: remainingPids,
-          message: `Failed to terminate ${remainingPids.length} child processes. Please manually kill PIDs: ${remainingPids.join(', ')}`
-        });
-      }
-    } catch (error) {
-      console.error('Error in killProcessTree:', error);
-      success = false;
-    }
-
-    return success;
+      },
+    });
   }
 }

@@ -38,7 +38,8 @@ vi.mock('../scriptExecutionTracker', () => ({
 }));
 
 import { SessionManager } from '../sessionManager';
-import { collectDescendantPids, listPidPpidTableSync } from '../processTable';
+import { collectDescendantPids } from '../processTable';
+import { listPidPpidTableSync } from '../../utils/platformProcess';
 import type { DatabaseService } from '../../database/database';
 
 function isAlive(pid: number): boolean {

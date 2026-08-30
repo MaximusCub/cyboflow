@@ -14,7 +14,8 @@ import {
   type CodexAppServerClientOptions,
   type SpawnAppServerProcess,
 } from './client';
-import { collectDescendantPids, listPidPpidTableSync } from '../../../processTable';
+import { collectDescendantPids } from '../../../processTable';
+import { listPidPpidTableSync } from '../../../../utils/platformProcess';
 import type { AppServerInitializeParams } from './protocol';
 
 class FakeAppServerProcess extends EventEmitter implements AppServerProcess {
