@@ -11,6 +11,11 @@
  *   Case C: BUILD_VARIANT=dev      → dev appId / productName / artifactName / publish URL overrides
  *   Case D: lean packaging plan    → every foreign Claude/Codex native package excluded
  *   Case E: BUILD_ARCH=<host arch> → generated config applies the tested plan
+ *   Case F: BUILD_PLATFORM=win     → npmRebuild false + the Electron-ABI guard passes
+ *                                    (probe stubbed via __setAbiProbeForTesting — no native
+ *                                    artifact needed on the test host)
+ *   Case F2: probe reports wrong ABI → hard exit(1) with the fix-it command
+ *   Case F3: CYBOFLOW_WIN_NPM_REBUILD=1 → the ABI probe is skipped entirely
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
  * point of the generated-config approach) and that the on-disk generated file matches the
@@ -33,7 +38,7 @@ function assert(condition, message) {
   }
 }
 
-function runCase(label, envOverrides, assertFn) {
+function runCase(label, envOverrides, assertFn, preConfigure) {
   console.log('\n--- ' + label + ' ---');
 
   // Snapshot package.json bytes to prove it is never mutated
@@ -70,8 +75,13 @@ function runCase(label, envOverrides, assertFn) {
     // Invalidate require cache so configure-build.js re-reads package.json fresh
     const cbPath = require.resolve('./configure-build.js');
     delete require.cache[cbPath];
-    const { configureBuild, GENERATED_CONFIG_PATH } = require('./configure-build.js');
+    const mod = require('./configure-build.js');
+    const { configureBuild, GENERATED_CONFIG_PATH } = mod;
     generatedPath = GENERATED_CONFIG_PATH;
+
+    // Test seam: let a case inject a stub ABI probe (or otherwise touch the
+    // fresh module) BEFORE configureBuild() runs.
+    if (preConfigure) preConfigure(mod);
 
     const config = configureBuild();
 
@@ -340,6 +350,16 @@ try {
         );
         // The Apple signing posture must be left untouched for a win build.
         assert(config.mac.notarize === true, 'win build should not mutate the mac notarize field');
+      },
+      // The ABI probe spawns a real child Electron against the installed
+      // better-sqlite3, which this test host cannot guarantee (a checkout
+      // installed with --ignore-scripts has NO native artifact at all). Stub
+      // it — Case F verifies the packaging posture, not the probe itself; the
+      // probe's own branches are covered by Cases F2/F3.
+      function (mod) {
+        mod.__setAbiProbeForTesting(function () {
+          return { ok: true, output: 'stub: artifact loads under the electron ABI' };
+        });
       }
     );
   } else {
@@ -347,6 +367,90 @@ try {
   }
 } catch (err) {
   console.error('FAIL: Case F — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F2: with npmRebuild off, a probe that reports the installed
+  // better-sqlite3 does NOT load under the Electron ABI must hard-exit(1)
+  // before electron-builder runs — that artifact packaged as-is ships an
+  // installer that crashes on first DB open (NODE_MODULE_VERSION mismatch).
+  const savedBuildPlatform = process.env.BUILD_PLATFORM;
+  process.env.BUILD_PLATFORM = 'win';
+
+  const packageJsonBefore = fs.readFileSync(PACKAGE_JSON, 'utf8');
+  const cbPath = require.resolve('./configure-build.js');
+  delete require.cache[cbPath];
+  const mod = require('./configure-build.js');
+  mod.__setAbiProbeForTesting(function () {
+    return { ok: false, output: 'stub: artifact does NOT load under the electron ABI' };
+  });
+
+  const realExit = process.exit;
+  let exitCode = null;
+  process.exit = function (code) {
+    exitCode = code;
+    throw new Error('PROCESS_EXIT');
+  };
+  try {
+    mod.configureBuild();
+    throw new Error('configureBuild should have exited on the failed ABI probe');
+  } catch (err) {
+    if (err.message !== 'PROCESS_EXIT') throw err;
+  } finally {
+    process.exit = realExit;
+    if (fs.existsSync(mod.GENERATED_CONFIG_PATH)) fs.unlinkSync(mod.GENERATED_CONFIG_PATH);
+    if (savedBuildPlatform === undefined) delete process.env.BUILD_PLATFORM;
+    else process.env.BUILD_PLATFORM = savedBuildPlatform;
+  }
+
+  assert(exitCode === 1, 'the failed ABI probe must exit with code 1');
+  assert(
+    fs.readFileSync(PACKAGE_JSON, 'utf8') === packageJsonBefore,
+    'package.json must not be mutated on the ABI-guard failure path'
+  );
+  console.log('\nPASS: Case F2 (win ABI-guard hard failure)');
+} catch (err) {
+  console.error('FAIL: Case F2 — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F3: CYBOFLOW_WIN_NPM_REBUILD=1 restores electron-builder's own
+  // rebuild step, which puts better-sqlite3 on the Electron ABI itself — so
+  // the prebuilt artifact's ABI is irrelevant and the probe must not run.
+  const savedBuildPlatform = process.env.BUILD_PLATFORM;
+  const savedNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD;
+  process.env.BUILD_PLATFORM = 'win';
+  // BUILD_ARCH deliberately unset: the lean-packaging preflight (which needs
+  // the win32 agent binaries on disk) is skipped for a universal build, so
+  // this case is host-independent — it exercises only npmRebuild + the probe
+  // skip.
+  process.env.CYBOFLOW_WIN_NPM_REBUILD = '1';
+
+  const cbPath = require.resolve('./configure-build.js');
+  delete require.cache[cbPath];
+  const mod = require('./configure-build.js');
+  let probeCalls = 0;
+  mod.__setAbiProbeForTesting(function () {
+    probeCalls++;
+    return { ok: false, output: 'stub: must not be consulted' };
+  });
+
+  try {
+    const config = mod.configureBuild();
+    assert(config.npmRebuild === true, 'CYBOFLOW_WIN_NPM_REBUILD=1 must re-enable npmRebuild');
+    assert(probeCalls === 0, 'the ABI probe must be skipped when electron-builder will rebuild');
+  } finally {
+    if (fs.existsSync(mod.GENERATED_CONFIG_PATH)) fs.unlinkSync(mod.GENERATED_CONFIG_PATH);
+    if (savedBuildPlatform === undefined) delete process.env.BUILD_PLATFORM;
+    else process.env.BUILD_PLATFORM = savedBuildPlatform;
+    if (savedNpmRebuild === undefined) delete process.env.CYBOFLOW_WIN_NPM_REBUILD;
+    else process.env.CYBOFLOW_WIN_NPM_REBUILD = savedNpmRebuild;
+  }
+  console.log('\nPASS: Case F3 (CYBOFLOW_WIN_NPM_REBUILD=1 skips the ABI probe)');
+} catch (err) {
+  console.error('FAIL: Case F3 — ' + err.message);
   failed = true;
 }
 

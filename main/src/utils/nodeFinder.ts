@@ -114,7 +114,15 @@ async function resolveNodeExecutable(): Promise<string> {
   // Final attempt: try which command (`where` on Windows)
   try {
     const whichCommand = process.platform === 'win32' ? 'where node' : 'which node';
-    const nodePath = execSync(whichCommand, { encoding: 'utf8' }).trim().split('\n')[0];
+    // Split on \r?\n and trim each line: `where` on Windows emits CRLF, so a
+    // plain split('\n') leaves a trailing \r on every line but the last — and
+    // existsSync('...node.exe\r') then fails even though the file is there.
+    // (The trailing-.trim() that used to run first only cleaned the FINAL
+    // line of the output, not the first.)
+    const nodePath = execSync(whichCommand, { encoding: 'utf8' })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
     if (nodePath && fs.existsSync(nodePath)) {
       console.log(`[NodeFinder] Found node using which: ${nodePath}`);
       return nodePath;

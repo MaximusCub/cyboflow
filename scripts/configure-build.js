@@ -24,12 +24,21 @@
  *     electron-builder must package those .node files as-is, not rebuild them
  *     (a rebuild needs MSVC, which a Windows dev host may not have). Set
  *     CYBOFLOW_WIN_NPM_REBUILD=1 to restore electron-builder's rebuild step.
+ *   - Because npmRebuild is off, nothing at packaging time would otherwise fix
+ *     a better-sqlite3 artifact that is on the WRONG ABI — but two everyday
+ *     flows put it there (the host-ABI auto-flip before test:unit /
+ *     test:integration, and a plain `pnpm install`, which re-runs
+ *     better-sqlite3's install script). Packaging as-is would ship an
+ *     installer that hard-crashes on first DB open (NODE_MODULE_VERSION
+ *     mismatch), so the Electron ABI is PROBED here and a wrong-ABI artifact
+ *     fails the build before electron-builder runs.
  *   - The lean-packaging plan keeps win32 agent binaries and excludes the
  *     darwin/linux ones, mirroring the mac plan.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
 const GENERATED_CONFIG_PATH = path.join(__dirname, '..', 'build', 'electron-builder.generated.json');
@@ -158,6 +167,38 @@ function warnIfPeekabooMissing() {
   );
 }
 
+/**
+ * Read-only probe: does the installed better-sqlite3 artifact actually LOAD
+ * under the Electron ABI?
+ *
+ * Delegates to scripts/ensure-sqlite-abi.mjs --check electron, which spawns a
+ * real child Electron and runs `new Database(':memory:')` — ground truth about
+ * whether the packaged .node would load, not a marker-file guess. That script
+ * is ESM and this file is CommonJS, so it is invoked as a child process rather
+ * than imported. `--check` is the read-only mode: it swaps nothing, so probing
+ * here never mutates the tree it is about to package.
+ *
+ * Module-level (not inline) so tests can inject a stub via
+ * __setAbiProbeForTesting instead of needing a real native artifact on disk.
+ */
+function probeWinElectronAbi() {
+  const result = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'ensure-sqlite-abi.mjs'), '--check', 'electron'],
+    { encoding: 'utf8' }
+  );
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
+  };
+}
+
+/** Test seam: replace the ABI probe (see probeWinElectronAbi). */
+let abiProbe = probeWinElectronAbi;
+function __setAbiProbeForTesting(fn) {
+  abiProbe = fn;
+}
+
 function configureBuild() {
   console.log('Configuring build for current environment...');
 
@@ -247,6 +288,31 @@ function configureBuild() {
     config.npmRebuild = winNpmRebuild;
     console.log(`Windows packaging: npmRebuild=${config.npmRebuild}` +
       (winNpmRebuild ? '' : ' (prebuilt .node files are packaged as-is; set CYBOFLOW_WIN_NPM_REBUILD=1 to rebuild)'));
+
+    // ABI guard. With npmRebuild off the .node files ship EXACTLY as they sit
+    // in node_modules — and two everyday flows leave better-sqlite3 on the
+    // wrong (host Node) ABI there: the auto-flip before test:unit /
+    // test:integration, and a plain `pnpm install`. Packaging that as-is
+    // produces an installer that hard-crashes on first DB open
+    // (NODE_MODULE_VERSION mismatch), which is far away from its cause — fail
+    // here instead, while the fix is one command. Skipped when npmRebuild was
+    // re-enabled: electron-builder then rebuilds better-sqlite3 for Electron
+    // itself, so the prebuilt artifact's ABI is irrelevant.
+    if (!winNpmRebuild) {
+      const probe = abiProbe();
+      if (!probe.ok) {
+        console.error(
+          'Error: the installed better-sqlite3 artifact does not load under the ' +
+            'ELECTRON ABI, but this build packages it as-is (npmRebuild=false). Shipping ' +
+            'it would hard-crash the app on first database open ' +
+            '(NODE_MODULE_VERSION mismatch).'
+        );
+        console.error('Run "node scripts/ensure-sqlite-abi.mjs electron" first, then retry the build.');
+        if (probe.output) console.error(`Probe output:\n${probe.output}`);
+        process.exit(1);
+      }
+      console.log('Windows packaging: better-sqlite3 verified on the Electron ABI.');
+    }
   }
 
   // Lean per-arch packaging. Both agent distributions ship their native CLIs
@@ -328,4 +394,10 @@ if (require.main === module) {
   configureBuild();
 }
 
-module.exports = { configureBuild, getLeanPackagingPlan, getWinPackagingPlan, GENERATED_CONFIG_PATH };
+module.exports = {
+  configureBuild,
+  getLeanPackagingPlan,
+  getWinPackagingPlan,
+  GENERATED_CONFIG_PATH,
+  __setAbiProbeForTesting,
+};

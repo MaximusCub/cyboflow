@@ -21,7 +21,11 @@
  *   --inspect  append `--inspect=<CYBOFLOW_INSPECT_PORT || 9229>`
  *   --perf     set CYBOFLOW_PERF_TRACE=1 in the child env
  * Everything else is forwarded to Electron as-is (e.g. extra Chromium flags).
- * Exits with the child's exit code; a SIGINT/SIGTERM is forwarded as a kill.
+ * Exits with the child's exit code; while the child is alive a SIGINT/SIGTERM
+ * is forwarded to it, and if the child dies FROM a signal this wrapper
+ * re-raises the same signal onto itself (after dropping its own handlers), so
+ * the wrapper and `concurrently` terminate with the shell-conventional code
+ * instead of hanging around a dead child.
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -49,7 +53,15 @@ if (typeof electronBinary !== 'string' || !electronBinary) {
   process.exit(1);
 }
 
-/** Poll the Vite server; any HTTP response means it is up. */
+/**
+ * Poll the Vite server; any HTTP response means it is up.
+ *
+ * The response STATUS is deliberately not checked (anything 2xx-5xx counts):
+ * Vite answers 200 on `/`, and a 5xx can only come from a non-Vite squatter
+ * that grabbed the port — dev-only noise that would just block the launch,
+ * not worth failing over. Connection errors, the real signal that Vite is
+ * not up yet, are what the retry loop waits out.
+ */
 async function waitOnVite() {
   const deadline = Date.now() + 120_000;
   let lastError = '';
@@ -79,10 +91,33 @@ const child = spawn(electronBinary, ['.', ...forwarded], {
   stdio: 'inherit',
   env: childEnv,
 });
+
+/** True once the child has exited (by code or by signal). */
+function childIsDead() {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 0);
+  if (!signal) {
+    process.exit(code ?? 0);
+  }
+  // The child died FROM a signal (e.g. Ctrl+C delivering SIGINT to the whole
+  // foreground process group). Re-raise the SAME signal onto this process so
+  // it dies the shell-conventional way (128+n) — but drop our own SIGINT/
+  // SIGTERM handlers first: they exist to forward signals to the child, and
+  // with the child dead that forwarding is a no-op. Leaving them installed
+  // would SWALLOW the re-raised signal (a handled signal kills nothing), and
+  // this wrapper — and `concurrently`, which waits on it — would hang forever
+  // after Ctrl+C. The signal is forwarded as received, never defaulted: the
+  // handlers below pass the actual signal, not child.kill()'s SIGTERM.
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+  process.kill(process.pid, signal);
 });
+
 for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => child.kill());
+  process.on(sig, () => {
+    if (childIsDead()) return; // exit handler owns the process now
+    child.kill(sig);
+  });
 }
