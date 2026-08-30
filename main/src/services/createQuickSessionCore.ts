@@ -31,6 +31,7 @@ import {
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { isPtyLane } from './panelLane';
+import { normalizePathSeparators } from '../utils/posixPath';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -214,7 +215,7 @@ export async function createQuickSessionCore(
     // branch needs no normalization.
     const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
     const onCreated = (createdSession: QuickSessionRow) => {
-      const wt = (createdSession.worktreePath ?? '').replace(/\\/g, '/');
+      const wt = normalizePathSeparators(createdSession.worktreePath ?? '');
       const name = createdSession.name ?? '';
       const matches =
         wt.split('/').pop() === branchName ||

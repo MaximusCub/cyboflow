@@ -32,6 +32,8 @@
  * time are only attributed if the census is installed before that import runs.
  */
 
+import { normalizePathSeparators } from '../utils/posixPath';
+
 /** Minimal logger surface — kept local so this module imports nothing heavy. */
 interface CensusLogger {
   info(message: string): void;
@@ -85,7 +87,7 @@ function callSite(): string {
     // drive-letter form above already parses). Normalize to '/' once so the
     // '/node_modules/' include and the short-label splits below work on both
     // platforms.
-    const normFile = file.replace(/\\/g, '/');
+    const normFile = normalizePathSeparators(file);
     if (firstFrame === null) firstFrame = `${normFile.split('/').slice(-2).join('/')}:${lineNo}`;
     if (normFile.includes('timerCensus')) continue;
     if (normFile.includes('node:')) continue;

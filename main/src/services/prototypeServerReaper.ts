@@ -27,6 +27,7 @@
 import { execFile } from 'node:child_process';
 import { execWindowsProcessTable } from './winProcessTable';
 import type { LoggerLike } from '../orchestrator/types';
+import { normalizePathSeparators } from '../utils/posixPath';
 
 /** A single process row parsed from `ps` output. */
 export interface ProcessInfo {
@@ -130,7 +131,7 @@ export class PrototypeServerReaper {
   async reapForRun(runArtifactsDir: string): Promise<void> {
     // Normalize to forward slashes so the needles match Windows command lines
     // too (identity on macOS/Linux — no backslashes there).
-    const base = trimDir(runArtifactsDir).replace(/\\/g, '/');
+    const base = normalizePathSeparators(trimDir(runArtifactsDir));
     if (base.length === 0) {
       this.logger?.debug('[PrototypeServerReaper] empty runArtifactsDir — skipping reap');
       return;
@@ -163,7 +164,7 @@ export class PrototypeServerReaper {
     isRunLive?: (runId: string) => boolean,
   ): Promise<void> {
     // Normalize to forward slashes (identity on macOS/Linux) — see reapForRun.
-    const root = trimDir(artifactsRunsRoot).replace(/\\/g, '/');
+    const root = normalizePathSeparators(trimDir(artifactsRunsRoot));
     if (root.length === 0) {
       this.logger?.debug('[PrototypeServerReaper] empty artifactsRunsRoot — skipping sweep');
       return;
@@ -213,7 +214,6 @@ export class PrototypeServerReaper {
     // Command lines are matched with backslashes normalized to forward slashes
     // (identity on macOS/Linux) so the forward-slash path segments above match
     // on Windows too.
-    const normalizeCommand = (command: string): string => command.replace(/\\/g, '/');
     let processes: ProcessInfo[];
     try {
       processes = await this.listProcesses();
@@ -228,7 +228,7 @@ export class PrototypeServerReaper {
 
     let killed = 0;
     for (const proc of processes) {
-      if (!matches(normalizeCommand(proc.command))) continue;
+      if (!matches(normalizePathSeparators(proc.command))) continue;
       try {
         this.killPid(proc.pid);
         killed += 1;
