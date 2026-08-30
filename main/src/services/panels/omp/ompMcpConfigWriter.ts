@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import type { Logger } from '../../../utils/logger';
+import { resolveGitCommand } from '../../../utils/gitExeFinder';
 
 /**
  * Writer for `<worktree>/.omp/mcp.json` — how the `cyboflow` MCP server (the
@@ -194,7 +195,7 @@ const OMP_EXCLUDE_LINE = '.omp/';
  */
 function ensureWorktreeExcludesOmpDir(worktreePath: string, logger?: Logger): void {
   try {
-    const raw = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
+    const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
       cwd: worktreePath,
       encoding: 'utf8',
       // Pin git's message language the same way workflowBundleInstall does,
