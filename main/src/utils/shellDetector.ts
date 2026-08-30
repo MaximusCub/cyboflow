@@ -42,24 +42,42 @@ export class ShellDetector {
    * Windows shell detection. Windows PowerShell 5.1 (`powershell.exe`) ships
    * with every supported Windows host at a fixed location, so it is the
    * guaranteed fallback; PowerShell 7 (`pwsh.exe`) is preferred when the user
-   * installed it and put it on PATH. cmd.exe is deliberately not used as the
-   * default interactive substrate: no `-c`-style command execution and a much
-   * weaker scripting surface for the flow agents.
+   * installed it. cmd.exe is deliberately not used as the default interactive
+   * substrate: no `-c`-style command execution and a much weaker scripting
+   * surface for the flow agents.
    */
   private static detectWindowsShell(): ShellInfo {
     const systemRoot = process.env.SystemRoot || 'C:\\Windows';
     const systemPowerShell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 
+    // PowerShell 7's fixed MSI install location — probe it FIRST, before the
+    // PATH loop. The PATH probe cannot tell a real pwsh.exe from a 0-byte
+    // Microsoft Store execution-alias stub (see below), but Program Files
+    // never holds stubs, so a hit here is always the real binary.
+    const pwsh7 = path.join(
+      process.env.ProgramFiles || 'C:\\Program Files',
+      'PowerShell', '7', 'pwsh.exe'
+    );
+    if (fs.existsSync(pwsh7)) {
+      return { path: pwsh7, name: 'pwsh', args: this.getShellArgs('pwsh') };
+    }
+
     // pwsh.exe: probe PATH the cheap way (no subprocess) and fall through to
-    // the always-present system PowerShell.
+    // the always-present system PowerShell. Skip 0-byte candidates: on Windows
+    // fs.accessSync(X_OK) is effectively existence-only, so a Store
+    // execution-alias stub (`...\Microsoft\WindowsApps\pwsh.exe`, 0 bytes
+    // until first launch) passes the probe but fails on every spawn — without
+    // this skip such a stub would win the scan and no PowerShell fallback
+    // would ever be reached.
     const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
     for (const dir of pathDirs) {
       const candidate = path.join(dir, 'pwsh.exe');
       try {
         fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).size === 0) continue;
         return { path: candidate, name: 'pwsh', args: this.getShellArgs('pwsh') };
       } catch {
-        // Not here — keep scanning.
+        // Not here (or stat raced away) — keep scanning.
       }
     }
 

@@ -183,12 +183,16 @@ on the Windows host and verified from both sides:
 ### Fixes shipped (win32 branches, POSIX paths untouched)
 
 - **Orch IPC endpoint** (`orchSocketEndpoint.ts`, new): on Windows the
-  `~/.cyboflow/sockets/orch.sock` path is replaced by a per-user named pipe
-  `\\.\pipe\cyboflow-<user>-orch` at the single wiring call site in
+  `~/.cyboflow/sockets/orch.sock` path is replaced by a per-user, per-data-dir
+  named pipe `\\.\pipe\cyboflow-<user>-<hash8>-orch` (hash = first 8 hex of a
+  SHA-256 over the injected socket path) at the single wiring call site in
   `index.ts`. Node's `net` module treats pipe paths transparently, so
   `OrchSocketServer` (bind/probe/close) and the subprocess clients are
   source-unchanged; the POSIX-mode security model degrades to per-user pipe
-  name + the run-scoped bearer tokens.
+  name + the run-scoped bearer tokens. The hash keeps the per-kind app
+  instances (stable / `pnpm dev` / dev DMG — one data dir each) from sharing
+  one pipe, which would route the second kind's MCP traffic to the first
+  kind's orch server.
 - **shellDetector.ts**: win32 branch — `pwsh.exe` (PATH probe) else the
   always-present system `powershell.exe`, else cmd.exe as last resort;
   `-NoLogo` for interactive PTYs; `getShellCommandArgs` emits
