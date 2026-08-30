@@ -4,11 +4,10 @@
  *
  * Windows paths carry backslashes; POSIX paths cannot contain them, so
  * replacing `\` with `/` is an identity operation on macOS/Linux and a
- * normalization on Windows. The windows-build stack grew one ad-hoc
- * `.replace(/\\/g, '/')` per match site (quick-session matchers, file-listing
- * filters, timer-census frame labels, reaper command-line matching, rung-1
- * path validation) — same idiom, five files, no shared name to grep for.
- * This module names it.
+ * normalization on Windows. Every site that needs that normalization
+ * (quick-session matchers, file-listing filters, timer-census frame labels,
+ * reaper command-line matching, rung-1 path validation) uses this module's
+ * one shared name.
  *
  * Matching-only by convention: normalize a COPY for comparison (git output,
  * command lines, stack frames are already '/'-shaped on POSIX); report or

@@ -466,7 +466,7 @@ export function createFileOps(
           // that git treats as literal filename characters, so the spec never
           // matches. Only remap on win32: on POSIX a backslash is a legitimate
           // (literal) filename character and must be preserved.
-          const gitObjectPath = path.sep === '\\' ? normalizedPath.replace(/\\/g, '/') : normalizedPath;
+          const gitObjectPath = normalizePathSeparators(normalizedPath);
           const { stdout } = await runGitCapture(session.worktreePath, [
             'show',
             END_OF_OPTIONS,

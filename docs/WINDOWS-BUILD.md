@@ -58,9 +58,11 @@ suite flips it — the guard exists because that flip is easy to forget).
 | better-sqlite3 | 12.11.1 | publishes `electron-v136` win32-x64 prebuilds; 11.x stopped at `electron-v132` |
 | node-pty-prebuilt-multiarch | 0.14.1 | ships a win32-x64 node-ABI build that is N-API-stable and loads under Electron 37 (0.12.x stopped near `electron-v110`) |
 
-Both are verified by loading them under the real Electron binary
-(`ELECTRON_RUN_AS_NODE=1`, real `:memory:` database open / `pty.spawn`
-call) before packaging.
+better-sqlite3 is load-probed twice per build — pre-packaging
+(`configure-build.js` → `ensure-sqlite-abi.mjs --check electron`) and
+post-packaging (the Windows `afterSign` arm). node-pty's Electron loading
+was verified once by hand (its build is N-API-stable) and is not re-probed
+per build.
 
 ## Packaging decisions
 
@@ -73,8 +75,10 @@ call) before packaging.
   excluded, mirroring how the macOS installer excludes everything else.
 - **Installer size floor.** The produced `.exe` is held to a 50 MB floor
   (NSIS compresses harder than a DMG; the bar is still far above any
-  stub). The macOS `afterSign` arch/ABI checks do not run on Windows — a
-  post-build PE-header/in-bundle probe is a known follow-up.
+  stub). The unpacked build is also verified post-packaging
+  (`build/afterSign.js` runs a Windows arm: PE machine check on
+  `Cyboflow.exe`, a load probe of the packaged better-sqlite3 under the
+  packaged Electron, and a size floor on `win-unpacked`).
 - **First run downloads electron-builder's NSIS/winCodeSign tooling.** On
   hosts without Windows Developer Mode, the winCodeSign archive's two
   darwin symlinks fail to extract and NSIS builds loop on the error; see
@@ -129,12 +133,6 @@ call) before packaging.
 - **No Windows update feed** (see updater above).
 - **x64 only**; ARM64 needs its own packaging path and prebuild
   verification.
-- **No post-build PE/in-bundle verification** (macOS `afterSign`
-  equivalent).
-- **Verification dependency-cache/snapshot support** degrades gracefully
-  (their helper commands assume POSIX `cp`/`npx`).
-- **Workflow names are not validated** against Windows-reserved characters
-  (`con`, `?`, `:` …); such a workflow fails at worktree creation.
 
 ## Troubleshooting
 

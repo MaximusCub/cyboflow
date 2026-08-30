@@ -1238,9 +1238,9 @@ async function caseAA() {
     // Cases F–V exercise REAL macOS `codesign`/`lipo`/`plutil` against
     // Mach-O fixtures (and dlopen a host-ABI addon). The fixtures also
     // symlink the host binary into a fake .app, which Windows only permits
-    // with admin/Developer-Mode privileges. On any non-darwin host they can
-    // only fail for platform reasons, which proves nothing about the
-    // verification logic they exist to pin — the hook itself no-ops there.
+    // with admin/Developer-Mode privileges. These are mac-posture probes —
+    // the mac arm of the hook is darwin-only; Windows gets verifyWindowsBundle
+    // instead, pinned by cases W-AA below.
     await caseF();
     await caseG();
     await caseH();
