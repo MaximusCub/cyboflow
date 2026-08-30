@@ -3,15 +3,12 @@
  *
  * On POSIX, rmSync happily deletes files a Database still holds open. On
  * Windows an open Database keeps its files undeletable until V8 finalizes the
- * object — an afterEach that races the finalizer gets EPERM, which failed 39
- * database-suite tests on Windows-only runs (POSIX never noticed).
- *
- * rmDbTestDir: try a plain delete first; on a Windows sharing violation,
- * RENAME the dir out of the way (renaming needs no access to the open files)
- * and delete the renamed copy best-effort. If the finalizer has not run yet,
- * the renamed dir carries a `.dbtest-leak-` marker and the next sweep call
- * removes it — the test result stays green and nothing accumulates beyond a
- * finalizer-lag window.
+ * object — an afterEach that races the finalizer gets EPERM. rmDbTestDir: try
+ * a plain delete first; on a Windows sharing violation, RENAME the dir out of
+ * the way (renaming needs no access to the open files) and delete the renamed
+ * copy best-effort. If the finalizer has not run yet, the renamed dir carries
+ * a `.dbtest-leak-` marker and the next sweep call removes it — the test
+ * result stays green and nothing accumulates beyond a finalizer-lag window.
  */
 import { readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

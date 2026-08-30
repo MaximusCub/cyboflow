@@ -10,9 +10,8 @@
  *
  * On Windows the same stub class applies to the NSIS installer, so `.exe`
  * artifacts are held to their own floor — lower than the mac one, because NSIS
- * compresses far harder than a DMG: a real Cyboflow installer lands well under
- * 100 MB. (build/afterSign.js no-ops off-mac, so this hook is the only bundle
- * check a Windows build gets.)
+ * compresses far harder than a DMG. (build/afterSign.js no-ops off-mac, so
+ * this hook is the only bundle check a Windows build gets.)
  *
  * `.dmg`/`.zip`/`.exe` are the only checked extensions. The other artifacts
  * electron-builder emits alongside them — `.blockmap`, `latest*.yml` — are
@@ -32,9 +31,9 @@ const fs = require('fs');
 /** Real per-arch DMGs are ~130-200 MB; a stub is three orders smaller. */
 const DEFAULT_MIN_ARTIFACT_BYTES = 100 * 1024 * 1024;
 /**
- * Windows floor. NSIS/7z-compresses Electron's ~250 MB runtime to a fraction,
- * so the bar must sit lower than the mac floor while still ordering of
- * magnitude above any stub.
+ * Windows floor: NSIS compresses Electron's ~250 MB runtime to a fraction, so
+ * the bar sits lower than the mac floor yet still orders of magnitude above
+ * any stub.
  */
 const DEFAULT_MIN_WIN_ARTIFACT_BYTES = 50 * 1024 * 1024;
 

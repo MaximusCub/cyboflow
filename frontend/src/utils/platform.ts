@@ -4,10 +4,8 @@
  * Shortcut HANDLERS are already cross-platform — every "mod" handler accepts
  * both Meta (mac) and Ctrl (Windows/Linux) — so the platform only matters for
  * the visible hint text: Apple platforms keep their ⌘ glyphs, everything else
- * spells "Ctrl" (the copy style Sidebar.tsx / App.tsx already use).
- *
- * SSR-safe: every navigator access is guarded, so the module can be imported
- * from non-DOM contexts (node-side tests, future SSR) without throwing.
+ * spells "Ctrl". SSR-safe: every navigator access is guarded, so the module
+ * imports fine from non-DOM contexts.
  */
 
 /** navigator.userAgentData, where browsers expose it (Chromium-family). */
@@ -38,9 +36,8 @@ const MAC_ENTER = '⏎';
  * Platform-appropriate label for a shortcut, for titles / placeholders / kbd
  * chips. `key` is the non-modifier key ('P', 'Enter', …).
  *
- *   kbdHint('mod', 'P')            → '⌘P'            (Apple) | 'Ctrl+P'   (else)
- *   kbdHint('mod', 'Enter')        → '⌘⏎'            (Apple) | 'Ctrl+Enter' (else)
- *   kbdHint('modShift', 'Enter')   → '⌘⇧⏎'           (Apple) | 'Ctrl+Shift+Enter'
+ *   kbdHint('mod', 'Enter')        → '⌘⏎'  (Apple) | 'Ctrl+Enter'       (else)
+ *   kbdHint('modShift', 'Enter')   → '⌘⇧⏎' (Apple) | 'Ctrl+Shift+Enter' (else)
  */
 export function kbdHint(combo: KbdCombo, key: string): string {
   if (!isApplePlatform()) {

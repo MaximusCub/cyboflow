@@ -5,27 +5,20 @@
  * Replaces the former inline chain `wait-on http://localhost:${VITE} &&
  * env -u NODE_OPTIONS electron . <flags>`, whose `${VAR:-default}` expansion
  * and `env -u` are POSIX-only — on Windows `pnpm dev` could not start the
- * Electron half at all (cmd cannot run that syntax).
+ * Electron half at all (cmd cannot run that syntax). Same net effect on every
+ * platform:
+ *   1. waits for the Vite dev server (port 4521, CYBOFLOW_VITE_PORT override);
+ *   2. strips NODE_OPTIONS from the child env — the Electron binary rejects
+ *      some host-Node-only flags;
+ *   3. spawns the real Electron binary on the repo root, forwarding every
+ *      flag not owned below, with stdio piped through.
  *
- * What it does (same net effect on every platform):
- *   1. Waits for the Vite dev server (default port 4521, CYBOFLOW_VITE_PORT
- *      override) — replaces `wait-on`.
- *   2. Strips NODE_OPTIONS from the child env (replaces `env -u`), because
- *      the Electron binary rejects some host-only NODE_OPTIONS flags.
- *   3. Spawns the real Electron binary (resolved from the electron package)
- *      on the repo root, forwarding every flag this script was not told to
- *      own, and pipes stdio through.
- *
- * Flags owned by this script (never forwarded verbatim):
- *   --cdp      append `--remote-debugging-port=<CYBOFLOW_CDP_PORT || 9223>`
- *   --inspect  append `--inspect=<CYBOFLOW_INSPECT_PORT || 9229>`
- *   --perf     set CYBOFLOW_PERF_TRACE=1 in the child env
- * Everything else is forwarded to Electron as-is (e.g. extra Chromium flags).
- * Exits with the child's exit code; while the child is alive a SIGINT/SIGTERM
- * is forwarded to it, and if the child dies FROM a signal this wrapper
- * re-raises the same signal onto itself (after dropping its own handlers), so
- * the wrapper and `concurrently` terminate with the shell-conventional code
- * instead of hanging around a dead child.
+ * Flags owned by this script (never forwarded verbatim): --cdp appends
+ * `--remote-debugging-port=<CYBOFLOW_CDP_PORT || 9223>`, --inspect appends
+ * `--inspect=<CYBOFLOW_INSPECT_PORT || 9229>`, --perf sets
+ * CYBOFLOW_PERF_TRACE=1 in the child env. Exits with the child's exit code;
+ * signal handling keeps the wrapper (and `concurrently`, which waits on it)
+ * from hanging after Ctrl+C — see the exit handler.
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -54,13 +47,10 @@ if (typeof electronBinary !== 'string' || !electronBinary) {
 }
 
 /**
- * Poll the Vite server; any HTTP response means it is up.
- *
- * The response STATUS is deliberately not checked (anything 2xx-5xx counts):
- * Vite answers 200 on `/`, and a 5xx can only come from a non-Vite squatter
- * that grabbed the port — dev-only noise that would just block the launch,
- * not worth failing over. Connection errors, the real signal that Vite is
- * not up yet, are what the retry loop waits out.
+ * Poll the Vite server; any HTTP response means it is up. The STATUS is
+ * deliberately not checked (2xx-5xx all count): a 5xx can only come from a
+ * non-Vite squatter that grabbed the port — dev-only noise not worth failing
+ * over. Connection errors are the real "not up yet" signal.
  */
 async function waitOnVite() {
   const deadline = Date.now() + 120_000;
@@ -82,8 +72,7 @@ await waitOnVite();
 
 const childEnv = { ...process.env };
 if (wants('--perf')) childEnv.CYBOFLOW_PERF_TRACE = '1';
-// `env -u NODE_OPTIONS` equivalent: the Electron binary rejects some
-// host-Node-only NODE_OPTIONS entries even in dev.
+// env -u NODE_OPTIONS equivalent — see header, point 2.
 delete childEnv.NODE_OPTIONS;
 
 const child = spawn(electronBinary, ['.', ...forwarded], {
@@ -103,13 +92,11 @@ child.on('exit', (code, signal) => {
   }
   // The child died FROM a signal (e.g. Ctrl+C delivering SIGINT to the whole
   // foreground process group). Re-raise the SAME signal onto this process so
-  // it dies the shell-conventional way (128+n) — but drop our own SIGINT/
-  // SIGTERM handlers first: they exist to forward signals to the child, and
-  // with the child dead that forwarding is a no-op. Leaving them installed
-  // would SWALLOW the re-raised signal (a handled signal kills nothing), and
-  // this wrapper — and `concurrently`, which waits on it — would hang forever
-  // after Ctrl+C. The signal is forwarded as received, never defaulted: the
-  // handlers below pass the actual signal, not child.kill()'s SIGTERM.
+  // it dies the shell-conventional way (128+n). Drop our own SIGINT/SIGTERM
+  // handlers first: they exist to forward signals to the child, and leaving
+  // them installed would SWALLOW the re-raised signal (a handled signal kills
+  // nothing) — this wrapper and `concurrently` would hang forever.
+  // The signal is forwarded as received, never defaulted.
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
   process.kill(process.pid, signal);

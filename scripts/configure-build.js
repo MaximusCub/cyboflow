@@ -4,36 +4,21 @@
  * Configure build settings based on environment.
  *
  * Reads the canonical electron-builder config from package.json's `build` field
- * (the committed source of truth — NEVER mutated) and writes an environment-adjusted
- * copy to build/electron-builder.generated.json. The mac build scripts pass that file
- * to electron-builder via `--config`, which uses it INSTEAD of package.json's `build`
- * (electron-builder reads a `--config` file exclusively; it does not merge package.json
- * `build` on top — see app-builder-lib getConfig). This keeps the tracked package.json
- * clean across signed, unsigned, and dev builds.
+ * (the committed source of truth — NEVER mutated) and writes an
+ * environment-adjusted copy to build/electron-builder.generated.json. The build
+ * scripts pass that file to electron-builder via `--config`, which uses it
+ * INSTEAD of package.json's `build` (electron-builder reads a `--config` file
+ * exclusively; it does not merge package.json `build` on top).
  *
  * Adjustments:
  *   - Signing/notarization posture is toggled based on the presence of Apple credentials.
  *   - When BUILD_VARIANT=dev, the dev appId / productName / artifactName / publish URL
- *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:dev).
- *
- * Windows (BUILD_PLATFORM=win, normally passed as `node scripts/configure-build.js
- * --platform win --arch x64` by the build:win scripts):
- *   - Requires build.win instead of build.mac; the mac signing posture is skipped.
- *   - npmRebuild is turned OFF: the Windows build lands native modules on the
- *     Electron ABI via prebuild-install (see docs/WINDOWS-BUILD.md) and
- *     electron-builder must package those .node files as-is, not rebuild them
- *     (a rebuild needs MSVC, which a Windows dev host may not have). Set
- *     CYBOFLOW_WIN_NPM_REBUILD=1 to restore electron-builder's rebuild step.
- *   - Because npmRebuild is off, nothing at packaging time would otherwise fix
- *     a better-sqlite3 artifact that is on the WRONG ABI — but two everyday
- *     flows put it there (the host-ABI auto-flip before test:unit /
- *     test:integration, and a plain `pnpm install`, which re-runs
- *     better-sqlite3's install script). Packaging as-is would ship an
- *     installer that hard-crashes on first DB open (NODE_MODULE_VERSION
- *     mismatch), so the Electron ABI is PROBED here and a wrong-ABI artifact
- *     fails the build before electron-builder runs.
- *   - The lean-packaging plan keeps win32 agent binaries and excludes the
- *     darwin/linux ones, mirroring the mac plan.
+ *     overrides are baked in.
+ *   - When BUILD_PLATFORM=win (see the win branch below for the details):
+ *     build.win is required instead of build.mac, npmRebuild is turned OFF and
+ *     the installed better-sqlite3 artifact is probed against the Electron ABI
+ *     (a wrong-ABI artifact fails the build), and the lean-packaging plan keeps
+ *     the win32 agent binaries and excludes the darwin/linux ones.
  */
 
 const fs = require('fs');
@@ -95,10 +80,8 @@ function getLeanPackagingPlan(targetArch) {
 
 /**
  * The Windows counterpart to getLeanPackagingPlan: a Windows installer needs
- * only the matching win32 agent packages, and the darwin/linux ones are dead
- * weight (and would ride into the asar unchecked). Binary layouts verified on
- * disk: claude-agent-sdk-win32-<arch>/claude.exe and
- * codex-win32-<arch>/vendor/<triple>/bin/codex.exe.
+ * only the matching win32 agent packages; the darwin/linux ones are dead
+ * weight (and would ride into the asar unchecked).
  */
 function getWinPackagingPlan(targetArch) {
   if (targetArch !== 'x64' && targetArch !== 'arm64') {
@@ -141,17 +124,12 @@ function getWinPackagingPlan(targetArch) {
 
 /**
  * Warn — loudly, but do not fail — when the bundled screen-capture binary is
- * absent from node_modules.
- *
- * It is an OPTIONAL dependency (`os: ["darwin"]`, so a required one would break
- * `pnpm install` on the Linux CI runners), which means "absent" is a legitimate
- * state on any non-macOS box and this check has to be a no-op there.
- *
- * A warning rather than the hard fail the per-arch agent binaries get: shipping
- * without it degrades to resolving `peekaboo` off the user's PATH, which is
- * exactly the pre-bundling behaviour — a lost convenience, not a broken
- * runtime. Silent, though, it would be the regression where most users simply
- * never satisfy the prerequisite.
+ * absent from node_modules. It is an OPTIONAL dependency (`os: ["darwin"]` — a
+ * required one would break `pnpm install` on the Linux CI runners), so absence
+ * is legitimate off-macOS and this check is a no-op there. A warning rather
+ * than a hard fail: shipping without it degrades to resolving `peekaboo` off
+ * the user's PATH — the pre-bundling behaviour, a lost convenience, not a
+ * broken runtime.
  */
 function warnIfPeekabooMissing() {
   if (process.platform !== 'darwin') return;
@@ -169,14 +147,12 @@ function warnIfPeekabooMissing() {
 
 /**
  * Read-only probe: does the installed better-sqlite3 artifact actually LOAD
- * under the Electron ABI?
- *
- * Delegates to scripts/ensure-sqlite-abi.mjs --check electron, which spawns a
- * real child Electron and runs `new Database(':memory:')` — ground truth about
- * whether the packaged .node would load, not a marker-file guess. That script
- * is ESM and this file is CommonJS, so it is invoked as a child process rather
- * than imported. `--check` is the read-only mode: it swaps nothing, so probing
- * here never mutates the tree it is about to package.
+ * under the Electron ABI? Delegates to scripts/ensure-sqlite-abi.mjs
+ * --check electron, which runs `new Database(':memory:')` in a real child
+ * Electron — ground truth about whether the packaged .node would load, not a
+ * marker-file guess. Invoked as a child process rather than imported (that
+ * script is ESM, this file is CommonJS); `--check` swaps nothing, so probing
+ * never mutates the tree it is about to package.
  *
  * Module-level (not inline) so tests can inject a stub via
  * __setAbiProbeForTesting instead of needing a real native artifact on disk.
@@ -243,8 +219,8 @@ function configureBuild() {
   const config = JSON.parse(JSON.stringify(packageJson.build));
 
   // Configure macOS signing posture based on capabilities. A win build has no
-  // Apple posture to adjust — the signing credentials above are darwin-only
-  // and the win config carries no hardenedRuntime/entitlements to mutate.
+  // Apple posture to adjust — the credentials above are darwin-only, and the
+  // win config carries no signing fields to mutate.
   if (!isWin) {
     config.mac.notarize = canNotarize;
 
@@ -264,8 +240,8 @@ function configureBuild() {
     }
   }
 
-  // Dev-variant overrides (previously inline --config.* flags on build:mac:dev).
-  // Template tokens like ${version} are electron-builder placeholders and must stay literal.
+  // Dev-variant overrides. Template tokens like ${version} are
+  // electron-builder placeholders and must stay literal.
   if (isDev) {
     console.log('Applying dev-variant overrides...');
     config.appId = 'com.cyboflow.app.dev';
@@ -277,12 +253,12 @@ function configureBuild() {
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
   }
 
-  // Windows ships hand-placed prebuilt native modules (better-sqlite3 and
-  // node-pty on the Electron ABI via prebuild-install — docs/WINDOWS-BUILD.md).
-  // electron-builder must package those .node files as-is; a rebuild here
-  // would (a) need MSVC, which a Windows dev host may not have, and (b)
-  // clobber the verified prebuilds. CYBOFLOW_WIN_NPM_REBUILD=1 restores the
-  // rebuild step for hosts that do have a toolchain.
+  // Windows ships prebuilt native modules (better-sqlite3 and node-pty on the
+  // Electron ABI via prebuild-install — docs/WINDOWS-BUILD.md); electron-builder
+  // must package those .node files as-is. A rebuild would need MSVC, which a
+  // Windows dev host may not have, and clobber the verified prebuilds.
+  // CYBOFLOW_WIN_NPM_REBUILD=1 restores the rebuild step for hosts with a
+  // toolchain.
   if (isWin) {
     const winNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD === '1';
     config.npmRebuild = winNpmRebuild;
@@ -294,10 +270,9 @@ function configureBuild() {
     // wrong (host Node) ABI there: the auto-flip before test:unit /
     // test:integration, and a plain `pnpm install`. Packaging that as-is
     // produces an installer that hard-crashes on first DB open
-    // (NODE_MODULE_VERSION mismatch), which is far away from its cause — fail
-    // here instead, while the fix is one command. Skipped when npmRebuild was
-    // re-enabled: electron-builder then rebuilds better-sqlite3 for Electron
-    // itself, so the prebuilt artifact's ABI is irrelevant.
+    // (NODE_MODULE_VERSION mismatch) — far from the cause, so fail here while
+    // the fix is one command. Skipped when npmRebuild was re-enabled:
+    // electron-builder then rebuilds better-sqlite3 for Electron itself.
     if (!winNpmRebuild) {
       const probe = abiProbe();
       if (!probe.ok) {
@@ -316,14 +291,12 @@ function configureBuild() {
   }
 
   // Lean per-arch packaging. Both agent distributions ship their native CLIs
-  // as optional per-platform/arch packages. electron-builder bundles
-  // node_modules wholesale, and a cross-arch dev box (or a forced install that
-  // materializes every optionalDependency) can have all of them present. A
-  // macOS DMG needs only the matching darwin package for each agent — and a
-  // Windows installer only the matching win32 package. Exclude every foreign
-  // native package and fail fast if either target binary is absent, which
-  // would otherwise silently break that runtime after release.
-  // BUILD_ARCH unset / 'universal' leaves files untouched.
+  // as optional per-platform/arch packages, and electron-builder bundles
+  // node_modules wholesale — a cross-arch dev box (or a forced install) can
+  // have all of them present. Exclude every foreign native package and fail
+  // fast if either target binary is absent, which would otherwise silently
+  // break that runtime after release. BUILD_ARCH unset / 'universal' leaves
+  // files untouched.
   const targetArch = process.env.BUILD_ARCH;
   const leanPackagingPlan = isWin
     ? getWinPackagingPlan(targetArch)
@@ -373,7 +346,7 @@ function configureBuild() {
 if (require.main === module) {
   // CLI arg form (--platform/--arch/--variant) exists so package.json scripts
   // never need POSIX `VAR=value cmd` env syntax, which breaks on Windows' cmd
-  // shell. It simply feeds the same env vars the mac scripts set inline.
+  // shell; it feeds the same env vars the mac scripts set inline.
   const argv = process.argv.slice(2);
   const takeValue = (flag) => {
     const idx = argv.indexOf(flag);

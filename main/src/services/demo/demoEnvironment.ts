@@ -52,9 +52,8 @@ export function getDemoBareRemotePath(): string {
 /**
  * Run a git command in `cwd`, surfacing stderr in the thrown Error.
  *
- * The git command comes from gitExeFinder (a Start-Menu launch may not carry a
- * PATH that reaches git), interpolated through quoteForShellString so a path
- * with spaces survives both sh and cmd.exe.
+ * The command comes from gitExeFinder (a GUI launch may not carry a PATH that
+ * reaches git), quoted so a path with spaces survives sh and cmd.exe.
  */
 function git(cwd: string, args: string): void {
   execSync(`${quoteForShellString(resolveGitCommand())} ${args}`, { cwd, stdio: 'pipe', windowsHide: true });
@@ -62,9 +61,8 @@ function git(cwd: string, args: string): void {
 
 /**
  * Run git with an argv array — for arguments (paths, URLs) whose backslashes
- * and quotes must survive verbatim. A shell string would mangle them on
- * Windows: cmd.exe does no quote removal, so JSON.stringify-style escaping
- * (`C:\\Users\\...`) would reach git literally.
+ * and quotes must survive verbatim. cmd.exe performs no quote removal, so a
+ * shell string would leave JSON-style escaping (`C:\\Users\\...`) literal.
  */
 function gitArgv(cwd: string, args: string[]): void {
   execFileSync(resolveGitCommand(), args, { cwd, stdio: 'pipe', windowsHide: true });
@@ -196,8 +194,8 @@ export function resetDemoEnvironment(rootOverride?: string): DemoEnvironment {
   git(sandboxPath, 'commit -m "Initial commit"');
 
   // origin: github-looking fetch URL, local-bare PUSH url (see module header).
-  // Both URLs go through gitArgv: the Windows push path contains backslashes
-  // that a shell string would leave doubled (cmd.exe performs no quote removal).
+  // Both URLs go through gitArgv — see that helper on why a shell string is
+  // unsafe for the Windows push path.
   gitArgv(sandboxPath, ['remote', 'add', 'origin', DEMO_REMOTE_URL]);
   gitArgv(sandboxPath, ['remote', 'set-url', '--push', 'origin', bareRemotePath]);
   git(sandboxPath, 'push origin main');

@@ -5,28 +5,22 @@
  * to spawn `.cmd`/`.bat` files without a shell: spawn/execFile of a batch shim
  * throws EINVAL (CVE-2024-27980 command-injection hardening). npm-shim installs
  * of the CLIs this app probes (`claude`, `codex`, `omp`, `pi`, …) leave exactly
- * such `.cmd` shims in the npm global bin directory, so every shell-less
- * `--version` probe of one dies with EINVAL — which callers misread as a broken
- * install (the interactive substrate's availability gate and the onboarding
- * binary probe both report "not installed" for a perfectly working CLI).
+ * such `.cmd` shims, so every shell-less `--version` probe of one dies with
+ * EINVAL — which callers misread as a broken install. Two escape hatches,
+ * tried best-first:
  *
- * Two escape hatches, tried best-first:
- *
- *   1. a sibling native `<name>.exe` — the Claude agent SDK bundles claude.exe
- *      next to its shim, and native installers do the same. A plain `.exe`
- *      spawns shell-less, no interpreter involved.
+ *   1. a sibling native `<name>.exe` (the Claude agent SDK and native
+ *      installers bundle one) — a plain `.exe` spawns shell-less;
  *
  *   2. the shim itself, through `cmd.exe /d /s /c` — the interpreter npm shims
  *      are written for. The whole command line is passed as ONE argument and
  *      spawned with `windowsVerbatimArguments`, so Node's argv quoting (which
- *      backslash-escapes inner quotes — something cmd.exe does not understand)
- *      never touches it, and `/s` makes cmd strip our outer quote pair. That is
- *      the same quoting shape cross-spawn uses, and it survives paths with
- *      spaces.
+ *      backslash-escapes inner quotes — cmd.exe does not understand those)
+ *      never touches it, and `/s` makes cmd strip our outer quote pair. Same
+ *      quoting shape cross-spawn uses; survives paths with spaces.
  *
- * Everything here is inert on POSIX: the helpers either branch on an injected
- * `platform` (defaulting to `process.platform`) or are only called from win32
- * branches, so macOS/POSIX probe behavior is unchanged.
+ * Everything here is inert on POSIX: helpers either branch on an injected
+ * `platform` or are only called from win32 branches.
  */
 import * as fs from 'fs';
 
@@ -36,26 +30,23 @@ export interface ShellShimProbeInvocation {
   /** argv for the spawn, including the version flag. */
   args: string[];
   /**
-   * Pass through to the spawn's `windowsVerbatimArguments`. Set on the cmd.exe
-   * plan (see module header); undefined on direct/`.exe` plans, which want
-   * Node's normal argv quoting.
+   * Pass through to the spawn's `windowsVerbatimArguments`. Set only on the
+   * cmd.exe plan (see module header); direct/`.exe` plans want Node's normal
+   * argv quoting.
    */
   windowsVerbatimArguments?: boolean;
 }
 
 /**
  * cmd.exe metacharacters that make a token unsafe to interpolate unquoted into
- * a `/c` command line. (`%` is deliberately absent: double-quoting does not
- * suppress cmd's %VAR% expansion, so quoting it would add nothing.)
+ * a `/c` command line. (`%` is absent: double-quoting does not suppress cmd's
+ * %VAR% expansion, so quoting it would add nothing.)
  */
 const CMD_METACHARS = /[ \t&()^<>|"]/;
 
 const SHELL_SHIM_SUFFIX = /\.(cmd|bat)$/i;
 
-/**
- * True when `executablePath` is a Windows batch shim — a path Node will refuse
- * to spawn without a shell. Always false off win32.
- */
+/** True when `executablePath` is a Windows batch shim Node cannot spawn shell-less. Always false off win32. */
 export function isWindowsShellShim(
   executablePath: string,
   platform: NodeJS.Platform = process.platform,
@@ -77,7 +68,6 @@ export function siblingNativeExecutable(executablePath: string): string | null {
  * the sibling native `.exe` when it exists, then the shim itself through
  * cmd.exe. On a path that is not a Windows shell shim this returns the direct
  * single plan, byte-identical to a plain `execFile(path, ['--version'])`.
- *
  * `fileExists` is a test seam (defaults to fs.existsSync).
  */
 export function planWindowsShimVersionProbes(
@@ -95,9 +85,9 @@ export function planWindowsShimVersionProbes(
     plans.push({ command: sibling, args: ['--version'] });
   }
 
-  // Wrap the whole line in one extra pair of quotes: with /s, cmd strips the
-  // FIRST and LAST quote of the /c string, leaving `"C:\path with spaces\x.cmd" --version`
-  // — a correctly quoted executable plus argv — even when the path has spaces.
+  // Wrap the whole line in one extra quote pair: with /s, cmd strips the FIRST
+  // and LAST quote of the /c string, leaving a correctly quoted executable plus
+  // argv — even when the path has spaces.
   const needsQuotes = CMD_METACHARS.test(executablePath);
   const quoted = needsQuotes ? `"${executablePath}"` : executablePath;
   plans.push({

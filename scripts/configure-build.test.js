@@ -352,10 +352,9 @@ try {
         assert(config.mac.notarize === true, 'win build should not mutate the mac notarize field');
       },
       // The ABI probe spawns a real child Electron against the installed
-      // better-sqlite3, which this test host cannot guarantee (a checkout
-      // installed with --ignore-scripts has NO native artifact at all). Stub
-      // it — Case F verifies the packaging posture, not the probe itself; the
-      // probe's own branches are covered by Cases F2/F3.
+      // better-sqlite3, which this host cannot guarantee (--ignore-scripts
+      // checkouts have no native artifact). Stub it — the probe's own
+      // branches are covered by Cases F2/F3.
       function (mod) {
         mod.__setAbiProbeForTesting(function () {
           return { ok: true, output: 'stub: artifact loads under the electron ABI' };
@@ -373,8 +372,7 @@ try {
 try {
   // Case F2: with npmRebuild off, a probe that reports the installed
   // better-sqlite3 does NOT load under the Electron ABI must hard-exit(1)
-  // before electron-builder runs — that artifact packaged as-is ships an
-  // installer that crashes on first DB open (NODE_MODULE_VERSION mismatch).
+  // before electron-builder runs — packaged as-is it would crash at runtime.
   const savedBuildPlatform = process.env.BUILD_PLATFORM;
   process.env.BUILD_PLATFORM = 'win';
 
@@ -422,10 +420,9 @@ try {
   const savedBuildPlatform = process.env.BUILD_PLATFORM;
   const savedNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD;
   process.env.BUILD_PLATFORM = 'win';
-  // BUILD_ARCH deliberately unset: the lean-packaging preflight (which needs
-  // the win32 agent binaries on disk) is skipped for a universal build, so
-  // this case is host-independent — it exercises only npmRebuild + the probe
-  // skip.
+  // BUILD_ARCH deliberately unset: the lean-packaging preflight needs the
+  // win32 agent binaries on disk, so a universal build skips it — this case
+  // is host-independent.
   process.env.CYBOFLOW_WIN_NPM_REBUILD = '1';
 
   const cbPath = require.resolve('./configure-build.js');
