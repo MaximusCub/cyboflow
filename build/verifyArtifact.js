@@ -10,8 +10,9 @@
  *
  * On Windows the same stub class applies to the NSIS installer, so `.exe`
  * artifacts are held to their own floor — lower than the mac one, because NSIS
- * compresses far harder than a DMG. (build/afterSign.js no-ops off-mac, so
- * this hook is the only bundle check a Windows build gets.)
+ * compresses far harder than a DMG. build/afterSign.js also verifies the
+ * win-unpacked layout on Windows; this hook is the only check that sees the
+ * finished NSIS installer.
  *
  * `.dmg`/`.zip`/`.exe` are the only checked extensions. The other artifacts
  * electron-builder emits alongside them — `.blockmap`, `latest*.yml` — are

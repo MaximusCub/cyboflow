@@ -1087,7 +1087,7 @@ export abstract class AbstractCliManager extends EventEmitter {
    *
    * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
    * win32, per-level recursion on POSIX) lives in utils/platformProcess.ts.
-   * This site injects its historical POSIX one-level lister because it differs
+   * This site injects its own POSIX one-level lister because it differs
    * from the other sites': `pgrep -P <ppid>` lists direct child PIDs and is
    * portable across macOS/BSD and Linux, while GNU `ps --ppid` is Linux-only
    * and silently returned no descendants on macOS (the primary ship platform).

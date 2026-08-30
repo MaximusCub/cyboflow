@@ -2,12 +2,8 @@
  * platformProcess — the ONE place that answers "how do I list / enumerate /
  * kill processes on this platform".
  *
- * The windows-build stack grew one `process.platform === 'win32'` arm per call
- * site (five copies of the same PowerShell-table descendant walk, four copies
- * of the same taskkill ladder, two copies of the `ps`-vs-PowerShell table
- * fetch); duplicated logic was judged unacceptable where per-call-site arms
- * extending a visible POSIX ladder are fine. So the platform branches live
- * here, and only here:
+ * The platform branches live here, and only here — a per-call-site arm that
+ * extends a visible POSIX ladder is fine, but duplicated win32 logic is not:
  *
  *   - {@link listProcessTable} / {@link listPidPpidTable} /
  *     {@link listPidPpidTableSync} — process-table listings (`ps -axo …` on
@@ -122,17 +118,17 @@ export function listPidPpidTableSync(opts: PlatformProcessOptions = {}): Process
 
 export interface CollectDescendantPidsOptions extends PlatformProcessOptions {
   /**
-   * POSIX one-level child lister. The historical call sites differ here
+   * POSIX one-level child lister. Call sites differ here
    * (`ps -o pid= --ppid N` for the session/log/run ladders, `pgrep -P N` for
    * the CLI manager — pgrep is the portable form across macOS/BSD/Linux), so a
    * site whose POSIX walk must stay byte-identical injects its own. The win32
-   * arm (the formerly-duplicated PowerShell-table walk) is always this
+   * arm (the shared PowerShell-table walk) is always this
    * module's and cannot be overridden.
    */
   posixChildPids?: (parentPid: number) => number[];
   /**
-   * Failure reporter for a failed table fetch / walk step. The historical
-   * sites either stay silent or log a warning — pass the logger call here;
+   * Failure reporter for a failed table fetch / walk step. Call sites
+   * either stay silent or log a warning — pass the logger call here;
    * a failed walk degrades to a partial kill list, never an error.
    */
   onWalkError?: (error: unknown) => void;
@@ -141,8 +137,7 @@ export interface CollectDescendantPidsOptions extends PlatformProcessOptions {
 /**
  * Default POSIX one-level lister: `ps -o pid= --ppid N`. The `2>/dev/null || true`
  * suffix keeps a "no such process" race from throwing — callers see an empty
- * child list (recursion ends) exactly as the try/catch-wrapped historical
- * walkers did.
+ * child list (recursion ends) exactly as the try/catch-wrapped walkers this replaces did.
  */
 function defaultPosixChildPids(parentPid: number): number[] {
   const output = execSync(`ps -o pid= --ppid ${parentPid} 2>/dev/null || true`, {
@@ -160,8 +155,7 @@ function defaultPosixChildPids(parentPid: number): number[] {
  *
  * win32: one synchronous PowerShell (pid, ppid) table fetch
  * ({@link listPidPpidTableSync}) walked by the shared BFS in
- * services/processTable.ts. POSIX: the historical per-level recursion (DFS,
- * so kill order matches the pre-consolidation call sites) over the injected
+ * services/processTable.ts. POSIX: per-level DFS recursion (kill order matches the per-site ladders this replaces) over the injected
  * or default one-level lister.
  *
  * Both arms are cycle-safe, never traverse or include pid ≤ 1, and never
@@ -279,8 +273,7 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   pollIntervalMs?: number;
   /**
    * How the grace window is spent: 'poll' (default) returns as soon as the
-   * root pid is dead; 'fixed' sleeps the whole window unconditionally (the
-   * historical RunCommandManager shape — it never probed during the wait).
+   * root pid is dead; 'fixed' sleeps the whole window unconditionally (RunCommandManager never probed during the wait).
    */
   graceMode?: 'poll' | 'fixed';
   /**
@@ -291,8 +284,8 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   listDescendants?: () => number[] | Promise<number[]>;
   /**
    * Survivor report: called (and awaited) with the pids that remain after the
-   * whole ladder ran, right before `killTree` resolves false. The historical
-   * ladders differ in what they emit here (an EventEmitter event, a CLI output
+   * whole ladder ran, whole ladder ran, right before `killTree` resolves false. Call sites
+   * differ in what they emit here (an EventEmitter event, a CLI output
    * line, a session log) — that reporting stays at the call site. Defaults to
    * a plain console.error.
    */
@@ -321,7 +314,7 @@ function defaultIsPidAlive(pid: number): boolean {
  * ladder, false when survivors remain (after {@link KillTreeOptions.onSurvivors}
  * ran) or the ladder threw.
  *
- * win32 — the taskkill ladder formerly duplicated across runCommandManager,
+ * win32 — the taskkill ladder shared by runCommandManager,
  * AbstractCliManager and terminalSessionManager: graceful `/T`, the grace
  * window, `/T /F`, per-descendant `/F` for up-front enumerated children still
  * alive (taskkill /T walks the PPID chain at call time, so a shell that died
@@ -330,7 +323,7 @@ function defaultIsPidAlive(pid: number): boolean {
  * 200ms, re-check).
  *
  * POSIX — the SIGTERM → process-group ladder (terminalSessionManager's
- * historical shape): SIGTERM the root, look up its real pgid, `kill -TERM
+ * shape): SIGTERM the root, look up its real pgid, `kill -TERM
  * -<pgid>`, a bounded dual probe (root AND group), SIGKILL the root and group,
  * kill every enumerated descendant, a `pkill -9 -P` sweep, then the same
  * 500ms verification (no survivors re-kill pass — preserving the POSIX
