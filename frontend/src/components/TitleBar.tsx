@@ -1,4 +1,5 @@
 import { Search, Clock } from 'lucide-react';
+import { kbdHint } from '../utils/platform';
 
 interface TitleBarProps {
   /** Global search query (sessions / agents / files). */
@@ -57,7 +58,7 @@ export function TitleBar({
         <button
           type="button"
           onClick={onPromptHistoryClick}
-          title="Prompt history (⌘P)"
+          title={`Prompt history (${kbdHint('mod', 'P')})`}
           aria-label="Prompt history"
           className="flex h-[22px] w-6 items-center justify-center text-text-secondary hover:bg-bg-primary hover:text-text-primary"
         >
