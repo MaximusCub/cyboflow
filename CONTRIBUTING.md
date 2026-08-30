@@ -118,7 +118,7 @@ Fixes #42
 
 The code-change gate is `pnpm test:unit` — a one-shot chain that runs the main- and frontend-process Vitest suites plus schema-parity and build-script checks. Run it (or the per-workspace `pnpm --filter main test` / `pnpm --filter frontend test`) before opening a PR.
 
-`pnpm test:e2e` (Playwright) drives the built Electron bundle via `_electron.launch()` and needs a real display, so do **not** use it as the headless gate; the host-Node ABI it leaves behind is restored automatically the next time you run `pnpm test:unit`. See docs/ARCHITECTURE.md → "The better-sqlite3 ABI ping-pong" for the full contract, and run `node scripts/ensure-sqlite-abi.mjs host` by hand if a direct `npx vitest run` hits `NODE_MODULE_VERSION` errors.
+`pnpm test:e2e` (Playwright) drives the built Electron bundle via `_electron.launch()` and needs a real display, so do **not** use it as the headless gate; the host-Node ABI it leaves behind is restored automatically the next time you run `pnpm test:unit`. Its minimal smoke tier (`test:ci:minimal`) is the exception — it IS a blocking PR check ("E2E smoke (macOS)") and part of the release gate. See docs/ARCHITECTURE.md → "The better-sqlite3 ABI ping-pong" for the full contract, and run `node scripts/ensure-sqlite-abi.mjs host` by hand if a direct `npx vitest run` hits `NODE_MODULE_VERSION` errors.
 
 ### Manual Testing
 
@@ -131,7 +131,7 @@ pnpm build:mac:arm64  # Build the macOS DMG for Apple silicon (Intel: build:mac:
 No Apple Developer certificates are required for a local build. The `build:mac:*` scripts run `scripts/configure-build.js`, which detects the absence of signing credentials and emits an **unsigned** build config — the build still succeeds, it just isn't signed or notarized. macOS will quarantine an unsigned app on first launch, so open it with right-click → **Open** (or clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Cyboflow.app`). Signed, notarized release builds require the Apple credentials documented in [docs/signing/APPLE_DEVELOPER_SETUP.md](docs/signing/APPLE_DEVELOPER_SETUP.md). The generated config is written to `build/electron-builder.generated.json` (git-ignored); the tracked `package.json` is never modified by the build.
 
 Manual testing checklist:
-- [ ] Create a project and start a flow (Planner / Sprint / Compound / Ship)
+- [ ] Create a project and start a flow (Launch / Planner / Sprint / Compound / Ship)
 - [ ] Start a quick session and interact with the live terminal
 - [ ] Approve/reject items in the review queue (`y` / `n`)
 - [ ] Git operations (merge / PR / dismiss) work correctly

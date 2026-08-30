@@ -5,14 +5,15 @@ Cyboflow is a self-contained macOS desktop app designed to make it easier to bui
 ## What it does
 
 Cyboflow comes with five core features:
-1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including four natively included as well as a custom workflow and agent builder.
+1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including five natively included as well as a custom workflow and agent builder.
 2. **Centralized review queue**: Cyboflow has a built in central human review queue to make it easier to monitor activity across agents, grant approvals as needed, and triage any issues. 
 3. **Analytics, insights, and observability**: Cyboflow tracks token usage, failure rates, errors, and bugs across workflow runs so you can iterate and improve on them over time
 4. **Worktree isolated SDK or PTY session**: Every session runs in its own worktree and can be run via SDK (for a chat experience) or PTY (for an interactive terminal experience)
 5. **Native task tracking**: Built into Cyboflow is a native task tracking module that lets you take ideas through clarification, extraction, execution and review. 
 
 #### Multi-agent workflows
-Cyboflow ships four flows out of the box:
+Cyboflow ships five flows out of the box:
+- **Launch** interviews a brand-new project into a brief, an ordered idea set, and a first build set.
 - **Planner** turns a raw idea into a reviewed backlog: it captures the idea, optionally researches it, decomposes it into epics and tasks, and pauses at human approval gates. 
 - **Sprint** executes the ready tasks — implement, test, review, verify — across isolated worktrees, optionally fanning a batch of tasks out across parallel subagents. 
 - **Compound** mines completed work for cleanups, follow-up tasks, and codebase-doc improvements
@@ -47,7 +48,7 @@ Download Cyboflow from https://www.cyboflow.com/download/ and then drag the Cybo
 - macOS 13 Ventura or later
 - [Claude Code](https://claude.ai/code) installed and authenticated
 
-The Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
+The Launch, Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
 
 ## Provenance
 
