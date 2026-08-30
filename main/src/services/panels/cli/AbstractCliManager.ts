@@ -747,8 +747,8 @@ export abstract class AbstractCliManager extends EventEmitter {
     const nodePath = await findNodeExecutable();
     const nodeDir = path.dirname(nodePath);
 
-    // Combine Node.js directory with enhanced PATH
-    const pathWithNode = nodeDir + ':' + shellPath;
+    // Combine Node.js directory with enhanced PATH (':' on POSIX, ';' on Windows)
+    const pathWithNode = nodeDir + path.delimiter + shellPath;
 
     return {
       ...process.env,

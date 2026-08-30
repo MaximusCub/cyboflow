@@ -142,13 +142,102 @@ trying to rebuild them (see M1).
 - `pnpm run typecheck` — clean.
 - `pnpm run lint` — 0 errors (200 pre-existing warnings).
 
-## M2 — launch verification
+## M2 — launch verification (measured)
 
-(pending)
+Launched `dist-electron/win-unpacked/Cyboflow.exe --remote-debugging-port=9223`
+on the Windows host and verified from both sides:
+
+- 4 `Cyboflow.exe` processes (main + GPU + renderer + utility) — normal
+  Electron tree; still running after the full M2 window.
+- CDP answers on the Windows-side `localhost:9223`
+  (`cyboflow/0.2.9 … Electron/37.6.0`). **From WSL2, CDP is NOT reachable** —
+  Chromium binds the debug port to Windows loopback only, and WSL2's NAT has
+  no localhost forward in that direction. Verify via Windows-side `curl`
+  (`cmd.exe /c "curl -s http://localhost:9223/json"`) or run the eval helpers
+  under Windows node.
+- Main window target exists and the DOM fully renders
+  (`document.body.innerText` shows the real boards: Human review, Task
+  backlog, Workflows, PROJECTS & SESSIONS …, footer v0.2.9).
+- Data dir `C:\Users\<user>\.cyboflow` created; `sessions.db` + migrations ran
+  cleanly — the packaged Electron-ABI better-sqlite3 loads and works.
+- **Updater failure is non-fatal** (code + measured): `AppUpdater.check()`
+  catches feed errors and returns a verdict; the packaged build logs
+  `[AppUpdater] check failed: app-update.yml ENOENT` and continues running
+  (the `--dir` build carries no app-update.yml, and even the NSIS artifact has
+  no Windows feed to check).
+
+### M2 degradation notes (measured, from the app log)
+
+- **Orch IPC / MCP server**: the packaged build logged
+  `listen EACCES …sockets\orch.sock` — binding a Unix-domain socket fails on
+  stock Windows. Fixed in M3 (named pipe, see below).
+- `McpOrphanTripwire` logs `spawn ps ENOENT` and skips its scan — the
+  pre-existing guard degrades correctly; ps does not exist on Windows.
+- `ClaudeCodeManager` SDK query reached the bundled `claude.exe` and failed
+  with `Failed to authenticate: OAuth session expired` — the spawn path works;
+  this Windows host simply is not logged in to Claude. Run `claude` once on
+  Windows to log in for session runs.
 
 ## M3 — runtime basics
 
-(pending)
+### Fixes shipped (win32 branches, POSIX paths untouched)
+
+- **Orch IPC endpoint** (`orchSocketEndpoint.ts`, new): on Windows the
+  `~/.cyboflow/sockets/orch.sock` path is replaced by a per-user named pipe
+  `\\.\pipe\cyboflow-<user>-orch` at the single wiring call site in
+  `index.ts`. Node's `net` module treats pipe paths transparently, so
+  `OrchSocketServer` (bind/probe/close) and the subprocess clients are
+  source-unchanged; the POSIX-mode security model degrades to per-user pipe
+  name + the run-scoped bearer tokens.
+- **shellDetector.ts**: win32 branch — `pwsh.exe` (PATH probe) else the
+  always-present system `powershell.exe`, else cmd.exe as last resort;
+  `-NoLogo` for interactive PTYs; `getShellCommandArgs` emits
+  `-NoLogo -NoProfile -NonInteractive -Command` instead of `-c`.
+- **shellPath.ts**: separator is `path.delimiter`; win32 skips login-shell
+  PATH discovery entirely (GUI apps inherit the registry PATH) and appends
+  the npm global shim dir (`%APPDATA%\npm`) + user-configured paths;
+  `findExecutableInPath` also probes `name.exe`/`name.cmd` on Windows.
+- **nodeFinder.ts**: win32 common locations (Program Files nodejs,
+  nvm-windows, fnm, volta, scoop); the glob branch is suffix-general instead
+  of hardcoding `/bin/node`; `where` instead of `which`.
+- **AbstractCliManager.getSystemEnvironment**: PATH join via
+  `path.delimiter` (was hardcoded `:`).
+- **driverCore.ts** (verify driver): negative-pid group kills become
+  `taskkill /pid <n> /T /F` on Windows (Node rejects negative pids there);
+  detached serve spawns through `cmd.exe /d /s /c` (`detached: true` still
+  isolates the child into its own process group).
+- **verificationAgentRunner.ts**: the `$VERIFY_DRIVER` wrapper is a
+  `verify-driver.cmd` on Windows (`set ELECTRON_RUN_AS_NODE=1` + forward
+  args); `defaultStopDriver` routes through `cmd.exe /d /s /c` because Node
+  refuses to spawn `.cmd` files directly (EINVAL).
+- **sessionManager.ts / logPanel/logsManager.ts** `getAllDescendantPids`:
+  on Windows one PowerShell call fetches the whole `Win32_Process`
+  (pid, ppid) table (CSV) and it is walked breadth-first locally — same
+  best-effort contract as the POSIX `ps` recursion.
+- **interactiveSettingsWriter.ts**: hook commands register as
+  `node "<path>"` on Windows (a bare `.js` path under cmd.exe resolves via
+  file association, which may not be node); exported `hookCommand` so the
+  unit tests pin the platform behavior.
+
+### Runtime evidence (measured)
+
+- `pnpm typecheck` clean; `pnpm lint` 0 errors; the covering vitest files
+  (`interactiveSettingsWriter.test.ts`, `driverCore.test.ts`) pass 114/114 on
+  Windows.
+- better-sqlite3 bump verification: the full `main/src/database` suite ran
+  under host node with the **host-ABI (node-v137 win32) prebuild** of
+  better-sqlite3 12.11.1 (placed manually via prebuild-install —
+  `pnpm rebuild better-sqlite3` itself fails on this host for unrelated
+  spawn reasons; the artifact it produces is the same file). Result:
+  **586/625 assertions pass; every one of the 39 failures is the same
+  Windows-only afterEach EPERM** — `rmSync` on a temp dir whose SQLite
+  files are still open (POSIX allows unlinking open files, Windows does
+  not). No assertion, ABI or SQL failures. Fixing that cleanup pattern in
+  19 test files is test-infra work, deliberately out of scope here.
+- The ABI flip machinery (`scripts/ensure-sqlite-abi.mjs`) works on Windows:
+  both artifacts banked under `.abi-cache/`
+  (`electron-win32-x64-bsq12.11.1-el37.6.0`,
+  `host-win32-x64-bsq12.11.1-nmv137`) and swaps are cache copies.
 
 ## M4 — wrap-up
 

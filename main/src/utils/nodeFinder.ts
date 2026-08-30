@@ -48,28 +48,42 @@ async function resolveNodeExecutable(): Promise<string> {
   console.log('[NodeFinder] Node not found in PATH, trying common locations...');
 
   // Common node installation paths on macOS
-  const commonNodePaths: string[] = [
-    '/usr/local/bin/node',
-    '/opt/homebrew/bin/node',
-    '/opt/homebrew/opt/node/bin/node',
-    '/usr/bin/node',
-    path.join(os.homedir(), '.nvm/versions/node/*/bin/node'), // nvm
-    path.join(os.homedir(), '.volta/bin/node'), // volta
-    path.join(os.homedir(), '.asdf/shims/node'), // asdf
-    '/opt/local/bin/node', // MacPorts
-    '/sw/bin/node' // Fink
-  ];
+  const commonNodePaths: string[] = process.platform === 'win32'
+    ? [
+      // Official MSI installers and fnm/nvm-windows defaults.
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'nodejs', 'node.exe'),
+      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'nodejs', 'node.exe'),
+      path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'fnm_multishells', '*', 'node.exe'),
+      path.join(os.homedir(), 'AppData', 'Roaming', 'nvm', '*', 'node.exe'), // nvm-windows
+      path.join(os.homedir(), '.volta', 'bin', 'node.exe'), // volta
+      path.join(os.homedir(), 'scoop', 'apps', 'nodejs', 'current', 'node.exe'), // scoop
+    ]
+    : [
+      '/usr/local/bin/node',
+      '/opt/homebrew/bin/node',
+      '/opt/homebrew/opt/node/bin/node',
+      '/usr/bin/node',
+      path.join(os.homedir(), '.nvm/versions/node/*/bin/node'), // nvm
+      path.join(os.homedir(), '.volta/bin/node'), // volta
+      path.join(os.homedir(), '.asdf/shims/node'), // asdf
+      '/opt/local/bin/node', // MacPorts
+      '/sw/bin/node' // Fink
+    ];
 
   // Check each path
   for (const nodePath of commonNodePaths) {
-    // Handle glob patterns (like nvm paths)
+    // Handle glob patterns (like nvm paths): match the single '*' against one
+    // directory level and keep whatever trails it (`/bin/node` on POSIX,
+    // `\node.exe` on Windows) as the suffix.
     if (nodePath.includes('*')) {
-      const baseDir = path.dirname(nodePath.split('*')[0]);
+      const starIdx = nodePath.indexOf('*');
+      const baseDir = path.dirname(nodePath.slice(0, starIdx));
+      const suffix = nodePath.slice(starIdx + 1);
       if (fs.existsSync(baseDir)) {
         try {
           const entries = fs.readdirSync(baseDir);
           for (const entry of entries) {
-            const fullPath = path.join(baseDir, entry, 'bin', 'node');
+            const fullPath = path.join(baseDir, entry + suffix);
             if (fs.existsSync(fullPath)) {
               console.log(`[NodeFinder] Found node at: ${fullPath}`);
               return fullPath;
@@ -97,9 +111,10 @@ async function resolveNodeExecutable(): Promise<string> {
     return process.execPath;
   }
 
-  // Final attempt: try which command
+  // Final attempt: try which command (`where` on Windows)
   try {
-    const nodePath = execSync('which node', { encoding: 'utf8' }).trim().split('\n')[0];
+    const whichCommand = process.platform === 'win32' ? 'where node' : 'which node';
+    const nodePath = execSync(whichCommand, { encoding: 'utf8' }).trim().split('\n')[0];
     if (nodePath && fs.existsSync(nodePath)) {
       console.log(`[NodeFinder] Found node using which: ${nodePath}`);
       return nodePath;

@@ -205,6 +205,21 @@ function ensureHookExecutable(hookScriptPath: string, logger?: LoggerLike): void
 }
 
 /**
+ * The registered command for a hook script. On POSIX a BARE PATH works: Claude
+ * Code execs it via `/bin/sh`, which needs only the execute bit plus the
+ * `#!/usr/bin/env node` shebang. On Windows the command runs under cmd.exe,
+ * where a bare `.js` path resolves through the FILE ASSOCIATION (which may not
+ * be node at all) — so the hook is registered as `node "<path>"` explicitly,
+ * quoted for the spaces in typical install paths.
+ */
+export function hookCommand(hookScriptPath: string): string {
+  if (process.platform === 'win32') {
+    return `node "${hookScriptPath}"`;
+  }
+  return hookScriptPath;
+}
+
+/**
  * Build the cyboflow inline `hooks` settings fragment for the `--settings
  * '<json>'` flag: the PreToolUse `'*'` gating hook (probe-verified: flag-tier
  * hooks fire AND block on CLI 2.1.201) PLUS the Stop turn-end hook
@@ -222,7 +237,7 @@ export function resolveInlineGatingHooks(
   const stopHookScriptPath = resolveStopHookScriptPath(opts.hookDirOverride);
   ensureHookExecutable(stopHookScriptPath, logger);
   const stop: HookMatcherGroup[] = [
-    { hooks: [{ type: 'command', command: stopHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }] },
+    { hooks: [{ type: 'command', command: hookCommand(stopHookScriptPath), timeout: STOP_HOOK_TIMEOUT_SECONDS }] },
   ];
 
   // The AskUserQuestion "parked on a question" notify hook — a PreToolUse entry
@@ -236,7 +251,7 @@ export function resolveInlineGatingHooks(
   ensureHookExecutable(questionHookScriptPath, logger);
   const questionGroup: HookMatcherGroup = {
     matcher: 'AskUserQuestion',
-    hooks: [{ type: 'command', command: questionHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }],
+    hooks: [{ type: 'command', command: hookCommand(questionHookScriptPath), timeout: STOP_HOOK_TIMEOUT_SECONDS }],
   };
 
   if (
@@ -254,7 +269,7 @@ export function resolveInlineGatingHooks(
   ensureHookExecutable(hookScriptPath, logger);
   return {
     PreToolUse: [
-      { matcher: '*', hooks: [{ type: 'command', command: hookScriptPath, timeout: HIGH_TIMEOUT_SECONDS }] },
+      { matcher: '*', hooks: [{ type: 'command', command: hookCommand(hookScriptPath), timeout: HIGH_TIMEOUT_SECONDS }] },
       questionGroup,
     ],
     Stop: stop,

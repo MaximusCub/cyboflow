@@ -245,6 +245,7 @@ import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
+import { orchSocketEndpoint } from './orchestrator/mcpServer/orchSocketEndpoint';
 import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents, stuckEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { ClaudeJudge } from './orchestrator/eval/evalJury';
@@ -3135,7 +3136,7 @@ async function initializeServices(): Promise<boolean> {
   // `interactiveCliManager` is already narrowed to InteractiveClaudeManager
   // (the throw-guard above at its construction site).
   const orchSocketServer = new OrchSocketServer(
-    getCyboflowSubdirectory('sockets', 'orch.sock'),
+    orchSocketEndpoint(getCyboflowSubdirectory('sockets', 'orch.sock')),
     cyboflowDb,
     cyboflowLogger,
     {
