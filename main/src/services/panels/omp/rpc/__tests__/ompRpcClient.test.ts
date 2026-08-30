@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import {
@@ -9,6 +10,7 @@ import {
   type OmpRpcProcess,
   type SpawnOmpRpcProcess,
 } from '../ompRpcClient';
+import { collectDescendantPids, listPidPpidTableSync } from '../../../../processTable';
 import { OMP_RPC_MODE_ARGS, OMP_RPC_UI_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
 
 class FakeOmpProcess extends EventEmitter implements OmpRpcProcess {
@@ -574,4 +576,83 @@ describe('OmpRpcClient — teardown', () => {
     await client.stop();
     expect(() => client.send({ type: 'get_state' })).toThrow(/is not running/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// win32 tree teardown (runs only on Windows hosts — the platform where the
+// negative-pid group kill is a no-op and the taskkill arm is load-bearing)
+// ---------------------------------------------------------------------------
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
+
+describe('OmpRpcClient — win32 tree teardown', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'reaps a real omp tree via taskkill (grandchild not orphaned)',
+    async () => {
+      // A REAL node child that spawns its own long-lived detached grandchild —
+      // the shape `omp --mode rpc` presents (it owns MCP servers). The
+      // taskkill arm must take BOTH; a bare child kill would orphan the
+      // grandchild.
+      let realChild: ChildProcess | undefined;
+      const spawn: SpawnOmpRpcProcess = () => {
+        realChild = nodeSpawn(
+          process.execPath,
+          [
+            '-e',
+            // Emit the ready frame OMP would, spawn a long-lived detached
+            // grandchild (its MCP-server stand-in), then stay alive.
+            `console.log(JSON.stringify(${JSON.stringify(READY_FRAME)}));`
+            + "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref();"
+            + 'setInterval(()=>{},1000);',
+          ],
+          { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
+        );
+        return realChild as unknown as OmpRpcProcess;
+      };
+      const client = new OmpRpcClient({
+        negotiateProtocolV2: false,
+        stopTimeoutMs: 500,
+        forceKillTimeoutMs: 500,
+        spawn,
+      });
+      client.start();
+      const pid = realChild?.pid;
+      expect(pid).toBeTypeOf('number');
+
+      await client.handshake();
+
+      // Positive control via the shared process table: the grandchild exists.
+      let grandkids: number[] = [];
+      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
+      }
+      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+
+      await client.stop();
+
+      const allDead = await waitUntil(
+        () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+        8000,
+      );
+      expect(allDead).toBe(true);
+    },
+    30000,
+  );
 });

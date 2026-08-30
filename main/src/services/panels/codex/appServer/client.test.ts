@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -13,6 +14,7 @@ import {
   type CodexAppServerClientOptions,
   type SpawnAppServerProcess,
 } from './client';
+import { collectDescendantPids, listPidPpidTableSync } from '../../../processTable';
 import type { AppServerInitializeParams } from './protocol';
 
 class FakeAppServerProcess extends EventEmitter implements AppServerProcess {
@@ -471,4 +473,68 @@ describe('CodexAppServerClient', () => {
     expect(client.state).toBe('failed');
     expect(child.killCalls).toEqual(['SIGTERM']);
   });
+});
+
+// ---------------------------------------------------------------------------
+// win32 tree teardown (runs only on Windows hosts — the platform where the
+// negative-pid group kill is a no-op and the taskkill arm is load-bearing)
+// ---------------------------------------------------------------------------
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
+
+describe('CodexAppServerClient — win32 tree teardown', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'reaps a real app-server tree via taskkill (grandchild not orphaned)',
+    async () => {
+      // A REAL node child that spawns its own long-lived detached grandchild —
+      // the shape the app-server presents (it owns the MCP-bridge node
+      // children). The taskkill arm must take BOTH; a bare child kill would
+      // orphan the grandchild.
+      let realChild: ChildProcess | undefined;
+      const spawn: SpawnAppServerProcess = () => {
+        realChild = nodeSpawn(
+          process.execPath,
+          ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
+          { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
+        );
+        return realChild as unknown as AppServerProcess;
+      };
+      const client = new CodexAppServerClient({ spawn });
+      client.start();
+      const pid = realChild?.pid;
+      expect(pid).toBeTypeOf('number');
+
+      // Positive control via the shared process table: the grandchild exists.
+      let grandkids: number[] = [];
+      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
+      }
+      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+
+      await client.stop();
+
+      expect(await waitUntil(() => !isAlive(pid as number), 8000)).toBe(true);
+      for (const g of grandkids) {
+        expect(await waitUntil(() => !isAlive(g), 8000)).toBe(true);
+      }
+    },
+    30000,
+  );
 });

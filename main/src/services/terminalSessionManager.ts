@@ -2,20 +2,25 @@ import { EventEmitter } from 'events';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
-import { exec, execFile } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
-import { execWindowsProcessTable } from './winProcessTable';
+import {
+  collectDescendantPids,
+  listPidPpidTable,
+  parseProcessTable,
+  type ProcessTableRow,
+} from './processTable';
+
+// The (pid, ppid) table helpers moved to processTable.ts (one parser/walker for
+// every kill ladder); re-exported here so the injected-test seams and the
+// existing imports keep working unchanged.
+export { collectDescendantPids, parseProcessTable } from './processTable';
+export type { ProcessTableRow } from './processTable';
 
 interface TerminalSession {
   pty: pty.IPty;
   sessionId: string;
   cwd: string;
-}
-
-/** One row of the system process table: a pid and its parent pid. */
-export interface ProcessTableRow {
-  pid: number;
-  ppid: number;
 }
 
 /** Minimal shape of a shell command's result — only stdout is ever consulted. */
@@ -50,91 +55,14 @@ export interface TerminalSessionManagerOptions {
 }
 
 /**
- * Parse `ps -axo pid=,ppid=` output into rows ("<pid> <ppid>" per line, no
- * header). Lines that don't match a plain numeric pair are skipped.
+ * Default process lister — the shared two-column table from processTable.ts
+ * (`ps -axo pid=,ppid=` on POSIX, the PowerShell stand-in on win32).
  */
-export function parseProcessTable(stdout: string): ProcessTableRow[] {
-  const rows: ProcessTableRow[] = [];
-  for (const rawLine of stdout.split('\n')) {
-    const line = rawLine.trim();
-    if (line.length === 0) continue;
-    const match = /^(\d+)\s+(\d+)$/.exec(line);
-    if (!match) continue;
-    const pid = Number.parseInt(match[1], 10);
-    const ppid = Number.parseInt(match[2], 10);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    rows.push({ pid, ppid });
-  }
-  return rows;
-}
-
-/**
- * Collect every descendant of `rootPid` by walking the ppid table (BFS,
- * cycle-safe). Excludes the root itself and never traverses pid<=1 (never chase
- * launchd/kernel via a stray reparent). Mirrors the tree-walk in
- * `codexBrokerReaper.ts`'s `collectProcessTree`.
- */
-export function collectDescendantPids(rootPid: number, procs: ProcessTableRow[]): number[] {
-  const childrenByPpid = new Map<number, number[]>();
-  for (const p of procs) {
-    if (p.pid <= 1) continue;
-    const list = childrenByPpid.get(p.ppid);
-    if (list) list.push(p.pid);
-    else childrenByPpid.set(p.ppid, [p.pid]);
-  }
-
-  // Never traverse from a root of launchd/kernel itself (mirrors codexBrokerReaper's
-  // collectProcessTree guard) — a reparented pid<=1 root has no legitimate descendants
-  // to enumerate here.
-  if (rootPid <= 1) return [];
-
-  const result = new Set<number>();
-  const queue: number[] = [rootPid];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    const kids = childrenByPpid.get(current);
-    if (!kids) continue;
-    for (const kid of kids) {
-      if (kid > 1 && kid !== rootPid && !result.has(kid)) {
-        result.add(kid);
-        queue.push(kid);
-      }
-    }
-  }
-  return [...result];
-}
+const defaultListProcessTable = listPidPpidTable;
 
 /** True if `error` is a Node errno exception carrying a `.code`. */
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
-}
-
-/**
- * Default process lister: one `ps -axo pid=,ppid=` call (no header, all
- * processes, no shell interpolation). Unlike the Linux-only `ps --ppid` flag
- * this works on both macOS and Linux.
- */
-function defaultListProcessTable(): Promise<ProcessTableRow[]> {
-  if (process.platform === 'win32') {
-    // Windows has no `ps`; the PowerShell stand-in emits the same line shape,
-    // so the parser below is used unchanged.
-    return execWindowsProcessTable('pid-ppid').then(parseProcessTable);
-  }
-  return new Promise<ProcessTableRow[]>((resolve, reject) => {
-    execFile(
-      'ps',
-      ['-axo', 'pid=,ppid='],
-      // The full process table can be large; 16 MiB comfortably covers it.
-      { maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
-          return;
-        }
-        resolve(parseProcessTable(stdout));
-      },
-    );
-  });
 }
 
 /**
@@ -386,8 +314,34 @@ export class TerminalSessionManager extends EventEmitter {
       } catch (error) {
         // Process might already be dead
       }
+      // taskkill /T walks the PPID chain at call time, so a shell that died
+      // between the graceful and /F calls — or a pid that was reused in that
+      // window — can orphan children the tree walk can no longer see. Force
+      // every descendant enumerated up-front that is still alive.
+      for (const childPid of descendantPids) {
+        try {
+          if (this.probeAlive(childPid)) {
+            await this.execCommand(`taskkill /PID ${childPid} /F`);
+          }
+        } catch (error) {
+          // Already dead / no permission — the verification pass below decides.
+        }
+      }
       await new Promise(resolve => setTimeout(resolve, 500));
-      const remainingPids = await this.getAllDescendantPids(pid);
+      let remainingPids = await this.getAllDescendantPids(pid);
+      if (remainingPids.length > 0) {
+        // Survivors found: one direct forced kill each — taskkill /T cannot see
+        // a child whose parent link it can no longer walk — then re-verify.
+        for (const survivorPid of remainingPids) {
+          try {
+            await this.execCommand(`taskkill /PID ${survivorPid} /F`);
+          } catch (error) {
+            // Already dead / no permission — the re-check below decides.
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 200));
+        remainingPids = await this.getAllDescendantPids(pid);
+      }
       if (remainingPids.length > 0) {
         console.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
         this.emit('zombie-processes-detected', {

@@ -52,7 +52,13 @@ function lineExpr(format: WinProcessLineFormat): string {
   }
 }
 
-function buildScript(format: WinProcessLineFormat): string {
+/**
+ * The PowerShell script that renders `format` — one `pid [ppid [etime]] command`
+ * line per Win32_Process row. Exported so synchronous callers (the kill ladders
+ * that cannot await inside `execSync`-shaped code) run the exact same query as
+ * {@link execWindowsProcessTable} instead of carrying a second copy of it.
+ */
+export function buildWindowsProcessTableScript(format: WinProcessLineFormat): string {
   const body = format === 'pid-ppid-etime-command' ? `$now = Get-Date; ` : '';
   return `${body}Get-CimInstance Win32_Process | ForEach-Object { ${lineExpr(format)} }`;
 }
@@ -66,7 +72,7 @@ export function execWindowsProcessTable(format: WinProcessLineFormat): Promise<s
   return new Promise<string>((resolve, reject) => {
     execFile(
       'powershell',
-      ['-NoProfile', '-NonInteractive', '-Command', buildScript(format)],
+      ['-NoProfile', '-NonInteractive', '-Command', buildWindowsProcessTableScript(format)],
       // Full-table command lines can total multiple MB; 64 MiB is comfortably
       // above any realistic table.
       { maxBuffer: 64 * 1024 * 1024, timeout: 30_000 },

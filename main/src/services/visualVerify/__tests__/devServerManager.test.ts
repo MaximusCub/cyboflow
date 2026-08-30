@@ -281,3 +281,64 @@ describe('DevServerManager', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// win32 tree teardown (runs only on Windows hosts — the platform where the
+// negative-pid group kill is a no-op and the taskkill arm is load-bearing)
+// ---------------------------------------------------------------------------
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
+
+describe('DevServerManager — win32 tree teardown', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'signalTree reaps a real parent+grandchild tree via taskkill /T /F',
+    async () => {
+      const { spawn } = await import('node:child_process');
+      const mgr = new DevServerManager(FAST);
+      // A REAL node child that spawns its own long-lived detached grandchild.
+      const child = spawn(
+        process.execPath,
+        ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
+        { stdio: 'ignore', detached: true },
+      );
+      const pid = child.pid;
+      expect(pid).toBeTypeOf('number');
+
+      // Positive control via the shared process table: the grandchild exists.
+      const { collectDescendantPids, listPidPpidTableSync } = await import('../../processTable');
+      let grandkids: number[] = [];
+      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
+      }
+      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+
+      (mgr as unknown as {
+        signalTree: (child: { pid?: number }, sig: NodeJS.Signals) => void;
+      }).signalTree(child, 'SIGTERM');
+
+      const allDead = await waitUntil(
+        () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+        8000,
+      );
+      expect(allDead).toBe(true);
+    },
+    30000,
+  );
+});

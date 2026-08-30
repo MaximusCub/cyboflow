@@ -5,9 +5,10 @@ import type { DatabaseService } from '../database/database';
 import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
-import { escapeShellArg } from '../utils/shellEscape';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
+import { collectDescendantPids, parseProcessTable } from './processTable';
+import { buildWindowsProcessTableScript } from './winProcessTable';
 
 interface RunProcess {
   process: pty.IPty;
@@ -75,9 +76,17 @@ export class RunCommandManager extends EventEmitter {
             const shellInfo = ShellDetector.getDefaultShell();
             this.logger?.verbose(`Using shell: ${shellInfo.path} (${shellInfo.name})`);
             
-            // Prepare command with environment variable — use escapeShellArg to safely quote
-            // the worktree path and prevent shell injection from adversarial directory names.
-            const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
+            // Prepare command with environment variable, in the dialect
+            // getShellCommandArgs routes to: POSIX sets it via `export` joined
+            // with `&&`; PowerShell (the win32 shell) has no `export` and, on
+            // the PS 5.1 every Windows host ships, cannot parse `&&`. The
+            // quoting still prevents shell injection from adversarial
+            // directory names — escapeShellArg on POSIX, PS single-quote
+            // doubling on win32.
+            const commandWithEnv = ShellDetector.buildCommandString(
+              { WORKTREE_PATH: worktreePath },
+              [commandLine]
+            );
             
             // Get shell command arguments
             const { shell, args: shellArgs } = ShellDetector.getShellCommandArgs(commandWithEnv);
@@ -240,6 +249,25 @@ export class RunCommandManager extends EventEmitter {
   private getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
 
+    if (process.platform === 'win32') {
+      // `ps` does not exist on Windows — the `ps -o pid= --ppid N` call below
+      // throws there (through cmd.exe), so this always returned [] and the
+      // win32 zombie check in killProcessTree falsely reported success. One
+      // PowerShell call fetches the whole (pid, ppid) table — the same query
+      // the async process-table helpers run — which the shared
+      // processTable.ts helpers parse and walk.
+      try {
+        const output = execSync(
+          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
+          { encoding: 'utf8', timeout: 15_000 }
+        );
+        return collectDescendantPids(parentPid, parseProcessTable(output));
+      } catch (error) {
+        this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
+        return [];
+      }
+    }
+
     try {
       const result = require('child_process').execSync(
         `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
@@ -259,6 +287,19 @@ export class RunCommandManager extends EventEmitter {
     }
 
     return [...new Set(descendants)];
+  }
+
+  /**
+   * Signal-0 liveness probe. ESRCH ("no such process") means dead; EPERM
+   * ("exists, no permission to signal") still counts as alive.
+   */
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
   }
 
   /**
@@ -291,8 +332,33 @@ export class RunCommandManager extends EventEmitter {
         } catch (error) {
           // Process might already be dead
         }
+        // taskkill /T walks the PPID chain at call time, so children a dying
+        // shell orphaned between the graceful and /F calls can survive it.
+        // Force every descendant enumerated up-front that is still alive.
+        for (const childPid of descendantPids) {
+          try {
+            if (this.isPidAlive(childPid)) {
+              await execAsync(`taskkill /PID ${childPid} /F`);
+            }
+          } catch (error) {
+            // Already dead / no permission — the verification pass below decides.
+          }
+        }
         await new Promise(resolve => setTimeout(resolve, 500));
-        const remainingPids = this.getAllDescendantPids(pid);
+        let remainingPids = this.getAllDescendantPids(pid);
+        if (remainingPids.length > 0) {
+          // Survivors found: one direct forced kill each — taskkill /T cannot
+          // see a child whose parent link it can no longer walk — then re-check.
+          for (const survivorPid of remainingPids) {
+            try {
+              await execAsync(`taskkill /PID ${survivorPid} /F`);
+            } catch (error) {
+              // Already dead / no permission — the re-check below decides.
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, 200));
+          remainingPids = this.getAllDescendantPids(pid);
+        }
         if (remainingPids.length > 0) {
           this.logger?.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
           success = false;
@@ -414,12 +480,40 @@ export class RunCommandManager extends EventEmitter {
    */
   private async killEscapedProcesses(sessionId: string, knownPids: number[]): Promise<void> {
     const execAsync = promisify(exec);
-    
+
     try {
       // Find all processes that have any of our known PIDs as ancestors
       // This is a more aggressive approach to catch processes that might have been orphaned
       const allDescendants: number[] = [];
-      
+
+      if (process.platform === 'win32') {
+        // Windows: the `ps -o pgid=`/`ps -o pid= -g` lookups and the `kill -9`
+        // sweep below are all dead through cmd.exe — this sweep ran nothing
+        // there. Enumerate via the shared (pid, ppid) table and force-kill
+        // every escapee with taskkill.
+        for (const pid of knownPids) {
+          allDescendants.push(...this.getAllDescendantPids(pid));
+        }
+        const escapees = [...new Set(allDescendants)];
+        if (escapees.length > 0) {
+          this.logger?.warn(`Killing ${escapees.length} escaped processes: ${escapees.join(', ')}`);
+          for (const escapeePid of escapees) {
+            try {
+              await execAsync(`taskkill /PID ${escapeePid} /F`);
+              this.logger?.info(`Killed escaped process ${escapeePid}`);
+            } catch (error) {
+              // Already dead — fine.
+            }
+          }
+          this.emit('zombie-processes-detected', {
+            sessionId,
+            pids: escapees,
+            message: `Detected and killed ${escapees.length} processes that escaped normal termination`
+          });
+        }
+        return;
+      }
+
       for (const pid of knownPids) {
         // Get all descendants, including orphaned ones
         const descendants = this.getAllDescendantPids(pid);

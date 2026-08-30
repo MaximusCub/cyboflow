@@ -14,6 +14,8 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
+import { collectDescendantPids, parseProcessTable } from './processTable';
+import { buildWindowsProcessTableScript } from './winProcessTable';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -1035,8 +1037,10 @@ export class SessionManager extends EventEmitter {
     // Track in shared script execution tracker
     scriptExecutionTracker.start('session', sessionId);
     
-    // Join commands with && to run them sequentially
-    const command = commands.join(' && ');
+    // Join commands to run them sequentially, in the dialect of the shell
+    // getShellCommandArgs routes to (POSIX `a && b`; PowerShell cannot parse
+    // `&&` on PS 5.1, so the win32 form differs — see buildCommandString).
+    const command = ShellDetector.buildCommandString({}, commands);
     
     // Get enhanced shell PATH
     const shellPath = getShellPath();
@@ -1214,37 +1218,19 @@ export class SessionManager extends EventEmitter {
 
     if (process.platform === 'win32') {
       // `ps` does not exist on Windows. One PowerShell call fetches the whole
-      // (pid, ppid) table, which is walked breadth-first here — the same
-      // best-effort contract as the POSIX recursion below, without a
-      // subprocess per tree level.
+      // (pid, ppid) table — the same query the async process-table helpers run —
+      // which the shared processTable.ts helpers parse and walk. Best-effort,
+      // same as the POSIX branch: a failed walk degrades to a partial kill
+      // list, never an error.
       try {
         const output = execSync(
-          'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"',
+          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
           { encoding: 'utf8', timeout: 15_000 }
         );
-        const childrenByParent = new Map<number, number[]>();
-        for (const line of output.split('\n').slice(1)) {
-          const match = line.match(/^"?(\d+)"?,"?(\d+)"?/);
-          if (!match) continue;
-          const pid = Number(match[1]);
-          const ppid = Number(match[2]);
-          const children = childrenByParent.get(ppid);
-          if (children) children.push(pid);
-          else childrenByParent.set(ppid, [pid]);
-        }
-        const queue = [parentPid];
-        while (queue.length > 0) {
-          const current = queue.pop() as number;
-          for (const child of childrenByParent.get(current) ?? []) {
-            descendants.push(child);
-            queue.push(child);
-          }
-        }
+        return collectDescendantPids(parentPid, parseProcessTable(output));
       } catch (error) {
-        // Best-effort, same as the POSIX branch: a failed walk degrades to a
-        // partial kill list, never an error.
+        return [];
       }
-      return descendants;
     }
 
     try {
@@ -1275,6 +1261,9 @@ export class SessionManager extends EventEmitter {
    * @returns Promise that resolves when the script has been stopped
    */
   stopRunningScript(): Promise<void> {
+    // Captured before the promise body: the callback below declares a local
+    // `process` (the ChildProcess) that shadows the global from its TDZ onward.
+    const isWin32 = process.platform === 'win32';
     return new Promise((resolve) => {
       if (!this.runningScriptProcess || !this.currentRunningSessionId) {
         resolve();
@@ -1296,10 +1285,21 @@ export class SessionManager extends EventEmitter {
         if (process.pid) {
           // First, get all descendant PIDs before we start killing
           const descendantPids = this.getAllDescendantPids(process.pid);
-          
+
           // Add a simple log entry for stopping the script
           addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
-          
+
+          if (isWin32) {
+            // Windows has no process groups and no POSIX signals — every
+            // `kill`/`pkill` call in the POSIX path below is a silent no-op
+            // there. Delegate to the taskkill ladder instead.
+            this.stopRunningScriptWindows(sessionId, process, descendantPids, () => {
+              this.finishStopScript(sessionId);
+              resolve();
+            });
+            return;
+          }
+
           // macOS/Unix: First, try SIGTERM for graceful shutdown
           addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${process.pid} and its group]`, 'System');
 
@@ -1397,6 +1397,94 @@ export class SessionManager extends EventEmitter {
         resolve();
       }
     });
+  }
+
+  /**
+   * Windows arm of {@link stopRunningScript}. Windows has no process groups and
+   * no POSIX signals, so the `kill`/`pkill` ladder in the POSIX path is a
+   * silent no-op there; `taskkill /PID <pid> /T /F` is the platform's
+   * whole-tree contract — but its /T walk happens at call time, so each
+   * descendant enumerated up-front is probed and force-killed individually,
+   * reaping children the tree walk can no longer see.
+   *
+   * The "terminated" count reflects only processes a liveness probe caught
+   * still alive after the tree kill whose forced kill then succeeded —
+   * taskkill's exit code alone cannot distinguish "already dead" from "no
+   * permission", so the POSIX path's "already terminated gracefully" counter
+   * is deliberately not replicated here.
+   */
+  private stopRunningScriptWindows(
+    sessionId: string,
+    scriptProcess: ChildProcess,
+    descendantPids: number[],
+    done: () => void
+  ): void {
+    const pid = scriptProcess.pid;
+    if (!pid) {
+      done();
+      return;
+    }
+
+    addSessionLog(sessionId, 'info', `[Forcefully terminating process ${pid} and its tree (taskkill)]`, 'System');
+
+    exec(`taskkill /PID ${pid} /T /F`, (error) => {
+      if (error) {
+        console.warn(`Error killing process tree ${pid}: ${error.message}`);
+      }
+    });
+
+    let killedCount = 0;
+    let pending = descendantPids.length;
+
+    const verifyAndFinish = (): void => {
+      if (killedCount > 0) {
+        addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
+      }
+      // Check for zombie processes after a short delay
+      setTimeout(() => {
+        const remainingPids = this.getAllDescendantPids(pid);
+        if (remainingPids.length > 0) {
+          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
+          addSessionLog(sessionId, 'error', `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`, 'System');
+        } else {
+          addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
+        }
+        done();
+      }, 500);
+    };
+
+    if (descendantPids.length === 0) {
+      verifyAndFinish();
+      return;
+    }
+
+    descendantPids.forEach((childPid) => {
+      // Only a process a liveness probe still catches after the tree kill is
+      // counted — and only if the forced kill then succeeded.
+      if (!this.isPidAlive(childPid)) {
+        pending -= 1;
+        if (pending === 0) verifyAndFinish();
+        return;
+      }
+      exec(`taskkill /PID ${childPid} /F`, (error) => {
+        if (!error) killedCount += 1;
+        pending -= 1;
+        if (pending === 0) verifyAndFinish();
+      });
+    });
+  }
+
+  /**
+   * Signal-0 liveness probe. ESRCH ("no such process") means dead; EPERM
+   * ("exists, no permission to signal") still counts as alive.
+   */
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
   }
 
   private finishStopScript(sessionId: string): void {

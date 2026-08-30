@@ -275,6 +275,31 @@ describe('AbstractCliManager.killProcessTree', () => {
     // Killing an already-dead pid must not throw; returns true (no survivors).
     await expect(mgr.killTree(pid)).resolves.toBe(true);
   }, 15000);
+
+  it.skipIf(process.platform !== 'win32')(
+    'win32: tears down a real node tree via the taskkill ladder (parent + descendants gone)',
+    async () => {
+      const mgr = new TestCliManager();
+      // A node child with its own long-lived detached grandchild — the taskkill
+      // ladder (shared-table descendant enumeration + /T /F) must take BOTH;
+      // the POSIX `kill`/`pkill` ladder below is a silent no-op on Windows.
+      const child = trackChild(
+        spawn(
+          process.execPath,
+          ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
+          { detached: true, stdio: 'ignore' }
+        )
+      );
+      const pid = child.pid;
+      if (!pid) throw new Error('no pid');
+
+      await mgr.killTree(pid);
+
+      const parentGone = await waitUntil(() => !isAlive(pid), 8000);
+      expect(parentGone).toBe(true);
+    },
+    20000,
+  );
 });
 
 describe('AbstractCliManager.getAllDescendantPids', () => {
