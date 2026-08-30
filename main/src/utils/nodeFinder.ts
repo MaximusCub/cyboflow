@@ -73,8 +73,7 @@ async function resolveNodeExecutable(): Promise<string> {
   // Check each path
   for (const nodePath of commonNodePaths) {
     // Handle glob patterns (like nvm paths): match the single '*' against one
-    // directory level and keep whatever trails it (`/bin/node` on POSIX,
-    // `\node.exe` on Windows) as the suffix.
+    // directory level and keep whatever trails it as the suffix.
     if (nodePath.includes('*')) {
       const starIdx = nodePath.indexOf('*');
       const baseDir = path.dirname(nodePath.slice(0, starIdx));
@@ -117,8 +116,6 @@ async function resolveNodeExecutable(): Promise<string> {
     // Split on \r?\n and trim each line: `where` on Windows emits CRLF, so a
     // plain split('\n') leaves a trailing \r on every line but the last — and
     // existsSync('...node.exe\r') then fails even though the file is there.
-    // (The trailing-.trim() that used to run first only cleaned the FINAL
-    // line of the output, not the first.)
     const nodePath = execSync(whichCommand, { encoding: 'utf8', windowsHide: true })
       .split(/\r?\n/)
       .map((line) => line.trim())

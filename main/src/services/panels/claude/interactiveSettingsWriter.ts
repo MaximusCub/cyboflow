@@ -205,12 +205,11 @@ function ensureHookExecutable(hookScriptPath: string, logger?: LoggerLike): void
 }
 
 /**
- * The registered command for a hook script. On POSIX a BARE PATH works: Claude
- * Code execs it via `/bin/sh`, which needs only the execute bit plus the
- * `#!/usr/bin/env node` shebang. On Windows the command runs under cmd.exe,
- * where a bare `.js` path resolves through the FILE ASSOCIATION (which may not
- * be node at all) — so the hook is registered as `node "<path>"` explicitly,
- * quoted for the spaces in typical install paths.
+ * The registered command for a hook script. On POSIX a BARE PATH works: it is
+ * execed via /bin/sh, which needs only the execute bit plus the node shebang.
+ * On Windows the command runs under cmd.exe, where a bare `.js` path resolves
+ * through the file association (which may not be node at all) — so register
+ * `node "<path>"` explicitly.
  */
 export function hookCommand(hookScriptPath: string): string {
   if (process.platform === 'win32') {

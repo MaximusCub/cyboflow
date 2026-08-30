@@ -50,10 +50,9 @@ function getPathSeparator(): string {
 
 /**
  * Windows PATH assembly. There is no login-shell discovery to do — GUI apps
- * already inherit the user's PATH from the registry, and `powershell -c 'echo
- * $PATH'` would only return what we already have. Just normalize the current
- * PATH and append the npm global shim directory (the Windows analogue of the
- * POSIX additional-paths sweep below).
+ * already inherit the user's PATH from the registry. Just normalize the
+ * current PATH and append the npm global shim directory (the Windows analogue
+ * of the POSIX additional-paths sweep below).
  */
 function getWindowsPath(): string {
   const pathSep = path.delimiter;
@@ -402,9 +401,9 @@ export function findExecutableInPath(executable: string): string | null {
   let searchedPaths = 0;
   for (const dir of paths) {
     searchedPaths++;
-    // On Windows, executables carry suffixes: `node` means node.exe, and npm
-    // installs .cmd shims. Probe the bare name (for suffix-less files) plus
-    // the Windows-specific suffixes; on POSIX only the bare name exists.
+    // On Windows, executables carry suffixes (`node` means node.exe, and npm
+    // installs .cmd shims) — probe the bare name plus those suffixes; POSIX
+    // probes the bare name only.
     const candidates = [executable];
     if (process.platform === 'win32') {
       candidates.push(`${executable}.exe`, `${executable}.cmd`);

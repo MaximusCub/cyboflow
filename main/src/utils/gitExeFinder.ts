@@ -1,32 +1,23 @@
 /**
  * Git discovery for GUI launches — the git twin of {@link ./nodeFinder}.
  *
- * A Start-Menu / .app launch of a GUI app does not always carry a PATH that
- * reaches git (per-user installs under %LocalAppData%, scoop shims, a trimmed
- * system PATH), and every bare `execFile('git')` then fails with ENOENT even
- * though git is installed and works fine in the user's terminal. Callers route
- * through {@link resolveGitCommand} instead, which resolves ONCE:
+ * A Start-Menu / .app launch does not always carry a PATH that reaches git, so
+ * every bare `execFile('git')` fails with ENOENT even though git works in the
+ * user's terminal. {@link resolveGitCommand} resolves once, best-first:
  *
- *   1. a probe of the resolved shell PATH (`getShellPath()`, degrading to the
- *      inherited PATH) — `git.exe` on Windows (a suffix-less `git` there is a
- *      sh script, and a `.cmd` shim would hit Node's shell-less EINVAL
- *      hardening), the bare name on POSIX;
+ *   1. the resolved shell PATH (`getShellPath()`, degrading to the inherited
+ *      PATH) — `git.exe` on Windows (a suffix-less `git` there is a sh script,
+ *      and a `.cmd` shim would hit Node's shell-less EINVAL hardening), the
+ *      bare name on POSIX;
  *   2. the standard Windows install locations (MSI, per-user, scoop);
- *   3. a last-ditch `where git` / `which git` (NodeFinder parity);
- *   4. the bare `'git'` fallback — a genuine failure is deliberately NOT
- *      cached, so a later call can retry (e.g. after the user installs git
- *      without restarting the app).
+ *   3. a last-ditch `where git` / `which git`;
+ *   4. the bare `'git'` fallback.
  *
- * Returning the resolved ABSOLUTE path is what fixes the GUI-launch scenario:
- * the spawn no longer depends on the child env's PATH at all. On POSIX a
- * resolved absolute path behaves identically to the bare name (same binary,
- * same argv/env/cwd), so existing POSIX behavior is unchanged.
- *
- * Memoized at module scope like nodeFinder: git call sites run on dashboard
- * refreshes, so re-running the PATH/candidate sweep per spawn would be pure
- * overhead. `clearGitExecutableCache()` and
- * {@link setGitFinderDependenciesForTest} are the test seams — all IO goes
- * through {@link GitFinderDependencies} so tests never depend on the host.
+ * Returning the resolved ABSOLUTE path is the fix: the spawn no longer depends
+ * on the child env's PATH. Successful resolutions are memoized (call sites run
+ * on dashboard refreshes); a genuine failure is deliberately NOT cached, so a
+ * later call can retry after the user installs git. All IO goes through
+ * {@link GitFinderDependencies}, the test seam.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -56,18 +47,14 @@ export interface GitFinderDependencies {
 let cachedGitCommand: string | null = null;
 let testDependencies: Partial<GitFinderDependencies> | null = null;
 
-/**
- * Clear the cached resolved git command (for tests, or after a git install
- * that a long-lived process should pick up).
- */
+/** Clear the cached resolved git command (tests, or after a git install). */
 export function clearGitExecutableCache(): void {
   cachedGitCommand = null;
 }
 
 /**
- * Test seam: override individual IO dependencies (merged over the real ones)
- * so resolution can be driven without touching the host. Null restores
- * production behavior. Clears the memoized cache.
+ * Test seam: override individual IO dependencies (merged over the real ones).
+ * Null restores production behavior. Clears the memoized cache.
  */
 export function setGitFinderDependenciesForTest(deps: Partial<GitFinderDependencies> | null): void {
   testDependencies = deps;
@@ -110,7 +97,8 @@ function currentDependencies(): GitFinderDependencies {
 
 /**
  * Resolve the command to spawn for git: an absolute path when one is found,
- * the bare `'git'` fallback otherwise. Memoized for successful resolutions.
+ * the bare `'git'` fallback otherwise. Memoized for successful resolutions
+ * (see module header).
  */
 export function resolveGitCommand(): string {
   if (cachedGitCommand) {
@@ -154,7 +142,7 @@ function resolveGitCommandUncached(deps: GitFinderDependencies): string {
 
 /**
  * Walk the resolved PATH looking for a spawnable git. Windows: `git.exe` only
- * (a suffix-less `git` is a sh script Node cannot exec, and a `.cmd` shim is
+ * (a suffix-less `git` is a sh script Node cannot exec; a `.cmd` shim is
  * refused shell-less); POSIX: the bare name.
  */
 function probePathForGit(deps: GitFinderDependencies): string | null {
@@ -198,8 +186,8 @@ function windowsGitCandidates(deps: GitFinderDependencies): string[] {
 /**
  * Quote a resolved command for interpolation into a SHELL command string
  * (execSync/exec — argv is not available there). Double quotes are understood
- * by both POSIX sh and cmd.exe. Quotes only when needed, so the POSIX bare
- * `'git'` fallback interpolates byte-identically to a literal `git`.
+ * by both POSIX sh and cmd.exe; quotes only when needed, so the bare `'git'`
+ * fallback interpolates byte-identically to a literal `git`.
  */
 export function quoteForShellString(command: string): string {
   return /\s/.test(command) ? `"${command}"` : command;

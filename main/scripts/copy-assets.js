@@ -3,18 +3,14 @@
  * copy-assets — copy the runtime SQL assets into the compiled bundle.
  *
  * Replaces the former shell pipeline (`mkdirp … && cp src/database/*.sql …`)
- * whose `cp` and `*.sql` globbing only worked on POSIX shells — on Windows
- * `pnpm build:main` died right here. fs.cpSync + readdirSync are portable and
- * behave identically on every host.
+ * whose `cp` and globbing only worked on POSIX shells — on Windows
+ * `pnpm build:main` died right here. fs.cpSync + readdirSync behave
+ * identically on every host.
  *
- * Copies:
- *   src/database/*.sql            -> dist/main/src/database/
- *   src/database/migrations/*.sql -> dist/main/src/database/migrations/
- *
- * Runs in the `main` build chain after `tsc`. The workflow markdown copy is a
- * separate step (copy-workflow-assets.js) and stays in package.json's
- * copy:assets chain. CommonJS to match the other build helpers in this
- * directory.
+ * Copies src/database/*.sql and src/database/migrations/*.sql into the
+ * matching dist/main/src/database/ trees. Runs in the `main` build chain after
+ * `tsc`; the workflow markdown copy is a separate step
+ * (copy-workflow-assets.js). CommonJS to match the other build helpers here.
  */
 const fs = require('fs');
 const path = require('path');
