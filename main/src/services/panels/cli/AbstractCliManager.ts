@@ -15,6 +15,12 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
+import {
+  collectDescendantPids,
+  listProcessTable,
+  parseProcessTable,
+} from '../../processTable';
+import { buildWindowsProcessTableScript } from '../../winProcessTable';
 
 interface CliProcess {
   process: pty.IPty;
@@ -1088,6 +1094,25 @@ export abstract class AbstractCliManager extends EventEmitter {
       return descendants;
     }
 
+    if (process.platform === 'win32') {
+      // `pgrep` does not exist on Windows — the POSIX call below is a silent
+      // no-op there, so every interactive-session stop left the whole tree
+      // running. One PowerShell call fetches the whole (pid, ppid) table — the
+      // same query the async process-table helpers run — which the shared
+      // processTable.ts helpers parse and walk. Best-effort, same as the POSIX
+      // branch: a failed walk degrades to a partial kill list, never an error.
+      try {
+        const output = execSync(
+          `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
+          { encoding: 'utf8', timeout: 15_000 }
+        );
+        return collectDescendantPids(parentPid, parseProcessTable(output));
+      } catch (error) {
+        this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
+        return [];
+      }
+    }
+
     try {
       // `pgrep -P <ppid>` lists direct child PIDs and is portable across
       // macOS/BSD and Linux. GNU `ps --ppid` is Linux-only and is not a
@@ -1114,10 +1139,41 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
+   * Signal-0 liveness probe. ESRCH ("no such process") means dead; EPERM
+   * ("exists, no permission to signal") still counts as alive.
+   */
+  private isPidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  /**
    * Get process information for a list of PIDs
    */
   protected async getProcessInfo(pids: number[]): Promise<{ pid: number; name?: string }[]> {
     const processInfo: { pid: number; name?: string }[] = [];
+
+    if (process.platform === 'win32') {
+      // `ps -p <pid> -o comm=` does not exist on Windows; the shared process
+      // table (PowerShell stand-in) supplies the command line instead, whose
+      // basename stands in for the comm name in the zombie report.
+      try {
+        const rows = await listProcessTable();
+        const commandByPid = new Map(rows.map(row => [row.pid, row.command]));
+        return pids.map((pid) => {
+          const command = commandByPid.get(pid) ?? '';
+          const firstToken = command.trim().split(/\s+/)[0] ?? '';
+          return { pid, name: firstToken ? path.basename(firstToken) : 'unknown' };
+        });
+      } catch (error) {
+        this.logger?.warn('Error getting process info from the Windows process table:', error as Error);
+        return pids.map(pid => ({ pid, name: 'unknown' }));
+      }
+    }
 
     for (const pid of pids) {
       try {
@@ -1141,6 +1197,87 @@ export abstract class AbstractCliManager extends EventEmitter {
   protected async killProcessTree(pid: number, panelId: string, sessionId: string): Promise<boolean> {
     const descendantPids = this.getAllDescendantPids(pid);
     this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} descendant processes for PID ${pid} in session ${sessionId}`);
+
+    if (process.platform === 'win32') {
+      // Windows: no process groups and no POSIX signals — the `kill`/`pkill`
+      // ladder below is a silent no-op there (it only ever "worked" via the
+      // final pty kill, orphaning the rest of the tree). `taskkill /T /F` is
+      // the platform's whole-tree contract, backed up by per-descendant
+      // forced kills for children the at-call-time PPID walk can no longer see.
+      let success = true;
+      try {
+        // Graceful attempt first (without /F, GUI apps may close cleanly).
+        try {
+          await this.execAsync(`taskkill /PID ${pid} /T`);
+        } catch (error) {
+          this.logger?.verbose(`[${this.getCliToolName()}] Graceful taskkill for ${pid} did not settle (expected for console apps): ${error}`);
+        }
+        // Bounded grace poll — return the moment the pid is gone, capped at the
+        // ~2s the POSIX ladder spends between SIGTERM and SIGKILL.
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline && this.isPidAlive(pid)) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        try {
+          await this.execAsync(`taskkill /PID ${pid} /T /F`);
+        } catch (error) {
+          // Process might already be dead
+        }
+        for (const childPid of descendantPids) {
+          try {
+            if (this.isPidAlive(childPid)) {
+              await this.execAsync(`taskkill /PID ${childPid} /F`);
+            }
+          } catch (error) {
+            // Already dead / no permission — the verification pass below decides.
+          }
+        }
+        // Verify all processes are actually dead
+        await new Promise(resolve => setTimeout(resolve, 500));
+        let remainingPids = this.getAllDescendantPids(pid);
+        if (remainingPids.length > 0) {
+          // Survivors found: one direct forced kill each — taskkill /T cannot
+          // see a child whose parent link it can no longer walk — then re-check.
+          for (const survivorPid of remainingPids) {
+            try {
+              await this.execAsync(`taskkill /PID ${survivorPid} /F`);
+            } catch (error) {
+              // Already dead / no permission — the re-check below decides.
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, 200));
+          remainingPids = this.getAllDescendantPids(pid);
+        }
+        if (remainingPids.length > 0) {
+          this.logger?.error(`[${this.getCliToolName()}] WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
+          success = false;
+          const remainingProcesses = await this.getProcessInfo(remainingPids);
+          const processReport = remainingProcesses.map(p => `${p.name || 'unknown'}(${p.pid})`).join(', ');
+          this.emit('output', {
+            panelId,
+            sessionId,
+            type: 'stderr',
+            data: `\n[WARNING] Failed to terminate ${remainingPids.length} child process${remainingPids.length > 1 ? 'es' : ''}: ${processReport}\nPlease manually kill these processes.\n`,
+            timestamp: new Date()
+          } as CliOutputEvent);
+        }
+      } catch (error) {
+        this.logger?.error(`[${this.getCliToolName()}] Error in killProcessTree:`, error as Error);
+        success = false;
+      }
+
+      // Always try to kill via pty interface as final fallback
+      try {
+        const cliProcess = this.processes.get(panelId);
+        if (cliProcess) {
+          cliProcess.process.kill();
+        }
+      } catch (error) {
+        // Process might already be dead
+      }
+
+      return success;
+    }
 
     let success = true;
 

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as os from 'os';
+import { escapeShellArg } from './shellEscape';
 
 interface ShellInfo {
   path: string;
@@ -172,6 +173,38 @@ export class ShellDetector {
       };
     }
     return { shell: shellInfo.path, args: ['-c', command] };
+  }
+
+  /**
+   * Build the command string for a multi-statement script — an optional set of
+   * environment variables assigned first, then the command lines run in
+   * order — in the dialect {@link getShellCommandArgs} routes to.
+   *
+   * POSIX (unchanged output): `export K='v' && line1 && line2`.
+   * Windows routes to PowerShell, where `export` does not exist and `&&` is a
+   * parse error on the PowerShell 5.1 every Windows host ships (only PS 7+
+   * supports it) — so a POSIX-shaped string NEVER executes there. The win32
+   * form assigns through the env provider (`$env:K = 'v'`, embedded single
+   * quotes doubled — PowerShell's own escaping) and separates statements with
+   * `;`. `platform` is injectable so tests can pin either dialect anywhere.
+   */
+  static buildCommandString(
+    envVars: Record<string, string>,
+    commandLines: string[],
+    platform: NodeJS.Platform = process.platform
+  ): string {
+    const parts: string[] = [];
+    if (platform === 'win32') {
+      for (const [key, value] of Object.entries(envVars)) {
+        parts.push(`$env:${key} = '${value.replace(/'/g, "''")}'`);
+      }
+    } else {
+      for (const [key, value] of Object.entries(envVars)) {
+        parts.push(`export ${key}=${escapeShellArg(value)}`);
+      }
+    }
+    parts.push(...commandLines);
+    return parts.join(platform === 'win32' ? '; ' : ' && ');
   }
 
   /**

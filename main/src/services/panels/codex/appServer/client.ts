@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import { killWindowsTree } from '../../../processTable';
 import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
@@ -1151,14 +1152,21 @@ export class CodexAppServerClient {
    * Signal the app-server. When the child leads its own process group (real
    * spawn, `detached: true`), target the whole group via a negative pid so the
    * MCP-bridge / MCP-server node grandchildren are reaped instead of orphaned.
-   * Falls back to a direct child signal when no pid is available (e.g. tests) or
-   * the group signal fails (child already reaped, or not a group leader).
+   * On Windows there are no process-group semantics through `process.kill` (a
+   * negative pid fails with EINVAL), so the whole tree is force-killed with
+   * `taskkill /T /F` instead. Falls back to a direct child signal when no pid
+   * is available (e.g. tests) or the group signal fails (child already reaped,
+   * or not a group leader).
    */
   private killChild(signal: NodeJS.Signals): void {
     const child = this.child;
     if (!child) return;
     const pid = child.pid;
     if (typeof pid === 'number' && pid > 0) {
+      if (process.platform === 'win32') {
+        killWindowsTree(pid);
+        return;
+      }
       try {
         process.kill(-pid, signal);
         return;

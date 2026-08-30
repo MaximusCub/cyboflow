@@ -192,4 +192,45 @@ describe('TerminalSessionManager killProcessTree — poll-until-dead', () => {
     // Early exit once the probe reports death (no 60s wait).
     expect(probeCalls).toBeLessThanOrEqual(4);
   });
+
+  it('win32 ladder: force-kills enumerated descendants the /T tree walk can no longer see', async () => {
+    // The shell (4242) dies in the graceful step, orphaning 4243 — a /T walk
+    // at that point can no longer reach the child, which is exactly the gap
+    // the up-front enumeration + per-descendant /F pass exist to close.
+    const table: ProcessTableRow[] = [
+      { pid: 4242, ppid: 1 },
+      { pid: 4243, ppid: 4242 },
+    ];
+    const execCommand = vi.fn<(command: string) => Promise<{ stdout: string }>>((command) => {
+      // Model taskkill: a successful kill removes exactly its target pid; a
+      // /T walk whose target pid is already gone finds nothing.
+      const match = /^taskkill \/PID (\d+)(?: \/T| \/F)?$/.exec(command);
+      if (match) {
+        const killed = Number(match[1]);
+        const idx = table.findIndex((row) => row.pid === killed);
+        if (idx !== -1) table.splice(idx, 1);
+      }
+      return Promise.resolve({ stdout: '' });
+    });
+
+    const manager = makeManager({
+      listProcessTable: () => Promise.resolve(table),
+      isPidAlive: (p) => table.some((row) => row.pid === p),
+      sendSignal: vi.fn(),
+      execCommand,
+      pollIntervalMs: 5,
+      graceMs: 1000,
+      platform: 'win32',
+    });
+
+    const success = await manager.killProcessTree(4242);
+
+    expect(success).toBe(true);
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T');
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T /F');
+    // The orphaned descendant was individually forced after the tree kill...
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4243 /F');
+    // ...and the verification pass saw no survivors (no zombie event path).
+    expect(table.some((row) => row.pid === 4243)).toBe(false);
+  });
 });

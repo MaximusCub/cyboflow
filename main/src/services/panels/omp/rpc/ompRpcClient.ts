@@ -26,6 +26,7 @@
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { killWindowsTree } from '../../../processTable';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';
@@ -941,14 +942,20 @@ export class OmpRpcClient {
   /**
    * Signal the child. When it leads its own process group (a real spawn), target
    * the group via a negative pid so OMP's own children are reaped rather than
-   * orphaned; fall back to a direct signal when there is no pid (tests) or the
-   * group signal fails.
+   * orphaned; on Windows there are no process-group semantics through
+   * `process.kill` (a negative pid fails with EINVAL), so the whole tree is
+   * force-killed with `taskkill /T /F` instead. Fall back to a direct signal
+   * when there is no pid (tests) or the group signal fails.
    */
   private killChild(signal: NodeJS.Signals): void {
     const child = this.child;
     if (!child) return;
     const pid = child.pid;
     if (typeof pid === 'number' && pid > 0) {
+      if (process.platform === 'win32') {
+        killWindowsTree(pid);
+        return;
+      }
       try {
         process.kill(-pid, signal);
         return;
