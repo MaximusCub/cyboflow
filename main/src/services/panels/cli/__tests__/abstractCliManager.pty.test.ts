@@ -41,7 +41,7 @@ import { AbstractCliManager } from '../AbstractCliManager';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConversationMessage } from '../../../../database/models';
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
-import { collectDescendantPids, listPidPpidTableSync } from '../../../processTable';
+import { collectDescendantPids, listPidPpidTableSync } from '../../../../utils/platformProcess';
 
 // ---------------------------------------------------------------------------
 // Minimal concrete subclass exposing the protected primitives under test.
@@ -369,7 +369,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
       // Positive control via the shared pid/ppid table: the tree really exists.
       let grandkids: number[] = [];
       const ok = await waitUntil(() => {
-        grandkids = collectDescendantPids(pid, listPidPpidTableSync());
+        grandkids = collectDescendantPids(pid);
         return grandkids.length >= 1;
       }, 5000);
       expect(ok).toBe(true);

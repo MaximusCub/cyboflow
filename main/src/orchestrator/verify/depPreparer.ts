@@ -229,6 +229,20 @@ export const defaultDepExec: DepExec = async (cmd, args, opts) => {
   // `cp` does not exist on Windows: translate the exact argv the two clone
   // rungs pass (`['-Rc'|'-R', src, dest]`) to an in-process verbatim copy.
   // Anything else (notably the electron-builder rebuild) still goes to execFile.
+  // `npx` on Windows is `npx.cmd`, which Node refuses to spawn shell-less
+  // (EINVAL hardening). cmd.exe resolves the shim and `windowsHide` (set on
+  // every exec below) keeps it invisible.
+  if (process.platform === 'win32' && cmd === 'npx') {
+    const comspec = process.env.comspec || 'cmd.exe';
+    const result = await execFileAsync(comspec, ['/d', '/s', '/c', 'npx', ...args], {
+      cwd: opts.cwd,
+      encoding: 'utf8',
+      timeout: opts.timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
+    });
+    return { code: 0, out: `${result.stdout}${result.stderr}` };
+  }
   if (
     process.platform === 'win32' &&
     cmd === 'cp' &&
