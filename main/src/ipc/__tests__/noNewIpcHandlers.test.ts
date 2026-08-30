@@ -20,12 +20,13 @@ import * as path from 'node:path';
  * contain the literal, so the surface stays countable.
  */
 
-/** Frozen 2026-08-25 (166 handlers — down from 187: the 21 `ipc/git.ts`
- * handlers left the raw surface in slice 3, the final slice, of the IPC→tRPC
- * migration — 20 became the cyboflow.sessionGit tRPC router and
- * `sessions:check-rebase-conflicts` was deleted outright, having had zero
- * callers). Entries may decrease or disappear, never grow — and a decrease
- * MUST be recorded here, so the map tracks reality. */
+/** Frozen 2026-08-30 (150 handlers — down from 166: 16 `ipc/session.ts`
+ * handlers left the raw surface in batch 1 of the session-surface IPC→tRPC
+ * migration — 15 became the cyboflow.sessions tRPC router and
+ * `debug:get-table-structure` was deleted outright, having had zero callers.
+ * The 166 before that came from slice 3, which retired all 21 `ipc/git.ts`
+ * handlers the same way.) Entries may decrease or disappear, never grow — and a
+ * decrease MUST be recorded here, so the map tracks reality. */
 const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'index.ts': 2,
   'ipc/app.ts': 10,
@@ -49,7 +50,7 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/prompt.ts': 2,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,
-  'ipc/session.ts': 42,
+  'ipc/session.ts': 26,
   'ipc/uiState.ts': 4,
   'ipc/updater.ts': 4,
 };

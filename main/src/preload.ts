@@ -15,8 +15,6 @@ import type {
   OpenArtifactHtmlExternalResult,
 } from '../../shared/types/artifacts';
 import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
-import type { SessionSummaryPayload } from '../../shared/types/sessionSummary';
-import type { QuickSessionRow } from '../../shared/types/quickSessions';
 import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../shared/types/ideaSession';
 import type {
   BugReportPreview,
@@ -235,14 +233,8 @@ export const GENERIC_INVOKE_CHANNELS: readonly string[] = [
   'preferences:get',
   'preferences:set',
 
-  // Sessions
-  'sessions:set-active-session',
-
   // Projects
   'projects:refresh-git-status',
-
-  // Archive progress polling
-  'archive:get-progress',
 
   // Tool panels
   'panels:update',
@@ -335,9 +327,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Session management
   sessions: {
-    getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-all'),
-    getAllWithProjects: (): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-all-with-projects'),
-    get: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get', sessionId),
     create: (request: CreateSessionRequest): Promise<IPCResponse> => ipcRenderer.invoke('sessions:create', request),
     // claudePanelId is set ONLY when the handler eagerly spawned the interactive
     // PTY REPL (request.substrate === 'interactive') so the frontend can skip
@@ -358,13 +347,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resumeInteractive: (sessionId: string, panelId?: string, acknowledgeProviderDisabled?: boolean): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resume-interactive', sessionId, panelId, acknowledgeProviderDisabled),
     restartInteractive: (sessionId: string, panelId?: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:restart-interactive', sessionId, panelId),
     getOutput: (sessionId: string, limit?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-output', sessionId, limit),
-    getStatistics: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-statistics', sessionId),
     getConversation: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation', sessionId),
     getConversationMessages: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation-messages', sessionId),
     generateCompactedContext: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:generate-compacted-context', sessionId),
-    markViewed: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:mark-viewed', sessionId),
-    getSummary: (sessionId: string, opts?: { catchUp?: boolean }): Promise<IPCResponse<SessionSummaryPayload>> => ipcRenderer.invoke('sessions:get-summary', sessionId, opts),
-    listQuick: (projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> => ipcRenderer.invoke('sessions:list-quick', projectId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
     // Main repo session
@@ -382,17 +367,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
     // Prompt operations
     getPrompts: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-prompts', sessionId),
-    rename: (sessionId: string, newName: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:rename', sessionId, newName),
-    toggleFavorite: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-favorite', sessionId),
-    updateAgentPermissionMode: (sessionId: string, mode: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-agent-permission-mode', sessionId, mode),
-    updateSessionMcps: (sessionId: string, disabledMcpServers: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-mcps', sessionId, disabledMcpServers),
-    updateSessionPlugins: (sessionId: string, enabledPlugins: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-plugins', sessionId, enabledPlugins),
 
     // IDE operations
     openIDE: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:open-ide', sessionId),
-    
-    // Reorder operations
-    reorder: (sessionOrders: Array<{ id: string; displayOrder: number }>): Promise<IPCResponse> => ipcRenderer.invoke('sessions:reorder', sessionOrders),
     
     // Image operations
     saveImages: (sessionId: string, images: Array<{ name: string; dataUrl: string; type: string }>): Promise<string[]> => ipcRenderer.invoke('sessions:save-images', sessionId, images),
@@ -792,11 +769,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     runScript: (sessionId: string, command: string, cwd: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:runScript', sessionId, command, cwd),
     stopScript: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:stopScript', panelId),
     isRunning: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('logs:isRunning', sessionId),
-  },
-
-  // Debug utilities
-  debug: {
-    getTableStructure: (tableName: 'folders' | 'sessions'): Promise<IPCResponse> => ipcRenderer.invoke('debug:get-table-structure', tableName),
   },
 
   // Nimbalyst integration

@@ -4,10 +4,7 @@ import type { Project } from './project';
 import type { Folder } from './folder';
 import type { ToolPanel, CreatePanelRequest, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
-import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
-import type { QuickSessionRow } from '../../../shared/types/quickSessions';
-import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { OpenIdeaSessionRequest, OpenIdeaSessionResponse } from '../../../shared/types/ideaSession';
 import type {
   BugReportPreview,
@@ -127,12 +124,6 @@ interface ElectronAPI {
 
   // Session management
   sessions: {
-    getAll: () => Promise<IPCResponse<Session[]>>;
-    // getAllWithProjects returns ProjectWithSessions[] (Project + sessions + folders),
-    // but that type is locally defined in DraggableProjectTreeView.
-    // Typed as unknown[] here; callers cast to their local interface.
-    getAllWithProjects: () => Promise<IPCResponse<unknown[]>>;
-    get: (sessionId: string) => Promise<IPCResponse<Session>>;
     create: (request: CreateSessionRequest) => Promise<IPCResponse<Session>>;
     // claudePanelId is present only when the server eagerly created the claude
     // panel (interactive-substrate sessions spawn the PTY REPL during create-quick);
@@ -160,14 +151,9 @@ interface ElectronAPI {
     restartInteractive: (sessionId: string, panelId?: string) => Promise<IPCResponse<void>>;
     // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
-    // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data
-    getStatistics: (sessionId: string) => Promise<IPCDataResponse<unknown>>;
     getConversation: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
-    markViewed: (sessionId: string) => Promise<IPCResponse<void>>;
-    getSummary: (sessionId: string, opts?: { catchUp?: boolean }) => Promise<IPCResponse<SessionSummaryPayload>>;
-    listQuick: (projectId?: number) => Promise<IPCResponse<QuickSessionRow[]>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Script operations
@@ -187,20 +173,12 @@ interface ElectronAPI {
     // Git merge operations
     mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
     mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
-    rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
-    toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
-    updateAgentPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<IPCResponse<void>>;
-    updateSessionMcps: (sessionId: string, disabledMcpServers: string[]) => Promise<IPCResponse<void>>;
-    updateSessionPlugins: (sessionId: string, enabledPlugins: string[]) => Promise<IPCResponse<void>>;
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;
 
     // IDE operations
     openIDE: (sessionId: string) => Promise<IPCResponse<void>>;
-
-    // Reorder operations
-    reorder: (sessionOrders: Array<{ id: string; displayOrder: number }>) => Promise<IPCResponse<void>>;
 
     // Image operations
     saveImages: (sessionId: string, images: Array<{ name: string; dataUrl: string; type: string }>) => Promise<string[]>;
@@ -457,34 +435,6 @@ interface ElectronAPI {
     isRunning: (sessionId: string) => Promise<IPCResponse<boolean>>;
   };
 
-  // Debug utilities
-  debug: {
-    getTableStructure: (tableName: 'folders' | 'sessions') => Promise<IPCResponse<{
-      columns: Array<{
-        cid: number;
-        name: string;
-        type: string;
-        notnull: number;
-        dflt_value: string | number | boolean | null;
-        pk: number;
-      }>;
-      foreignKeys: Array<{
-        id: number;
-        seq: number;
-        table: string;
-        from: string;
-        to: string;
-        on_update: string;
-        on_delete: string;
-        match: string;
-      }>;
-      indexes: Array<{
-        name: string;
-        tbl_name: string;
-        sql: string;
-      }>;
-    }>>;
-  };
 
   // Nimbalyst integration
   nimbalyst: {

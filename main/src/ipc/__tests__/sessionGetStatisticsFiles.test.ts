@@ -1,13 +1,16 @@
 /**
- * sessions:get-statistics — the `files` block.
+ * sessionOps.getStatistics — the `files` block.
+ *
+ * The ops implementation behind the `cyboflow.sessions.getStatistics` tRPC
+ * procedure, formerly the `sessions:get-statistics` IPC handler.
  *
  * Regression guard for the quick-session card reading "0 files seen / +0 −0"
- * beside a Diff tab listing hundreds of changed files. The handler summed
+ * beside a Diff tab listing hundreds of changed files. It used to sum
  * `execution_diffs`, which ExecutionTracker only writes when the agent PROCESS
  * EXITS — a warm-SDK / PTY quick session keeps one process alive across every
  * turn, so it has NO rows at all however much it edits.
  *
- * The handler now diffs the worktree against the session's branch point and
+ * It now diffs the worktree against the session's branch point and
  * only falls back to the execution_diffs aggregation when git cannot answer
  * (archived session whose worktree is gone, gc'd base commit).
  */
@@ -53,10 +56,10 @@ vi.mock('../../utils/runGit', () => ({
   runGit: vi.fn(),
 }));
 
-import { registerSessionHandlers } from '../session';
+import { createSessionOps } from '../sessionOps';
+import type { SessionOpsLike } from '../../orchestrator/trpc/contracts/sessionOps';
 import type { AppServices } from '../types';
 
-const CHANNEL = 'sessions:get-statistics';
 const SESSION_ID = 'sess-001';
 const WORKTREE = '/tmp/project/quick-test';
 const BASE_COMMIT = 'a'.repeat(40);
@@ -72,16 +75,6 @@ interface StatisticsResult {
       executionCount: number;
     };
   };
-}
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, fn);
-    },
-  };
-  return { ipcMain, handlers };
 }
 
 /** One execution_diffs row — the legacy source, kept as the git-less fallback. */
@@ -153,21 +146,14 @@ function makeServices(opts: {
     cyboflow: { workflowRegistry: {}, runLauncher: {} },
   } as unknown as AppServices;
 
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerSessionHandlers(
-    ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
-    services,
-  );
-  return handlers;
+  return createSessionOps(services);
 }
 
-async function invoke(handlers: Map<string, (...args: unknown[]) => Promise<unknown>>) {
-  const fn = handlers.get(CHANNEL);
-  if (!fn) throw new Error(`No handler registered for channel: ${CHANNEL}`);
-  return (await fn({} as unknown, SESSION_ID)) as StatisticsResult;
+async function invoke(ops: SessionOpsLike) {
+  return (await ops.getStatistics({ sessionId: SESSION_ID })) as StatisticsResult;
 }
 
-describe('sessions:get-statistics — file statistics', () => {
+describe('sessionOps.getStatistics — file statistics', () => {
   beforeEach(() => {
     mockRunGitAsync.mockReset();
     // Every ref candidate resolves unless a test says otherwise.
@@ -179,9 +165,9 @@ describe('sessions:get-statistics — file statistics', () => {
       stats: { additions: 15443, deletions: 745, filesChanged: 177 },
       changedFiles: ['CHANGELOG.md', 'docs/ARCHITECTURE.md'],
     }));
-    const handlers = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
 
-    const result = await invoke(handlers);
+    const result = await invoke(ops);
 
     expect(result.success).toBe(true);
     expect(result.data.files.totalFilesChanged).toBe(177);
@@ -198,9 +184,9 @@ describe('sessions:get-statistics — file statistics', () => {
       stats: { additions: 0, deletions: 0, filesChanged: 0 },
       changedFiles: [],
     }));
-    const handlers = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
 
-    const result = await invoke(handlers);
+    const result = await invoke(ops);
 
     expect(result.data.files.totalFilesChanged).toBe(0);
     expect(result.data.files.filesModified).toEqual([]);
@@ -209,13 +195,13 @@ describe('sessions:get-statistics — file statistics', () => {
   it('falls back to the execution_diffs aggregation when git cannot answer', async () => {
     // No worktree to diff (archived session): the historical rows are all we have.
     const getDiffStatsAgainstRef = vi.fn();
-    const handlers = makeServices({
+    const ops = makeServices({
       getDiffStatsAgainstRef,
       baseCommit: BASE_COMMIT,
       worktreePath: null,
     });
 
-    const result = await invoke(handlers);
+    const result = await invoke(ops);
 
     expect(getDiffStatsAgainstRef).not.toHaveBeenCalled();
     expect(result.data.files.totalFilesChanged).toBe(1);
@@ -233,9 +219,9 @@ describe('sessions:get-statistics — file statistics', () => {
       stats: { additions: 30, deletions: 4, filesChanged: 3 },
       changedFiles: ['a.ts', 'b.ts', 'c.ts'],
     }));
-    const handlers = makeServices({ getDiffStatsAgainstRef, baseCommit: undefined, isMainRepo: true });
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: undefined, isMainRepo: true });
 
-    const result = await invoke(handlers);
+    const result = await invoke(ops);
 
     expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'origin/main');
     expect(result.data.files.totalFilesChanged).toBe(3);
@@ -246,14 +232,14 @@ describe('sessions:get-statistics — file statistics', () => {
       stats: { additions: 1, deletions: 0, filesChanged: 1 },
       changedFiles: ['a.ts'],
     }));
-    const handlers = makeServices({
+    const ops = makeServices({
       getDiffStatsAgainstRef,
       baseCommit: undefined,
       isMainRepo: true,
       originBranch: null,
     });
 
-    await invoke(handlers);
+    await invoke(ops);
 
     expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'main');
   });
@@ -267,9 +253,9 @@ describe('sessions:get-statistics — file statistics', () => {
       stats: { additions: 4, deletions: 1, filesChanged: 2 },
       changedFiles: ['x.ts', 'y.ts'],
     }));
-    const handlers = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
 
-    const result = await invoke(handlers);
+    const result = await invoke(ops);
 
     expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'main');
     expect(result.data.files.totalFilesChanged).toBe(2);

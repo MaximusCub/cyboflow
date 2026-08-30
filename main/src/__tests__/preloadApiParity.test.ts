@@ -106,8 +106,11 @@ describe('preload ↔ api.ts contextBridge parity (B11 + C6)', () => {
     // Guards against the regex silently matching nothing (which would make the
     // parity assertion below vacuously pass).
     expect(consumedPaths.size).toBeGreaterThan(30);
-    // Spot-check a representative nested path was captured.
-    expect(consumedPaths.has('sessions.getAll')).toBe(true);
+    // Spot-check a representative nested path was captured. `sessions.create`
+    // rather than `sessions.getAll`: the session RECORD reads left the bridge in
+    // batch 1 of the session IPC→tRPC migration, while the lifecycle channels
+    // (create / delete / input / …) stayed.
+    expect(consumedPaths.has('sessions.create')).toBe(true);
   });
 
   it('exposes artifacts.loadHtml + loadImages (IDEA-039 static-mockup loader parity)', () => {

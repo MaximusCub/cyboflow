@@ -145,9 +145,11 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGitOps';
+import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
+import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -945,6 +947,18 @@ let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
 let sessionGitOps: SessionGitOpsLike | undefined;
 
 /**
+ * The `cyboflow.sessions` router's ops implementation (batch 1 of the
+ * session-surface IPC→tRPC migration) — the exact twin of the sessionGit holder
+ * above, and for the same reason: createSessionOps needs the full AppServices
+ * object, which is assembled inside initializeServices and is not in scope
+ * here. Read LAZILY by the per-request context factory below, so a window
+ * attached before initializeServices finished still sees the ops once they
+ * exist. Undefined before then, which the router reports as
+ * PRECONDITION_FAILED.
+ */
+let sessionOps: SessionOpsLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -1026,6 +1040,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // the full AppServices object, which only exists inside
         // initializeServices.
         sessionGitOps,
+        sessionOps,
       }),
   });
 }
@@ -4408,6 +4423,11 @@ async function initializeServices(): Promise<boolean> {
   // included. Publish it on the module-scope holder the per-request tRPC
   // context reads.
   sessionGitOps = createGitOps(services);
+  // Same seam, same reason, for the session-record surface (batch 1 of the
+  // session-side migration): the `cyboflow.sessions` router's reads and small
+  // mutations are ops closures over this very services object now, not
+  // ipcMain.handle registrations.
+  sessionOps = createSessionOps(services);
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);

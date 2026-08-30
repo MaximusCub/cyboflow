@@ -28,6 +28,7 @@ import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
+import type { SessionOpsLike } from './contracts/sessionOps';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -523,6 +524,27 @@ export interface ContextDeps {
    * access can omit it.
    */
   sessionGitOps?: SessionGitOpsLike;
+
+  /**
+   * Live session-ops implementation (the `sessions` router's business logic —
+   * the session-record surface: the sidebar's session reads, the quick-session
+   * status board, the summary read, the statistics poll, archive progress, and
+   * the rename / favourite / permission-mode / MCP+plugin-toggle / reorder /
+   * active-session mutations).
+   *
+   * Injected from `main/src/index.ts` via `createSessionOps(services)`
+   * (main/src/ipc/sessionOps.ts) — the SAME AppServices object
+   * `registerIpcHandlers` gets, so the summary scheduler and the quick-session
+   * board's manager singletons are the same live instances the rest of the IPC
+   * layer uses. Using the narrow {@link SessionOpsLike} interface (rather than
+   * importing the concrete factory) preserves the standalone-typecheck
+   * invariant: no 'main/src/services/*' import is needed here.
+   *
+   * Handlers must explicitly check `ctx.sessionOps` before use — `undefined` is
+   * the intentional default so unit tests that do not need session access can
+   * omit it.
+   */
+  sessionOps?: SessionOpsLike;
 }
 
 /**
@@ -580,6 +602,7 @@ export function createContext(deps: ContextDeps = {}): {
   configOps?: ConfigOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
+  sessionOps?: SessionOpsLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -603,6 +626,7 @@ export function createContext(deps: ContextDeps = {}): {
     configOps,
     workspaceFileOps,
     sessionGitOps,
+    sessionOps,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -633,6 +657,7 @@ export function createContext(deps: ContextDeps = {}): {
     configOps,
     workspaceFileOps,
     sessionGitOps,
+    sessionOps,
   };
 }
 

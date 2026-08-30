@@ -19,9 +19,10 @@ import type { Session, SessionOutput } from '../../types/session';
 // ---------------------------------------------------------------------------
 // API mock — setActiveSession/createSession call into it.
 // ---------------------------------------------------------------------------
-const { apiGet, apiMarkViewed } = vi.hoisted(() => ({
+const { apiGet, apiMarkViewed, apiSetActiveSession } = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiMarkViewed: vi.fn(),
+  apiSetActiveSession: vi.fn(),
 }));
 
 vi.mock('../../utils/api', () => ({
@@ -29,6 +30,7 @@ vi.mock('../../utils/api', () => ({
     sessions: {
       get: apiGet,
       markViewed: apiMarkViewed,
+      setActiveSession: apiSetActiveSession,
     },
   },
 }));
@@ -72,9 +74,7 @@ beforeEach(() => {
   resetStore();
   apiGet.mockReset();
   apiMarkViewed.mockReset().mockResolvedValue({ success: true });
-  (window as unknown as { electronAPI: { invoke: ReturnType<typeof vi.fn> } }).electronAPI = {
-    invoke: vi.fn().mockResolvedValue(undefined),
-  };
+  apiSetActiveSession.mockReset().mockResolvedValue({ success: true });
 });
 
 describe('addSession — display order', () => {
@@ -190,8 +190,9 @@ describe('setActiveSession — branches', () => {
     const state = useSessionStore.getState();
     expect(state.activeSessionId).toBeNull();
     expect(state.activeMainRepoSession).toBeNull();
-    const invoke = (window as unknown as { electronAPI: { invoke: ReturnType<typeof vi.fn> } }).electronAPI.invoke;
-    expect(invoke).toHaveBeenCalledWith('sessions:set-active-session', null);
+    // The backend notification rides API.sessions.setActiveSession (the
+    // cyboflow.sessions tRPC mutation) rather than the generic invoke bridge.
+    expect(apiSetActiveSession).toHaveBeenCalledWith(null);
   });
 
   it('uses the in-store regular session without fetching', async () => {

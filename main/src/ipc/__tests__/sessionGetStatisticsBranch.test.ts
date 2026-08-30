@@ -1,9 +1,11 @@
 /**
- * Unit tests for the sessions:get-statistics IPC handler's branch resolution
- * (TASK-085).
+ * Unit tests for the branch resolution in `getStatistics`
+ * (main/src/ipc/sessionOps.ts) — the ops implementation behind the
+ * `cyboflow.sessions.getStatistics` tRPC procedure, formerly the
+ * `sessions:get-statistics` IPC handler (TASK-085).
  *
  * The running-session card previously showed the literal 'HEAD' / a 'main'
- * fallback because the handler returned `session.baseBranch || 'main'`
+ * fallback because it returned `session.baseBranch || 'main'`
  * verbatim instead of resolving the LIVE worktree branch. The fix calls
  * `getCurrentBranch(session.worktreePath)` ONCE per session (not per-panel)
  * and only falls back to `baseBranch || 'main'` when that resolves to null
@@ -11,7 +13,7 @@
  *
  * `baseBranch` semantics are otherwise untouched, so this suite only locks
  * the new `statistics.session.branch` fallback chain — it does not
- * re-assert every other field the handler returns.
+ * re-assert every other field the payload carries.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -53,32 +55,11 @@ vi.mock('../../services/gitPlumbingCommands', () => ({
   getCurrentBranch: mockGetCurrentBranch,
 }));
 
-import { registerSessionHandlers } from '../session';
+import { createSessionOps } from '../sessionOps';
 import type { AppServices } from '../types';
 
-const CHANNEL = 'sessions:get-statistics';
 const SESSION_ID = 'sess-001';
 const WORKTREE = '/tmp/project/quick-test';
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, fn);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invoke(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler registered for channel: ${channel}`);
-  return fn({} as unknown, ...args);
-}
 
 function makeServices(opts: { baseBranch?: string; worktreePath?: string }) {
   const fakeDb = {
@@ -134,16 +115,7 @@ function makeServices(opts: { baseBranch?: string; worktreePath?: string }) {
   return { services, fakeSessionManager };
 }
 
-function registerWith(services: AppServices) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerSessionHandlers(
-    ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
-    services,
-  );
-  return handlers;
-}
-
-describe('sessions:get-statistics — branch resolution', () => {
+describe('sessionOps.getStatistics — branch resolution', () => {
   beforeEach(() => {
     mockGetCurrentBranch.mockReset();
     mockGetPanelsForSession.mockReset();
@@ -153,9 +125,9 @@ describe('sessions:get-statistics — branch resolution', () => {
   it('uses the live worktree branch when getCurrentBranch resolves one', async () => {
     mockGetCurrentBranch.mockReturnValue('feature/live-branch');
     const { services } = makeServices({ baseBranch: 'main', worktreePath: WORKTREE });
-    const handlers = registerWith(services);
+    const ops = createSessionOps(services);
 
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID)) as {
+    const result = (await ops.getStatistics({ sessionId: SESSION_ID })) as {
       success: boolean;
       data: { session: { branch: string } };
     };
@@ -170,9 +142,9 @@ describe('sessions:get-statistics — branch resolution', () => {
   it('falls back to baseBranch when getCurrentBranch returns null (detached HEAD / unreadable worktree)', async () => {
     mockGetCurrentBranch.mockReturnValue(null);
     const { services } = makeServices({ baseBranch: 'develop', worktreePath: WORKTREE });
-    const handlers = registerWith(services);
+    const ops = createSessionOps(services);
 
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID)) as {
+    const result = (await ops.getStatistics({ sessionId: SESSION_ID })) as {
       success: boolean;
       data: { session: { branch: string } };
     };
@@ -184,9 +156,9 @@ describe('sessions:get-statistics — branch resolution', () => {
   it('falls back to "main" when getCurrentBranch returns null and there is no baseBranch', async () => {
     mockGetCurrentBranch.mockReturnValue(null);
     const { services } = makeServices({ baseBranch: undefined, worktreePath: WORKTREE });
-    const handlers = registerWith(services);
+    const ops = createSessionOps(services);
 
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID)) as {
+    const result = (await ops.getStatistics({ sessionId: SESSION_ID })) as {
       success: boolean;
       data: { session: { branch: string } };
     };
@@ -208,9 +180,9 @@ describe('sessions:get-statistics — branch resolution', () => {
     ]);
     mockGetCurrentBranch.mockReturnValue('feature/multi-panel');
     const { services } = makeServices({ baseBranch: 'main', worktreePath: WORKTREE });
-    const handlers = registerWith(services);
+    const ops = createSessionOps(services);
 
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID)) as {
+    const result = (await ops.getStatistics({ sessionId: SESSION_ID })) as {
       success: boolean;
       data: { session: { branch: string } };
     };

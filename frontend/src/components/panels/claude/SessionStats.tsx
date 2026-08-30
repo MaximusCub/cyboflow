@@ -15,14 +15,21 @@ interface ToolUsageStats {
   totalOutputTokens: number;
 }
 
+/**
+ * Renderer twin of `SessionStatisticsPayload`
+ * (main/src/orchestrator/trpc/contracts/sessionOps.ts — source of truth). The
+ * timestamps are Dates, not strings: the session row's `createdAt` /
+ * `lastActivity` are parsed Dates main-side and superjson carries them across
+ * intact.
+ */
 interface SessionStatistics {
   session: {
     id: string;
     name: string;
     status: string;
-    model: string;
-    createdAt: string;
-    updatedAt: string;
+    model: string | null;
+    createdAt: Date;
+    updatedAt: Date;
     duration: number;
     worktreePath: string;
     branch?: string;
@@ -49,7 +56,7 @@ interface SessionStatistics {
       stdout: number;
       stderr: number;
     };
-    lastActivity: string;
+    lastActivity: Date;
   };
   toolUsage?: {
     tools: ToolUsageStats[];
@@ -71,7 +78,7 @@ export const SessionStats: React.FC<SessionStatsProps> = ({ sessionId }) => {
       try {
         setLoading(true);
         const response = await API.sessions.getStatistics(sessionId);
-        if (response.success && response.data) {
+        if (response.success) {
           setStatistics(response.data as SessionStatistics);
         } else {
           setError(response.error || 'Failed to load statistics');
