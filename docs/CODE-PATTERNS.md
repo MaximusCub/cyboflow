@@ -15,7 +15,7 @@ to a canonical example — read those for the actual implementation.
   examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and `rawEvents.ts`).
 - **Barrels:** No barrel `index.ts` re-exports as a rule; import paths are explicit. Known
   exceptions: `main/src/services/panels/codex/appServer/index.ts` (a pure `export *` barrel),
-  plus the named-re-export barrels `main/src/services/streamParser/index.ts` and
+  plus the named-re-export barrels `shared/streamParser/index.ts` and
   `main/src/orchestrator/dynamicWorkflows/index.ts` — not license to add more.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
   (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`. The `any` type is
@@ -205,7 +205,7 @@ truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and t
 - The `@deprecated` re-exports in `{frontend,main}/src/types/session.ts` (`TextContent`,
   `ToolUseContent`, `ToolResultContent`) are a temporary migration bridge — do not add new
   consumers.
-- TS↔Zod drift bridge: `main/src/services/streamParser/schemas.ts` `_typeCheck` catches
+- TS↔Zod drift bridge: `shared/streamParser/schemas.ts` `_typeCheck` catches
   required-field drift. Optional-field drift is a known gap (SPRINT-020 TASK-571 HUMAN_NEEDED).
 
 **StreamEvent discriminated-union narrowing:** `StreamEvent.type` (`frontend/src/utils/cyboflowApi.ts`)
@@ -438,7 +438,7 @@ columns each table carries — add a new per-type column there, not via scattere
 `if (type === 'idea')` branches.
 
 **Off-board buckets (migration 042).** Decomposing an idea stamps `ideas.decomposed_at` (the idea
-leaves the 4-stage board, reachable only via children) with NO cascade — retirement is
+leaves the 5-stage board, reachable only via children) with NO cascade — retirement is
 exclusively gate-driven (the approve-plan gate retires the planner's root idea). The CREATE seam
 is the Q1 visibility gate: a plan-gated run's epics/tasks are created PENDING
 (`approved_at IS NULL` = backend-invisible + sprint-ineligible) and stay so until the approve-plan
@@ -464,17 +464,21 @@ REQUIRED on `BacklogTaskItem` so an omitting constructor fails the build (silent
 
 ### Derived-stage recompute follow-ons (`recomputeTaskExecutionStage` + `recomputeEpicStage`)
 
-Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 042, so the board's
-two `derived` stages are now computed by recompute follow-ons that re-enter the chokepoint as
-`actor='orchestrator'` UPDATEs (never raw table writes). BOTH are idempotent (a target equal to
-the current stage is a no-op) and best-effort at the follow-on seam:
+Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 042; migration 066
+later re-introduced ONLY position 7 ('In development') as a derived execution stage — position 8
+('Ready-to-merge') stayed collapsed. The board's one derived stage plus the epic rollup are
+computed by recompute follow-ons that re-enter the chokepoint as `actor='orchestrator'` UPDATEs
+(never raw table writes). BOTH are idempotent (a target equal to the current stage is a no-op)
+and best-effort at the follow-on seam:
 
 - **`recomputeTaskExecutionStage(taskId)`** — the AGGREGATE over a task's runs (supports
-  parallel runs). `any outcome='merged' → Done (9)`; otherwise the task HOLDS at its
-  `entry_stage_id` (fallback Ready for development, 6) — there is no longer an in-development or
-  ready-to-merge stage to derive. Driven from the run-lifecycle follow-on seams (`runExecutor`,
-  `runLauncher`, the `runs.*` tRPC router, and the `git.ts` merge close-out, which mirrors the
-  `outcome='merged'` arm inline for sprint lanes).
+  parallel runs, both direct `workflow_runs.task_id` and sprint-batch lane runs). Four arms,
+  first match wins: (1) any run merged (or batch lane integrated) → Done (9); (2) any run not
+  yet terminal → In development (7); (3) runs exist but neither of the above → revert to
+  `entry_stage_id` (fallback Ready for development, 6); (4) no runs → no-op. A terminal-stage
+  guard on arms 2/3 never moves a task currently at Done or Won't-do. Driven from the
+  run-lifecycle follow-on seams (`runExecutor`, `runLauncher`, the `runs.*` tRPC router, and the
+  `git.ts` merge close-out, which mirrors the `outcome='merged'` arm inline for sprint lanes).
 - **`recomputeEpicStage(epicId)`** — the ROLLUP over an epic's COUNTABLE child tasks (epics
   carry no runs). A child counts only when non-archived, not parked at Won't-do (position 10 —
   an explicit retirement neither blocks Done nor demotes), and not a PENDING draft
@@ -516,20 +520,60 @@ emit after commit via `emitReviewItemChangedById`. Rules:
 - **Canonical example:** `main/src/orchestrator/reviewItemRouter.ts`;
   `main/src/orchestrator/trpc/routers/reviewItems.ts` (the two-chokepoint `promoteToTask`).
 
+### Run-scoped artifact write chokepoint (`ArtifactRouter.apply`)
+
+Every write to the run-scoped `artifacts` table (migration 035) routes through `ArtifactRouter.apply`
+(`main/src/orchestrator/artifactRouter.ts`) — the third single-table chokepoint, structurally a
+twin of `TaskChangeRouter`/`ReviewItemRouter`: a per-project `PQueue({concurrency: 1})`
+serializes writes, and each op atomically mutates `artifacts`, appends an `entity_events` delta
+under `entity_type='artifact'`, and emits an `ArtifactChangedEvent` after commit. `apply`
+dispatches on `op` (`create` | `update` | `commit`); `create` UPSERTs by `(runId, atype)` so
+re-deriving a templated artifact (auto-mint) is idempotent — one artifact per `(run_id, atype)`
+in v1. Two further ops ride the same per-project queue outside `apply` proper: `acceptAsBaseline`
+(the Accept-as-baseline git action, delegating the fs-copy + commit to an injected
+`BaselineAcceptor` so the router itself imports no `fs`/git — standalone-typecheck invariant) and
+`mergeScreenshots` (an atomic read-merge-UPSERT for concurrent screenshot deliveries). The tRPC
+sub-router, the `cyboflow_report_artifact` MCP tool family, and the orchestrator's auto-mint path
+are the only callers.
+
+- **Canonical example:** `main/src/orchestrator/artifactRouter.ts`.
+
+### `idea_components` write chokepoint (`IdeaComponentRouter.applyChange`)
+
+Every write to the `idea_components` ledger (migration 101 — each idea's idea-spec / prototype /
+architecture / epics / stories progress) routes through `IdeaComponentRouter.applyChange`
+(`main/src/orchestrator/ideaComponents/ideaComponentRouter.ts`) — the fourth single-table
+chokepoint, a miniature of `ReviewItemRouter`'s per-project `PQueue` + emit-after-commit
+architecture, scaled down for a table with no `entity_events` audit trail of its own. The merged
+read model (`resolveIdeaComponents`) is recomputed AFTER each commit and broadcast via
+`ideaComponentChangeEvents`, so a subscriber never sees a raw row or a partial component list. A
+ledger row, once written, is authoritative over derivation — `state='skipped'` is NEVER derived,
+only ever set explicitly via `setComponentState`. `TaskChangeRouter.applyChange` calls
+`IdeaComponentRouter.getInstance().applyChange(...)` directly as a POST-COMMIT follow-on
+(staleness stamping on idea edits) — the one chokepoint here that re-enters another from inside
+its own post-commit block.
+
+- **Canonical example:** `main/src/orchestrator/ideaComponents/ideaComponentRouter.ts`.
+
 ### In-repo workflow prompt bodies (self-containment)
 
-The four user-facing flows (Planner + Sprint + Compound + Ship) and their prompt BODIES live in
-app source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `compound.md`,
-`ship.md`, `builtInWorkflows.ts`). There is NO runtime read from
-`~/.claude/plugins/cache/soloflow/...`.
+Six built-in flows — `planner` / `sprint` / `compound` / `ship` / `verify-setup` / `launch` —
+and their prompt BODIES live in app source at `main/src/orchestrator/workflows/` (one `.md` per
+flow name, plus `design.md` and `idea-session.md` for the non-flow design-mode / idea-session
+spawns, and `builtInWorkflows.ts`). Five are user-facing; `verify-setup` configures a project
+(the visual-verification runbook) rather than doing project work, and launches from its own
+surface (the Verify Queue's health panel) instead of the general flow picker. There is NO
+runtime read from `~/.claude/plugins/cache/soloflow/...`.
 Rules when touching workflows:
 
-- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`), its
-  type `CyboflowWorkflowName`, and the type guard `isCyboflowWorkflowName` — all exported from
-  `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over the name array, so
-  adding/removing a flow there is a compile-time tripwire on the descriptor map and on
-  `WORKFLOW_DEFINITIONS` (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*`
-  names — NOT the historical `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` /
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES`, its type `CyboflowWorkflowName`, and the type
+  guard `isCyboflowWorkflowName` — all exported from `shared/types/workflows.ts` (grep there for
+  the current tuple rather than trusting a copy here; it is an app-wide exhaustive discriminant
+  and has grown before). `buildBuiltInWorkflows()` maps over the name array, so adding/removing a
+  flow there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
+  (`Readonly<Record<CyboflowWorkflowName, …>>`). `launch` must stay LAST in the tuple (its
+  bundled agents dedupe first-wins against the planner/sprint agents it borrows from). Use the
+  `Cyboflow*` names — NOT the historical `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` /
   `SOLOFLOW_WORKFLOW_NAMES` / `isSoloFlowWorkflowName` / `resolveSoloFlowPluginRoot` /
   `buildDefaultSoloFlowWorkflows`). `compound` was rebuilt natively from its preserved
   prose and `ship` was built natively from scratch.
@@ -548,15 +592,18 @@ Rules when touching workflows:
 
 ### Database access
 
-`main/src/services/database.ts` is the singleton. All mutations go through the main process —
-the renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
+`main/src/database/database.ts` (`DatabaseService`) is the singleton owning schema DDL, the
+migrations runner, and `seedDefaultBoard`. `main/src/services/database.ts` is a thin bootstrap
+shim (~10 lines) that constructs that `DatabaseService` instance from the boot path and calls
+`.initialize()` — nothing else lives there. All mutations go through the main process — the
+renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
 
-ENTITY writes are the exception that proves the rule: they do not go through ad-hoc `database.ts`
-methods but through the `TaskChangeRouter` / `ReviewItemRouter` chokepoints above. `database.ts`
-still owns `seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the
-post-042 4-stage board seed (cross-check test pins this).
+ENTITY writes are the exception that proves the rule: they do not go through ad-hoc
+`DatabaseService` methods but through the write chokepoints above. `DatabaseService` still owns
+`seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the post-066
+5-stage board seed (cross-check test pins this).
 
 ### Schema reconciliation
 
@@ -672,8 +719,8 @@ Two valid categories:
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical example (Crystal-preserved):** `main/src/services/worktreeManager.ts:502`
-  (method-group)
+- **Canonical example (whole-file case):** `main/src/services/visualVerify/baselineStore.ts`
+  (the golden-baseline feature, retired entirely — not merely behind a kill switch)
 - **Canonical example (forward-looking placeholder):**
   `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
   (Day-3 ApprovalRouter integration point)
@@ -822,15 +869,17 @@ are pinned field-for-field against the TypeScript row interfaces in `main/src/da
 of these tables, update the migration, `schema.sql`, the `*Row` interface, and the shared type in
 the same commit — `entitySchemaParity` is the tripwire.
 
-**The 4-stage board seed is dual-sourced.** Migration `042_collapse_board` narrowed the board
-to the FOUR kept stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at
-their original positions; `database.ts` `seedDefaultBoard` seeds the same four for NEW projects.
-Both MUST be field-for-field identical; the cross-check test asserts `seedDefaultBoard` === the
-migrated 4-stage seed. The `derived` In-development / Ready-to-merge stages collapsed away — all
-four kept stages are `asserted`, and the derived execution/rollup stages are now computed by the
-`recomputeTaskExecutionStage` / `recomputeEpicStage` follow-ons (see the chokepoint pattern
-above). The off-board buckets (`ideas.decomposed_at`, `epics`+`tasks.approved_at`,
-`workflow_runs.plan_approved_at`) carry the dropped intermediate stages as nullable stamps.
+**The 5-stage board seed is dual-sourced.** Migration `042_collapse_board` narrowed the board to
+FOUR `asserted` stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at their
+original positions; migration `066_in_development_stage` later re-introduced position 7 ('In
+development') as a fifth, `derived` stage — position 8 ('Ready-to-merge') stayed collapsed and
+was never brought back. `database.ts` (`main/src/database/database.ts`) `seedDefaultBoard` seeds
+the same five for NEW projects. Both MUST be field-for-field identical; the cross-check test
+asserts `seedDefaultBoard` === the migrated 5-stage seed. The derived execution/rollup stages are
+computed by the `recomputeTaskExecutionStage` / `recomputeEpicStage` follow-ons (see the
+chokepoint pattern above). The off-board buckets (`ideas.decomposed_at`, `epics`+
+`tasks.approved_at`, `workflow_runs.plan_approved_at`) carry the dropped intermediate stages as
+nullable stamps.
 
 A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite,
 applies the schema.sql + migrations path side-by-side with the migrations-only path, and asserts
@@ -840,23 +889,56 @@ drift is caught by the test suites that import them.
 
 ## permissionMode contract
 
-**Source of truth:** `shared/types/permissionMode.ts` exports both the type alias and the default constant:
+**Source of truth:** `shared/types/permissionMode.ts` exports both the type alias and the default constant — the LEGACY 2-mode contract for quick/legacy sessions:
 
 ```typescript
 export type PermissionMode = 'approve' | 'ignore';
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
 ```
 
+This is DISTINCT from the newer 4-mode contract governing workflow runs and the current Settings
+UI — `'default' | 'acceptEdits' | 'auto' | 'dontAsk'`, ALSO named `PermissionMode` but exported
+from `shared/types/workflows.ts`. `interactiveSettingsWriter.ts` treats `'ignore'`/`'dontAsk'` as
+parallel opt-outs; do not collapse the two types or import one where the other is meant.
+
 **Rules — enforced by grep-gate in TASK-654:**
 
-1. **No UI surface may expose `'ignore'` as selectable.** The Settings.tsx Default Security Mode section and the BaseCliPanel.tsx Permission Mode dropdown must each offer only `value="approve"`. Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
+1. **No UI surface may expose `'ignore'` as selectable.** The `BaseCliPanel.tsx` Permission Mode
+   dropdown must offer only `value="approve"`. (Settings.tsx no longer has a 2-mode picker at
+   all — it now exposes the separate 4-mode `defaultAgentPermissionMode` picker,
+   `SessionSettings.tsx`'s `PERMISSION_MODE_OPTIONS`, which has no `'ignore'` value to begin
+   with.) Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
 
 2. **No default or fallback may resolve to `'ignore'`.** Use `DEFAULT_PERMISSION_MODE` (imported from `shared/types/permissionMode`) wherever a missing value must be filled in. Verification: `grep -rnE "\|\| 'ignore'" main/src/ frontend/src/ shared/` must return 0 matches.
 
-3. **`'ignore'` remains a valid typed value** — it is consumed by `claudeCodeManager.ts:389` (omits the PreToolUse hook for a legitimate debug bypass) and by test fixtures. Do NOT remove `'ignore'` from the `PermissionMode` union or the DB CHECK constraint — legacy rows and the manager's bypass path depend on it.
+3. **`'ignore'` remains a valid typed value.** Each CLI manager owns its own
+   `resolveSessionAgentPermissionMode` method (`claudeCodeManager.ts`,
+   `interactiveClaudeManager.ts`, `codexPtyManager.ts`, `ompPtyManager.ts`,
+   `piSdkManager.ts`, `piPtyManager.ts`) that reads it: the Claude pair short-circuits to
+   `undefined` (preserving the legacy branch instead of resolving the 4-mode
+   `agentPermissionMode`), the non-Claude managers fold it into the equivalent `'dontAsk'`. On
+   the Claude interactive/PTY substrate specifically, `resolveInlineGatingHooks`
+   (`interactiveSettingsWriter.ts`) also still branches on it directly — `'ignore'`, like the
+   newer `'dontAsk'`/`'auto'`, omits the wildcard PreToolUse gating hook from the inline
+   `--settings` fragment. Plus test fixtures. Do NOT remove `'ignore'` from the `PermissionMode`
+   union or the DB CHECK constraint — legacy rows and these consumers depend on it.
 
 4. **DB CHECK constraint is `IN ('approve', 'ignore')`** — both values are persisted. Migration 008 (`main/src/database/migrations/008_permission_mode_approve_default.sql`) backfills NULL rows to `'approve'` on legacy installs. The DEFAULT clause on new columns uses `'approve'`.
 
 5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts. Verification: `grep -rnE "\|\| 'approve'" main/src/ frontend/src/ shared/ --include='*.ts' --include='*.tsx'` must return 0 matches in non-comment lines.
 
-6. **`settingSources` in `buildSdkOptions` is `['user', 'project']` — this is intentional.** Loading user settings from `~/.claude/settings.json` is needed to pick up user-level MCP servers, custom instructions, and other per-user configuration. The acknowledged risk is that user-level tool allow-lists (e.g. `defaultMode: 'auto'` + a `Bash(...)` allow entry) could cause the SDK to auto-approve tools before the `PreToolUse` hook fires, bypassing `ApprovalRouter`. This risk is mitigated by the conditional hook registration in `claudeCodeManager.ts buildSdkOptions()`: when `permissionMode === 'ignore'` the `PreToolUse` hook is omitted entirely (tools auto-approved by design), and when `permissionMode !== 'ignore'` the hook is registered unconditionally. Do NOT revert `settingSources` to `['project']`-only without also removing the user-settings UX features that depend on it. If SDK behaviour around allow-list precedence needs clarification, see TASK-797.
+6. **The Claude SDK substrate installs its `PreToolUse` hook UNCONDITIONALLY.**
+   `composeHookOptions` (`claudeCodeManager.ts` — the SDK-manager half of the dual-substrate
+   seam) ALWAYS installs exactly one dynamic `PreToolUse` hook: no per-mode fork, no
+   `'ignore'`/`dontAsk` early return. The hook live-reads the owning session's 4-mode
+   `agentPermissionMode` (`shared/types/workflows.ts`) on every call, so a mode change takes
+   effect on the very next tool call with no re-spawn. `'auto'` (when the model is capable) is
+   the only mode where the hook itself defers to the native classifier — and even then
+   `canUseTool` is installed unconditionally, so the classifier's terminal 'ask' verdict still
+   becomes a blocking `ApprovalRouter` prompt. This replaced an earlier conditional-registration
+   mechanism in the permission-mode redesign. `settingSources` in `buildSdkOptions` staying
+   `['user', 'project']` — needed to pick up user-level MCP servers, custom instructions, and
+   other per-user configuration from `~/.claude/settings.json` — is safe under this design for
+   the same reason: nothing on the tool-call path skips the hook based on user-level settings.
+   Do NOT revert `settingSources` to `['project']`-only without also removing the user-settings
+   UX features that depend on it.
