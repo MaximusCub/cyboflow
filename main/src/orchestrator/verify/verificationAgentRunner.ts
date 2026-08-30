@@ -41,6 +41,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
+import { resolveGitCommand } from '../../utils/gitExeFinder';
 import {
   type VerificationTaskV1,
   type VerificationReportV1,
@@ -1508,7 +1509,7 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
   // snapshot commit) — untracked build output is ignored, so only a mutation of a
   // TRACKED source trips this.
   try {
-    await execFileAsync('git', ['diff', '--quiet', 'HEAD'], {
+    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD'], {
       cwd: worktreePath,
       timeout: 30_000,
     });

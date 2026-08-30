@@ -340,6 +340,7 @@ import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebug
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { runGitAsync } from './utils/runGit';
+import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 
@@ -2101,9 +2102,9 @@ async function initializeServices(): Promise<boolean> {
       // the project ROOT (baselines are durable at root, not the run worktree).
       if (written.length > 0) {
         try {
-          execFileSync('git', ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe' });
+          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe' });
           execFileSync(
-            'git',
+            resolveGitCommand(),
             ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
             { cwd: projectRoot, stdio: 'pipe' },
           );

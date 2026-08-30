@@ -21,10 +21,11 @@
  * openExternal handler suppresses opening the fake URL in demo mode.
  */
 
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
+import { quoteForShellString, resolveGitCommand } from '../../utils/gitExeFinder';
 
 /** Fetch URL stamped on the sandbox's origin — recognizably fake, never pushed to. */
 export const DEMO_REMOTE_URL = 'https://github.com/cyboflow/demo-project.git';
@@ -48,9 +49,25 @@ export function getDemoBareRemotePath(): string {
   return path.join(getDemoRootDir(), 'remote.git');
 }
 
-/** Run a git command in `cwd`, surfacing stderr in the thrown Error. */
+/**
+ * Run a git command in `cwd`, surfacing stderr in the thrown Error.
+ *
+ * The git command comes from gitExeFinder (a Start-Menu launch may not carry a
+ * PATH that reaches git), interpolated through quoteForShellString so a path
+ * with spaces survives both sh and cmd.exe.
+ */
 function git(cwd: string, args: string): void {
-  execSync(`git ${args}`, { cwd, stdio: 'pipe' });
+  execSync(`${quoteForShellString(resolveGitCommand())} ${args}`, { cwd, stdio: 'pipe' });
+}
+
+/**
+ * Run git with an argv array — for arguments (paths, URLs) whose backslashes
+ * and quotes must survive verbatim. A shell string would mangle them on
+ * Windows: cmd.exe does no quote removal, so JSON.stringify-style escaping
+ * (`C:\\Users\\...`) would reach git literally.
+ */
+function gitArgv(cwd: string, args: string[]): void {
+  execFileSync(resolveGitCommand(), args, { cwd, stdio: 'pipe' });
 }
 
 /**
@@ -179,8 +196,10 @@ export function resetDemoEnvironment(rootOverride?: string): DemoEnvironment {
   git(sandboxPath, 'commit -m "Initial commit"');
 
   // origin: github-looking fetch URL, local-bare PUSH url (see module header).
-  git(sandboxPath, `remote add origin ${DEMO_REMOTE_URL}`);
-  git(sandboxPath, `remote set-url --push origin ${JSON.stringify(bareRemotePath)}`);
+  // Both URLs go through gitArgv: the Windows push path contains backslashes
+  // that a shell string would leave doubled (cmd.exe performs no quote removal).
+  gitArgv(sandboxPath, ['remote', 'add', 'origin', DEMO_REMOTE_URL]);
+  gitArgv(sandboxPath, ['remote', 'set-url', '--push', 'origin', bareRemotePath]);
   git(sandboxPath, 'push origin main');
 
   return {
