@@ -73,8 +73,9 @@ export function siblingNativeExecutable(executablePath: string): string | null {
 export function planWindowsShimVersionProbes(
   executablePath: string,
   fileExists: (path: string) => boolean = (p) => fs.existsSync(p),
+  platform: NodeJS.Platform = process.platform,
 ): ShellShimProbeInvocation[] {
-  if (!isWindowsShellShim(executablePath)) {
+  if (!isWindowsShellShim(executablePath, platform)) {
     return [{ command: executablePath, args: ['--version'] }];
   }
 

@@ -36,12 +36,14 @@ function makeDeps(opts: DepsOptions): GitFinderDependencies & { existsCalls: str
   const notExecutable = new Set(opts.notExecutable ?? []);
   // Standard Windows environment for the candidate table, so the WIN_* path
   // constants below match what the finder builds. Tests override per-name.
+  // Built with the host path.join — the same primitive the finder uses — so
+  // the joined candidates match these values on every host.
   const winEnv: Record<string, string> = opts.platform === 'win32'
     ? {
-      ProgramFiles: 'C:\\Program Files',
-      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
-      LocalAppData: 'C:\\Users\\tester\\AppData\\Local',
-      USERPROFILE: 'C:\\Users\\tester',
+      ProgramFiles: path.join('C:', 'Program Files'),
+      'ProgramFiles(x86)': path.join('C:', 'Program Files (x86)'),
+      LocalAppData: path.join('C:', 'Users', 'tester', 'AppData', 'Local'),
+      USERPROFILE: path.join('C:', 'Users', 'tester'),
       ...(opts.envRecord ?? {}),
     }
     : (opts.envRecord ?? {});
@@ -57,7 +59,7 @@ function makeDeps(opts: DepsOptions): GitFinderDependencies & { existsCalls: str
     },
     shellPath: () => (opts.shellPath === undefined ? null : opts.shellPath),
     whereGit: () => (opts.whereGit === undefined ? null : opts.whereGit),
-    homeDir: () => (opts.platform === 'win32' ? 'C:\\Users\\tester' : '/home/tester'),
+    homeDir: () => (opts.platform === 'win32' ? path.join('C:', 'Users', 'tester') : '/home/tester'),
     env: (name) => {
       if (name in winEnv) return winEnv[name];
       if (name === 'PATH') return opts.pathEnv;

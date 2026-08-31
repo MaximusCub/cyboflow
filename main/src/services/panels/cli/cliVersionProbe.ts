@@ -124,7 +124,7 @@ export async function probeCliVersion(
 
   const shellShim = isWindowsShellShim(executablePath, platform);
   const plans: ShellShimProbeInvocation[] = shellShim
-    ? planWindowsShimVersionProbes(executablePath, fileExists)
+    ? planWindowsShimVersionProbes(executablePath, fileExists, platform)
     : [{ command: executablePath, args: ['--version'] }];
 
   const attemptErrors: unknown[] = [];

@@ -61,9 +61,9 @@ export function setGitFinderDependenciesForTest(deps: Partial<GitFinderDependenc
   cachedGitCommand = null;
 }
 
-function defaultDependencies(): GitFinderDependencies {
+function defaultDependencies(platform: NodeJS.Platform): GitFinderDependencies {
   return {
-    platform: process.platform,
+    platform,
     existsSync: (p) => fs.existsSync(p),
     accessSync: (p, mode) => {
       fs.accessSync(p, mode);
@@ -78,7 +78,7 @@ function defaultDependencies(): GitFinderDependencies {
     },
     whereGit: () => {
       try {
-        const command = process.platform === 'win32' ? 'where git' : 'which git';
+        const command = platform === 'win32' ? 'where git' : 'which git';
         const firstLine = execSync(command, { encoding: 'utf8', windowsHide: true }).trim().split(/\r?\n/)[0];
         return firstLine || null;
       } catch {
@@ -91,8 +91,11 @@ function defaultDependencies(): GitFinderDependencies {
 }
 
 function currentDependencies(): GitFinderDependencies {
-  if (!testDependencies) return defaultDependencies();
-  return { ...defaultDependencies(), ...testDependencies };
+  // Defaults derive from the injected platform (when a test provides one), so
+  // no default dependency reads the host platform behind the seam.
+  const platform = testDependencies?.platform ?? process.platform;
+  if (!testDependencies) return defaultDependencies(platform);
+  return { ...defaultDependencies(platform), ...testDependencies };
 }
 
 /**

@@ -66,6 +66,17 @@ post-packaging (the Windows `afterSign` arm). node-pty's Electron loading
 was verified once by hand (its build is N-API-stable) and is not re-probed
 per build.
 
+### node-pty and `@electron/rebuild`
+
+node-pty's prebuilt binaries are N-API-stable — the same binary loads in
+Node and Electron — but `@electron/rebuild` only recognizes them under the
+name `node.napi.node`, which the package does not ship, and otherwise
+rebuilds from source. `scripts/apply-pty-napi-prebuilds.js` (root
+postinstall, running before `electron-builder install-app-deps`) copies the
+package's installed binary to that name so electron-rebuild skips the
+source build on every host. On Windows the documented `--ignore-scripts`
+install skips install-app-deps entirely.
+
 ## Packaging decisions
 
 - **`npmRebuild: false` on Windows.** The prebuilt `.node` files are

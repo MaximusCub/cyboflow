@@ -83,7 +83,7 @@
     "preview": "pnpm run --filter frontend preview",
     "lint": "pnpm run -r lint",
     "typecheck": "pnpm run -r typecheck",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "node scripts/apply-pty-napi-prebuilds.js && electron-builder install-app-deps",
     "electron:rebuild": "pnpm exec electron-rebuild -f -w better-sqlite3 -m ./main",
     "install:darwin-cross": "pnpm install --config.supportedArchitectures.os=darwin --config.supportedArchitectures.cpu=x64 --config.supportedArchitectures.cpu=arm64",
     "setup": "pnpm install && pnpm run electron:rebuild && pnpm run build:main",
