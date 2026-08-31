@@ -50,23 +50,9 @@ Download Cyboflow from https://www.cyboflow.com/download/ and then drag the Cybo
 
 The Launch, Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
 
-## Provenance
+## Provenance & License
 
-Cyboflow is a fork of [stravu/crystal](https://github.com/stravu/crystal) pinned at commit `1e18e0bc981225f75b5226f82a300fa741970c6f`. Crystal provides six of Cyboflow's eight required primitives — PTY management, git worktrees, SQLite persistence, macOS packaging, the permission bridge, and zombie-process detection — in production-tested form. Cyboflow adds the cross-workflow review queue, the typed stream parser, and the CyboflowMcpServer outbound bridge.
-
-The fork was taken from Crystal `0.3.5` (Crystal's final public tag) before the Crystal project was renamed to Nimbalyst and put on a different product footing.
-
-See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full lineage and audit trail.
-
-## License
-
-Cyboflow is licensed under the MIT License (see [LICENSE](LICENSE)), inheriting Crystal's MIT license. The LICENSE retains Stravu's original Crystal copyright alongside Cyboflow's, as MIT requires.
-
-### Do not merge from Nimbalyst
-
-Crystal was renamed to Nimbalyst in early 2026 and became a separate product with its own scope and direction. Nimbalyst is also MIT-licensed, but Cyboflow deliberately forked at Crystal `0.3.5` and has diverged substantially in scope and architecture. To keep a clean, auditable provenance and avoid importing decisions from a now-divergent codebase, **do not** apply patches, cherry-picks, or merges from the Nimbalyst repository (https://github.com/Nimbalyst/nimbalyst). If a bug surfaces in Cyboflow that was independently fixed in Nimbalyst, reproduce the fix from first principles or from Cyboflow-side analysis.
-
-See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full rationale.
+Cyboflow began as a fork of [Crystal](https://github.com/stravu/crystal) `0.3.5` by Stravu and has since diverged substantially in scope and architecture. It is licensed under the MIT License (see [LICENSE](LICENSE)), retaining Stravu's original Crystal copyright alongside Cyboflow's. See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full lineage.
 
 ## Development
 
