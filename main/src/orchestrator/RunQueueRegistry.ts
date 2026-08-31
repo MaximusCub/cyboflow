@@ -70,7 +70,7 @@ export class RunQueueRegistry {
     // REMAINING teardown (DB close, MCP stop) — worse than the lost mutation.
     // Wait per queue up to DRAIN_TIMEOUT_MS, attribute any queue that does not
     // drain, and always let shutdown continue.
-    const DRAIN_TIMEOUT_MS = 8_000;
+    const DRAIN_TIMEOUT_MS = 1_500;
     const entries = [...this.queues.entries()];
     await Promise.allSettled(
       entries.map(([runId, q]) => {
