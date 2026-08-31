@@ -336,8 +336,6 @@ export function OverviewBacklogSection({
         dotColor="var(--color-phase-plan)"
         title="Backlog"
         count={counts.items}
-        descriptor={backlogEmpty ? undefined : 'Planning pipeline · pre-sprint'}
-        action={{ label: 'Task backlog', onClick: onOpenBacklog }}
       />
 
       {backlogEmpty ? (
@@ -400,11 +398,12 @@ export function OverviewBacklogSection({
                 )}
               </div>
             )}
-            {/* auto-fill: column count follows the PANE's width, not viewport
-                breakpoints (which lie when side panels compress the center). */}
+            {/* auto-fit: column count follows the PANE's width, not viewport
+                breakpoints (which lie when side panels compress the center),
+                and empty tracks collapse so the tiles always fill the card. */}
             <div
               className="grid gap-2.5"
-              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))' }}
+              style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}
             >
               {backlog.stageTiles.map((tile) => (
                 <div

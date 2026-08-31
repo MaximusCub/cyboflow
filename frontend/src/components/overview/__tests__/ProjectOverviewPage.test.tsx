@@ -223,8 +223,8 @@ beforeEach(() => {
 describe('ProjectOverviewPage — page-state routing', () => {
   it('empty-new-existing: an empty backlog with unknown codebase freshness shows the existing-codebase card set', async () => {
     mount([]);
-    expect(await screen.findByText('Where to start in an existing codebase')).toBeInTheDocument();
-    expect(screen.getByTestId('overview-backlog-empty')).toBeInTheDocument();
+    expect(await screen.findByTestId('overview-backlog-empty')).toBeInTheDocument();
+    // The hardcoded existing-codebase card set (capture-idea only exists there).
     expect(screen.getByTestId('overview-action-launch-planner')).toBeInTheDocument();
     expect(screen.getByTestId('overview-action-capture-idea')).toBeInTheDocument();
   });
@@ -234,8 +234,9 @@ describe('ProjectOverviewPage — page-state routing', () => {
     expect(await screen.findByText('Project overview page')).toBeInTheDocument();
     expect(screen.getByTestId('overview-nextup-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('overview-backlog-empty')).not.toBeInTheDocument();
-    // Derived (not hardcoded) card set for this state.
-    expect(screen.getByText("Computed from this project's recent activity")).toBeInTheDocument();
+    // Derived (not hardcoded) card set for this state — capture-idea exists
+    // only in the hardcoded sets.
+    expect(screen.queryByTestId('overview-action-capture-idea')).not.toBeInTheDocument();
   });
 
   it('empty-drained: shipped tasks + open ideas + a dry queue shows the drained next-up well', async () => {
@@ -249,7 +250,6 @@ describe('ProjectOverviewPage — page-state routing', () => {
   it('empty-done: everything shipped renders the Backlog-clear banner and the milestone card set', async () => {
     mount([doneTask({ title: 'Shipped thing' })]);
     expect(await screen.findByTestId('overview-backlog-clear')).toBeInTheDocument();
-    expect(screen.getByText('Close out this milestone, then start the next one')).toBeInTheDocument();
     expect(screen.getByTestId('overview-action-plan-next-milestone')).toBeInTheDocument();
     // The two selectable lists are replaced by the banner in this state.
     expect(screen.queryByText('Top ideas')).not.toBeInTheDocument();

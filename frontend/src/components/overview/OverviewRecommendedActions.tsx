@@ -224,16 +224,6 @@ function writeDismissed(projectId: number, dismissed: Record<string, string>): v
 // Section
 // ---------------------------------------------------------------------------
 
-/** Muted descriptor beside the section title, per page state. */
-const DESCRIPTOR: Record<OverviewPageState, string> = {
-  normal: "Computed from this project's recent activity",
-  'empty-new': 'Where to start on a fresh codebase',
-  'empty-new-existing': 'Where to start in an existing codebase',
-  'empty-ideas': "Computed from this project's recent activity",
-  'empty-drained': "Computed from this project's recent activity",
-  'empty-done': 'Close out this milestone, then start the next one',
-};
-
 /** The states whose cards are written here rather than derived from data. */
 const HARDCODED_STATES: ReadonlySet<OverviewPageState> = new Set<OverviewPageState>([
   'empty-new',
@@ -453,7 +443,6 @@ export function OverviewRecommendedActions({
         dotColor="var(--human)"
         title="Recommended actions"
         count={cards.active.length}
-        descriptor={DESCRIPTOR[pageState]}
       />
       {/* auto-fill keys the column count on the PANE's width (viewport
           breakpoints lie when side panels compress the center pane), and

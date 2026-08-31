@@ -375,10 +375,6 @@ export function OverviewActiveAgents({
         dotColor="var(--color-interactive-primary)"
         title="Active agents"
         count={total}
-        descriptor={
-          total > 0 ? 'Live runs in this project — blocked checkpoints surface here' : undefined
-        }
-        action={{ label: 'Human review', onClick: openHumanReview }}
       />
 
       {total === 0 ? (
