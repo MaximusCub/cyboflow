@@ -153,3 +153,11 @@ per build.
   proves nothing. Poll
   `Get-Process conhost,cmd,powershell,OpenConsole | ? { $_.MainWindowHandle -ne 0 }`
   and resolve the reported parent PID to find the offending spawn site.
+
+- **White screen at launch + MCP subprocess "Cannot find module"**: the
+  packaged app contains RAW tsc output — `build:main` normally runs
+  `bundle-preload.mjs` + `bundle-mcp-server.mjs` after `tsc`, and a partial
+  or cross-OS incremental build that skips them breaks the packaged app (an
+  unbundled sandboxed preload cannot load; the unbundled MCP server cannot
+  resolve its siblings from `app.asar.unpacked`). Run both bundle scripts
+  after every `main` build, on the build host.
