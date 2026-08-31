@@ -332,6 +332,14 @@ export interface RecommendedAction {
   ctaLabel: string;
   ctaKind: RecommendedActionCtaKind;
   accent: RecommendedActionAccent;
+  /**
+   * Compact encoding of the trigger state this card was computed from.
+   * Dismissals are stored as `id → fingerprint`, so a dismissal only holds
+   * while the situation that produced the card is unchanged — when the
+   * fingerprint moves (new ready tasks, a different top idea, another merged
+   * sprint, a conflict-count change) the card reappears.
+   */
+  fingerprint: string;
 }
 
 export interface RecommendedActionsInput {
@@ -344,7 +352,8 @@ export interface RecommendedActionsInput {
   trackerProvider: TrackerProvider | null;
   /** `null` when the connection has never synced. */
   trackerLastSyncAt: string | null;
-  dismissedIds: readonly string[];
+  /** `id → fingerprint` of dismissed cards (see {@link RecommendedAction.fingerprint}). */
+  dismissed: Readonly<Record<string, string>>;
   nowIso: string;
 }
 
@@ -394,7 +403,7 @@ export function priorityTone(priority: Priority): PriorityTone {
   return PRIORITY_TONE[priority];
 }
 
-/** The localStorage key an Overview page's per-project dismissed-action ids are kept under. A brand-new key — no legacy name exists, so no migrateLocalStorageKey call is needed. */
+/** The localStorage key an Overview page's per-project dismissals are kept under, as an `actionId → fingerprint` record. A brand-new key — no legacy name exists, so no migrateLocalStorageKey call is needed. */
 export function OVERVIEW_DISMISSED_KEY(projectId: number): string {
   return `cyboflow.projectOverview.dismissed.${projectId}`;
 }
@@ -416,6 +425,12 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
   const totalReady = input.backlog.nextUp.reduce((sum, g) => sum + g.readyCount, 0);
   if (totalReady > 0) {
     const isOne = totalReady === 1;
+    // Fingerprint: the ready-task id set — a task landing in (or leaving)
+    // Ready for development resurfaces a dismissed card.
+    const readyIds = input.backlog.nextUp
+      .flatMap((g) => g.tasks.filter((t) => !t.inFlow).map((t) => t.id))
+      .sort()
+      .join(',');
     actions.push({
       id: 'launch-sprint',
       title: 'Launch a sprint',
@@ -425,6 +440,7 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
       ctaLabel: 'Select tasks',
       ctaKind: 'primary',
       accent: 'terracotta',
+      fingerprint: readyIds,
     });
   }
 
@@ -438,6 +454,8 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
       ctaLabel: 'Open planner',
       ctaKind: 'secondary',
       accent: 'blue',
+      // A different idea reaching the top resurfaces a dismissed card.
+      fingerprint: topIdea.id,
     });
   }
 
@@ -459,6 +477,9 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
       ctaLabel: 'Run Compound',
       ctaKind: 'secondary',
       accent: 'purple',
+      // Another merged sprint (or a Compound run moving lastRunAt) resurfaces
+      // a dismissed card.
+      fingerprint: `${sprintMergedRuns}:${compoundLastRunAt ?? 'never'}`,
     });
   }
 
@@ -471,6 +492,9 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
       ctaLabel: 'Set up verification',
       ctaKind: 'primary',
       accent: 'amber',
+      // Setup-status moves (missing → draft → …) resurface a dismissed card;
+      // while nothing changes the dismissal holds.
+      fingerprint: input.verifySetup?.status ?? 'missing',
     });
   }
 
@@ -487,9 +511,13 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
       ctaLabel: 'Review conflicts',
       ctaKind: 'secondary',
       accent: 'green',
+      // The conflict count moving (new conflicts, or some resolved but not
+      // all) resurfaces a dismissed card.
+      fingerprint: String(input.trackerConflictCount),
     });
   }
 
-  const dismissed = new Set(input.dismissedIds);
-  return actions.filter((a) => !dismissed.has(a.id));
+  // A dismissal only suppresses the card while its fingerprint still matches
+  // the state it was dismissed under.
+  return actions.filter((a) => input.dismissed[a.id] !== a.fingerprint);
 }

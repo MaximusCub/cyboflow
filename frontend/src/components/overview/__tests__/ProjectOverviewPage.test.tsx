@@ -268,7 +268,7 @@ describe('ProjectOverviewPage — page-state routing', () => {
 // ---------------------------------------------------------------------------
 
 describe('ProjectOverviewPage — recommended-action dismissal', () => {
-  it('hides the card and persists its id under the per-project key', async () => {
+  it('hides the card and persists its id → fingerprint under the per-project key', async () => {
     const user = userEvent.setup();
     mount([]);
 
@@ -280,16 +280,29 @@ describe('ProjectOverviewPage — recommended-action dismissal', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('overview-action-capture-idea')).not.toBeInTheDocument();
     });
-    expect(JSON.parse(localStorage.getItem(OVERVIEW_DISMISSED_KEY(1)) ?? '[]')).toContain(
-      'capture-idea',
-    );
+    expect(
+      JSON.parse(localStorage.getItem(OVERVIEW_DISMISSED_KEY(1)) ?? '{}') as Record<
+        string,
+        string
+      >,
+    ).toHaveProperty('capture-idea');
   });
 
-  it('stays dismissed on a fresh mount (the persisted set is read back at init)', async () => {
-    localStorage.setItem(OVERVIEW_DISMISSED_KEY(1), JSON.stringify(['capture-idea']));
+  it('stays dismissed on a fresh mount (the persisted record is read back at init)', async () => {
+    // The hardcoded empty-state cards carry the constant fingerprint 'static'.
+    localStorage.setItem(OVERVIEW_DISMISSED_KEY(1), JSON.stringify({ 'capture-idea': 'static' }));
     mount([]);
     expect(await screen.findByTestId('overview-action-launch-planner')).toBeInTheDocument();
     expect(screen.queryByTestId('overview-action-capture-idea')).not.toBeInTheDocument();
+  });
+
+  it('resurfaces a card whose stored fingerprint no longer matches', async () => {
+    localStorage.setItem(
+      OVERVIEW_DISMISSED_KEY(1),
+      JSON.stringify({ 'capture-idea': 'some-stale-fingerprint' }),
+    );
+    mount([]);
+    expect(await screen.findByTestId('overview-action-capture-idea')).toBeInTheDocument();
   });
 });
 

@@ -35,7 +35,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GitBranch } from 'lucide-react';
 import { OverviewActiveAgents } from './OverviewActiveAgents';
-import { OverviewRecommendedActions, readDismissedIds } from './OverviewRecommendedActions';
+import { OverviewRecommendedActions, readDismissed } from './OverviewRecommendedActions';
 import { OverviewBacklogSection } from './OverviewBacklogSection';
 import { useOverviewLaunch } from './useOverviewLaunch';
 import {
@@ -150,10 +150,14 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
     };
   }, [projectId]);
 
-  // -- Dismissed recommendation ids (per project, localStorage) -------------
-  const [dismissedIds, setDismissedIds] = useState<string[]>(() => readDismissedIds(projectId));
+  // -- Dismissed recommendations (per project, localStorage) ----------------
+  // `actionId → fingerprint`: a dismissal holds only while the card's trigger
+  // state is unchanged (see RecommendedAction.fingerprint).
+  const [dismissed, setDismissed] = useState<Record<string, string>>(() =>
+    readDismissed(projectId),
+  );
   useEffect(() => {
-    setDismissedIds(readDismissedIds(projectId));
+    setDismissed(readDismissed(projectId));
   }, [projectId]);
 
   // -- Derivations ----------------------------------------------------------
@@ -207,16 +211,23 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
         trackerConflictCount: tracker.conflictCount,
         trackerProvider: tracker.provider,
         trackerLastSyncAt: tracker.lastSyncAt,
-        dismissedIds,
+        dismissed,
         nowIso: new Date().toISOString(),
       }),
-    [backlog, workflowStats, verifySetup, tracker, dismissedIds],
+    [backlog, workflowStats, verifySetup, tracker, dismissed],
   );
 
   // -- Navigation callbacks -------------------------------------------------
   const nextUpRef = useRef<HTMLDivElement>(null);
 
+  // "Select tasks" both scrolls to the Next-up list AND selects the ready
+  // tasks there (the label promises selection, and on a tall window there may
+  // be nothing to scroll — a scroll alone reads as the button doing nothing).
+  // The nonce is how the selection order crosses into OverviewBacklogSection,
+  // which owns the checkbox state.
+  const [selectNextUpNonce, setSelectNextUpNonce] = useState(0);
   const onFocusNextUp = useCallback(() => {
+    setSelectNextUpNonce((n) => n + 1);
     nextUpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
@@ -286,8 +297,8 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
           projectId={projectId}
           pageState={pageState}
           actions={actions}
-          dismissedIds={dismissedIds}
-          onDismissedIdsChange={setDismissedIds}
+          dismissed={dismissed}
+          onDismissedChange={setDismissed}
           onFocusNextUp={onFocusNextUp}
           onLaunchTopIdea={onLaunchTopIdea}
           onRunFlow={onRunFlow}
@@ -301,6 +312,7 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
           backlog={backlog}
           itemsById={itemsById}
           nextUpRef={nextUpRef}
+          selectNextUpNonce={selectNextUpNonce}
           onOpenBacklog={onOpenBacklog}
           onRunPlannerFlow={() => onRunFlow('planner')}
         />

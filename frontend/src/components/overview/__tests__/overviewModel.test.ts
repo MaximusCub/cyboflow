@@ -357,7 +357,7 @@ function baseRecInput(over: Partial<Parameters<typeof deriveRecommendedActions>[
     trackerConflictCount: 0,
     trackerProvider: null,
     trackerLastSyncAt: null,
-    dismissedIds: [],
+    dismissed: {},
     nowIso: '2026-06-15T00:00:00.000Z',
     ...over,
   };
@@ -526,16 +526,48 @@ describe('deriveRecommendedActions', () => {
     expect(result.find((a) => a.id === 'tracker-conflicts')).toBeUndefined();
   });
 
-  it('dismissed ids are filtered out even when their trigger condition is true', () => {
-    const result = deriveRecommendedActions(
-      baseRecInput({
-        backlog: { ...EMPTY_BACKLOG, nextUp: [READY_GROUP] },
-        trackerConflictCount: 1,
-        trackerProvider: 'plane',
-        dismissedIds: ['launch-sprint', 'tracker-conflicts'],
-      }),
-    );
+  it('a dismissal suppresses the card while its fingerprint still matches', () => {
+    const input = baseRecInput({
+      backlog: { ...EMPTY_BACKLOG, nextUp: [READY_GROUP] },
+      trackerConflictCount: 1,
+      trackerProvider: 'plane',
+    });
+    // Dismiss under the CURRENT state: capture the live fingerprints.
+    const live = deriveRecommendedActions(input);
+    const dismissed = Object.fromEntries(live.map((a) => [a.id, a.fingerprint]));
+    const result = deriveRecommendedActions({ ...input, dismissed });
     expect(result.map((a) => a.id)).toEqual([]);
+  });
+
+  it('a dismissed card REAPPEARS when its trigger state changes (stale fingerprint)', () => {
+    const input = baseRecInput({
+      backlog: { ...EMPTY_BACKLOG, nextUp: [READY_GROUP] },
+      trackerConflictCount: 1,
+      trackerProvider: 'plane',
+    });
+    const live = deriveRecommendedActions(input);
+    const dismissed = Object.fromEntries(live.map((a) => [a.id, a.fingerprint]));
+    // A new task lands Ready and a second conflict appears — both fingerprints move.
+    const moved = deriveRecommendedActions({
+      ...input,
+      backlog: {
+        ...EMPTY_BACKLOG,
+        nextUp: [
+          {
+            ...READY_GROUP,
+            readyCount: 3,
+            totalCount: 3,
+            tasks: [
+              ...READY_GROUP.tasks,
+              { id: 't3', title: 'c', priority: 'P2', category: 'feature', eligible: true, inFlow: false },
+            ],
+          },
+        ],
+      },
+      trackerConflictCount: 2,
+      dismissed,
+    });
+    expect(moved.map((a) => a.id)).toEqual(['launch-sprint', 'tracker-conflicts']);
   });
 
   it('orders active actions launch-sprint, launch-planner, run-compound, verify-setup, tracker-conflicts', () => {

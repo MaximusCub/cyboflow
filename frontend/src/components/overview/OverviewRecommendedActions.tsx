@@ -11,10 +11,11 @@
  *     backlog, no run history, and no verification signal, so the design's
  *     "where to start" copy is the only honest thing to show.
  *
- * Dismissal is per-project and persisted under
- * {@link OVERVIEW_DISMISSED_KEY}; the derived path also feeds the persisted ids
- * back into `deriveRecommendedActions` (which filters them), so a dismissed
- * card stays gone across reloads. Every read/write is try/catch-guarded —
+ * Dismissal is per-project and persisted under {@link OVERVIEW_DISMISSED_KEY}
+ * as an `actionId → fingerprint` record; the derived path feeds it back into
+ * `deriveRecommendedActions`, which suppresses a card only while its
+ * fingerprint still matches — when the card's trigger state changes it
+ * reappears. Every read/write is try/catch-guarded —
  * localStorage throws in private mode and a storage failure must never take the
  * page down.
  *
@@ -81,6 +82,8 @@ interface ActionCardModel {
   accent: RecommendedActionAccent;
   /** Overrides the accent's default icon (the hardcoded empty-state cards use their own). */
   icon?: LucideIcon;
+  /** Trigger-state fingerprint (see {@link RecommendedAction.fingerprint}); `'static'` on the hardcoded empty-state cards. */
+  fingerprint: string;
   onCta: () => void;
 }
 
@@ -89,7 +92,7 @@ function ActionCard({
   onDismiss,
 }: {
   action: ActionCardModel;
-  onDismiss: (id: string) => void;
+  onDismiss: (id: string, fingerprint: string) => void;
 }): React.JSX.Element {
   const Icon = action.icon ?? ACCENT_ICON[action.accent];
   const accent = `var(${ACCENT_VAR[action.accent]})`;
@@ -116,7 +119,7 @@ function ActionCard({
       >
         {action.body}
       </p>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
           onClick={action.onCta}
@@ -132,7 +135,7 @@ function ActionCard({
         </button>
         <button
           type="button"
-          onClick={() => onDismiss(action.id)}
+          onClick={() => onDismiss(action.id, action.fingerprint)}
           data-testid={`overview-action-dismiss-${action.id}`}
           className="ml-auto text-text-muted hover:text-text-secondary"
           style={{ fontSize: '10px' }}
@@ -148,23 +151,29 @@ function ActionCard({
 // Persisted dismissals
 // ---------------------------------------------------------------------------
 
-/** Read the persisted dismissed-action ids for a project; [] on any failure. */
-export function readDismissedIds(projectId: number): string[] {
+/**
+ * Read the persisted dismissals for a project as an `actionId → fingerprint`
+ * record; {} on any failure (including the pre-fingerprint array shape, which
+ * simply resurfaces those cards once).
+ */
+export function readDismissed(projectId: number): Record<string, string> {
   try {
     const raw = localStorage.getItem(OVERVIEW_DISMISSED_KEY(projectId));
-    if (raw === null) return [];
+    if (raw === null) return {};
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v): v is string => typeof v === 'string');
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') out[k] = v;
+    return out;
   } catch {
-    return [];
+    return {};
   }
 }
 
-/** Persist the dismissed-action ids for a project. Swallows storage failures. */
-function writeDismissedIds(projectId: number, ids: string[]): void {
+/** Persist the dismissals for a project. Swallows storage failures. */
+function writeDismissed(projectId: number, dismissed: Record<string, string>): void {
   try {
-    localStorage.setItem(OVERVIEW_DISMISSED_KEY(projectId), JSON.stringify(ids));
+    localStorage.setItem(OVERVIEW_DISMISSED_KEY(projectId), JSON.stringify(dismissed));
   } catch {
     // Private mode / quota — a failed persist must never crash the page.
   }
@@ -196,9 +205,9 @@ export interface OverviewRecommendedActionsProps {
   pageState: OverviewPageState;
   /** The derived cards (already dismissal-filtered by the page). */
   actions: RecommendedAction[];
-  /** Dismissed ids, owned by the page so the derive call and this list agree. */
-  dismissedIds: string[];
-  onDismissedIdsChange: (ids: string[]) => void;
+  /** `actionId → fingerprint` dismissals, owned by the page so the derive call and this list agree. */
+  dismissed: Record<string, string>;
+  onDismissedChange: (dismissed: Record<string, string>) => void;
   /** launch-sprint CTA — scrolls the page to the Next-up task list. */
   onFocusNextUp: () => void;
   /** launch-planner CTA — fires the light planner launch on the top idea. */
@@ -215,8 +224,8 @@ export function OverviewRecommendedActions({
   projectId,
   pageState,
   actions,
-  dismissedIds,
-  onDismissedIdsChange,
+  dismissed,
+  onDismissedChange,
   onFocusNextUp,
   onLaunchTopIdea,
   onRunFlow,
@@ -227,16 +236,15 @@ export function OverviewRecommendedActions({
   // behaves identically in every page state. The set is owned by the page (it
   // also feeds `deriveRecommendedActions`), so this only writes + lifts.
   const dismiss = useCallback(
-    (id: string) => {
-      const next = dismissedIds.includes(id) ? dismissedIds : [...dismissedIds, id];
-      writeDismissedIds(projectId, next);
-      onDismissedIdsChange(next);
+    (id: string, fingerprint: string) => {
+      const next = { ...dismissed, [id]: fingerprint };
+      writeDismissed(projectId, next);
+      onDismissedChange(next);
     },
-    [dismissedIds, onDismissedIdsChange, projectId],
+    [dismissed, onDismissedChange, projectId],
   );
 
   const cards = useMemo<ActionCardModel[]>(() => {
-    const dismissed = new Set(dismissedIds);
 
     if (HARDCODED_STATES.has(pageState)) {
       const hardcoded: ActionCardModel[] =
@@ -250,6 +258,7 @@ export function OverviewRecommendedActions({
                 ctaKind: 'primary',
                 accent: 'terracotta',
                 icon: Play,
+                fingerprint: 'static',
                 onCta: () => onRunFlow('launch'),
               },
               {
@@ -260,6 +269,7 @@ export function OverviewRecommendedActions({
                 ctaKind: 'secondary',
                 accent: 'blue',
                 icon: Plus,
+                fingerprint: 'static',
                 onCta: onAddIdea,
               },
             ]
@@ -273,6 +283,7 @@ export function OverviewRecommendedActions({
                   ctaKind: 'primary',
                   accent: 'blue',
                   icon: Lightbulb,
+                  fingerprint: 'static',
                   onCta: () => onRunFlow('planner'),
                 },
                 {
@@ -283,6 +294,7 @@ export function OverviewRecommendedActions({
                   ctaKind: 'secondary',
                   accent: 'blue',
                   icon: Plus,
+                  fingerprint: 'static',
                   onCta: onAddIdea,
                 },
                 {
@@ -293,6 +305,7 @@ export function OverviewRecommendedActions({
                   ctaKind: 'primary',
                   accent: 'green',
                   icon: Focus,
+                  fingerprint: 'static',
                   onCta: () => onRunFlow('verify-setup'),
                 },
               ]
@@ -305,6 +318,7 @@ export function OverviewRecommendedActions({
                   ctaKind: 'primary',
                   accent: 'purple',
                   icon: RotateCcw,
+                  fingerprint: 'static',
                   onCta: () => onRunFlow('compound'),
                 },
                 {
@@ -315,6 +329,7 @@ export function OverviewRecommendedActions({
                   ctaKind: 'primary',
                   accent: 'terracotta',
                   icon: Play,
+                  fingerprint: 'static',
                   onCta: () => onRunFlow('launch'),
                 },
                 {
@@ -325,10 +340,11 @@ export function OverviewRecommendedActions({
                   ctaKind: 'secondary',
                   accent: 'blue',
                   icon: Plus,
+                  fingerprint: 'static',
                   onCta: onAddIdea,
                 },
               ];
-      return hardcoded.filter((c) => !dismissed.has(c.id));
+      return hardcoded.filter((c) => dismissed[c.id] !== c.fingerprint);
     }
 
     // Derived path — `actions` is already dismissal-filtered by the model, so
@@ -340,6 +356,7 @@ export function OverviewRecommendedActions({
       ctaLabel: a.ctaLabel,
       ctaKind: a.ctaKind,
       accent: a.accent,
+      fingerprint: a.fingerprint,
       onCta: () => {
         switch (a.id) {
           case 'launch-sprint':
@@ -362,7 +379,7 @@ export function OverviewRecommendedActions({
     }));
   }, [
     actions,
-    dismissedIds,
+    dismissed,
     onAddIdea,
     onFocusNextUp,
     onLaunchTopIdea,
@@ -381,7 +398,13 @@ export function OverviewRecommendedActions({
         count={cards.length}
         descriptor={DESCRIPTOR[pageState]}
       />
-      <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+      {/* auto-fill keys the column count on the PANE's width (viewport
+          breakpoints lie when side panels compress the center pane), and
+          keeps partial rows at column width instead of stretching. */}
+      <div
+        className="grid gap-2.5"
+        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
+      >
         {cards.map((card) => (
           <ActionCard key={card.id} action={card} onDismiss={dismiss} />
         ))}
