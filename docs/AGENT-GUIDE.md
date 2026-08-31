@@ -77,14 +77,12 @@ Full index: `docs/README.md`. The load-bearing ones:
   IPC surface.
 - `@cyboflow-hidden` marks intentionally unreachable code: do NOT delete it, and do NOT add
   the marker to actively-called code (template and examples in `docs/CODE-PATTERNS.md`).
-- `AbstractCliManager` (`main/src/services/panels/cli/`) is an intentional extension surface
-  with several live subclasses (Claude SDK + interactive, Codex) — do not collapse it. Its
-  base PTY methods are live for the interactive substrate even though the SDK manager
-  bypasses them; see `docs/ARCHITECTURE.md` → "Dual-substrate seam".
-- Changes under `main/src/services/panels/claude/` must also pass `pnpm test:integration`
-  (mocked-SDK `*.itest.ts` suite; blocking CI job; structurally excluded from `test:unit`).
 - localStorage key renames go through `frontend/src/utils/migrateLocalStorageKey.ts` — never
   ad-hoc `getItem`/`setItem` logic.
+- Directory-scoped rules live in nested `AGENTS.md` files — currently
+  `main/src/database/migrations/` (numbering, idempotence, schema sync) and
+  `main/src/services/panels/` (substrate seam, integration-test requirement). Claude and
+  Codex auto-load them; other runtimes must read them before editing there.
 
 ## Common commands
 
