@@ -558,6 +558,77 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Immediate hard kill — the logs-panel stop shape
+// ---------------------------------------------------------------------------
+
+export interface KillTreeImmediateOptions extends PlatformProcessOptions {
+  /**
+   * Up-front enumerated descendants to SIGKILL alongside the root. Defaults
+   * to enumerating here via {@link collectDescendantPids} (silent on walk
+   * errors — the stop path this serves never reported walk failures).
+   */
+  descendantPids?: number[];
+  /**
+   * Shell-command runner for the final sweep. Defaults to `exec` wrapped with
+   * `windowsHide: true`. Failures are ignored by contract — the sweep is the
+   * best-effort backstop behind the direct SIGKILLs (and silently no-ops
+   * through cmd.exe on win32, exactly like the call site it replaced).
+   */
+  execCommand?: (command: string) => Promise<{ stdout: string }>;
+  /** Signal sender. Defaults to `process.kill`. */
+  sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Called when the ladder itself throws unexpectedly. Defaults to console.error. */
+  onError?: (error: unknown) => void;
+}
+
+/**
+ * Immediate hard kill of a pid and its enumerated descendants — the
+ * logs-panel stop shape (services/panels/logPanel/logsManager.ts): no
+ * graceful phase, no grace window, no probe. SIGKILLs the root and every
+ * enumerated descendant directly, then runs a best-effort shell sweep
+ * (`kill -9 <all>; pkill -9 -P <pid>`, errors ignored) as the backstop.
+ *
+ * Deliberately unbranched: `process.kill` SIGKILL is cross-platform in Node,
+ * and the sweep silently no-ops through cmd.exe on win32 — byte-identical to
+ * the inline ladder this replaced on every platform.
+ */
+export async function killTreeImmediate(
+  pid: number,
+  opts: KillTreeImmediateOptions = {}
+): Promise<void> {
+  try {
+    const allPids = [pid, ...(opts.descendantPids ?? collectDescendantPids(pid, opts))];
+    const sendSignal =
+      opts.sendSignal ??
+      ((signalPid: number, signal: NodeJS.Signals) => {
+        process.kill(signalPid, signal);
+      });
+    for (const targetPid of allPids) {
+      try {
+        sendSignal(targetPid, 'SIGKILL');
+      } catch (error) {
+        // Process might already be dead or inaccessible
+      }
+    }
+
+    // Shell command as the ultimate fallback (kill -9 cannot be caught or ignored)
+    const execCommand =
+      opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
+    try {
+      await execCommand(`kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`);
+    } catch (error) {
+      // Processes might already be dead — the sweep is best-effort by contract.
+    }
+  } catch (error) {
+    if (opts.onError) {
+      opts.onError(error);
+    } else {
+      console.error('Error killing process tree:', error);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Local helpers
 // ---------------------------------------------------------------------------
 
