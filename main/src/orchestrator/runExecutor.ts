@@ -1381,20 +1381,31 @@ export class RunExecutor {
     const activeRunIds = Array.from(this.activePanelIds.keys());
 
     for (const runId of activeRunIds) {
-      const panelId = this.activePanelIds.get(runId);
-      if (!panelId) continue;
-
-      // Stop a programmatic run's host-driven walk FIRST (abort the controller +
-      // settle any open gate); aborting the spawner alone only kills the current
-      // step and would let the controller spawn the next one. No-op for
-      // orchestrated runs.
-      this.requestProgrammaticCancel(runId);
-      await this.spawner.abort(panelId);
-      await this.onLifecycleTransition(runId, 'canceled');
-      // Emit step 'done' on canceled path — the step ended regardless of reason.
-      this.emitStep(runId, 'done');
-      this.teardownRun(runId);
+      await this.cancelRun(runId);
     }
+  }
+
+  /**
+   * Cancel ONE run through its lifecycle: abort the spawner (settling the
+   * queued execute() task this run's PQueue holds), transition to 'canceled',
+   * and tear down. Extracted so app shutdown can cancel a single run whose
+   * execute() would otherwise hold the queue drain forever (e.g. a run
+   * awaiting a human gate that no one will answer — the app is quitting).
+   */
+  async cancelRun(runId: string): Promise<void> {
+    const panelId = this.activePanelIds.get(runId);
+    if (!panelId) return;
+
+    // Stop a programmatic run's host-driven walk FIRST (abort the controller +
+    // settle any open gate); aborting the spawner alone only kills the current
+    // step and would let the controller spawn the next one. No-op for
+    // orchestrated runs.
+    this.requestProgrammaticCancel(runId);
+    await this.spawner.abort(panelId);
+    await this.onLifecycleTransition(runId, 'canceled');
+    // Emit step 'done' on canceled path — the step ended regardless of reason.
+    this.emitStep(runId, 'done');
+    this.teardownRun(runId);
   }
 
   /**

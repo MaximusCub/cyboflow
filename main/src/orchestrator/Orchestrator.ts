@@ -131,7 +131,7 @@ export class Orchestrator {
    * resolving, ensuring in-flight state mutations complete cleanly.
    * If not running, returns immediately.
    */
-  async stop(): Promise<void> {
+  async stop(settleBusyQueue?: (runId: string) => Promise<void> | void): Promise<void> {
     if (!this.running) {
       return;
     }
@@ -150,7 +150,7 @@ export class Orchestrator {
     this.detectorEvents = undefined;
     this.onDetectorStuck = undefined;
 
-    await this.deps.runQueues.drainAll();
+    await this.deps.runQueues.drainAll(settleBusyQueue);
     this.deps.logger.info('orchestrator.stop.complete');
   }
 
