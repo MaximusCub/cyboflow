@@ -5,7 +5,9 @@ Index of the documentation tree.
 **Agent entry points:** shared guidance for all agents lives in
 [`AGENT-GUIDE.md`](AGENT-GUIDE.md). Root-level `CLAUDE.md` (Claude runtimes) imports it;
 root-level `AGENTS.md` (Codex, OMP, pi, other runtimes) points to it. Each of those two files
-carries only runtime-specific notes.
+carries only runtime-specific notes. If a directory-scoped instruction file is ever needed,
+put the shared guidance in that directory's `AGENTS.md` and make its `CLAUDE.md` a pointer —
+no nested agent-guide files.
 
 ## Current reference docs
 
