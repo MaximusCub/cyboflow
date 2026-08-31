@@ -2,11 +2,8 @@
 /**
  * dev-electron — cross-platform Electron launcher for the dev scripts.
  *
- * Replaces the former inline chain `wait-on http://localhost:${VITE} &&
- * env -u NODE_OPTIONS electron . <flags>`, whose `${VAR:-default}` expansion
- * and `env -u` are POSIX-only — on Windows `pnpm dev` could not start the
- * Electron half at all (cmd cannot run that syntax). Same net effect on every
- * platform:
+ * Node implementation so `pnpm dev`'s Electron half starts from cmd.exe too
+ * (no `${VAR:-}` / `env -u` shell syntax). Same net effect on every platform:
  *   1. waits for the Vite dev server (port 4521, CYBOFLOW_VITE_PORT override);
  *   2. strips NODE_OPTIONS from the child env — the Electron binary rejects
  *      some host-Node-only flags;

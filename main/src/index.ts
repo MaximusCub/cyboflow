@@ -6832,8 +6832,9 @@ async function drainOnQuit(): Promise<void> {
   // Cleanup all sessions and terminate child processes BEFORE the queue drain:
   // the queued run-executor tasks settle only when their sessions end, so
   // draining first would wait (until the quit-drain timeout) on tasks that the
-  // very next step would have settled. macOS behavior: same ordering now, and
-  // the drain completes immediately for the common case.
+  // very next step would have settled. The same cleanup-first ordering now
+  // applies on macOS, where the drain also completes immediately for the
+  // common case.
   if (sessionManager) {
     console.log('[Main] Cleaning up sessions and terminating child processes...');
     await sessionManager.cleanup();

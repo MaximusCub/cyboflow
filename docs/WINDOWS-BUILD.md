@@ -26,8 +26,9 @@ cd node_modules/electron && node install.js
 postinstall is run manually because it is not covered by the prebuild
 placement below.
 
-Place the two native modules on the **Electron ABI** (Electron 37 →
-`NODE_MODULE_VERSION` 136; current Node 24 is 137 — the mismatch matters):
+Place each native module on the ABI that loads in Electron
+(Electron 37 → `NODE_MODULE_VERSION` 136; current Node 24 is 137 — the
+mismatch matters):
 
 ```bash
 cd node_modules/.pnpm/better-sqlite3@<version>/node_modules/better-sqlite3
@@ -47,9 +48,10 @@ Then build and package:
 pnpm build:win        # NSIS installer + unpacked build in dist-electron/
 ```
 
-`build:win` re-checks the better-sqlite3 ABI before packaging and fails
-the build if a host-ABI artifact would be shipped (running the host test
-suite flips it — the guard exists because that flip is easy to forget).
+`build:win` first auto-swaps the better-sqlite3 artifact to the Electron
+ABI, then the packaging preflight fails the build if the artifact still
+will not load under Electron (running the host test suite flips it — the
+guard exists because that flip is easy to forget).
 
 ## Native module versions
 
@@ -88,9 +90,10 @@ per build.
 
 - **MCP IPC over a named pipe.** Windows cannot bind Unix sockets
   (`EACCES`); the orch endpoint becomes
-  `\\.\pipe\cyboflow-<user>-<hash>-orch` (hash of the per-instance data
-  dir, so parallel app variants cannot cross-talk). Node's `net` module
-  treats pipe paths transparently, so server and clients are unchanged.
+  `\\.\pipe\cyboflow-<user>-<hash>-orch` (first 8 hex of a SHA-256 digest
+  over the per-instance socket path, so parallel app variants cannot
+  cross-talk). Node's `net` module treats pipe paths transparently, so
+  server and clients are unchanged.
 - **PowerShell is the default shell** (`pwsh` if installed, else the
   system `powershell.exe`, then cmd.exe). Run/build commands are
   constructed per platform — `$env:K = 'v'` + `;` joins on Windows,
@@ -100,7 +103,7 @@ per build.
   of every teardown path (run scripts, terminals, PTY CLIs, agent-server
   clients, the verify driver). Process enumeration uses one PowerShell
   `Win32_Process` query rendered as `ps`-compatible text lines, so the
-  former `ps`-parsing sweeps work with their parsers unchanged.
+  `ps`-parsing sweeps work with their parsers unchanged.
 - **Agent-server spawns are not `detached` on Windows.** `DETACHED_PROCESS`
   leaves codex.exe console-less, which makes it allocate its own *visible*
   console — with the "Let Windows decide" default-terminal setting that is
