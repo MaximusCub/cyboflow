@@ -59,8 +59,7 @@ Full index: `docs/README.md`. The load-bearing ones:
 - `docs/BACKUP-RESTORE.md` — daily `sessions.db` snapshots, the `raw_events` shard archive,
   lineages, and the restore procedure. Read before touching a backup: a daily backup alone
   has an EMPTY `raw_events`.
-- `docs/PROVENANCE.md` — fork lineage; standing rule: never merge or cherry-pick from
-  Nimbalyst.
+- `docs/PROVENANCE.md` — fork lineage.
 - `docs/crystal-legacy/` and `docs/workflows-future/` — historical reference, not current
   truth.
 
