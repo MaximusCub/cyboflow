@@ -51,7 +51,7 @@ the specific thing), never a **doc** edit.
 ## Instruction-file edits carry their own, much higher bar
 
 Clearing the durability bar above only makes a learning a candidate for a `quick`
-fix or a `task`. Proposing an edit to an instruction file — a **CLAUDE.md** or a
+fix or a `task`. Proposing an edit to an instruction file — an instruction-layer file (rung 1) or a
 **`docs/*.md`** reference doc — is a SEPARATE and stricter decision, because those
 files are read by every future agent and they get WORSE as they grow. A rule that
 is merely true is not worth a line; every line must earn its place against the
@@ -65,15 +65,15 @@ guide every runtime loads — imported by repo-root `CLAUDE.md`, read first per
 agent lands in AGENT-GUIDE.md; a rule for one runtime only lands in `CLAUDE.md` or
 `AGENTS.md`. This layer is loaded into EVERY session of every flow, so its budget
 is the scarcest in the project. A directory-scoped `CLAUDE.md` is one notch looser
-but still sits above the docs bar. Propose a CLAUDE.md edit ONLY when ALL FIVE hold
-— if you cannot answer all five in one sentence each, it is not a CLAUDE.md edit:
+but still sits above the docs bar. Propose a `doc:claude-md` edit ONLY when ALL FIVE hold
+— if you cannot answer all five in one sentence each, it is not a `doc:claude-md` edit:
 
 1. **Behaviour-changing, broadly.** An agent that has not read this line takes a
    materially WRONG action — not merely a less-informed one — and it does so on
    **most** future tasks, not only inside one subsystem.
 2. **Not derivable.** The code, types, tests, filenames, or `git log` do not already
    say it, and one obvious grep would not reveal it. If opening the file it names
-   would tell you, it is not a CLAUDE.md rule.
+   would tell you, it is not an instruction-layer rule.
 3. **Durable and general.** No run/session ids, migration numbers, version numbers,
    dates, commit SHAs, branch names, PR numbers, or "we used to / this was fixed in"
    history. If the sentence would be stale or false in three months, it does not
@@ -83,16 +83,16 @@ but still sits above the docs bar. Propose a CLAUDE.md edit ONLY when ALL FIVE h
 5. **Net budget.** It AMENDS or TIGHTENS text that is already there wherever it can.
    Net-new lines must be justified explicitly — say what the file loses without
    them. Depth that belongs to one subsystem goes in `docs/*.md` behind the existing
-   load-on-demand pointer, never inline in CLAUDE.md.
+   load-on-demand pointer, never inline in the instruction layer.
 
-**At most ONE CLAUDE.md edit per run, and zero is the expected outcome.** If two
+**At most ONE `doc:claude-md` edit per run, and zero is the expected outcome.** If two
 candidates both look worthy, propose only the higher-impact one and discard the
 other with that as the reason. When in doubt: discard it, or downgrade it to a
 `docs/*.md` edit or a `task`.
 
 ### Rung 2 — reference docs (`docs/*.md`, incl. CODE-PATTERNS.md, ARCHITECTURE.md — but NOT `docs/AGENT-GUIDE.md`, which is rung 1)
 
-A lower bar than CLAUDE.md, but still a real one — these are loaded on demand and
+A lower bar than rung 1, but still a real one — these are loaded on demand and
 also decay as they grow. Propose one only when it:
 
 - **corrects something wrong, or fills a gap that actually misled** an agent (or
@@ -140,14 +140,14 @@ buckets:
   test, or a refactor that should queue for a future Sprint run. A regression
   traced to already-merged work is a `quick` fix when trivial, otherwise a `task`
   — an improvement to *make*, not an observation to re-file.
-- **doc** — a proposed instruction-file edit: a **CLAUDE.md** edit or a
+- **doc** — a proposed instruction-file edit: an instruction-layer (**`doc:claude-md`**) edit or a
   **`docs/*.md`** reference-doc edit (you only propose it; the orchestrator applies
   it after approval). The tag is `doc`; downstream, once approved at the gate, the
   orchestrator APPLIES the edit in-place at write-back, and all applied changes are
   reviewed together at the terminal human-review merge gate — do not use the word
   "decision" as a tag, it is the review-item kind, not a bucket. Every `doc` entry
   MUST carry a rung sub-label — **`doc:claude-md`** or **`doc:reference`** — so the
-  orchestrator can group CLAUDE.md edits into their own section of the
+  orchestrator can group instruction-layer edits into their own section of the
   recommendations doc, and MUST clear its rung's bar in "Instruction-file edits
   carry their own, much higher bar" above. Every doc edit names the exact file and
   section the edit lands in and what existing text it **replaces or extends** —

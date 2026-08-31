@@ -914,7 +914,7 @@ parallel opt-outs; do not collapse the two types or import one where the other i
 3. **`'ignore'` remains a valid typed value.** Each CLI manager owns its own
    `resolveSessionAgentPermissionMode` method (`claudeCodeManager.ts`,
    `interactiveClaudeManager.ts`, `codexPtyManager.ts`, `ompPtyManager.ts`,
-   `piSdkManager.ts`, `piPtyManager.ts`) that reads it: the Claude pair short-circuits to
+   `piPtyManager.ts`; `piSdkManager.ts` names its equivalent `resolveGateMode`) that reads it: the Claude pair short-circuits to
    `undefined` (preserving the legacy branch instead of resolving the 4-mode
    `agentPermissionMode`), the non-Claude managers fold it into the equivalent `'dontAsk'`. On
    the Claude interactive/PTY substrate specifically, `resolveInlineGatingHooks`
