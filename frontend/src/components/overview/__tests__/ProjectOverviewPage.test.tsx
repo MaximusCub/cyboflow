@@ -312,6 +312,22 @@ describe('ProjectOverviewPage — recommended-action dismissal', () => {
     expect(await screen.findByTestId('overview-action-capture-idea')).toBeInTheDocument();
   });
 
+  it('dismissing EVERY card grows the toggle into the full-width "all dismissed" well', async () => {
+    const user = userEvent.setup();
+    mount([]);
+
+    // The empty-new-existing hardcoded set has three cards; dismiss them all.
+    for (const id of ['launch-planner', 'capture-idea', 'verify-setup']) {
+      await user.click(await screen.findByTestId(`overview-action-dismiss-${id}`));
+    }
+
+    const toggle = screen.getByTestId('overview-dismissed-toggle');
+    expect(toggle).toHaveTextContent('All pending actions dismissed');
+    expect(toggle).toHaveTextContent('View dismissed actions (3)');
+    await user.click(toggle);
+    expect(screen.getByTestId('overview-dismissed-action-capture-idea')).toBeInTheDocument();
+  });
+
   it('"View dismissed" reveals still-qualifying dismissed cards, and Restore brings one back', async () => {
     const user = userEvent.setup();
     mount([]);

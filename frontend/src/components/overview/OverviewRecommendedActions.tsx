@@ -466,39 +466,58 @@ export function OverviewRecommendedActions({
           {cards.active.map((card) => (
             <ActionCard key={card.id} action={card} onDismiss={dismiss} />
           ))}
+          {/* The dismissed-cards toggle rides the grid as a card-sized ghost
+              tile so it reads as part of the deck, not fine print under it. */}
+          {cards.dismissedCards.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowDismissed((v) => !v)}
+              data-testid="overview-dismissed-toggle"
+              className="flex min-h-[96px] flex-col items-center justify-center gap-1 border border-dashed border-border-primary text-text-muted hover:bg-bg-hover hover:text-text-secondary"
+            >
+              <span className="font-semibold" style={{ fontSize: '12px' }}>
+                {showDismissed
+                  ? 'Hide dismissed ▴'
+                  : `View dismissed (${cards.dismissedCards.length}) ▾`}
+              </span>
+            </button>
+          )}
         </div>
       )}
-      {/* Dismissed-but-still-qualifying cards, behind a quiet toggle. */}
-      {cards.dismissedCards.length > 0 && (
-        <>
-          <button
-            type="button"
-            onClick={() => setShowDismissed((v) => !v)}
-            data-testid="overview-dismissed-toggle"
-            className="self-start text-text-muted hover:text-text-secondary"
-            style={{ fontSize: '10.5px' }}
-          >
+      {/* EVERY qualifying action dismissed: the toggle grows into a full-width
+          well so the section explains its own emptiness. */}
+      {cards.active.length === 0 && cards.dismissedCards.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowDismissed((v) => !v)}
+          data-testid="overview-dismissed-toggle"
+          className="flex flex-col items-center gap-1 border border-dashed border-border-primary px-4 py-6 text-center hover:bg-bg-hover"
+        >
+          <span className="font-semibold text-text-secondary" style={{ fontSize: '12.5px' }}>
+            All pending actions dismissed
+          </span>
+          <span className="text-interactive" style={{ fontSize: '11px' }}>
             {showDismissed
-              ? 'Hide dismissed ▴'
-              : `View dismissed (${cards.dismissedCards.length}) ▾`}
-          </button>
-          {showDismissed && (
-            <div
-              className="grid gap-2.5"
-              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
-            >
-              {cards.dismissedCards.map((card) => (
-                <ActionCard
-                  key={card.id}
-                  action={card}
-                  onDismiss={dismiss}
-                  dismissed
-                  onRestore={restore}
-                />
-              ))}
-            </div>
-          )}
-        </>
+              ? 'Hide dismissed actions ▴'
+              : `View dismissed actions (${cards.dismissedCards.length}) ▾`}
+          </span>
+        </button>
+      )}
+      {showDismissed && cards.dismissedCards.length > 0 && (
+        <div
+          className="grid gap-2.5"
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
+        >
+          {cards.dismissedCards.map((card) => (
+            <ActionCard
+              key={card.id}
+              action={card}
+              onDismiss={dismiss}
+              dismissed
+              onRestore={restore}
+            />
+          ))}
+        </div>
       )}
     </section>
   );
