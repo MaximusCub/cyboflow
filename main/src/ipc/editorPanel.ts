@@ -1,3 +1,11 @@
+// @cyboflow-hidden: both channels registered here (`editor:createPanel`,
+// `editor:openFile`) are unreachable in cyboflow v1. They are registered from
+// main/src/ipc/index.ts, but neither appears in main/src/preload.ts, so the renderer
+// has no way to invoke them, and no frontend code calls either channel. Note this
+// surface reaches a real file-write path — keep it unexposed until it is deliberately
+// wired. The reachable Monaco surface is the DIFF viewer, not this.
+// Re-enable by adding both channels to preload.ts's invoke allowlist and calling
+// `editor:createPanel` from a UI affordance (see frontend useAddTerminalPanel.ts).
 import { IpcMain } from 'electron';
 import * as path from 'path';
 import { panelManager } from '../services/panelManager';
