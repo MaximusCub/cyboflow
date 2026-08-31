@@ -11,6 +11,14 @@
  *   codex-primary   Codex executes,  Claude verifies
  *   codex           Codex executes,  Codex verifies
  *
+ * ORTHOGONAL TO THE RUNTIME ROW, too. The launch Runtime picks the run's
+ * ORCHESTRATOR — the provider the run itself resolves onto — while the mix picks
+ * the provider of each AGENT the flow dispatches. Neither constrains the other:
+ * {@link applyRuntimeMix} states EVERY routed agent's runtime explicitly, so a
+ * mixed graph runs identically under a Claude or a Codex orchestrator. (Picking
+ * a mix therefore never moves the Runtime row, and picking a Runtime never
+ * rewrites the mix.)
+ *
  * Unlike a tuning level, the mix is materialized EXACTLY ONCE — inside
  * `createRun`'s spec freeze, via {@link materializeForLevelAndMix}. Every other
  * definition read (`resolveEffectiveDefinition`, the workflow editor, the
@@ -75,9 +83,15 @@ export function isRuntimeMix(value: unknown): value is RuntimeMix {
 }
 
 /**
- * The provider that runs the EXECUTION class under `mix` — the run's base
- * provider. `createRun` feeds this into the provider/runtime ladder before
- * `resolveExecutionModel` (plan D3 step 3).
+ * The provider that runs the EXECUTION class under `mix`.
+ *
+ * NOT the run's base provider: the mix and the Runtime row are ORTHOGONAL dials
+ * — the Runtime picks the ORCHESTRATOR (the provider the run itself resolves
+ * onto), the mix picks the provider of each AGENT the flow dispatches, and
+ * {@link applyRuntimeMix} states every routed agent's runtime explicitly so the
+ * two never have to agree. `createRun` consults this only as a FILL-IN for a
+ * launch that named no provider at all (the backlog/idea launchers, MCP), where
+ * nothing is being overridden.
  */
 export function primaryProviderForMix(mix: RuntimeMix): 'claude' | 'codex' {
   return mix === 'claude' || mix === 'claude-primary' ? 'claude' : 'codex';
@@ -86,27 +100,6 @@ export function primaryProviderForMix(mix: RuntimeMix): 'claude' | 'codex' {
 /** True for the two cross-provider mixes — one provider executes, the other verifies. */
 export function isMixedRuntimeMix(mix: RuntimeMix): boolean {
   return mix === 'claude-primary' || mix === 'codex-primary';
-}
-
-/**
- * Swap the mix's PRIMARY to `provider`, preserving the same/cross aspect.
- *
- * The wizard is not the only launch surface: the top-bar picker, the in-session
- * launcher, the backlog launchers, and "Run with modifications" all send their
- * own provider (or omit it). Rejecting a provider that disagrees with a saved
- * mix would break every one of them the moment a workflow saves a non-claude
- * default, so `createRun` RECONCILES instead (plan D3 step 2) — and the wizard's
- * Runtime row calls this same helper, so the two surfaces cannot drift.
- *
- *   claude        + codex  -> codex          (same-provider aspect kept)
- *   codex-primary + claude -> claude-primary (cross-provider aspect kept)
- *
- * Identity when the provider already matches the mix's primary.
- */
-export function reconcileMixWithProvider(mix: RuntimeMix, provider: 'claude' | 'codex'): RuntimeMix {
-  if (primaryProviderForMix(mix) === provider) return mix;
-  if (provider === 'codex') return mix === 'claude' ? 'codex' : 'codex-primary';
-  return mix === 'codex' ? 'claude' : 'claude-primary';
 }
 
 // ─── Tier map: Claude pin -> Codex pin ───────────────────────────────────────
@@ -316,12 +309,12 @@ function definitionRoutableAgentKeys(def: WorkflowDefinition): string[] {
  *     effort }` from the tier map. The Claude `model` field STAYS: it is inert
  *     under a codex runtime (`providerModel` wins at every spawn seam) and it is
  *     what makes a flip back to a Claude mix lossless.
- *   - routed to CLAUDE on a codex-BASE mix (`codex-primary`'s verification
- *     class) -> `runtime: 'claude-sdk'` explicitly, `model`/`effort` untouched.
- *     Without the pin the agent would inherit the run's codex provider in
- *     `spawnStepRunner`.
- *   - routed to CLAUDE on a claude-base mix -> left alone; there is nothing to
- *     say.
+ *   - routed to CLAUDE -> `runtime: 'claude-sdk'` explicitly, `model`/`effort`
+ *     untouched. Pinned on EVERY non-claude mix, not only a codex-base one:
+ *     the mix is orthogonal to the run's base provider, so a `claude-primary`
+ *     graph must STATE its Claude routing rather than inherit it — under a
+ *     Codex orchestrator an unpinned agent would otherwise take the run's
+ *     provider in `spawnStepRunner` and silently execute on Codex.
  *
  * `mix === 'claude'` returns the clone unchanged. Callers short-circuit before
  * reaching here (see {@link materializeForLevelAndMix}), but the function stays
@@ -360,9 +353,10 @@ export function applyRuntimeMix(
         effort: pin.effort,
       };
       wrote = true;
-    } else if (primaryProviderForMix(mix) === 'codex') {
-      // Claude-routed on a codex-base run: pin the substrate or the agent
-      // inherits the run's codex provider.
+    } else {
+      // Claude-routed: pin the substrate unconditionally. The mix no longer
+      // decides the run's provider, so "inherit the run" is not a statement
+      // about Claude any more — only an explicit pin is.
       configs[agentKey] = { ...(existing ?? {}), runtime: 'claude-sdk' };
       wrote = true;
     }

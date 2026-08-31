@@ -27,8 +27,9 @@
  *     workflow-tuning-levels.md D4; mutually exclusive with pinning a specific
  *     A/B variant, see the effects near `selectedWorkflowId`) + a per-run
  *     runtime-mix override (same gate, RuntimeMixSelector —
- *     workflow-runtime-mix.md D4; two-way coupled with the Runtime row, see
- *     `effectiveRuntimeMix` and its two handlers) + the A/B variant picker +
+ *     workflow-runtime-mix.md D4; ORTHOGONAL to the Runtime row above, which
+ *     picks the orchestrator while the mix picks each agent's provider, see
+ *     `handleRuntimeMixChange`) + the A/B variant picker +
  *     workflow blueprint editor access + a launch summary.
  *   - quick: agent-permission override + agent runtime (+ caveats) + model pin
  *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
@@ -115,8 +116,6 @@ import {
   DEFAULT_RUNTIME_MIX,
   RUNTIME_MIX_LABELS,
   VERIFICATION_AGENT_KEYS,
-  primaryProviderForMix,
-  reconcileMixWithProvider,
   type RuntimeMix,
 } from '../../../../../shared/tuning/runtimeMix';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
@@ -147,7 +146,6 @@ import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared
 import {
   AGENT_RUNTIME_LABELS,
   DEFAULT_SESSION_AGENT_RUNTIME,
-  PROVIDER_DEFAULT_RUNTIME,
   claudeRuntimeFromSubstrate,
   isSessionAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
@@ -778,11 +776,13 @@ export default function SessionStartWizard(): React.JSX.Element {
       : workflowMetas.find((m) => m.id === selectedWorkflowId);
 
   // ── The derived launch route (workflow-runtime-mix.md D4) ────────────────
-  // ONE derivation feeding the selector, the Runtime-row reconcile, the Mode
-  // row's visibility, the summary and BOTH launch payloads — the Runtime row is
-  // not cosmetic (`agentRuntime` drives host-session creation, the payload and
-  // the async model-family coercion), so a second, subtly different notion of
-  // "the mix this launch runs under" is exactly the drift to avoid.
+  // ONE derivation feeding the selector, the Mode row's visibility, the summary
+  // and BOTH launch payloads, so a second, subtly different notion of "the mix
+  // this launch runs under" cannot drift in.
+  //
+  // It does NOT feed the Runtime row, which is a separate dial: Runtime picks
+  // the run's ORCHESTRATOR (`agentRuntime` drives host-session creation, the
+  // payload and the model-family coercion), the mix picks each AGENT's provider.
 
   // A pinned variant runs its own frozen definition and its runs are
   // mix-unattributed, so the override cannot ride along; clear it the moment a
@@ -822,46 +822,24 @@ export default function SessionStartWizard(): React.JSX.Element {
     selectedMeta?.isBuiltIn !== true || runtimeMixRowDisabled ? null : displayedRuntimeMix;
 
   /**
-   * The Runtime row's onChange. Beyond setting the runtime it RECONCILES a live
-   * mix with the provider just chosen, through the same shared helper
-   * `createRun` uses, so the wizard and the server cannot drift: the primary
-   * swaps and the same/cross aspect is kept (`claude` + Codex → `codex`;
-   * `codex-primary` + Claude → `claude-primary`).
+   * The mix row's onChange. Sets the override ONLY — picking the stamp back
+   * clears it, since only a genuine divergence is one.
    *
-   * Wrapping the existing handler rather than forking a second path also covers
-   * SubstrateSelector's OWN programmatic writes (the CLI-only lock, snapping off
-   * a provider switched off in Settings) — those change the launching provider
-   * exactly as much as a click does.
-   */
-  const handleAgentRuntimeChange = useCallback(
-    (runtime: LaunchAgentRuntime): void => {
-      setAgentRuntimeByUser(runtime);
-      if (effectiveRuntimeMix === null) return;
-      const provider = providerForRuntime(runtime);
-      if (provider !== 'claude' && provider !== 'codex') return;
-      const next = reconcileMixWithProvider(effectiveRuntimeMix, provider);
-      setRuntimeMixOverride(next === savedRuntimeMix ? null : next);
-    },
-    [setAgentRuntimeByUser, effectiveRuntimeMix, savedRuntimeMix],
-  );
-
-  /**
-   * The mix row's onChange — the other half of the same coupling. Picking the
-   * stamp back clears the override (only a genuine divergence is one), and the
-   * implied provider is routed through the SAME `setAgentRuntimeByUser` path a
-   * manual Runtime click takes, so the family coercion and every downstream
-   * consumer of `agentRuntime` stay correct. A pick whose primary already
-   * matches leaves the runtime alone, so a deliberate `claude-interactive`
-   * choice survives a Claude-side mix change.
+   * It deliberately does NOT touch the Runtime row, and the Runtime row does not
+   * rewrite the mix: the two are orthogonal dials. Runtime picks the run's
+   * ORCHESTRATOR (and, with it, the Default-model family); the mix picks which
+   * provider each AGENT of the flow runs on. `applyRuntimeMix` pins every routed
+   * agent's runtime explicitly, so a mixed graph runs identically under either
+   * orchestrator and neither pick has to move the other. (Both halves of the
+   * former two-way coupling — this handler's `setAgentRuntimeByUser` and the
+   * Runtime row's `reconcileMixWithProvider` — are gone; `createRun` dropped the
+   * matching server-side reconcile in the same change.)
    */
   const handleRuntimeMixChange = useCallback(
     (mix: RuntimeMix): void => {
       setRuntimeMixOverride(mix === savedRuntimeMix ? null : mix);
-      const provider = primaryProviderForMix(mix);
-      if (providerForRuntime(agentRuntime) === provider) return;
-      setAgentRuntimeByUser(PROVIDER_DEFAULT_RUNTIME[provider]);
     },
-    [savedRuntimeMix, agentRuntime, setAgentRuntimeByUser],
+    [savedRuntimeMix],
   );
 
   /**
@@ -2101,9 +2079,10 @@ export default function SessionStartWizard(): React.JSX.Element {
                   value={agentRuntime}
                   // A real per-launch pick — latches THIS key touched, so the
                   // card's stored/global default stops re-seeding it (and only
-                  // it) — and reconciles a live runtime mix with the provider
-                  // just chosen (see handleAgentRuntimeChange).
-                  onChange={handleAgentRuntimeChange}
+                  // it). It picks the run's ORCHESTRATOR and leaves the runtime
+                  // mix alone; the two dials are orthogonal (see
+                  // handleRuntimeMixChange).
+                  onChange={setAgentRuntimeByUser}
                   id="wizard-substrate"
                   caveatsTestId="wizard-substrate-caveats"
                   runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
