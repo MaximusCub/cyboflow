@@ -9,20 +9,25 @@
  * that a rejected call comes back as an IPCResponse rather than a thrown error
  * (a throw crosses the bridge as an opaque "Error invoking remote method").
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 
 vi.mock('electron', () => ({
-  ipcMain: { handle: vi.fn() },
+  ipcMain: { handle: vi.fn(), on: vi.fn() },
   app: { isPackaged: false },
 }));
 
 import {
+  installIpcSenderGuard,
   isTrustedRendererFrameUrl,
   isTrustedSender,
   senderRejection,
+  TRPC_ELECTRON_CHANNEL,
   type SenderGuardConfig,
 } from '../senderGuard';
+import { ipcMain } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const PROD: SenderGuardConfig = { isDevelopment: false, devRendererPort: '4521' };
 const DEV: SenderGuardConfig = { isDevelopment: true, devRendererPort: '4521' };
@@ -140,5 +145,84 @@ describe('senderRejection', () => {
     const rejection = senderRejection('git:execute-project');
     expect(rejection.success).toBe(false);
     expect(rejection.error).toContain('git:execute-project');
+  });
+});
+
+describe('installIpcSenderGuard — singleton patch', () => {
+  // installIpcSenderGuard is module-singleton (idempotent by design), so this
+  // block installs ONCE up front and probes both patched surfaces through the
+  // shared electron mock. The original vi.fn registrars are captured before the
+  // install because the patch reassigns `ipcMain.handle` / `ipcMain.on`; the
+  // bound originals inside the patch are these same mocks, so their
+  // `.mock.calls` show exactly what got registered underneath.
+  const originalHandle = ipcMain.handle as unknown as Mock;
+  const originalOn = ipcMain.on as unknown as Mock;
+  installIpcSenderGuard(PROD);
+
+  const TRUSTED = { url: 'file:///app/frontend/dist/index.html', parent: null };
+  const HOSTILE = { url: 'about:srcdoc', parent: { url: 'file:///app/frontend/dist/index.html' } };
+
+  function lastRegistered(mock: Mock): (event: unknown, ...args: unknown[]) => unknown {
+    const call = mock.mock.calls[mock.mock.calls.length - 1];
+    return call[1] as (event: unknown, ...args: unknown[]) => unknown;
+  }
+
+  it('handle: serves a trusted top frame and passes args through', async () => {
+    const inner = vi.fn().mockResolvedValue({ success: true, data: 42 });
+    ipcMain.handle('probe:channel', inner);
+    const wrapped = lastRegistered(originalHandle);
+    const event = eventFrom(TRUSTED);
+    await expect(wrapped(event, 'a', 'b')).resolves.toEqual({ success: true, data: 42 });
+    expect(inner).toHaveBeenCalledWith(event, 'a', 'b');
+  });
+
+  it('handle: answers an untrusted frame with the rejection envelope, never the listener', async () => {
+    const inner = vi.fn();
+    ipcMain.handle('probe:channel2', inner);
+    const wrapped = lastRegistered(originalHandle);
+    expect(await wrapped(eventFrom(HOSTILE))).toEqual(senderRejection('probe:channel2'));
+    expect(inner).not.toHaveBeenCalled();
+  });
+
+  it('on: wraps ONLY the trpc-electron channel — other channels register the exact listener', () => {
+    const passthrough = vi.fn();
+    ipcMain.on('terminal:input', passthrough);
+    const lastCall = originalOn.mock.calls[originalOn.mock.calls.length - 1];
+    expect(lastCall[0]).toBe('terminal:input');
+    // Identity, not a wrapper: .on semantics for every non-tRPC channel are
+    // untouched (removeListener-by-reference keeps working there).
+    expect(lastCall[1]).toBe(passthrough);
+  });
+
+  it('on(trpc): delivers a trusted frame message to the real listener', () => {
+    const inner = vi.fn();
+    ipcMain.on(TRPC_ELECTRON_CHANNEL, inner);
+    const wrapped = lastRegistered(originalOn);
+    expect(wrapped).not.toBe(inner);
+    const event = eventFrom(TRUSTED);
+    wrapped(event, { method: 'request', operation: { id: 1 } });
+    expect(inner).toHaveBeenCalledWith(event, { method: 'request', operation: { id: 1 } });
+  });
+
+  it('on(trpc): DROPS an untrusted frame message — listener never sees it', () => {
+    const inner = vi.fn();
+    ipcMain.on(TRPC_ELECTRON_CHANNEL, inner);
+    const wrapped = lastRegistered(originalOn);
+    expect(wrapped(eventFrom(HOSTILE), { method: 'request' })).toBeUndefined();
+    expect(wrapped(eventFrom(null), { method: 'request' })).toBeUndefined();
+    expect(inner).not.toHaveBeenCalled();
+  });
+
+  it('TRPC_ELECTRON_CHANNEL matches trpc-electron’s own ELECTRON_TRPC_CHANNEL declaration', () => {
+    // The literal is declared locally in senderGuard.ts (importing
+    // 'trpc-electron/main' would pull the real package + electron into every
+    // consumer test). Pin it against the installed package's .d.ts so a channel
+    // rename in an upgrade fails HERE instead of silently registering the tRPC
+    // listener unwrapped.
+    // __filename, not import.meta.url — main's tsconfig is commonjs.
+    const require = createRequire(__filename);
+    const dtsPath = require.resolve('trpc-electron/main').replace(/\.c?js$/, '.d.ts');
+    const dts = readFileSync(dtsPath, 'utf8');
+    expect(dts).toContain(`ELECTRON_TRPC_CHANNEL = "${TRPC_ELECTRON_CHANNEL}"`);
   });
 });
