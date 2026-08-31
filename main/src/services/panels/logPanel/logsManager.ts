@@ -1,10 +1,10 @@
-import { ChildProcess, spawn, exec } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import { ToolPanel, LogsPanelState } from '../../../../../shared/types/panels';
 import { panelManager } from '../../panelManager';
 import { addSessionLog, cleanupSessionLogs } from '../../../ipc/logs';
 import { mainWindow } from '../../../index';
 import { getShellPath } from '../../../utils/shellPath';
-import { collectDescendantPids } from '../../../utils/platformProcess';
+import { killTreeImmediate } from '../../../utils/platformProcess';
 
 export class LogsManager {
   private static instance: LogsManager;
@@ -185,26 +185,12 @@ export class LogsManager {
   }
   
   /**
-   * Get all descendant PIDs of a process recursively
-   * @param parentPid The parent process ID
-   * @returns Array of all descendant PIDs
-   *
-   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
-   * win32, per-level `ps --ppid` recursion on POSIX) lives in
-   * utils/platformProcess.ts; this walker stays silent on a failed walk,
-   * degrading to a partial kill list exactly as before.
-   */
-  private getAllDescendantPids(parentPid: number): number[] {
-    return collectDescendantPids(parentPid);
-  }
-
-  /**
    * Stop a running script and ensure all child processes are terminated.
-   * This method uses multiple approaches to ensure complete cleanup:
-   * 1. Gets all descendant PIDs recursively before killing
-   * 2. Kills the process group via `kill -TERM -<pgid>` then `-9`
-   * 3. Kills individual descendant processes as a fallback
-   * 4. Uses graceful SIGTERM first, then forceful SIGKILL
+   *
+   * The ladder lives in utils/platformProcess.ts (killTreeImmediate): an
+   * immediate SIGKILL of the root and every enumerated descendant, then a
+   * best-effort shell sweep — no graceful phase, no probe. This site keeps
+   * only its panel bookkeeping.
    */
   async stopScript(panelId: string): Promise<void> {
     const childProcess = this.activeProcesses.get(panelId);
@@ -212,38 +198,13 @@ export class LogsManager {
       this.activeProcesses.delete(panelId);
       return;
     }
-    
+
     const pid = childProcess.pid;
 
     // Immediately remove from active processes to prevent new output
     this.activeProcesses.delete(panelId);
 
-    try {
-      // First, get all descendant PIDs before we start killing
-      const descendantPids = this.getAllDescendantPids(pid);
-
-      // macOS/Unix: kill the shell AND all its descendants
-      const allPids = [pid, ...descendantPids];
-
-      for (const targetPid of allPids) {
-        try {
-          process.kill(targetPid, 'SIGKILL');
-        } catch (error: unknown) {
-          // Process might already be dead or inaccessible
-        }
-      }
-
-      // Use shell command as ultimate fallback (kill -9 cannot be caught or ignored)
-      const killCmd = `kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`;
-      await new Promise<void>((resolve) => {
-        exec(killCmd, { windowsHide: true }, () => {
-          // Ignore errors - processes might already be dead
-          resolve();
-        });
-      });
-    } catch (error) {
-      console.error('Error killing process tree:', error);
-    }
+    await killTreeImmediate(pid);
   }
   
   /**

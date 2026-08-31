@@ -1,5 +1,5 @@
 /**
- * platformProcess — killTree's POSIX option surface.
+ * platformProcess — killTree's POSIX option surface + killTreeImmediate.
  *
  * Fully hermetic: every seam (execCommand / sendSignal / isPidAlive /
  * descendantPids / listDescendants) is injected, so no real `ps`/`kill`/`exec`
@@ -14,7 +14,7 @@
  *    members the tree walk missed swept into the per-descendant kills.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { killTree } from './platformProcess';
+import { killTree, killTreeImmediate } from './platformProcess';
 
 type ExecSpy = ReturnType<typeof vi.fn<(command: string) => Promise<{ stdout: string }>>>;
 
@@ -146,5 +146,48 @@ describe('killTree POSIX — group resolution shapes', () => {
     });
 
     expect(descendantPids).toEqual([5001]);
+  });
+});
+
+describe('killTreeImmediate', () => {
+  it('SIGKILLs the root and every enumerated descendant, then runs the shell sweep', async () => {
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
+    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+
+    await killTreeImmediate(4242, {
+      platform: 'linux',
+      descendantPids: [5001, 5002],
+      sendSignal,
+      execCommand,
+    });
+
+    expect(sendSignal).toHaveBeenCalledTimes(3);
+    expect(sendSignal).toHaveBeenCalledWith(4242, 'SIGKILL');
+    expect(sendSignal).toHaveBeenCalledWith(5001, 'SIGKILL');
+    expect(sendSignal).toHaveBeenCalledWith(5002, 'SIGKILL');
+    expect(execCommand).toHaveBeenCalledWith(
+      'kill -9 4242 5001 5002 2>/dev/null; pkill -9 -P 4242 2>/dev/null',
+    );
+  });
+
+  it('is fail-soft: dead pids and a failing sweep never throw', async () => {
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>((pid) => {
+      if (pid === 5001) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    });
+    const execCommand: ExecSpy = vi.fn(() => Promise.reject(new Error('pkill matched nothing')));
+    const onError = vi.fn();
+
+    await expect(
+      killTreeImmediate(4242, {
+        platform: 'linux',
+        descendantPids: [5001],
+        sendSignal,
+        execCommand,
+        onError,
+      }),
+    ).resolves.toBeUndefined();
+
+    // The sweep failure is ignored by contract — not surfaced through onError.
+    expect(onError).not.toHaveBeenCalled();
   });
 });
