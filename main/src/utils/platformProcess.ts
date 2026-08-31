@@ -10,8 +10,9 @@
  *     POSIX, the winProcessTable.ts stand-in on win32).
  *   - {@link collectDescendantPids} — descendant-tree enumeration (table
  *     fetch + walk).
- *   - {@link killWindowsTree}, {@link killPidSync}, {@link killTree} — the
- *     fire-and-forget, synchronous, and ladder-shaped tree kills.
+ *   - {@link killWindowsTree}, {@link killPidSync}, {@link killTree},
+ *     {@link killTreeImmediate} — the fire-and-forget, synchronous,
+ *     ladder-shaped, and immediate-hard tree kills.
  *
  * Per-site zombie emission, log wording and grace timings stay at the call
  * sites via {@link KillTreeOptions} hooks — this module owns the platform
@@ -273,9 +274,24 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   pollIntervalMs?: number;
   /**
    * How the grace window is spent: 'poll' (default) returns as soon as the
-   * root pid is dead; 'fixed' sleeps the whole window unconditionally (RunCommandManager never probed during the wait).
+   * root pid is dead; 'fixed' sleeps the whole window unconditionally
+   * (RunCommandManager never probed during the wait, and neither did the
+   * POSIX ladders of AbstractCliManager / sessionManager — a fixed 200ms /
+   * 2s between the SIGTERM and SIGKILL phases). Honored on both arms.
    */
   graceMode?: 'poll' | 'fixed';
+  /**
+   * POSIX process-group resolution (win32 ignores this — no groups there):
+   *  - 'lookup' (default, terminalSessionManager's shape): after the SIGTERM,
+   *    one `ps -o pgid=` lookup replaces the root-pid stand-in with the real
+   *    pgid when it responds.
+   *  - 'root' (AbstractCliManager / sessionManager): no lookup — the pty/spawned
+   *    child is its own group leader, so the root pid IS the group id.
+   *  - 'enumerate' (runCommandManager): BEFORE any signal, resolve the real
+   *    pgid and sweep group members the up-front tree walk missed into the
+   *    per-descendant kill list.
+   */
+  posixGroupMode?: 'lookup' | 'root' | 'enumerate';
   /**
    * Re-enumeration for the verification passes. Defaults to
    * {@link collectDescendantPids} on this platform; sites with an injected
@@ -322,12 +338,15 @@ function defaultIsPidAlive(pid: number): boolean {
  * verification pass (500ms settle, re-enumerate, direct kill per survivor,
  * 200ms, re-check).
  *
- * POSIX — the SIGTERM → process-group ladder (terminalSessionManager's
- * shape): SIGTERM the root, look up its real pgid, `kill -TERM
- * -<pgid>`, a bounded dual probe (root AND group), SIGKILL the root and group,
- * kill every enumerated descendant, a `pkill -9 -P` sweep, then the same
- * 500ms verification (no survivors re-kill pass — preserving the POSIX
- * ladder's shape exactly).
+ * POSIX — the SIGTERM → process-group ladder: SIGTERM the root, group handling
+ * per {@link KillTreeOptions.posixGroupMode} (default: terminalSessionManager's
+ * `ps -o pgid=` lookup; 'root' skips the lookup; 'enumerate' resolves the pgid
+ * and sweeps in group members before any signal flies), `kill -TERM -<pgid>`,
+ * the grace window in {@link KillTreeOptions.graceMode} shape ('poll': a
+ * bounded dual probe of root AND group; 'fixed': an unconditional sleep),
+ * SIGKILL the root and group, kill every enumerated descendant, a `pkill -9
+ * -P` sweep, then the same 500ms verification (no survivors re-kill pass —
+ * preserving the POSIX ladder's shape exactly).
  */
 export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise<boolean> {
   const platform = opts.platform ?? process.platform;
@@ -338,6 +357,8 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
     opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
   const graceMs = opts.graceMs ?? 2000;
   const pollIntervalMs = opts.pollIntervalMs ?? 100;
+  const fixedGrace = (opts.graceMode ?? 'poll') === 'fixed';
+  const posixGroupMode = opts.posixGroupMode ?? 'lookup';
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
   // Probe contract: a throw means "could not tell" — count as alive so a poll
   // waits out its window instead of short-circuiting to the forceful kill.
@@ -351,7 +372,11 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
   const listDescendants = async (): Promise<number[]> =>
     (opts.listDescendants ? await opts.listDescendants() : collectDescendantPids(pid, { platform })) ??
     [];
-  const descendantPids = opts.descendantPids ?? collectDescendantPids(pid, { platform });
+  // Copied: the POSIX 'enumerate' group mode appends group members the tree
+  // walk missed — the caller's array must not be mutated as a side effect.
+  const descendantPids = [
+    ...(opts.descendantPids ?? collectDescendantPids(pid, { platform })),
+  ];
 
   try {
     if (platform === 'win32') {
@@ -361,7 +386,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       } catch (error) {
         opts.onGracefulError?.(error);
       }
-      if ((opts.graceMode ?? 'poll') === 'fixed') {
+      if (fixedGrace) {
         await sleep(graceMs);
       } else {
         // Bounded grace poll — return the moment the pid is gone, capped at
@@ -395,6 +420,32 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       const sendSignal = opts.sendSignal ?? ((signalPid: number, signal: NodeJS.Signals) => {
         process.kill(signalPid, signal);
       });
+      let pgid = pid;
+
+      if (posixGroupMode === 'enumerate') {
+        // runCommandManager's shape: resolve the real pgid BEFORE any signal
+        // flies and sweep in group members the up-front tree walk could not
+        // see (workers re-parented into the group). The bare lookup (no
+        // `|| echo ""` suffix) keeps this site's exact failure shape.
+        try {
+          const result = await execCommand(`ps -o pgid= -p ${pid}`);
+          const foundPgid = parseInt(result.stdout.trim());
+          if (!isNaN(foundPgid)) {
+            pgid = foundPgid;
+            if (foundPgid !== pid) {
+              const pgResult = await execCommand(`ps -o pid= -g ${foundPgid} 2>/dev/null || true`);
+              const pgPids = pgResult.stdout
+                .split('\n')
+                .map(line => parseInt(line.trim()))
+                .filter(p => !isNaN(p) && p !== pid && !descendantPids.includes(p));
+              descendantPids.push(...pgPids);
+            }
+          }
+        } catch (error) {
+          console.warn('Error getting process group:', error);
+        }
+      }
+
       // First, try SIGTERM for graceful shutdown
       try {
         sendSignal(pid, 'SIGTERM');
@@ -402,18 +453,19 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
         console.warn('SIGTERM failed:', error);
       }
 
-      // Kill the entire process group using negative PID. First find the
-      // actual process group id — the root's pid is only a stand-in when the
-      // lookup fails.
-      let pgid = pid;
-      try {
-        const pgidResult = await execCommand(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
-        const foundPgid = parseInt(pgidResult.stdout.trim());
-        if (!isNaN(foundPgid)) {
-          pgid = foundPgid;
+      if (posixGroupMode === 'lookup') {
+        // terminalSessionManager's shape: after the SIGTERM, find the actual
+        // process group id — the root's pid is only a stand-in when the
+        // lookup fails.
+        try {
+          const pgidResult = await execCommand(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
+          const foundPgid = parseInt(pgidResult.stdout.trim());
+          if (!isNaN(foundPgid)) {
+            pgid = foundPgid;
+          }
+        } catch (error) {
+          // Use the original PID as fallback
         }
-      } catch (error) {
-        // Use the original PID as fallback
       }
 
       try {
@@ -422,15 +474,19 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
         console.warn(`Error sending SIGTERM to process group: ${error}`);
       }
 
-      // Poll for early exit instead of unconditionally sleeping the full grace
-      // window — return the moment both the main pid and its process group are
-      // gone, bounded at the grace window, before forcing SIGKILL below.
-      const deadline = Date.now() + graceMs;
-      while (Date.now() < deadline) {
-        if (!probeAlive(pid) && !probeAlive(-pgid)) {
-          break;
+      if (fixedGrace) {
+        await sleep(graceMs);
+      } else {
+        // Poll for early exit instead of unconditionally sleeping the full grace
+        // window — return the moment both the main pid and its process group are
+        // gone, bounded at the grace window, before forcing SIGKILL below.
+        const deadline = Date.now() + graceMs;
+        while (Date.now() < deadline) {
+          if (!probeAlive(pid) && !probeAlive(-pgid)) {
+            break;
+          }
+          await sleep(pollIntervalMs);
         }
-        await sleep(pollIntervalMs);
       }
 
       // Now forcefully kill the main process
