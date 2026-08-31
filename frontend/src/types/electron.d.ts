@@ -167,9 +167,6 @@ interface ElectronAPI {
     preCreateTerminal: (sessionId: string) => Promise<IPCResponse<void>>;
     resizeTerminal: (sessionId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
 
-    // Prompt operations — PromptMarker is locally typed; IPCDataResponse for direct .data access
-    getPrompts: (sessionId: string) => Promise<IPCDataResponse<unknown[]>>;
-
     // Git merge operations
     mergeMainToWorktree: (sessionId: string) => Promise<IPCResponse<void>>;
     mergeWorktreeToMain: (sessionId: string) => Promise<IPCResponse<void>>;
@@ -307,11 +304,6 @@ interface ElectronAPI {
     getPreview(): Promise<IPCResponse<BugReportPreview>>;
     submit(request: BugReportSubmitRequest): Promise<IPCResponse<BugReportSubmitResponse>>;
     resolveRun(sessionId: string): Promise<IPCResponse<BugReportRunLink | null>>;
-  };
-
-  // Prompts — IPCDataResponse so callers can use response.data directly after success check
-  prompts: {
-    getAll: () => Promise<IPCDataResponse<unknown[]>>;
   };
 
   // Dialog

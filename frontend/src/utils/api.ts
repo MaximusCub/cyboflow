@@ -289,12 +289,6 @@ export class API {
       return window.electronAPI.sessions.resizeTerminal(sessionId, cols, rows);
     },
 
-    // Prompt operations
-    async getPrompts(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getPrompts(sessionId);
-    },
-
     // Git rebase operations
     async rebaseMainIntoWorktree(sessionId: string) {
       return trpc.cyboflow.sessionGit.rebaseMainIntoWorktree.mutate({ sessionId });
@@ -564,14 +558,6 @@ export class API {
       return trpc.cyboflow.config.updateSessionPreferences.mutate(
         preferences as unknown as Parameters<typeof trpc.cyboflow.config.updateSessionPreferences.mutate>[0],
       );
-    },
-  };
-
-  // Prompts
-  static prompts = {
-    async getAll() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.prompts.getAll();
     },
   };
 

@@ -1,10 +1,9 @@
-import { Search, Clock } from 'lucide-react';
+import { Search } from 'lucide-react';
 
 interface TitleBarProps {
   /** Global search query (sessions / agents / files). */
   searchQuery: string;
   onSearchChange: (value: string) => void;
-  onPromptHistoryClick: () => void;
 }
 
 // Width reserved at the left for the native macOS traffic lights
@@ -16,13 +15,11 @@ const TRAFFIC_LIGHT_GUTTER = 72;
  *
  * The whole bar is a drag region (WebkitAppRegion: drag); interactive controls
  * opt out with `no-drag`. The left gutter is empty space reserved for the
- * native macOS traffic lights. The center hosts a global search field; the
- * right hosts action icons wired to the app's existing handlers.
+ * native macOS traffic lights. The center hosts a global search field.
  */
 export function TitleBar({
   searchQuery,
   onSearchChange,
-  onPromptHistoryClick,
 }: TitleBarProps) {
   return (
     <div
@@ -47,22 +44,6 @@ export function TitleBar({
           className="w-full bg-transparent text-[11px] text-text-primary placeholder:text-text-tertiary focus:outline-none"
           aria-label="Search sessions, agents, files"
         />
-      </div>
-
-      {/* Right action icons */}
-      <div
-        className="flex flex-shrink-0 items-center gap-1"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      >
-        <button
-          type="button"
-          onClick={onPromptHistoryClick}
-          title="Prompt history (⌘P)"
-          aria-label="Prompt history"
-          className="flex h-[22px] w-6 items-center justify-center text-text-secondary hover:bg-bg-primary hover:text-text-primary"
-        >
-          <Clock className="h-3.5 w-3.5" strokeWidth={1.6} />
-        </button>
       </div>
     </div>
   );

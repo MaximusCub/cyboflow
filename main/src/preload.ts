@@ -364,9 +364,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sendTerminalInput: (sessionId: string, data: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:send-terminal-input', sessionId, data),
     preCreateTerminal: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:pre-create-terminal', sessionId),
     resizeTerminal: (sessionId: string, cols: number, rows: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:resize-terminal', sessionId, cols, rows),
-    
-    // Prompt operations
-    getPrompts: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-prompts', sessionId),
 
     // IDE operations
     openIDE: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:open-ide', sessionId),
@@ -516,11 +513,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('bugReport:submit', request),
     resolveRun: (sessionId: string): Promise<IPCResponse<BugReportRunLink | null>> =>
       ipcRenderer.invoke('bugReport:resolveRun', { sessionId }),
-  },
-
-  // Prompts
-  prompts: {
-    getAll: (): Promise<IPCResponse> => ipcRenderer.invoke('prompts:get-all'),
   },
 
   // Dialog
