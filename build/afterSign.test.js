@@ -987,10 +987,15 @@ function buildWinUnpackedFixture(tmpDir, options = {}) {
     executableBytes: undefined,
     addons: undefined,
     padBytes: 0,
+    nestedLayout: false,
     ...options
   };
 
-  const unpackedDir = path.join(tmpDir, 'win-unpacked');
+  // Real electron-builder shape on Windows: appOutDir IS the win-unpacked dir.
+  // (nested=true lays it one level down, for the legacy-shape acceptance test.)
+  const unpackedDir = opts.nestedLayout
+    ? path.join(tmpDir, 'win-unpacked')
+    : tmpDir;
   fs.mkdirSync(unpackedDir, { recursive: true });
 
   if (opts.withExecutable) {
@@ -1135,8 +1140,8 @@ async function caseZ() {
     const { message } = await runCapturing(winContext(tmpDir, ARCH.x64, 'win'));
     assert(message !== '', 'Case Z(a): a missing win-unpacked directory throws');
     assert(
-      message.includes('win-unpacked') && message.includes('missing entirely'),
-      'Case Z(a): the error names the missing win-unpacked directory'
+      message.includes('missing entirely') && message.includes('TestApp.exe'),
+      'Case Z(a): the error names the missing app directory and expected exe'
     );
   });
 
@@ -1175,8 +1180,8 @@ async function caseZ() {
     });
     const { message } = await runCapturing(winContext(tmpDir, ARCH.x64));
     assert(
-      message.includes('the packaged executable is missing'),
-      'Case Z(c): a missing <productName>.exe is reported'
+      message.includes('missing entirely') && message.includes('TestApp.exe'),
+      'Case Z(c): a missing <productName>.exe is reported as a missing app dir'
     );
     assert(
       !message.includes('cannot load the packaged'),
