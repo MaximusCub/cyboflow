@@ -3,7 +3,8 @@
  *
  * Fully hermetic: every seam (execCommand / sendSignal / isPidAlive /
  * descendantPids / listDescendants) is injected, so no real `ps`/`kill`/`exec`
- * ever runs. Pins the three POSIX group-resolution shapes by their exact
+ * ever runs. Pins the three POSIX group-resolution shapes and the win32
+ * taskkill ladder by their exact
  * command strings and signal order — the contract each call site's ladder was
  * moved under byte-identically:
  *  - 'lookup' (default): terminalSessionManager's shape — SIGTERM, then the
@@ -32,12 +33,19 @@ function baseOpts() {
 describe('killTree POSIX — group resolution shapes', () => {
   it("default 'lookup': SIGTERM, pgid lookup, group kills by pgid, dual-probe poll", async () => {
     const opts = { ...baseOpts(), descendantPids: [5001] };
-    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+    const events: string[] = [];
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(`exec:${command}`);
+      return Promise.resolve({ stdout: '' });
+    });
     // Poll cadence: the pid is alive through the first probe pair, then gone.
     let probes = 0;
     opts.isPidAlive = vi.fn(() => {
       probes += 1;
       return probes <= 2;
+    });
+    opts.sendSignal = vi.fn((_pid, signal) => {
+      events.push(`signal:${signal}`);
     });
 
     await killTree(4242, {
@@ -60,11 +68,28 @@ describe('killTree POSIX — group resolution shapes', () => {
     expect(opts.sendSignal).toHaveBeenCalledWith(4242, 'SIGKILL');
     expect(probes).toBeGreaterThanOrEqual(2);
     expect(probes).toBeLessThanOrEqual(4);
+    // Relative order pinned end to end.
+    expect(events).toEqual([
+      'signal:SIGTERM',
+      'exec:ps -o pgid= -p 4242 2>/dev/null || echo ""',
+      'exec:kill -TERM -4242',
+      'signal:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:kill -9 5001',
+      'exec:pkill -9 -P 4242',
+    ]);
   });
 
   it("'root': no pgid lookup — the root pid IS the group id, and the fixed grace never probes", async () => {
     const opts = { ...baseOpts() };
-    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+    const events: string[] = [];
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(`exec:${command}`);
+      return Promise.resolve({ stdout: '' });
+    });
+    opts.sendSignal = vi.fn((_pid, signal) => {
+      events.push(`signal:${signal}`);
+    });
     const start = Date.now();
 
     await killTree(4242, {
@@ -85,6 +110,14 @@ describe('killTree POSIX — group resolution shapes', () => {
     expect(opts.isPidAlive).not.toHaveBeenCalled();
     expect(opts.sendSignal).toHaveBeenCalledWith(4242, 'SIGTERM');
     expect(opts.sendSignal).toHaveBeenCalledWith(4242, 'SIGKILL');
+    // Relative order pinned: no lookup between the signal phases.
+    expect(events).toEqual([
+      'signal:SIGTERM',
+      'exec:kill -TERM -4242',
+      'signal:SIGKILL',
+      'exec:kill -9 -4242',
+      'exec:pkill -9 -P 4242',
+    ]);
   });
 
   it("'enumerate': resolves the pgid BEFORE any signal and sweeps group members into the kill list", async () => {
@@ -146,6 +179,83 @@ describe('killTree POSIX — group resolution shapes', () => {
     });
 
     expect(descendantPids).toEqual([5001]);
+  });
+
+  it("'enumerate': a failed pgid lookup warns and falls back to the root pid", async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Every shell call fails — including the pre-signal pgid lookup.
+    const execCommand: ExecSpy = vi.fn(() => Promise.reject(new Error('process gone')));
+    const opts = { ...baseOpts() };
+
+    const stopped = await killTree(4242, {
+      ...opts,
+      execCommand,
+      graceMode: 'fixed',
+      graceMs: 10,
+      posixGroupMode: 'enumerate',
+    });
+
+    // The lookup failure warned (fail-soft) and the ladder proceeded with the
+    // root pid standing in for the group id — no group-member sweep ran.
+    expect(warnSpy).toHaveBeenCalledWith('Error getting process group:', expect.any(Error));
+    expect(execCommand).toHaveBeenCalledWith('kill -TERM -4242');
+    expect(execCommand).toHaveBeenCalledWith('kill -9 -4242');
+    const sweepCalls = execCommand.mock.calls.filter(([cmd]) => cmd.startsWith('ps -o pid= -g'));
+    expect(sweepCalls).toEqual([]);
+    expect(stopped).toBe(true);
+    warnSpy.mockRestore();
+  });
+});
+
+describe('killTree win32 — the taskkill ladder', () => {
+  it('graceful /T, then /T /F, then a per-descendant /F for each alive enumerated child', async () => {
+    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+    // The root is already gone when the grace poll probes it; the enumerated
+    // child is still alive when its per-descendant pass runs.
+    const isPidAlive = vi.fn((pid: number) => pid === 5001);
+
+    const stopped = await killTree(4242, {
+      platform: 'win32',
+      descendantPids: [5001],
+      execCommand,
+      isPidAlive,
+      graceMs: 50,
+      pollIntervalMs: 5,
+      listDescendants: () => Promise.resolve([]),
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T');
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T /F');
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 5001 /F');
+    expect(stopped).toBe(true);
+  });
+
+  it('survivors found by the verification pass get one direct /F each, then a re-check', async () => {
+    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+    let verificationCalls = 0;
+    const listDescendants = vi.fn(() => {
+      verificationCalls += 1;
+      // The verification pass finds one survivor; the re-check after its
+      // forced kill finds none.
+      return Promise.resolve(verificationCalls === 1 ? [6001] : []);
+    });
+    const onSurvivors = vi.fn();
+
+    const stopped = await killTree(4242, {
+      platform: 'win32',
+      descendantPids: [],
+      execCommand,
+      isPidAlive: () => false,
+      graceMode: 'fixed',
+      graceMs: 10,
+      listDescendants,
+      onSurvivors,
+    });
+
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 6001 /F');
+    expect(onSurvivors).not.toHaveBeenCalled();
+    expect(stopped).toBe(true);
+    expect(verificationCalls).toBe(2);
   });
 });
 
