@@ -14,7 +14,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
-import { collectDescendantPids } from '../utils/platformProcess';
+import { collectDescendantPids, killTree } from '../utils/platformProcess';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -1265,11 +1265,12 @@ export class SessionManager extends EventEmitter {
    * 2. Kills the process group via `kill -TERM -<pgid>` then `-9`
    * 3. Kills individual descendant processes as a fallback
    * 4. Uses graceful SIGTERM first, then forceful SIGKILL
+   *
+   * The POSIX ladder lives in utils/platformProcess.ts (killTree); win32 keeps
+   * its own counted-verify shape ({@link stopRunningScriptWindows}).
    * @returns Promise that resolves when the script has been stopped
    */
   stopRunningScript(): Promise<void> {
-    // Captured before the promise body: the callback below declares a local
-    // `process` (the ChildProcess) that shadows the global from its TDZ onward.
     const isWin32 = process.platform === 'win32';
     return new Promise((resolve) => {
       if (!this.runningScriptProcess || !this.currentRunningSessionId) {
@@ -1278,7 +1279,7 @@ export class SessionManager extends EventEmitter {
       }
 
       const sessionId = this.currentRunningSessionId;
-      const process = this.runningScriptProcess;
+      const scriptProcess = this.runningScriptProcess;
 
       // Mark as closing in shared tracker
       scriptExecutionTracker.markClosing('session', sessionId);
@@ -1286,123 +1287,58 @@ export class SessionManager extends EventEmitter {
       // Immediately clear references to prevent new output
       this.currentRunningSessionId = null;
       this.runningScriptProcess = null;
-      
-      // Kill the entire process group to ensure all child processes are terminated
-      try {
-        if (process.pid) {
-          // First, get all descendant PIDs before we start killing
-          const descendantPids = this.getAllDescendantPids(process.pid);
 
-          // Add a simple log entry for stopping the script
-          addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
-
-          if (isWin32) {
-            // Windows has no process groups and no POSIX signals — every
-            // `kill`/`pkill` call in the POSIX path below is a silent no-op
-            // there. Delegate to the taskkill ladder instead.
-            this.stopRunningScriptWindows(sessionId, process, descendantPids, () => {
-              this.finishStopScript(sessionId);
-              resolve();
-            });
-            return;
-          }
-
-          // macOS/Unix: First, try SIGTERM for graceful shutdown
-          addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${process.pid} and its group]`, 'System');
-
-          try {
-            process.kill('SIGTERM');
-          } catch (error) {
-            console.warn('SIGTERM failed:', error);
-          }
-
-          // Kill the entire process group using negative PID
-          exec(`kill -TERM -${process.pid}`, { windowsHide: true }, (error) => {
-            if (error) {
-              console.warn(`Error sending SIGTERM to process group: ${error.message}`);
-            }
-          });
-
-          // Give processes a chance to clean up gracefully
-          addSessionLog(sessionId, 'info', '[Waiting 10 seconds for graceful shutdown...]', 'System');
-
-          // Use a shorter timeout for faster cleanup
-          setTimeout(() => {
-            addSessionLog(sessionId, 'info', '\n[Grace period expired, using forceful termination]', 'System');
-
-            // Now forcefully kill the main process
-            try {
-              process.kill('SIGKILL');
-              addSessionLog(sessionId, 'info', `[Sent SIGKILL to process ${process.pid}]`, 'System');
-            } catch (error) {
-              // Process might already be dead
-              addSessionLog(sessionId, 'info', `[Process ${process.pid} already terminated]`, 'System');
-            }
-
-            // Kill the process group with SIGKILL
-            exec(`kill -9 -${process.pid}`, { windowsHide: true }, (error) => {
-              if (error) {
-                console.warn(`Error sending SIGKILL to process group: ${error.message}`);
-                addSessionLog(sessionId, 'warn', `[Warning: Could not kill process group: ${error.message}]`, 'System');
-              } else {
-                addSessionLog(sessionId, 'info', `[Sent SIGKILL to process group ${process.pid}]`, 'System');
-              }
-            });
-
-            // Kill all known descendants individually to be sure
-            let killedCount = 0;
-            let alreadyDeadCount = 0;
-
-            descendantPids.forEach(pid => {
-              exec(`kill -9 ${pid}`, { windowsHide: true }, (error) => {
-                if (error) {
-                  alreadyDeadCount++;
-                } else {
-                  killedCount++;
-                }
-
-                // Report results after processing all descendants
-                if (killedCount + alreadyDeadCount === descendantPids.length) {
-                  if (killedCount > 0) {
-                    addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
-                  }
-                  if (alreadyDeadCount > 0) {
-                    addSessionLog(sessionId, 'info', `[${alreadyDeadCount} process${alreadyDeadCount > 1 ? 'es' : ''} had already terminated gracefully]`, 'System');
-                  }
-                }
-              });
-            });
-
-            // Final cleanup attempt using pkill
-            exec(`pkill -9 -P ${process.pid}`, { windowsHide: true }, () => {
-              // Ignore errors - processes might already be dead
-            });
-
-            // Check for zombie processes after a short delay
-            setTimeout(() => {
-              if (process.pid) {
-                const remainingPids = this.getAllDescendantPids(process.pid);
-                if (remainingPids.length > 0) {
-                  addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-                  addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
-                } else {
-                  addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-                }
-              }
-              this.finishStopScript(sessionId);
-              resolve();
-            }, 500);
-          }, 2000); // Reduced from 10 seconds to 2 seconds for faster cleanup
-        } else {
-          // No process PID
-          this.finishStopScript(sessionId);
-          resolve();
-        }
-      } catch (error) {
-        console.warn('Error killing script process:', error);
+      const pid = scriptProcess.pid;
+      if (!pid) {
+        // No process PID
         this.finishStopScript(sessionId);
         resolve();
+        return;
       }
+
+      // First, get all descendant PIDs before we start killing
+      const descendantPids = this.getAllDescendantPids(pid);
+
+      // Add a simple log entry for stopping the script
+      addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
+
+      if (isWin32) {
+        // Windows has no process groups and no POSIX signals — every
+        // `kill`/`pkill` call in the POSIX ladder is a silent no-op there.
+        // Delegate to the taskkill ladder instead.
+        this.stopRunningScriptWindows(sessionId, scriptProcess, descendantPids, () => {
+          this.finishStopScript(sessionId);
+          resolve();
+        });
+        return;
+      }
+
+      // POSIX: the ladder lives in utils/platformProcess.ts (killTree) —
+      // SIGTERM → group TERM (the spawned script is its own group leader, so
+      // the root pid IS the group id; no pgid lookup) → the historical fixed
+      // 2s grace → SIGKILL escalation → per-descendant kills → pkill sweep →
+      // verification. This site keeps its session-log reporting: the stop
+      // acknowledgement above and the outcome report below.
+      addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${pid} and its group]`, 'System');
+
+      void killTree(pid, {
+        descendantPids,
+        graceMode: 'fixed',
+        graceMs: 2000,
+        posixGroupMode: 'root',
+        listDescendants: () => this.getAllDescendantPids(pid),
+        onSurvivors: (remainingPids) => {
+          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
+          addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
+        },
+        onError: (error) => console.warn('Error killing script process:', error),
+      }).then((stopped) => {
+        if (stopped) {
+          addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
+        }
+        this.finishStopScript(sessionId);
+        resolve();
+      });
     });
   }
 
