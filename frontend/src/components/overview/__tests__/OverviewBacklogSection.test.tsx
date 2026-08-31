@@ -18,7 +18,6 @@ import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createRef } from 'react';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 
 const { launchPlanner, launchSprint, openIdeaSession, resolveEffective } = vi.hoisted(() => ({
@@ -100,18 +99,13 @@ function mkBacklog(over: Partial<OverviewBacklog> = {}): OverviewBacklog {
   };
 }
 
-function renderSection(
-  backlog: OverviewBacklog,
-  { selectNextUpNonce = 0 }: { selectNextUpNonce?: number } = {},
-): ReturnType<typeof render> {
+function renderSection(backlog: OverviewBacklog): ReturnType<typeof render> {
   return render(
     <OverviewBacklogSection
       projectId={7}
       pageState="normal"
       backlog={backlog}
       itemsById={new Map<string, BacklogTaskItem>()}
-      nextUpRef={createRef<HTMLDivElement>()}
-      selectNextUpNonce={selectNextUpNonce}
       onOpenBacklog={vi.fn()}
       onRunPlannerFlow={vi.fn()}
     />,
@@ -217,33 +211,5 @@ describe('OverviewBacklogSection — task selection', () => {
       ),
     ).toBeInTheDocument();
     expect(launchSprint).not.toHaveBeenCalled();
-  });
-
-  it('a selectNextUpNonce bump selects the ready tasks up to the sprint cap', async () => {
-    const tasks = Array.from({ length: SPRINT_CAP + 2 }, (_, i) => mkTask(i + 1));
-    tasks.push(mkTask(99, { inFlow: true }));
-    const backlog = mkBacklog({ nextUp: [group(tasks)] });
-    const { rerender } = renderSection(backlog);
-
-    expect(screen.queryByTestId('overview-task-selection')).not.toBeInTheDocument();
-
-    rerender(
-      <OverviewBacklogSection
-        projectId={7}
-        pageState="normal"
-        backlog={backlog}
-        itemsById={new Map<string, BacklogTaskItem>()}
-        nextUpRef={createRef<HTMLDivElement>()}
-        selectNextUpNonce={1}
-        onOpenBacklog={vi.fn()}
-        onRunPlannerFlow={vi.fn()}
-      />,
-    );
-
-    // Caps at the sprint cap (never an over-cap disabled bar) and never
-    // selects the in-flow task.
-    expect(await screen.findByText(`${SPRINT_CAP} tasks selected`)).toBeInTheDocument();
-    expect(screen.getByTestId('overview-task-selection-cta')).toBeEnabled();
-    expect(screen.getByTestId('overview-task-check-task-99')).not.toBeChecked();
   });
 });

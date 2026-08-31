@@ -412,12 +412,25 @@ function pluralRuns(n: number): string {
   return n === 1 ? 'run' : 'runs';
 }
 
+/** The partitioned card sets {@link deriveRecommendedActions} returns. */
+export interface DerivedRecommendedActions {
+  /** Cards to show, in the fixed order (never reordered). */
+  active: RecommendedAction[];
+  /**
+   * Cards that still QUALIFY but are suppressed by a matching dismissal —
+   * what the section's "View dismissed" affordance reveals (with a Restore).
+   */
+  dismissed: RecommendedAction[];
+}
+
 /**
  * The "you should probably do this next" cards, in the fixed order
  * launch-sprint → launch-planner → run-compound → verify-setup →
- * tracker-conflicts (dismissed ids filtered out, never reordered).
+ * tracker-conflicts, partitioned into active vs dismissed-but-qualifying.
  */
-export function deriveRecommendedActions(input: RecommendedActionsInput): RecommendedAction[] {
+export function deriveRecommendedActions(
+  input: RecommendedActionsInput,
+): DerivedRecommendedActions {
   const actions: RecommendedAction[] = [];
 
   // launch-sprint: at least one task is actually poolable right now (not
@@ -518,6 +531,10 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
   }
 
   // A dismissal only suppresses the card while its fingerprint still matches
-  // the state it was dismissed under.
-  return actions.filter((a) => input.dismissed[a.id] !== a.fingerprint);
+  // the state it was dismissed under; the suppressed cards are still returned
+  // (they qualify) so "View dismissed" can show them.
+  return {
+    active: actions.filter((a) => input.dismissed[a.id] !== a.fingerprint),
+    dismissed: actions.filter((a) => input.dismissed[a.id] === a.fingerprint),
+  };
 }

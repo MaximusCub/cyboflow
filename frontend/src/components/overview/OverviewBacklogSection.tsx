@@ -25,7 +25,7 @@
  * own dashed well, and `empty-done` replaces the whole list area with the
  * "Backlog clear" banner.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Inbox, List as ListIcon } from 'lucide-react';
 import { CategoryTag, PriorityTag, ScopeTag, TypeTag } from '../Backlog/markers';
 import {
@@ -227,14 +227,6 @@ export interface OverviewBacklogSectionProps {
    * needs, and a task's display `ref`.
    */
   itemsById: Map<string, BacklogTaskItem>;
-  /** Scroll anchor for the Recommended-actions "Select tasks" CTA. */
-  nextUpRef: React.RefObject<HTMLDivElement | null>;
-  /**
-   * Bumped by the "Select tasks" CTA: each increment selects the ready
-   * Next-up tasks (up to the sprint cap) so the launch bar appears — the CTA
-   * must visibly DO something even when the page is too short to scroll.
-   */
-  selectNextUpNonce: number;
   /** Opens the backlog pane filtered to this project. */
   onOpenBacklog: () => void;
   /** Opens the wizard preselected to the planner (the "no ideas yet" escape hatch). */
@@ -246,8 +238,6 @@ export function OverviewBacklogSection({
   pageState,
   backlog,
   itemsById,
-  nextUpRef,
-  selectNextUpNonce,
   onOpenBacklog,
   onRunPlannerFlow,
 }: OverviewBacklogSectionProps): React.JSX.Element {
@@ -306,17 +296,6 @@ export function OverviewBacklogSection({
       return next.length === prev.length ? prev : next;
     });
   }, [selectableTaskIds]);
-
-  // "Select tasks" CTA: each nonce bump selects the ready tasks up to the
-  // sprint cap. The ref-guard keeps re-renders from re-selecting after the
-  // user has hand-tweaked the set (only a fresh click reapplies it).
-  const appliedSelectNonce = useRef(0);
-  useEffect(() => {
-    if (selectNextUpNonce === appliedSelectNonce.current) return;
-    appliedSelectNonce.current = selectNextUpNonce;
-    clearError();
-    setSelectedTaskIds([...selectableTaskIds].slice(0, sprintCap));
-  }, [clearError, selectNextUpNonce, selectableTaskIds, sprintCap]);
 
   const toggleIdea = (id: string): void => {
     clearError();
@@ -523,7 +502,7 @@ export function OverviewBacklogSection({
               )}
 
               {/* ── Next up ───────────────────────────────────────────── */}
-              <div ref={nextUpRef} className="flex flex-col gap-2.5">
+              <div className="flex flex-col gap-2.5">
                 <ListLabel>Next up · Ready for development</ListLabel>
                 {backlog.nextUp.length === 0 ? (
                   <EmptyWell

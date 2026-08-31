@@ -363,6 +363,13 @@ function baseRecInput(over: Partial<Parameters<typeof deriveRecommendedActions>[
   };
 }
 
+/** The ACTIVE partition — what the section renders as cards (most tests only care about this). */
+function deriveActive(
+  input: Parameters<typeof deriveRecommendedActions>[0],
+): ReturnType<typeof deriveRecommendedActions>['active'] {
+  return deriveRecommendedActions(input).active;
+}
+
 function provenSetupRow(over: Partial<VerifyProjectSetupRow> = {}): VerifyProjectSetupRow {
   return { projectId: 1, status: 'proven', provenModalities: ['web'], hasLaneDerivedRunbook: false, ...over };
 }
@@ -401,12 +408,12 @@ const READY_GROUP: OverviewBacklog['nextUp'][number] = {
 
 describe('deriveRecommendedActions', () => {
   it('produces nothing when every trigger is off and verify-setup is already proven', () => {
-    const result = deriveRecommendedActions(baseRecInput());
+    const result = deriveActive(baseRecInput());
     expect(result).toEqual([]);
   });
 
   it('launch-sprint fires when readyCount > 0, with a pluralized body', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({ backlog: { ...EMPTY_BACKLOG, nextUp: [READY_GROUP] } }),
     );
     const action = result.find((a) => a.id === 'launch-sprint');
@@ -417,14 +424,14 @@ describe('deriveRecommendedActions', () => {
 
   it('launch-sprint uses singular grammar for exactly one ready task', () => {
     const oneReady: OverviewBacklog['nextUp'][number] = { ...READY_GROUP, readyCount: 1, totalCount: 1 };
-    const result = deriveRecommendedActions(baseRecInput({ backlog: { ...EMPTY_BACKLOG, nextUp: [oneReady] } }));
+    const result = deriveActive(baseRecInput({ backlog: { ...EMPTY_BACKLOG, nextUp: [oneReady] } }));
     const action = result.find((a) => a.id === 'launch-sprint');
     expect(action?.body).toBe('1 task is Ready for development — select it below and batch it into a sprint.');
   });
 
   it('launch-sprint does NOT fire when tasks are eligible but all in-flight (readyCount 0)', () => {
     const allInFlight: OverviewBacklog['nextUp'][number] = { ...READY_GROUP, readyCount: 0, totalCount: 2 };
-    const result = deriveRecommendedActions(baseRecInput({ backlog: { ...EMPTY_BACKLOG, nextUp: [allInFlight] } }));
+    const result = deriveActive(baseRecInput({ backlog: { ...EMPTY_BACKLOG, nextUp: [allInFlight] } }));
     expect(result.find((a) => a.id === 'launch-sprint')).toBeUndefined();
   });
 
@@ -435,19 +442,19 @@ describe('deriveRecommendedActions', () => {
         { id: 'i1', ref: 'IDEA-1', title: 'Dark mode', scope: null, priority: 'P1', inFlow: false, inFlowLabel: null },
       ],
     };
-    const result = deriveRecommendedActions(baseRecInput({ backlog }));
+    const result = deriveActive(baseRecInput({ backlog }));
     const action = result.find((a) => a.id === 'launch-planner');
     expect(action?.body).toBe('"Dark mode" is the top idea with no spec or stories yet — plan it before the next sprint.');
     expect(action?.ctaKind).toBe('secondary');
   });
 
   it('launch-planner does not fire when there are no open ideas', () => {
-    const result = deriveRecommendedActions(baseRecInput());
+    const result = deriveActive(baseRecInput());
     expect(result.find((a) => a.id === 'launch-planner')).toBeUndefined();
   });
 
   it('run-compound fires when Sprint mergedRuns >= 3 and Compound has never run', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({ workflowStats: [workflowStats({ workflowName: 'Sprint', mergedRuns: 3 })] }),
     );
     const action = result.find((a) => a.id === 'run-compound');
@@ -455,7 +462,7 @@ describe('deriveRecommendedActions', () => {
   });
 
   it('run-compound fires and cites days-since when Compound has run before', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({
         nowIso: '2026-06-15T00:00:00.000Z',
         workflowStats: [
@@ -469,38 +476,38 @@ describe('deriveRecommendedActions', () => {
   });
 
   it('run-compound does NOT fire below the merged-run threshold', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({ workflowStats: [workflowStats({ workflowName: 'Sprint', mergedRuns: 2 })] }),
     );
     expect(result.find((a) => a.id === 'run-compound')).toBeUndefined();
   });
 
   it('verify-setup fires when the row is undefined (never registered)', () => {
-    const result = deriveRecommendedActions(baseRecInput({ verifySetup: undefined }));
+    const result = deriveActive(baseRecInput({ verifySetup: undefined }));
     const action = result.find((a) => a.id === 'verify-setup');
     expect(action).toBeDefined();
     expect(action?.ctaKind).toBe('primary');
   });
 
   it('verify-setup fires when status is "unproven" or "none"', () => {
-    const unproven = deriveRecommendedActions(
+    const unproven = deriveActive(
       baseRecInput({ verifySetup: provenSetupRow({ status: 'unproven', provenModalities: [] }) }),
     );
     expect(unproven.find((a) => a.id === 'verify-setup')).toBeDefined();
 
-    const none = deriveRecommendedActions(
+    const none = deriveActive(
       baseRecInput({ verifySetup: provenSetupRow({ status: 'none', provenModalities: [] }) }),
     );
     expect(none.find((a) => a.id === 'verify-setup')).toBeDefined();
   });
 
   it('verify-setup does NOT fire when status is "proven"', () => {
-    const result = deriveRecommendedActions(baseRecInput());
+    const result = deriveActive(baseRecInput());
     expect(result.find((a) => a.id === 'verify-setup')).toBeUndefined();
   });
 
   it('tracker-conflicts fires with provider label and last-sync hint', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({
         trackerConflictCount: 3,
         trackerProvider: 'linear',
@@ -514,7 +521,7 @@ describe('deriveRecommendedActions', () => {
   });
 
   it('tracker-conflicts uses singular grammar for exactly one conflict, and "never synced" when unset', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({ trackerConflictCount: 1, trackerProvider: 'dart', trackerLastSyncAt: null }),
     );
     const action = result.find((a) => a.id === 'tracker-conflicts');
@@ -522,7 +529,7 @@ describe('deriveRecommendedActions', () => {
   });
 
   it('tracker-conflicts does NOT fire when conflict count is 0', () => {
-    const result = deriveRecommendedActions(baseRecInput());
+    const result = deriveActive(baseRecInput());
     expect(result.find((a) => a.id === 'tracker-conflicts')).toBeUndefined();
   });
 
@@ -533,10 +540,13 @@ describe('deriveRecommendedActions', () => {
       trackerProvider: 'plane',
     });
     // Dismiss under the CURRENT state: capture the live fingerprints.
-    const live = deriveRecommendedActions(input);
+    const live = deriveActive(input);
     const dismissed = Object.fromEntries(live.map((a) => [a.id, a.fingerprint]));
     const result = deriveRecommendedActions({ ...input, dismissed });
-    expect(result.map((a) => a.id)).toEqual([]);
+    expect(result.active.map((a) => a.id)).toEqual([]);
+    // The suppressed cards still QUALIFY, so they land in the dismissed
+    // partition (what "View dismissed" renders).
+    expect(result.dismissed.map((a) => a.id)).toEqual(['launch-sprint', 'tracker-conflicts']);
   });
 
   it('a dismissed card REAPPEARS when its trigger state changes (stale fingerprint)', () => {
@@ -545,10 +555,10 @@ describe('deriveRecommendedActions', () => {
       trackerConflictCount: 1,
       trackerProvider: 'plane',
     });
-    const live = deriveRecommendedActions(input);
+    const live = deriveActive(input);
     const dismissed = Object.fromEntries(live.map((a) => [a.id, a.fingerprint]));
     // A new task lands Ready and a second conflict appears — both fingerprints move.
-    const moved = deriveRecommendedActions({
+    const moved = deriveActive({
       ...input,
       backlog: {
         ...EMPTY_BACKLOG,
@@ -571,7 +581,7 @@ describe('deriveRecommendedActions', () => {
   });
 
   it('orders active actions launch-sprint, launch-planner, run-compound, verify-setup, tracker-conflicts', () => {
-    const result = deriveRecommendedActions(
+    const result = deriveActive(
       baseRecInput({
         backlog: {
           ...EMPTY_BACKLOG,

@@ -32,8 +32,10 @@
  * renders its header and the section headings over empty bodies, which is the
  * same skeleton the empty states use.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { GitBranch } from 'lucide-react';
+import { TaskBatchPickerModal } from '../cyboflow/TaskBatchPickerModal';
+import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { OverviewActiveAgents } from './OverviewActiveAgents';
 import { OverviewRecommendedActions, readDismissed } from './OverviewRecommendedActions';
 import { OverviewBacklogSection } from './OverviewBacklogSection';
@@ -42,8 +44,8 @@ import {
   deriveOverviewBacklog,
   deriveRecommendedActions,
   selectOverviewPageState,
+  type DerivedRecommendedActions,
   type OverviewPageState,
-  type RecommendedAction,
 } from './overviewModel';
 import { filterTasks } from '../Backlog/backlogSelectors';
 import { useBacklogStore } from '../../stores/backlogStore';
@@ -202,7 +204,7 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
 
   // `nowIso` is captured once per data change rather than per render: the only
   // thing it feeds is a "N days ago" phrase, which does not need a live clock.
-  const actions = useMemo<RecommendedAction[]>(
+  const actions = useMemo<DerivedRecommendedActions>(
     () =>
       deriveRecommendedActions({
         backlog,
@@ -218,17 +220,14 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
   );
 
   // -- Navigation callbacks -------------------------------------------------
-  const nextUpRef = useRef<HTMLDivElement>(null);
 
-  // "Select tasks" both scrolls to the Next-up list AND selects the ready
-  // tasks there (the label promises selection, and on a tall window there may
-  // be nothing to scroll — a scroll alone reads as the button doing nothing).
-  // The nonce is how the selection order crosses into OverviewBacklogSection,
-  // which owns the checkbox state.
-  const [selectNextUpNonce, setSelectNextUpNonce] = useState(0);
-  const onFocusNextUp = useCallback(() => {
-    setSelectNextUpNonce((n) => n + 1);
-    nextUpRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // "Select tasks" opens the SAME pre-launch batch picker the backlog's Run
+  // button uses (TaskBatchPickerModal) — selection, eligibility, and the
+  // substrate cap all live there, so the CTA and the backlog can never
+  // diverge on what is launchable.
+  const [batchPickerOpen, setBatchPickerOpen] = useState(false);
+  const onSelectTasks = useCallback(() => {
+    setBatchPickerOpen(true);
   }, []);
 
   const onRunFlow = useCallback(
@@ -257,7 +256,8 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
   // its own idea picker) rather than launching an unseeded planner.
   const {
     launchPlanner: launchTopIdeaPlanner,
-    error: topIdeaError,
+    launchSprint,
+    error: launchError,
     launching: topIdeaLaunching,
   } = useOverviewLaunch();
   const topIdeaId = backlog.topIdeas.find((i) => !i.inFlow)?.id ?? null;
@@ -287,9 +287,11 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
 
         <OverviewActiveAgents projectId={projectId} pageState={pageState} />
 
-        {topIdeaError !== null && (
+        {/* Errors from BOTH light launch paths (top-idea planner CTA, the
+            batch picker's sprint launch) surface here. */}
+        {launchError !== null && (
           <p className="text-status-error" role="alert" style={{ fontSize: '11px' }}>
-            {topIdeaError}
+            {launchError}
           </p>
         )}
 
@@ -299,7 +301,7 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
           actions={actions}
           dismissed={dismissed}
           onDismissedChange={setDismissed}
-          onFocusNextUp={onFocusNextUp}
+          onSelectTasks={onSelectTasks}
           onLaunchTopIdea={onLaunchTopIdea}
           onRunFlow={onRunFlow}
           onReviewTrackerConflicts={onReviewTrackerConflicts}
@@ -311,12 +313,26 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
           pageState={pageState}
           backlog={backlog}
           itemsById={itemsById}
-          nextUpRef={nextUpRef}
-          selectNextUpNonce={selectNextUpNonce}
           onOpenBacklog={onOpenBacklog}
           onRunPlannerFlow={() => onRunFlow('planner')}
         />
       </div>
+
+      {/* Sprint batch picker — the same modal the backlog's Run button opens;
+          it owns eligibility + the substrate cap, `launchSprint` is the same
+          light runs.start path the inline selection bar uses. */}
+      {batchPickerOpen && (
+        <TaskBatchPickerModal
+          isOpen
+          projectId={projectId}
+          substrate={DEFAULT_SUBSTRATE}
+          onClose={() => setBatchPickerOpen(false)}
+          onPicked={(taskIds) => {
+            setBatchPickerOpen(false);
+            void launchSprint(taskIds, projectId);
+          }}
+        />
+      )}
     </div>
   );
 }

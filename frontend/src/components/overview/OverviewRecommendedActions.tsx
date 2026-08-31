@@ -23,7 +23,7 @@
  * scrolls to the Next-up list, `onLaunchPlanner` fires the light planner
  * launch, the rest are navigation) so this component stays presentational.
  */
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Focus,
   GitBranch,
@@ -37,6 +37,7 @@ import {
 import { SectionHeader } from './overviewChrome';
 import {
   OVERVIEW_DISMISSED_KEY,
+  type DerivedRecommendedActions,
   type OverviewPageState,
   type RecommendedAction,
   type RecommendedActionAccent,
@@ -90,12 +91,52 @@ interface ActionCardModel {
 function ActionCard({
   action,
   onDismiss,
+  dismissed = false,
+  onRestore,
 }: {
   action: ActionCardModel;
   onDismiss: (id: string, fingerprint: string) => void;
+  /** Renders the muted "dismissed but still qualifying" variant: no CTA, a Restore link instead of Dismiss. */
+  dismissed?: boolean;
+  onRestore?: (id: string) => void;
 }): React.JSX.Element {
   const Icon = action.icon ?? ACCENT_ICON[action.accent];
   const accent = `var(${ACCENT_VAR[action.accent]})`;
+  if (dismissed) {
+    return (
+      <div
+        data-testid={`overview-dismissed-action-${action.id}`}
+        className="flex flex-col gap-2 border border-dashed border-border-primary bg-surface-primary px-4 py-3.5 opacity-70"
+      >
+        <div className="flex items-center gap-2.5">
+          <span
+            aria-hidden="true"
+            className="flex h-6 w-6 shrink-0 items-center justify-center"
+            style={{ backgroundColor: `color-mix(in srgb, ${accent} 12%, transparent)` }}
+          >
+            <Icon className="h-3.5 w-3.5" strokeWidth={2} style={{ color: accent }} />
+          </span>
+          <span className="font-bold text-text-primary" style={{ fontSize: '12.5px' }}>
+            {action.title}
+          </span>
+        </div>
+        <p className="flex-1 text-text-secondary" style={{ fontSize: '11.5px', lineHeight: 1.55 }}>
+          {action.body}
+        </p>
+        <div className="flex items-center">
+          <button
+            type="button"
+            onClick={() => onRestore?.(action.id)}
+            data-testid={`overview-action-restore-${action.id}`}
+            className="font-semibold text-text-secondary hover:text-text-primary"
+            style={{ fontSize: '10px' }}
+          >
+            Restore
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div
       data-testid={`overview-action-${action.id}`}
@@ -203,13 +244,13 @@ const HARDCODED_STATES: ReadonlySet<OverviewPageState> = new Set<OverviewPageSta
 export interface OverviewRecommendedActionsProps {
   projectId: number;
   pageState: OverviewPageState;
-  /** The derived cards (already dismissal-filtered by the page). */
-  actions: RecommendedAction[];
+  /** The derived cards, partitioned into active vs dismissed-but-qualifying by the model. */
+  actions: DerivedRecommendedActions;
   /** `actionId → fingerprint` dismissals, owned by the page so the derive call and this list agree. */
   dismissed: Record<string, string>;
   onDismissedChange: (dismissed: Record<string, string>) => void;
-  /** launch-sprint CTA — scrolls the page to the Next-up task list. */
-  onFocusNextUp: () => void;
+  /** launch-sprint CTA — opens the sprint batch picker modal. */
+  onSelectTasks: () => void;
   /** launch-planner CTA — fires the light planner launch on the top idea. */
   onLaunchTopIdea: () => void;
   /** Opens the wizard preselected to a flow, locked to this project. */
@@ -226,7 +267,7 @@ export function OverviewRecommendedActions({
   actions,
   dismissed,
   onDismissedChange,
-  onFocusNextUp,
+  onSelectTasks,
   onLaunchTopIdea,
   onRunFlow,
   onReviewTrackerConflicts,
@@ -244,8 +285,20 @@ export function OverviewRecommendedActions({
     [dismissed, onDismissedChange, projectId],
   );
 
-  const cards = useMemo<ActionCardModel[]>(() => {
+  const restore = useCallback(
+    (id: string) => {
+      const next = { ...dismissed };
+      delete next[id];
+      writeDismissed(projectId, next);
+      onDismissedChange(next);
+    },
+    [dismissed, onDismissedChange, projectId],
+  );
 
+  /** Whether the "dismissed but still qualifying" cards are expanded. */
+  const [showDismissed, setShowDismissed] = useState(false);
+
+  const cards = useMemo<{ active: ActionCardModel[]; dismissedCards: ActionCardModel[] }>(() => {
     if (HARDCODED_STATES.has(pageState)) {
       const hardcoded: ActionCardModel[] =
         pageState === 'empty-new'
@@ -344,12 +397,15 @@ export function OverviewRecommendedActions({
                   onCta: onAddIdea,
                 },
               ];
-      return hardcoded.filter((c) => dismissed[c.id] !== c.fingerprint);
+      return {
+        active: hardcoded.filter((c) => dismissed[c.id] !== c.fingerprint),
+        dismissedCards: hardcoded.filter((c) => dismissed[c.id] === c.fingerprint),
+      };
     }
 
-    // Derived path — `actions` is already dismissal-filtered by the model, so
+    // Derived path — the model already partitions active vs dismissed, so
     // only the CTA handler needs attaching here.
-    return actions.map((a) => ({
+    const toCard = (a: RecommendedAction): ActionCardModel => ({
       id: a.id,
       title: a.title,
       body: a.body,
@@ -360,7 +416,7 @@ export function OverviewRecommendedActions({
       onCta: () => {
         switch (a.id) {
           case 'launch-sprint':
-            onFocusNextUp();
+            onSelectTasks();
             return;
           case 'launch-planner':
             onLaunchTopIdea();
@@ -376,39 +432,74 @@ export function OverviewRecommendedActions({
             return;
         }
       },
-    }));
+    });
+    return { active: actions.active.map(toCard), dismissedCards: actions.dismissed.map(toCard) };
   }, [
     actions,
     dismissed,
     onAddIdea,
-    onFocusNextUp,
+    onSelectTasks,
     onLaunchTopIdea,
     onReviewTrackerConflicts,
     onRunFlow,
     pageState,
   ]);
 
-  if (cards.length === 0) return null;
+  if (cards.active.length === 0 && cards.dismissedCards.length === 0) return null;
 
   return (
     <section className="flex flex-col gap-2.5" data-testid="overview-recommended-actions">
       <SectionHeader
         dotColor="var(--human)"
         title="Recommended actions"
-        count={cards.length}
+        count={cards.active.length}
         descriptor={DESCRIPTOR[pageState]}
       />
       {/* auto-fill keys the column count on the PANE's width (viewport
           breakpoints lie when side panels compress the center pane), and
           keeps partial rows at column width instead of stretching. */}
-      <div
-        className="grid gap-2.5"
-        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
-      >
-        {cards.map((card) => (
-          <ActionCard key={card.id} action={card} onDismiss={dismiss} />
-        ))}
-      </div>
+      {cards.active.length > 0 && (
+        <div
+          className="grid gap-2.5"
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
+        >
+          {cards.active.map((card) => (
+            <ActionCard key={card.id} action={card} onDismiss={dismiss} />
+          ))}
+        </div>
+      )}
+      {/* Dismissed-but-still-qualifying cards, behind a quiet toggle. */}
+      {cards.dismissedCards.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowDismissed((v) => !v)}
+            data-testid="overview-dismissed-toggle"
+            className="self-start text-text-muted hover:text-text-secondary"
+            style={{ fontSize: '10.5px' }}
+          >
+            {showDismissed
+              ? 'Hide dismissed ▴'
+              : `View dismissed (${cards.dismissedCards.length}) ▾`}
+          </button>
+          {showDismissed && (
+            <div
+              className="grid gap-2.5"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))' }}
+            >
+              {cards.dismissedCards.map((card) => (
+                <ActionCard
+                  key={card.id}
+                  action={card}
+                  onDismiss={dismiss}
+                  dismissed
+                  onRestore={restore}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </section>
   );
 }

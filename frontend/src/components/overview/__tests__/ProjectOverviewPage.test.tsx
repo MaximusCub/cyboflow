@@ -104,6 +104,13 @@ vi.mock('../../../hooks/useIdeaSessionOpener', () => ({
   useIdeaSessionOpener: () => ({ openingTaskId: null, error: null, openIdeaSession: vi.fn() }),
 }));
 
+// The sprint batch picker owns its own data fetching + eligibility (covered by
+// its own suite); the page tests only assert that the CTA OPENS it.
+vi.mock('../../cyboflow/TaskBatchPickerModal', () => ({
+  TaskBatchPickerModal: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div data-testid="task-batch-picker-modal" /> : null,
+}));
+
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -303,6 +310,41 @@ describe('ProjectOverviewPage — recommended-action dismissal', () => {
     );
     mount([]);
     expect(await screen.findByTestId('overview-action-capture-idea')).toBeInTheDocument();
+  });
+
+  it('"View dismissed" reveals still-qualifying dismissed cards, and Restore brings one back', async () => {
+    const user = userEvent.setup();
+    mount([]);
+
+    await user.click(await screen.findByTestId('overview-action-dismiss-capture-idea'));
+    expect(screen.queryByTestId('overview-action-capture-idea')).not.toBeInTheDocument();
+
+    const toggle = screen.getByTestId('overview-dismissed-toggle');
+    expect(toggle).toHaveTextContent('View dismissed (1)');
+    await user.click(toggle);
+    expect(screen.getByTestId('overview-dismissed-action-capture-idea')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('overview-action-restore-capture-idea'));
+    expect(await screen.findByTestId('overview-action-capture-idea')).toBeInTheDocument();
+    expect(screen.queryByTestId('overview-dismissed-toggle')).not.toBeInTheDocument();
+    expect(
+      JSON.parse(localStorage.getItem(OVERVIEW_DISMISSED_KEY(1)) ?? '{}') as Record<string, string>,
+    ).not.toHaveProperty('capture-idea');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. "Select tasks" CTA → sprint batch picker
+// ---------------------------------------------------------------------------
+
+describe('ProjectOverviewPage — Select tasks opens the batch picker', () => {
+  it('clicking the launch-sprint CTA opens TaskBatchPickerModal', async () => {
+    const user = userEvent.setup();
+    mount([idea({ title: 'An idea' }), item({ title: 'A ready task' })]);
+
+    expect(screen.queryByTestId('task-batch-picker-modal')).not.toBeInTheDocument();
+    await user.click(await screen.findByTestId('overview-action-cta-launch-sprint'));
+    expect(screen.getByTestId('task-batch-picker-modal')).toBeInTheDocument();
   });
 });
 
