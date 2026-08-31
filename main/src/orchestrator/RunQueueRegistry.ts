@@ -64,7 +64,33 @@ export class RunQueueRegistry {
    * Intended for clean shutdown.
    */
   async drainAll(): Promise<void> {
-    await Promise.all([...this.queues.values()].map((q) => q.onIdle()));
+    // Bounded per-queue wait. A queued task that never settles (observed: a
+    // state mutation awaiting a hung agent turn) would hold onIdle forever and
+    // starve the rest of shutdown; the quit-drain's own timeout then skips the
+    // REMAINING teardown (DB close, MCP stop) — worse than the lost mutation.
+    // Wait per queue up to DRAIN_TIMEOUT_MS, attribute any queue that does not
+    // drain, and always let shutdown continue.
+    const DRAIN_TIMEOUT_MS = 1_500;
+    const entries = [...this.queues.entries()];
+    await Promise.allSettled(
+      entries.map(([runId, q]) => {
+        const pending = q.pending;
+        return Promise.race([
+          q.onIdle().catch((err) => {
+            console.error(`[RunQueueRegistry] queue ${runId} onIdle threw:`, err);
+          }),
+          new Promise<void>((resolve) =>
+            setTimeout(() => {
+              console.error(
+                `[RunQueueRegistry] queue ${runId} did not drain within ${DRAIN_TIMEOUT_MS}ms ` +
+                  `(pending=${pending}, size=${q.size}) — its in-flight mutation may be lost; continuing shutdown`,
+              );
+              resolve();
+            }, DRAIN_TIMEOUT_MS),
+          ),
+        ]);
+      }),
+    );
     this.queues.clear();
   }
 

@@ -4591,7 +4591,18 @@ app.whenReady().then(async () => {
   // gives the standard edit/zoom accelerators. macOS keeps the system menu.
   if (process.platform !== 'darwin') {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { label: '&File', submenu: [{ role: 'quit', label: 'Exit' }] },
+      {
+        label: '&File',
+        submenu: [
+          {
+            label: 'Exit',
+            click: () => {
+              console.log('[Menu] File → Exit clicked — calling app.quit()');
+              app.quit();
+            },
+          },
+        ],
+      },
       { role: 'editMenu' },
       { role: 'viewMenu' },
       { role: 'windowMenu' },
