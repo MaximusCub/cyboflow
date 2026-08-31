@@ -6809,10 +6809,31 @@ async function drainOnQuit(): Promise<void> {
   // this is cleanup for tidiness rather than a shutdown-correctness requirement.
   databaseBackupService?.stop();
 
-  // Stop orchestrator (drains run queues)
+  // Cleanup all sessions and terminate child processes BEFORE the queue drain:
+  // the queued run-executor tasks settle only when their sessions end, so
+  // draining first would wait (until the quit-drain timeout) on tasks that the
+  // very next step would have settled. macOS behavior: same ordering now, and
+  // the drain completes immediately for the common case.
+  if (sessionManager) {
+    console.log('[Main] Cleaning up sessions and terminating child processes...');
+    await sessionManager.cleanup();
+    console.log('[Main] Session cleanup complete');
+  }
+
+  // Stop orchestrator (drains run queues). A queue held by a session-lifetime
+  // execute() task (a live panel awaiting user input, or a restored run
+  // awaiting a human gate) gets one chance to settle through its own
+  // lifecycle: cancelRun aborts the run's spawner and transitions the run to
+  // 'canceled', which settles the queued task and lets the drain complete.
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');
-    await orchestrator.stop();
+    await orchestrator.stop((busyRunId) => {
+      if (runExecutor?.hasActiveExecution(busyRunId)) {
+        console.log(`[Main] Quit drain: canceling busy run ${busyRunId} to settle its queue`);
+        return runExecutor.cancelRun(busyRunId);
+      }
+      return undefined;
+    });
     console.log('[Main] Orchestrator stopped');
   }
 
@@ -6834,13 +6855,6 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Stopping pairwise judge worker...');
     await pairwiseWorker.stop();
     console.log('[Main] Pairwise judge worker stopped');
-  }
-
-  // Cleanup all sessions and terminate child processes
-  if (sessionManager) {
-    console.log('[Main] Cleaning up sessions and terminating child processes...');
-    await sessionManager.cleanup();
-    console.log('[Main] Session cleanup complete');
   }
 
   // Stop all run commands
