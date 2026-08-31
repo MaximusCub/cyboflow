@@ -2,10 +2,8 @@
 /**
  * copy-assets — copy the runtime SQL assets into the compiled bundle.
  *
- * Replaces the former shell pipeline (`mkdirp … && cp src/database/*.sql …`)
- * whose `cp` and globbing only worked on POSIX shells — on Windows
- * `pnpm build:main` died right here. fs.cpSync + readdirSync behave
- * identically on every host.
+ * Implemented in Node rather than a shell pipeline so the `main` build chain
+ * runs identically on every host, including Windows cmd.
  *
  * Copies src/database/*.sql and src/database/migrations/*.sql into the
  * matching dist/main/src/database/ trees. Runs in the `main` build chain after
