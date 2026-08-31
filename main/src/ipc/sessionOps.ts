@@ -362,6 +362,9 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     disabledMcpServers,
   }: OpsInput<'updateSessionMcps'>): Promise<OpsResult<'updateSessionMcps'>> => {
     try {
+      // Defense-in-depth for DIRECT ops callers only: via the tRPC router this
+      // branch is unreachable — its z.array(z.string()) schema throws
+      // BAD_REQUEST before ops is called.
       if (!Array.isArray(disabledMcpServers) || !disabledMcpServers.every((m) => typeof m === 'string')) {
         return { success: false, error: 'Invalid MCP selection' };
       }
@@ -395,6 +398,7 @@ export function createSessionOps(services: AppServices): SessionOpsLike {
     enabledPlugins,
   }: OpsInput<'updateSessionPlugins'>): Promise<OpsResult<'updateSessionPlugins'>> => {
     try {
+      // Defense-in-depth for DIRECT ops callers only — see updateSessionMcps.
       if (!Array.isArray(enabledPlugins) || !enabledPlugins.every((p) => typeof p === 'string')) {
         return { success: false, error: 'Invalid plugin selection' };
       }

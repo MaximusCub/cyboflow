@@ -27,12 +27,16 @@
  * object per method.
  *
  * Envelope passthrough is total: this router never re-shapes what the ops layer
- * returns. That is what preserves the three mutations whose malformed-payload
- * answer is a RETURNED failure envelope rather than a thrown validation error —
+ * returns. One mutation extends that to its VALIDATION failure:
  * `updateAgentPermissionMode` takes `mode: z.string()` here precisely so the
- * `isPermissionMode` check can stay in the ops body and keep answering
- * `{ success: false, error: 'Invalid agent permission mode: …' }`. See the
- * contract for the rest.
+ * `isPermissionMode` check can stay in the ops body and keep answering the
+ * legacy `{ success: false, error: 'Invalid agent permission mode: …' }`
+ * envelope. The two array mutations (`updateSessionMcps` /
+ * `updateSessionPlugins`) do NOT share that quirk: their `z.array(z.string())`
+ * schemas reject a malformed payload with a thrown BAD_REQUEST before ops is
+ * ever reached — a deliberate tightening over the legacy channels (no typed
+ * renderer caller can produce one), with the ops-body guards retained as
+ * defense-in-depth for direct ops callers only. See the contract for the rest.
  *
  * `getSummary` and `listQuick` are QUERIES even though each has a
  * fire-and-forget side effect (the lazy summarizer catch-up kick and the
@@ -145,9 +149,10 @@ export const sessionsRouter = router({
     }),
 
   updateSessionMcps: protectedProcedure
-    // Same reasoning as updateAgentPermissionMode: the Array.isArray guard stays
-    // in the ops body so a malformed payload keeps returning
-    // `'Invalid MCP selection'` rather than throwing.
+    // UNLIKE updateAgentPermissionMode, this schema is strict: a malformed
+    // array is a thrown BAD_REQUEST at this boundary, so the ops body's
+    // `'Invalid MCP selection'` envelope only answers DIRECT ops callers
+    // (defense-in-depth) — via the router it is unreachable.
     .input(z.object({ sessionId: z.string().min(1), disabledMcpServers: z.array(z.string()) }))
     .mutation(async ({ ctx, input }): Promise<{ success: true } | SessionOpsError> => {
       return requireOps(ctx.sessionOps).updateSessionMcps(input);

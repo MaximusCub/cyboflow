@@ -19,12 +19,14 @@
  * returned — same success/error keys, same error strings — so frontend call
  * sites keep their existing shape. Two envelope quirks are load-bearing and are
  * preserved deliberately rather than "cleaned up":
- *   • `updateAgentPermissionMode` / `updateSessionMcps` / `updateSessionPlugins`
- *     answer a malformed payload with a RETURNED failure envelope
- *     (`{ success: false, error: 'Invalid agent permission mode: …' }`), not a
- *     thrown validation error. The runtime guards therefore stay in the ops
- *     bodies even where zod could express them — a zod rejection would surface
- *     as a BAD_REQUEST throw, which is a different wire contract.
+ *   • `updateAgentPermissionMode` answers an unrecognized mode with a RETURNED
+ *     failure envelope (`{ success: false, error: 'Invalid agent permission
+ *     mode: …' }`), not a thrown validation error — its router schema takes
+ *     `mode` as a plain string so the isPermissionMode check stays in the ops
+ *     body. `updateSessionMcps` / `updateSessionPlugins` do NOT share that
+ *     quirk: their router schemas are strict (`z.array(z.string())`), so a
+ *     malformed payload throws BAD_REQUEST at the zod boundary; their ops-body
+ *     guards are defense-in-depth for direct ops callers only.
  *   • `getSummary`'s validation failure is `createValidationError`'s
  *     `{ success: false, error: '<Session x not found|is archived>' }`, which
  *     must survive byte-identical.
@@ -265,8 +267,9 @@ export interface SessionOpsLike {
 
   /**
    * Mirrors legacy `sessions:update-session-mcps`. The per-session MCP DENY
-   * list; a malformed payload returns `'Invalid MCP selection'` rather than
-   * throwing.
+   * list. The `'Invalid MCP selection'` envelope only answers a malformed
+   * payload from a DIRECT ops caller — via the router, zod throws BAD_REQUEST
+   * first.
    */
   updateSessionMcps(request: {
     sessionId: string;
@@ -275,7 +278,9 @@ export interface SessionOpsLike {
 
   /**
    * Mirrors legacy `sessions:update-session-plugins`. The per-session plugin
-   * ALLOW list; a malformed payload returns `'Invalid plugin selection'`.
+   * ALLOW list. Same validation posture as {@link updateSessionMcps}: the
+   * `'Invalid plugin selection'` envelope is defense-in-depth for direct ops
+   * callers; the router's zod schema throws BAD_REQUEST first.
    */
   updateSessionPlugins(request: {
     sessionId: string;

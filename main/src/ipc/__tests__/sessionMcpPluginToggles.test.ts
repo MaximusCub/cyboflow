@@ -113,10 +113,9 @@ describe('sessionOps.updateSessionMcps (DENY list)', () => {
     const { services, updateSession } = makeServices();
     const ops = createSessionOps(services);
 
-    // The runtime guard is deliberately duplicated behind the router's zod
-    // schema: a malformed payload must come back as a RETURNED envelope, which
-    // is only reachable by calling ops directly, as the renderer's own
-    // mis-typed call would.
+    // This exercises the DEFENSE-IN-DEPTH guard for direct ops callers. Via
+    // the tRPC router the branch is unreachable — z.array(z.string()) throws
+    // BAD_REQUEST first (pinned in routers/__tests__/sessions.test.ts).
     const res = await ops.updateSessionMcps({
       sessionId: 'sess-001',
       disabledMcpServers: ['ok', 42] as unknown as string[],
