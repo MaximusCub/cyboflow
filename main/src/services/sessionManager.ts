@@ -966,43 +966,8 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  getPromptHistory(): Array<{
-    id: string;
-    prompt: string;
-    sessionName: string;
-    sessionId: string;
-    createdAt: string;
-    status: string;
-  }> {
-    const sessions = this.db.getAllSessionsIncludingArchived();
-    
-    return sessions.map(session => ({
-      id: session.id,
-      prompt: session.initial_prompt,
-      sessionName: session.name,
-      sessionId: session.id,
-      createdAt: session.created_at,
-      status: session.status
-    })).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }
-
-  getPromptById(promptId: string): PromptMarker | null {
-    // For prompt history, the promptId is the sessionId
-    // We need to get the initial prompt marker for that session
-    const markers = this.db.getPromptMarkers(promptId);
-    
-    // The initial prompt is always the first marker (output_index 0)
-    const initialMarker = markers.find(m => m.output_index === 0);
-    
-    return initialMarker || null;
-  }
-
   getPromptMarkers(sessionId: string): PromptMarker[] {
     return this.db.getPromptMarkers(sessionId);
-  }
-
-  getSessionPrompts(sessionId: string): PromptMarker[] {
-    return this.getPromptMarkers(sessionId);
   }
 
   addInitialPromptMarker(sessionId: string, prompt: string): void {

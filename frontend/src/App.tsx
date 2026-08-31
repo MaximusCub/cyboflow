@@ -8,7 +8,6 @@ import { PerfProfiler } from './components/cyboflow/PerfProfiler';
 import { perfProbeStart } from './utils/perfProbe';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
-import { PromptHistoryModal } from './components/PromptHistoryModal';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
@@ -51,7 +50,6 @@ import {
 
 function App() {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
   const view = useNavigationStore((s) => s.view);
   const showHumanReview = useNavigationStore((s) => s.humanReviewOpen);
@@ -235,21 +233,6 @@ function App() {
   // arrows defeat React.memo on every App re-render; these keep referential
   // identity across renders since the underlying setters are themselves stable.
   const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
-  const handlePromptHistoryClick = useCallback(() => setIsPromptHistoryOpen(true), []);
-
-  // Add keyboard shortcut for prompt history
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Cmd/Ctrl + P to open prompt history
-      if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
-        e.preventDefault();
-        setIsPromptHistoryOpen(true);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
@@ -276,7 +259,6 @@ function App() {
         <TitleBar
           searchQuery={globalSearch}
           onSearchChange={setGlobalSearch}
-          onPromptHistoryClick={handlePromptHistoryClick}
         />
         {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
             the fullscreen surface. TitleBar (native drag region) and the dialog
@@ -295,7 +277,6 @@ function App() {
           <PerfProfiler id="sidebar">
             <Sidebar
               onAboutClick={handleAboutClick}
-              onPromptHistoryClick={handlePromptHistoryClick}
               width={sidebarWidth}
               onResize={startResize}
               pendingReviewCount={reviewQueueCount}
@@ -437,11 +418,6 @@ function App() {
           details={currentError?.details}
           command={currentError?.command}
         />
-        <PromptHistoryModal
-          isOpen={isPromptHistoryOpen}
-          onClose={() => setIsPromptHistoryOpen(false)}
-        />
-        
         {/* Token Test Modal - Toggle with Cmd/Ctrl + Shift + T (Development Only) */}
         {isTokenTestOpen && process.env.NODE_ENV === 'development' && (
           <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50 p-4 overflow-y-auto">
