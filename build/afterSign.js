@@ -506,9 +506,13 @@ function verifyWindowsBundle(options) {
 
   const failures = [];
 
-  const appDir = path.join(appOutDir, 'win-unpacked');
-  if (!fs.existsSync(appDir)) {
-    return [`the packaged app directory is missing entirely: ${appDir}`];
+  // electron-builder's Windows appOutDir IS the win-unpacked directory
+  // (dist-electron/win-unpacked) — unlike the mac layout, there is no nested
+  // step. Accept a legacy/doubled nesting in case a caller passes the parent.
+  const nested = path.join(appOutDir, 'win-unpacked');
+  const appDir = fs.existsSync(nested) ? nested : appOutDir;
+  if (!fs.existsSync(appDir) || !fs.existsSync(path.join(appDir, `${productName}.exe`))) {
+    return [`the packaged app directory is missing entirely (expected ${productName}.exe under): ${appDir}`];
   }
 
   const executablePath = path.join(appDir, `${productName}.exe`);
