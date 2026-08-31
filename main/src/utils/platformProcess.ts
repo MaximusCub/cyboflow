@@ -5,7 +5,10 @@
  * The platform branches for the ladders live here, and only here — duplicated
  * win32 kill logic is not acceptable at a call site. Call sites may consult
  * the host platform to choose their {@link KillTreeOptions} timings and modes;
- * the kill commands themselves may not branch.
+ * the kill commands themselves may not branch, with two documented
+ * exceptions whose shapes the options cannot express: sessionManager's
+ * counted-verify stop arm (stopRunningScriptWindows) and runCommandManager's
+ * escapee sweep (killEscapedProcesses).
  *
  *   - {@link listProcessTable} / {@link listPidPpidTable} /
  *     {@link listPidPpidTableSync} — process-table listings (`ps -axo …` on
@@ -515,8 +518,8 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
     if (platform === 'win32' && remainingPids.length > 0) {
       // Survivors found: one direct forced kill each — the tree-level kill
       // cannot see a child whose parent link it can no longer walk — then
-      // re-verify. (win32-only: the POSIX ladder never had this extra pass,
-      // and preserving its shape exactly matters more than the extra sweep.)
+      // re-verify. (win32-only: on POSIX the `pkill -9 -P` sweep above
+      // already plays this role.)
       for (const survivorPid of remainingPids) {
         try {
           await execCommand(`taskkill /PID ${survivorPid} /F`);

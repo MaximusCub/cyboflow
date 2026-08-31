@@ -209,7 +209,11 @@ describe('killTree POSIX — group resolution shapes', () => {
 
 describe('killTree win32 — the taskkill ladder', () => {
   it('graceful /T, then /T /F, then a per-descendant /F for each alive enumerated child', async () => {
-    const execCommand: ExecSpy = vi.fn(() => Promise.resolve({ stdout: '' }));
+    const events: string[] = [];
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(`exec:${command}`);
+      return Promise.resolve({ stdout: '' });
+    });
     // The root is already gone when the grace poll probes it; the enumerated
     // child is still alive when its per-descendant pass runs.
     const isPidAlive = vi.fn((pid: number) => pid === 5001);
@@ -228,6 +232,13 @@ describe('killTree win32 — the taskkill ladder', () => {
     expect(execCommand).toHaveBeenCalledWith('taskkill /PID 4242 /T /F');
     expect(execCommand).toHaveBeenCalledWith('taskkill /PID 5001 /F');
     expect(stopped).toBe(true);
+    // Sequence pinned: graceful attempt first, then the forced tree kill,
+    // then the alive child.
+    expect(events).toEqual([
+      'exec:taskkill /PID 4242 /T',
+      'exec:taskkill /PID 4242 /T /F',
+      'exec:taskkill /PID 5001 /F',
+    ]);
   });
 
   it('survivors found by the verification pass get one direct /F each, then a re-check', async () => {
