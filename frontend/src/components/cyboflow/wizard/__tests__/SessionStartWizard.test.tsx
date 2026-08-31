@@ -3883,7 +3883,7 @@ describe('SessionStartWizard — runtime-mix override (D4)', () => {
     );
   });
 
-  it('(a) picking CODEX only moves the Runtime row and threads runtimeMix into the payload', async () => {
+  it('(a) picking CODEX only LEAVES the Runtime row alone and threads runtimeMix into the payload', async () => {
     mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
@@ -3891,17 +3891,19 @@ describe('SessionStartWizard — runtime-mix override (D4)', () => {
 
     await chooseMix('codex');
 
-    // The mix pick routes through setAgentRuntimeByUser, so the Runtime row —
-    // and with it the family coercion that swaps in the Codex model — follows.
-    expect(runtimeValue()).toBe('codex-sdk');
-    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+    // Orthogonal dials: the mix picks each AGENT's provider, the Runtime row
+    // picks the run's ORCHESTRATOR (and with it the Default-model family). A mix
+    // pick must not move either — `applyRuntimeMix` states every agent's runtime
+    // in the frozen graph, so it does not need the run to agree.
+    expect(runtimeValue()).toBe('claude-sdk');
+    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex only');
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
     expect(mockRunStart).toHaveBeenCalledWith(
-      expect.objectContaining({ runtimeMix: 'codex', agentRuntime: 'codex-sdk' }),
+      expect.objectContaining({ runtimeMix: 'codex', agentRuntime: 'claude-sdk' }),
     );
   });
 
@@ -3964,10 +3966,10 @@ describe('SessionStartWizard — runtime-mix override (D4)', () => {
     );
   });
 
-  it('(d) a Runtime-row click swaps the mix primary and KEEPS the cross aspect', async () => {
-    // The other half of the coupling: `reconcileMixWithProvider` — the same
-    // helper createRun uses — so a manual provider flip cannot leave the mix
-    // describing the provider the user just left.
+  it('(d) a Runtime-row click does NOT rewrite the mix (the other half of the decoupling)', async () => {
+    // The Runtime row chooses the ORCHESTRATOR only. It used to reconcile the mix
+    // to the provider just picked (`reconcileMixWithProvider`, since removed from
+    // both the wizard and createRun), which made the two dials one.
     mockWorkflowsList.mockResolvedValue([SPRINT_CLAUDE_PRIMARY_ROW]);
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
@@ -3983,19 +3985,21 @@ describe('SessionStartWizard — runtime-mix override (D4)', () => {
       fireEvent.click(screen.getByTestId('wizard-substrate-provider-codex'));
     });
 
-    // claude-primary + codex -> codex-primary (cross aspect kept), and it is a
-    // divergence from the stamp, so the Save-as-default CTA appears.
-    expect(screen.getByTestId('wizard-runtime-mix-codex-primary')).toHaveAttribute(
+    // Only the orchestrator moved: the stamped mix is untouched, so the row still
+    // reads "saved default" and no mix override is pending. (The Save-as-default
+    // CTA does appear, but for the RUNTIME divergence — its own savable key.)
+    expect(runtimeValue()).toBe('codex-sdk');
+    expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toHaveAttribute(
       'aria-checked',
       'true',
     );
-    expect(screen.getByTestId('wizard-runtime-mix-desc')).not.toHaveTextContent('saved default');
-    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-runtime-mix-desc')).toHaveTextContent('saved default');
 
-    // Back to Claude and the override folds away again (it equals the stamp).
+    // And back to Claude: still no mix movement in either direction.
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-substrate-provider-claude'));
     });
+    expect(runtimeValue()).toBe('claude-sdk');
     expect(screen.getByTestId('wizard-runtime-mix-claude-primary')).toHaveAttribute(
       'aria-checked',
       'true',

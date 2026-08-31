@@ -39,7 +39,6 @@ import {
   isRuntimeMix,
   materializeForLevelAndMix,
   primaryProviderForMix,
-  reconcileMixWithProvider,
   type RuntimeMix,
 } from '../../../shared/tuning/runtimeMix';
 import {
@@ -1589,14 +1588,16 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: the ${AGENT_PROVIDER_LABELS[explicitProvider]} provider is disabled in Settings → Integrations`,
       );
     }
-    // ── Runtime mix: resolve, reconcile, derive a provider (migration 128 /
-    //    runtime-mix plan D3)
+    // ── Runtime mix: resolve, fill in a provider, force the plane (migration
+    //    128 / runtime-mix plan D3, amended — the mix no longer RECONCILES with
+    //    the requested provider; the two are orthogonal dials)
     //
     // Resolved HERE — after the provider REQUEST is known but before the
     // provider/runtime ladder, the substrate and `resolveExecutionModel` —
-    // because it feeds all three: the mix's primary is the run's base provider,
-    // and a non-claude mix forces the programmatic plane (only that plane honors
-    // the per-agent `agentConfigs` pins the mix writes).
+    // because it feeds all three: the mix's primary FILLS IN the base provider
+    // when the launch named none, and a non-claude mix forces the programmatic
+    // plane (only that plane honors the per-agent `agentConfigs` pins the mix
+    // writes).
     //
     // A non-built-in ("save as new") flow has no verification class to split, so
     // it is outside the mix system entirely and stamps NULL. The `__quick__`
@@ -1646,21 +1647,18 @@ export class WorkflowRegistry {
           // a graph that no longer matches it.
           opts.frozenSpec.runtimeMix
         : overrideMix ?? savedMix;
-    // Reconcile rather than reject (plan D3 step 2): the wizard is not the only
-    // launch surface — the top-bar picker, the in-session launcher, the backlog
-    // launchers and "Run with modifications" all send their own provider or omit
-    // it, and a hard mismatch rejection would break every one of them the moment
-    // a workflow saves a non-claude default. An explicit provider therefore SWAPS
-    // the mix's primary while preserving the same/cross aspect — the exact
-    // semantics of the wizard's derived Runtime row, applied at the chokepoint via
-    // the shared helper both surfaces call.
-    const effectiveMix: RuntimeMix | null =
-      resolvedMix !== null && (explicitProvider === 'claude' || explicitProvider === 'codex')
-        ? reconcileMixWithProvider(resolvedMix, explicitProvider)
-        : resolvedMix;
-    // The provider a SAVED mix puts the run on when the launch named none. Gated
-    // like an explicit request: a codex mix saved before the toggle flipped must
-    // fail closed, not spawn a provider the user switched off in Settings.
+    // The mix is taken VERBATIM — an explicit provider does not rewrite it. The
+    // two are orthogonal dials: the requested provider is the run's ORCHESTRATOR,
+    // the mix is the per-agent routing of the steps the flow dispatches, and
+    // `applyRuntimeMix` pins every routed agent's runtime explicitly so a mixed
+    // graph runs identically whichever provider the run itself resolved onto.
+    // (This replaced a `reconcileMixWithProvider` swap that made picking
+    // `codex-primary` in the wizard move the Runtime row to Codex.)
+    const effectiveMix: RuntimeMix | null = resolvedMix;
+    // The provider a SAVED mix FILLS IN when the launch named none at all — the
+    // backlog/idea launchers and MCP, which carry no Runtime row to override.
+    // Gated like an explicit request: a codex mix saved before the toggle flipped
+    // must fail closed, not spawn a provider the user switched off in Settings.
     const mixDerivedProvider: AgentProvider | undefined =
       effectiveMix !== null &&
       explicitProvider === undefined &&
@@ -1682,9 +1680,9 @@ export class WorkflowRegistry {
     // absent⇒disabled, so reaching it always takes an explicit request and it is
     // never a reroute target.
     //
-    // The mix-derived arm deliberately sits BELOW the explicit request (which the
-    // reconcile above already folded into the mix) and ABOVE the reroute (a mix
-    // is a stated intent; the reroute is a fallback).
+    // The mix-derived arm deliberately sits BELOW the explicit request (a chosen
+    // orchestrator is never overridden by the mix) and ABOVE the reroute (a saved
+    // mix is a stated intent; the reroute is a fallback).
     const resolvedProvider: AgentProvider | undefined =
       explicitProvider ?? mixDerivedProvider ?? (!claudeEnabled && codexEnabled ? 'codex' : undefined);
     /**

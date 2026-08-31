@@ -209,8 +209,9 @@ describe('createRun — a saved non-claude mix routes the run', () => {
     const stamps = stampsOf(runId);
 
     expect(stamps.mix).toBe('claude-primary');
-    // The EXECUTION class decides the base provider; only the verification steps
-    // cross over, through their own pins.
+    // No provider was requested, so the mix's execution class FILLS IN the base
+    // provider (nothing to override); the verification steps cross over through
+    // their own pins.
     expect(stamps.provider).toBe('claude');
     expect(stamps.runtime).toBe('claude-sdk');
     // Forced: per-agent pins are honored by the programmatic runner only.
@@ -223,18 +224,21 @@ describe('createRun — a saved non-claude mix routes the run', () => {
     const review = frozenAgentConfig(runId, 'code-review');
     expect(review?.runtime).toBe('codex-sdk');
     expect(review?.providerModel).toMatch(/^gpt-/);
-    // Execution agents are left alone — they inherit the run's Claude provider.
-    expect(frozenAgentConfig(runId, 'implement')?.runtime).toBeUndefined();
+    // Execution agents are pinned claude-sdk EXPLICITLY rather than inheriting
+    // the run — the mix is orthogonal to the run's provider, so the graph has to
+    // state its own routing (see runtimeMix.test.ts).
+    expect(frozenAgentConfig(runId, 'implement')?.runtime).toBe('claude-sdk');
   });
 
-  it('codex-primary derives the codex provider and pins verification back to claude-sdk', () => {
+  it('codex-primary fills in the codex provider and pins verification back to claude-sdk', () => {
     setMix(WF_SPRINT, 'codex-primary');
     const { runId, substrate } = registry.createRun(WF_SPRINT, undefined, SESSION);
     const stamps = stampsOf(runId);
 
     expect(stamps.mix).toBe('codex-primary');
-    // Derived from the mix with NO explicit request — this is the ladder rung the
-    // mix adds, and it must flow through runtime + substrate like a real request.
+    // Filled in from the mix because NO provider was requested — the ladder rung
+    // the mix adds for the runtime-less launchers (backlog/idea pickers, MCP) —
+    // and it must flow through runtime + substrate like a real request.
     expect(stamps.provider).toBe('codex');
     expect(stamps.runtime).toBe('codex-sdk');
     expect(substrate).toBe('sdk');
@@ -271,34 +275,39 @@ describe('createRun — a saved non-claude mix routes the run', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Reconcile with the requested provider (plan D3 step 2)
+// Orthogonality: the requested provider NEVER rewrites the mix
 // ---------------------------------------------------------------------------
 
-describe('createRun — the requested provider reconciles the mix', () => {
-  it('a codex request on a claude-mix flow swaps the primary, keeping the same-provider aspect', () => {
+describe('createRun — the requested provider leaves the mix alone', () => {
+  it('a codex request on a claude-mix flow keeps the mix claude and pins every agent claude-sdk', () => {
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
       requestedAgentProvider: 'codex',
       requestedAgentRuntime: 'codex-sdk',
     });
     const stamps = stampsOf(runId);
-    // 'claude' + codex -> 'codex' (both classes on one provider, as before).
-    expect(stamps.mix).toBe('codex');
+    // The Runtime picks the ORCHESTRATOR; the mix picks each agent's provider.
+    // A `claude` mix therefore survives a Codex request untouched — and, being
+    // the identity mix, writes no pins and leaves the plane unforced.
+    expect(stamps.mix).toBe('claude');
     expect(stamps.provider).toBe('codex');
-    expect(stamps.executionModel).toBe('programmatic');
+    expect(frozenAgentConfig(runId, 'implement')?.runtime).toBeUndefined();
   });
 
-  it('a claude request on a codex-primary flow swaps to claude-primary, keeping the CROSS aspect', () => {
+  it('a claude request on a codex-primary flow keeps codex-primary, with both classes pinned', () => {
     setMix(WF_SPRINT, 'codex-primary');
     const { runId } = registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
       requestedAgentProvider: 'claude',
       requestedAgentRuntime: 'claude-sdk',
     });
     const stamps = stampsOf(runId);
-    // The user asked for Claude; the flow's "one provider verifies the other"
-    // intent survives as claude-primary rather than being rejected.
-    expect(stamps.mix).toBe('claude-primary');
+    // The user chose the Claude ORCHESTRATOR; the flow's "Codex executes, Claude
+    // verifies" routing is a separate statement and is preserved verbatim.
+    expect(stamps.mix).toBe('codex-primary');
     expect(stamps.provider).toBe('claude');
-    expect(frozenAgentConfig(runId, 'code-review')?.runtime).toBe('codex-sdk');
+    // Both classes are stated in the frozen graph, so the routing does not
+    // depend on which provider the run itself landed on.
+    expect(frozenAgentConfig(runId, 'implement')?.runtime).toBe('codex-sdk');
+    expect(frozenAgentConfig(runId, 'code-review')?.runtime).toBe('claude-sdk');
   });
 
   it('a per-run override outranks the workflow stamp without writing the workflows row', () => {
@@ -372,7 +381,7 @@ describe('createRun — mix-suppressing arms stamp NULL', () => {
     expect(stamps.specHash).toBe(computeSpecHash(SLOT_SPEC));
   });
 
-  it('an omp lane ignores the stamp — no derived provider, no reconcile, no forcing', () => {
+  it('an omp lane ignores the stamp — no filled-in provider, no routing, no forcing', () => {
     setMix(WF_SPRINT, 'codex-primary');
     const omp = registryWithAccess({ claude: true, codex: true, omp: true });
     // OMP is programmatic-only in this build, so the launch says so itself — the
@@ -550,9 +559,10 @@ describe('createRun — the mixed-provider guard is symmetric', () => {
       'custom',
       WF_SPRINT,
     );
-    // An explicit codex launch (the mix stays 'claude' and reconciles to 'codex',
-    // which would force programmatic), so ask for the orchestrated plane the old
-    // one-way guard waved through — and get refused for the RIGHT reason.
+    // An explicit codex launch under the IDENTITY mix — which writes no pins and
+    // does not force the plane — so the orchestrated request survives to the
+    // guard, and the hand-pinned claude-sdk step is what refuses it. This is the
+    // case the old one-way (`agentProvider === 'claude'`) scoping waved through.
     expect(() =>
       registry.createRun(WF_SPRINT, undefined, SESSION, undefined, {
         runtimeMix: 'claude',
@@ -560,7 +570,7 @@ describe('createRun — the mixed-provider guard is symmetric', () => {
         requestedAgentRuntime: 'codex-sdk',
         requestedExecutionModel: 'orchestrated',
       }),
-    ).toThrow(new RegExp(RUNTIME_MIX_ORCHESTRATED_CODE));
+    ).toThrow(new RegExp(MIXED_PROVIDER_ORCHESTRATED_CODE));
 
     // With the mix out of the picture entirely (a variant carries the same graph),
     // the guard itself is what refuses the launch.

@@ -10,6 +10,22 @@ createRun ONLY, never on the read path), D3 (resolve the mix before the
 provider/execution ladders; reconcile instead of reject on legacy launch
 surfaces), and D6 (restart provenance).
 
+> **AMENDED 2026-08-31 — the mix is orthogonal to the launch Runtime row.**
+> As shipped, D3's `reconcileMixWithProvider` step and the wizard's matching
+> two-way coupling made picking `codex-primary` move the Runtime row (and with
+> it the Default-model family) to Codex. They are now two independent dials: the
+> **Runtime** picks the run's **orchestrator**; the **mix** picks the provider of
+> each **agent** the flow dispatches. Concretely, superseding D3/D4 below:
+> `reconcileMixWithProvider` is DELETED; `createRun` takes the resolved mix
+> verbatim and an explicit provider never rewrites it; `applyRuntimeMix` now pins
+> `runtime: 'claude-sdk'` on every Claude-routed agent under ANY non-claude mix
+> (not just a codex-base one), so a materialized graph never depends on the
+> provider the run itself landed on. What SURVIVES: the mix's primary still
+> fills in the base provider for launchers that send no runtime at all (backlog
+> / idea pickers, MCP), where nothing is being overridden; a non-claude mix still
+> forces the programmatic plane; the whole mix row is still inert on an OMP/Pi
+> lane and on a pinned variant.
+
 **What it is.** Each built-in workflow gets four versions, split along one line —
 execution vs. verification:
 
