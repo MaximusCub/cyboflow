@@ -47,7 +47,6 @@ const FROZEN_HANDLER_COUNTS: Record<string, number> = {
   'ipc/nimbalyst.ts': 2,
   'ipc/panels.ts': 16,
   'ipc/project.ts': 13,
-  'ipc/prompt.ts': 2,
   'ipc/providerDetection.ts': 3,
   'ipc/script.ts': 12,
   'ipc/session.ts': 26,
