@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { useIPCEvents } from './hooks/useIPCEvents';
 import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
@@ -16,6 +17,9 @@ import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
 import { useNavigationStore } from './stores/navigationStore';
+import { useLayoutStore } from './stores/layoutStore';
+import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts';
+import { useKeyboardShortcutsHydration } from './hooks/useKeyboardShortcutsHydration';
 import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
@@ -119,9 +123,19 @@ function App() {
     storageKey: 'cyboflow-sidebar-width'
   });
   
+  // Left-rail (sidebar) collapse — shared with the ⌘[ global shortcut, so it
+  // lives in layoutStore rather than App-local state.
+  const leftRailCollapsed = useLayoutStore((s) => s.leftRailCollapsed);
+  const toggleLeftRail = useLayoutStore((s) => s.toggleLeftRail);
+
   useIPCEvents();
   useNotifications();
   useStuckNotifications();
+  // Seed the shortcut overrides from config.json, then run THE single global
+  // keydown listener for the six remappable actions (hydration first so the
+  // listener binds the user's own bindings as soon as they arrive).
+  useKeyboardShortcutsHydration();
+  useGlobalKeyboardShortcuts();
 
   // Start the MCP health polling subscription on mount. Narrowed selector
   // (not the broad `useMcpHealthStore()` destructure) — the store bumps
@@ -274,11 +288,20 @@ function App() {
             rail as a primary item that swaps the center to a full-width review
             pane (see docs/SHELL-LAYOUT.md). */}
         <div className="flex flex-1 overflow-hidden">
+          {/* Left rail. Collapsing hides the Sidebar rather than unmounting it
+              (mirrors the TerminalDock invariant): the project tree's expansion
+              state and its in-flight queries survive a collapse, and re-expanding
+              is instant. The hide is applied INSIDE Sidebar, to its own root box
+              only — Sidebar also renders the Settings / bug-report / status-guide
+              dialogs as siblings, and a display:none wrapper here would hide
+              those too (Settings is openable from surfaces far outside the rail). */}
           <PerfProfiler id="sidebar">
             <Sidebar
               onAboutClick={handleAboutClick}
               width={sidebarWidth}
               onResize={startResize}
+              collapsed={leftRailCollapsed}
+              onCollapse={toggleLeftRail}
               pendingReviewCount={reviewQueueCount}
               humanReviewActive={showHumanReview}
               onToggleHumanReview={toggleHumanReview}
@@ -294,6 +317,26 @@ function App() {
               onToggleVerifyQueue={toggleVerifyQueue}
             />
           </PerfProfiler>
+          {/* Collapsed left rail — a thin strip with only a re-expand chevron,
+              deliberately the same 28px geometry + affordance as RunRightRail's
+              collapsed strip (mirrored horizontally). */}
+          {leftRailCollapsed && (
+            <aside
+              data-testid="sidebar-collapsed"
+              className="w-[28px] shrink-0 flex flex-col items-center border-r border-border-primary bg-bg-secondary"
+            >
+              <button
+                type="button"
+                data-testid="sidebar-expand"
+                aria-label="Expand left rail"
+                title="Expand left rail"
+                onClick={toggleLeftRail}
+                className="flex h-8 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+              >
+                <ChevronRight size={14} />
+              </button>
+            </aside>
+          )}
           {/* Center-surface state machine, keyed off navigationStore.view:
                 • 'session' → CyboflowRoot (the active run/session workspace, the
                   only mount point for the run surface; legacy SessionView retired

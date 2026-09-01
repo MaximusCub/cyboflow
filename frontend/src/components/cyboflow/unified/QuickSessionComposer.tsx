@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
+import { useComposerFocusRequest } from '../../../stores/composerFocusStore';
 import { errorText } from '../../../utils/errorText';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
@@ -139,6 +140,13 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // Falls back to the status check when the host does not pass `working`.
   const running = working ?? activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
+
+  // Global ⌘' (toggleChat) focus mailbox. The quick-session composer registers
+  // under the SESSION id — NOT the panel-scoped `hostKey` below, which is the
+  // pending-send key and is per-panel. The shortcut handler resolves
+  // `activeRunId ?? selectedSessionId`, and a quick session has no active run,
+  // so the session id is what arrives (see composerFocusStore's key scheme).
+  useComposerFocusRequest(activeSession.id, textareaRef);
 
   // Question-gate answer plumbing: direct-answer submits reuse the card's
   // trpc mutation; multi-question gates go through the card's Other-text bus.

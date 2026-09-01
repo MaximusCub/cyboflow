@@ -2,7 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug } from 'lucide-react';
+import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug, ChevronLeft } from 'lucide-react';
 import { BugReportDialog } from './BugReportDialog';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
@@ -23,6 +23,21 @@ interface SidebarProps {
   onAboutClick: () => void;
   width: number;
   onResize: (e: React.MouseEvent) => void;
+  /**
+   * Whether the left rail is collapsed. The rail's own root box is hidden
+   * (display:none) rather than unmounted, so the project tree's expansion state
+   * and in-flight queries survive a collapse. Applied HERE, not by a wrapper in
+   * App, because this component also renders the Settings / bug-report /
+   * status-guide dialogs as siblings — a hidden wrapper would hide those too,
+   * and Settings is openable from surfaces far outside the rail.
+   */
+  collapsed?: boolean;
+  /**
+   * Collapse the rail (App.tsx renders the thin strip that expands it again).
+   * Optional so render sites that predate the collapsible rail — and unit tests
+   * — keep compiling; when absent the header control is simply not shown.
+   */
+  onCollapse?: () => void;
   /** Count of pending human-review approvals (drives the rail badge). */
   pendingReviewCount: number;
   /** Whether the human-review pane is the active center view. */
@@ -74,6 +89,8 @@ export const Sidebar = memo(function Sidebar({
   onAboutClick,
   width,
   onResize,
+  collapsed = false,
+  onCollapse,
   pendingReviewCount,
   humanReviewActive,
   onToggleHumanReview,
@@ -184,7 +201,12 @@ export const Sidebar = memo(function Sidebar({
         // narrow one an unclamped 500px sidebar + the fixed 296px right rail
         // starve the center column to ~0 (composer collapses). Clamp to a
         // viewport fraction so the center always keeps usable width.
-        style={{ width: `${width}px`, maxWidth: 'min(600px, 40vw)' }}
+        // `collapsed` hides this box only — the dialogs below stay renderable.
+        style={{
+          width: `${width}px`,
+          maxWidth: 'min(600px, 40vw)',
+          ...(collapsed ? { display: 'none' } : {}),
+        }}
       >
         {/* Resize handle */}
         <div
@@ -228,6 +250,20 @@ export const Sidebar = memo(function Sidebar({
             )}
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
+            {/* Collapse the left rail (⌘[ does the same thing globally). Mirrors
+                RunRightRail's leading collapse chevron, pointing the other way. */}
+            {onCollapse && (
+              <button
+                type="button"
+                onClick={onCollapse}
+                data-testid="sidebar-collapse"
+                aria-label="Collapse left rail"
+                title="Collapse left rail"
+                className="flex h-7 w-7 items-center justify-center text-text-tertiary hover:text-text-primary"
+              >
+                <ChevronLeft size={16} />
+              </button>
+            )}
             <IconButton
               onClick={() => { openSettings('general'); trackEvent('settings_opened'); }}
               aria-label="Settings"

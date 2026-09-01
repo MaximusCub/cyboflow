@@ -8,10 +8,18 @@
  */
 import { useState, type ReactElement, type ReactNode } from 'react';
 import { RunView } from './RunView';
+import { useChatTabFocusRequest } from '../../stores/composerFocusStore';
 
 interface QuickSessionDockTabsProps {
   chatContent: ReactNode;
   runId: string | null;
+  /**
+   * The composer-focus key for this dock's chat (the SESSION id — see
+   * composerFocusStore's key scheme). When ⌘' posts a focus request for it, the
+   * Chat tab is revealed first: the data-stream tab hides the chat panel with
+   * display:none, and a display:none textarea cannot take focus.
+   */
+  composerFocusKey?: string | null;
 }
 
 type QuickDockTab = 'chat' | 'data-stream';
@@ -19,8 +27,13 @@ type QuickDockTab = 'chat' | 'data-stream';
 export function QuickSessionDockTabs({
   chatContent,
   runId,
+  composerFocusKey = null,
 }: QuickSessionDockTabsProps): ReactElement {
   const [activeTab, setActiveTab] = useState<QuickDockTab>('chat');
+
+  // Reveal the chat before the composer is asked to focus. The request is
+  // consumed by the composer itself, not here, so it survives this re-render.
+  useChatTabFocusRequest(composerFocusKey, () => setActiveTab('chat'));
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="quick-session-dock-tabs">
