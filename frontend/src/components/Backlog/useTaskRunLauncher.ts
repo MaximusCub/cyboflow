@@ -90,7 +90,19 @@ export interface TaskRunLaunchState {
    * sprint batch. Resolves to the new runId or null (no-op on an empty batch).
    */
   launchSprintBatch: (spinnerId: string, taskIds: string[], projectId: number) => Promise<string | null>;
+  /**
+   * Launch a **Planner** seeded with an explicit set of ideas — the review
+   * queue's multi-idea pick-list. Mirrors {@link launchSprintBatch}, but seeds
+   * `ideaIds` (planner-only; `runs.start` rejects it for any other flow and
+   * caps it at {@link MAX_PLANNER_SEED_IDEAS}, so the batch is truncated here
+   * rather than round-tripped for a rejection). Resolves to the new runId or
+   * null (no-op on an empty batch).
+   */
+  launchPlannerBatch: (spinnerId: string, ideaIds: string[], projectId: number) => Promise<string | null>;
 }
+
+/** `runs.start`'s server-side cap on planner seed ideas (`ideaIds` is `.max(4)`). */
+export const MAX_PLANNER_SEED_IDEAS = 4;
 
 export function useTaskRunLauncher(): TaskRunLaunchState {
   const [launchingTaskId, setLaunchingTaskId] = useState<string | null>(null);
@@ -190,5 +202,44 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
     [globalPermissionMode],
   );
 
-  return { launchingTaskId, error, launch, launchSprintBatch };
+  const launchPlannerBatch = useCallback(
+    async (spinnerId: string, ideaIds: string[], projectId: number): Promise<string | null> => {
+      if (ideaIds.length === 0) return null;
+      setError(null);
+      setLaunchingTaskId(spinnerId);
+      try {
+        const workflows = await trpc.cyboflow.workflows.list.query({ projectId });
+        // Planner is the idea-decomposition flow; resolve it by name (built-in
+        // ordering is not a contract). Fall back to the first flow.
+        const workflowId = workflows.find((w) => w.name === 'planner')?.id ?? workflows[0]?.id;
+        if (!workflowId) {
+          setError('No workflow available to run');
+          return null;
+        }
+        // Session-hosted like every other launch surface; forceNew so the batch
+        // run never silently absorbs the selected quick session (mirrors `launch`).
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
+        const result = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
+          projectId,
+          sessionId,
+          // `ideaIds` and the singular `ideaId` are mutually exclusive server-side —
+          // seed only the plural form here.
+          ideaIds: ideaIds.slice(0, MAX_PLANNER_SEED_IDEAS),
+          ...resolveLaunchDefaults(workflowId, globalPermissionMode),
+        });
+        trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'planner' });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
+        return result.runId;
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to launch planner');
+        return null;
+      } finally {
+        setLaunchingTaskId(null);
+      }
+    },
+    [globalPermissionMode],
+  );
+
+  return { launchingTaskId, error, launch, launchSprintBatch, launchPlannerBatch };
 }

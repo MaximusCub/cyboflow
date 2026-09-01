@@ -158,6 +158,15 @@ export interface LandingState {
   reviewItemsByProject: Record<number, ReviewItem[]>;
   /** True while the initial fan-out is in flight. */
   loading: boolean;
+  /**
+   * True when the top-level project-list fan-out (fetchProjects) failed on the
+   * most recent resync — `projects.getAll` threw or returned `success: false`.
+   * A per-project reviewItems failure stays soft (warn + empty list) and never
+   * sets this; only the project-list fetch gates the whole page, since without
+   * it there is no reliable project set to render anything against. Cleared by
+   * the next successful resync.
+   */
+  loadError: boolean;
 
   /**
    * Bootstrap the landing aggregation:
@@ -169,6 +178,9 @@ export interface LandingState {
    * Idempotent. Returns an unsubscribe that tears down every subscription.
    */
   init: () => (() => void);
+
+  /** Re-run the resync fan-out (sets `loading` true while in flight). Safe to call any time, incl. after an error. */
+  retry: () => void;
 }
 
 export const useLandingStore = create<LandingState>((set) => {
@@ -182,16 +194,21 @@ export const useLandingStore = create<LandingState>((set) => {
   const lifecycleSubs: Array<{ unsubscribe: () => void }> = [];
   let resyncTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** Fetch the project list. Returns [] (and warns) on failure. */
-  const fetchProjects = async (): Promise<Project[]> => {
+  /**
+   * Fetch the project list. Returns `{ projects: [], failed: true }` (and warns)
+   * on failure — `projects.getAll` throwing or returning `success: false` — so
+   * the caller can distinguish "the fan-out itself failed" from "zero projects
+   * exist" and gate the whole page on the former. Never throws.
+   */
+  const fetchProjects = async (): Promise<{ projects: Project[]; failed: boolean }> => {
     try {
       const res = await API.projects.getAll();
-      if (res.success && res.data) return res.data;
+      if (res.success && res.data) return { projects: res.data, failed: false };
       console.warn('[landingStore] projects.getAll returned no data:', res.error);
-      return [];
+      return { projects: [], failed: true };
     } catch (err: unknown) {
       console.warn('[landingStore] projects.getAll failed:', err);
-      return [];
+      return { projects: [], failed: true };
     }
   };
 
@@ -250,9 +267,20 @@ export const useLandingStore = create<LandingState>((set) => {
    * Full re-sync of projects + review_items (the authoritative fan-out). Also
    * re-wires per-project delta subscriptions and refreshes the reused runs
    * store for the current project set.
+   *
+   * When the top-level project-list fetch itself fails, this sets `loadError`
+   * and returns early WITHOUT touching `projects`/`reviewItemsByProject` — a
+   * transient fan-out failure leaves the last known-good render in place
+   * rather than blanking the page to empty. A successful resync always clears
+   * `loadError`.
    */
   const resync = async (): Promise<void> => {
-    const projects = await fetchProjects();
+    const { projects, failed } = await fetchProjects();
+    if (failed) {
+      set({ loading: false, loadError: true });
+      return;
+    }
+
     const projectIds = projects.map((p) => p.id);
 
     // Reuse the runs store: refresh every project so runsByProject populates.
@@ -267,7 +295,7 @@ export const useLandingStore = create<LandingState>((set) => {
     });
 
     wireReviewItemSubscriptions(projectIds);
-    set({ projects, reviewItemsByProject, loading: false });
+    set({ projects, reviewItemsByProject, loading: false, loadError: false });
   };
 
   /** Debounced full re-sync fired by the global lifecycle signals. */
@@ -283,6 +311,12 @@ export const useLandingStore = create<LandingState>((set) => {
     projects: [],
     reviewItemsByProject: {},
     loading: false,
+    loadError: false,
+
+    retry: () => {
+      set({ loading: true });
+      void resync();
+    },
 
     init: () => {
       if (initialized) return cachedUnsubscribe!;
@@ -355,6 +389,9 @@ export const useLandingProjects = (): Project[] => useLandingStore((s) => s.proj
 
 /** Number of projects (scalar — stable, no new reference per render). */
 export const useProjectsCount = (): number => useLandingStore((s) => s.projects.length);
+
+/** True when the landing fan-out's top-level project-list fetch is currently failing. */
+export const useLandingLoadError = (): boolean => useLandingStore((s) => s.loadError);
 
 /**
  * Pending DECISION + HUMAN_TASK + NOTIFICATION items across all projects.

@@ -1,7 +1,9 @@
 /**
- * NewTaskDialog — the "+ New" affordance. Creates a task (idea / epic / task)
- * via `cyboflow.tasks.create`, which routes through the applyChange chokepoint
- * (actor:'user') in the main process. The created task lands at the `idea` stage
+ * NewTaskDialog — the "+ New" affordance. Creates an IDEA via
+ * `cyboflow.tasks.create`, which routes through the applyChange chokepoint
+ * (actor:'user') in the main process. Everything hand-created is an idea by
+ * design — epics and tasks are minted by the planner's decomposition, so the
+ * dialog carries no Type picker. The created idea lands at the `idea` stage
  * (the chokepoint's create default) and arrives in the store via the
  * onTaskChanged subscription — no optimistic insert needed here.
  *
@@ -20,7 +22,7 @@ import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { CATEGORY_LABEL } from './markers';
-import type { EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { EntityCategory, IdeaAttachment, IdeaScope, Priority } from '../../../../shared/types/tasks';
 
 /** Empty seed for the attachment hook (stable reference). */
 const NO_ATTACHMENTS: IdeaAttachment[] = [];
@@ -38,7 +40,6 @@ interface NewTaskDialogProps {
   onCreated?: (taskId: string) => void;
 }
 
-const TYPES: TaskType[] = ['idea', 'epic', 'task'];
 const PRIORITIES: Priority[] = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
 
@@ -46,7 +47,6 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const projects = useBacklogStore((s) => s.projects);
   const filterProjectId = useBacklogStore((s) => s.filterProjectId);
 
-  const [type, setType] = useState<TaskType>('idea');
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
   const [priority, setPriority] = useState<Priority>('P2');
@@ -70,7 +70,6 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const selectedProjectId = projectOverride ?? defaultProjectId;
 
   const reset = (): void => {
-    setType('idea');
     setTitle('');
     setSummary('');
     setPriority('P2');
@@ -93,14 +92,13 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
     try {
       const result = await trpc.cyboflow.tasks.create.mutate({
         projectId: selectedProjectId,
-        type,
+        type: 'idea',
         title: title.trim(),
         summary: summary.trim().length > 0 ? summary.trim() : null,
-        // Attachments are ideas-only; the chokepoint ignores them otherwise.
-        ...(type === 'idea' ? { attachments: attachmentsCtl.attachments } : {}),
-        // Size hint is ideas-only too; unset ('') is omitted so the column
-        // stays NULL and the planner's triage judges it.
-        ...(type === 'idea' && scope !== '' ? { scope } : {}),
+        attachments: attachmentsCtl.attachments,
+        // Unset ('') size is omitted so the column stays NULL and the planner's
+        // triage judges it.
+        ...(scope !== '' ? { scope } : {}),
         priority,
         category,
       });
@@ -116,25 +114,9 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} size="md">
-      <ModalHeader>New backlog item</ModalHeader>
+      <ModalHeader>New idea</ModalHeader>
       <ModalBody>
         <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-            Type
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value as TaskType)}
-              className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
-              aria-label="Task type"
-            >
-              {TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t.charAt(0).toUpperCase() + t.slice(1)}
-                </option>
-              ))}
-            </select>
-          </label>
-
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Project
             <select
@@ -170,30 +152,23 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
             <textarea
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
-              onPaste={type === 'idea' ? attachmentsCtl.handlePaste : undefined}
-              onDrop={type === 'idea' ? attachmentsCtl.handleDrop : undefined}
-              onDragOver={type === 'idea' ? (e) => e.preventDefault() : undefined}
+              onPaste={attachmentsCtl.handlePaste}
+              onDrop={attachmentsCtl.handleDrop}
+              onDragOver={(e) => e.preventDefault()}
               rows={3}
-              placeholder={
-                type === 'idea'
-                  ? 'Optional — a sentence or two of context. Paste or drop a file to attach it.'
-                  : 'Optional — a sentence or two of context'
-              }
+              placeholder="Optional — a sentence or two of context. Paste or drop a file to attach it."
               className="resize-none rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text placeholder:text-input-placeholder"
               aria-label="Task summary"
             />
           </label>
 
-          {/* Attachments — ideas only (the only entity with an attachments column). */}
-          {type === 'idea' && (
-            <IdeaAttachmentStrip
-              previews={attachmentsCtl.previews}
-              busy={attachmentsCtl.busy}
-              error={attachmentsCtl.error}
-              onAddFiles={(files) => void attachmentsCtl.addFiles(files)}
-              onRemove={attachmentsCtl.remove}
-            />
-          )}
+          <IdeaAttachmentStrip
+            previews={attachmentsCtl.previews}
+            busy={attachmentsCtl.busy}
+            error={attachmentsCtl.error}
+            onAddFiles={(files) => void attachmentsCtl.addFiles(files)}
+            onRemove={attachmentsCtl.remove}
+          />
 
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Priority
@@ -227,25 +202,23 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
             </select>
           </label>
 
-          {/* Size hint — ideas only (IDEA-009). Pre-stamping saves the planner's
-              triage a judgment call and drives the multi-select picker's S/L
-              badges + plan-separately split. */}
-          {type === 'idea' && (
-            <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-              Size
-              <select
-                value={scope}
-                onChange={(e) => setScope(e.target.value as '' | IdeaScope)}
-                className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
-                aria-label="Idea size"
-                data-testid="new-task-scope"
-              >
-                <option value="">Let the planner judge</option>
-                <option value="small">Small — fits a batch</option>
-                <option value="large">Large — plan on its own</option>
-              </select>
-            </label>
-          )}
+          {/* Size hint (IDEA-009). Pre-stamping saves the planner's triage a
+              judgment call and drives the multi-select picker's S/L badges +
+              plan-separately split. */}
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+            Size
+            <select
+              value={scope}
+              onChange={(e) => setScope(e.target.value as '' | IdeaScope)}
+              className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
+              aria-label="Idea size"
+              data-testid="new-task-scope"
+            >
+              <option value="">Let the planner judge</option>
+              <option value="small">Small — fits a batch</option>
+              <option value="large">Large — plan on its own</option>
+            </select>
+          </label>
 
           {error && (
             <p className="text-xs text-status-error" role="alert">
