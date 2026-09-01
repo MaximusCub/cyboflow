@@ -147,14 +147,30 @@ export const VERIFY_SETUP_WORKFLOW_NAME = 'verify-setup';
 export const SETUP_WORKFLOW_NAMES: ReadonlySet<string> = new Set([VERIFY_SETUP_WORKFLOW_NAME]);
 
 /**
- * The wizard's "or run a workflow" list: every meta EXCEPT the setup flows.
+ * Display order for the wizard's "or run a workflow" list — a deliberate
+ * curated ranking (end-to-end first, learnings-mining last), NOT the registry
+ * tuple order, which is a persistence contract this must not disturb. Names
+ * absent from this list (custom flows) sort after all of these, keeping their
+ * incoming relative order.
+ */
+const LAUNCHER_DISPLAY_ORDER = ['ship', 'planner', 'sprint', 'launch', 'compound'] as const;
+
+/**
+ * The wizard's "or run a workflow" list: every meta EXCEPT the setup flows,
+ * in {@link LAUNCHER_DISPLAY_ORDER} (custom flows trailing, order preserved).
  *
  * A function rather than a filter written inline at the JSX, so the rule is
  * assertable without mounting the wizard — and so the render site cannot
  * quietly lose the filter while every test stays green.
  */
 export function launcherWorkflowMetas(metas: WorkflowCardMeta[]): WorkflowCardMeta[] {
-  return metas.filter((meta) => !meta.hiddenFromLauncher);
+  const rank = (meta: WorkflowCardMeta): number => {
+    const index = LAUNCHER_DISPLAY_ORDER.indexOf(meta.name as (typeof LAUNCHER_DISPLAY_ORDER)[number]);
+    return index === -1 ? LAUNCHER_DISPLAY_ORDER.length : index;
+  };
+  // Array.prototype.sort is stable, so equal ranks (all custom flows) keep
+  // their incoming relative order.
+  return metas.filter((meta) => !meta.hiddenFromLauncher).sort((a, b) => rank(a) - rank(b));
 }
 
 /**

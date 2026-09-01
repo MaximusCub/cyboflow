@@ -12,9 +12,10 @@
  * not require a live Electron IPC bridge. Path is relative to this test file:
  * ../../trpc/client → frontend/src/trpc/client.ts.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReviewItem, ReviewItemKind, ReviewItemStatus } from '../../../../shared/types/reviews';
 import type { ActiveRunRow } from '../activeRunsStore';
+import type { Project } from '../../types/project';
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -37,12 +38,14 @@ vi.mock('../../utils/api', () => ({
   API: { projects: { getAll: vi.fn() } },
 }));
 
+import { API } from '../../utils/api';
 import {
   collectPendingBlockingRunIds,
   flattenActiveRunRows,
   flattenPendingBlockingFindings,
   flattenPendingReviewItems,
   upsertReviewItem,
+  useLandingStore,
 } from '../landingStore';
 
 describe('flattenActiveRunRows', () => {
@@ -236,5 +239,70 @@ describe('flattenPendingBlockingFindings', () => {
     };
 
     expect(flattenPendingBlockingFindings(byProject).map((item) => item.id)).toEqual(['blocking']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadError / retry
+//
+// Exercises the store instance directly (not just its pure reducers), but
+// only through code paths that never touch useActiveRunsStore's own trpc
+// surface (runs.list / workflows.list are NOT stubbed by this file's trpc
+// mock): the failure path returns before any of that runs, and the success
+// path below resolves zero projects so the per-project refresh loop is a
+// no-op. See backlogStore.test.ts for the same `vi.waitFor` idiom against a
+// live store instance.
+// ---------------------------------------------------------------------------
+
+describe('landingStore loadError/retry', () => {
+  beforeEach(() => {
+    useLandingStore.setState({ projects: [], reviewItemsByProject: {}, loading: false, loadError: false });
+    vi.mocked(API.projects.getAll).mockReset();
+  });
+
+  it('sets loadError when the project-list fetch throws', async () => {
+    vi.mocked(API.projects.getAll).mockRejectedValueOnce(new Error('boom'));
+    useLandingStore.getState().retry();
+    await vi.waitFor(() => expect(useLandingStore.getState().loadError).toBe(true));
+    expect(useLandingStore.getState().loading).toBe(false);
+  });
+
+  it('sets loadError when the project-list fetch resolves success:false', async () => {
+    vi.mocked(API.projects.getAll).mockResolvedValueOnce({ success: false, error: 'nope', data: [] });
+    useLandingStore.getState().retry();
+    await vi.waitFor(() => expect(useLandingStore.getState().loadError).toBe(true));
+  });
+
+  it('leaves the prior projects/reviewItemsByProject untouched on a failed resync', async () => {
+    // Seed a known-good prior state, then fail a subsequent resync.
+    const priorProject: Project = {
+      id: 7,
+      name: 'Prior',
+      path: '/tmp/prior',
+      active: true,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+    };
+    useLandingStore.setState({ projects: [priorProject], reviewItemsByProject: { 7: [] } });
+    vi.mocked(API.projects.getAll).mockRejectedValueOnce(new Error('boom'));
+    useLandingStore.getState().retry();
+    await vi.waitFor(() => expect(useLandingStore.getState().loadError).toBe(true));
+    expect(useLandingStore.getState().projects).toEqual([priorProject]);
+  });
+
+  it('sets loading true synchronously when retry is called', () => {
+    vi.mocked(API.projects.getAll).mockImplementation(() => new Promise(() => {}));
+    useLandingStore.getState().retry();
+    expect(useLandingStore.getState().loading).toBe(true);
+  });
+
+  it('clears loadError after a subsequent successful resync', async () => {
+    vi.mocked(API.projects.getAll).mockRejectedValueOnce(new Error('boom'));
+    useLandingStore.getState().retry();
+    await vi.waitFor(() => expect(useLandingStore.getState().loadError).toBe(true));
+
+    vi.mocked(API.projects.getAll).mockResolvedValueOnce({ success: true, data: [] });
+    useLandingStore.getState().retry();
+    await vi.waitFor(() => expect(useLandingStore.getState().loadError).toBe(false));
   });
 });

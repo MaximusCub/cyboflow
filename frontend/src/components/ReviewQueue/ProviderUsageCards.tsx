@@ -247,7 +247,7 @@ function ProviderCard({
 
   return (
     <div
-      className="border border-border-primary bg-bg-secondary px-4 py-3"
+      className="border border-border-primary bg-surface-raised px-4 py-3"
       data-testid={`usage-card-${snapshot.provider}`}
     >
       <div className="flex items-baseline justify-between gap-3">
@@ -311,7 +311,7 @@ export function ProviderUsageCards(): React.ReactElement | null {
   if (visible.length === 0) return null;
 
   return (
-    <div className="mb-4 grid gap-3 sm:grid-cols-2" data-testid="provider-usage-cards">
+    <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-3" data-testid="provider-usage-cards">
       {visible.map((snapshot) => (
         <ProviderCard key={snapshot.provider} snapshot={snapshot} nowMs={nowMs} />
       ))}

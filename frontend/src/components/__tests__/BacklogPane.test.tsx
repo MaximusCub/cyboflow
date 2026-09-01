@@ -610,10 +610,10 @@ describe('BacklogPane', () => {
     expect(screen.queryByTestId('task-batch-picker-launch')).not.toBeInTheDocument();
   });
 
-  it('opens the New task dialog from the + New affordance', () => {
+  it('opens the New idea dialog from the + New affordance', () => {
     render(<BacklogPane projectId={1} />);
     fireEvent.click(screen.getByTestId('backlog-new-button'));
-    expect(screen.getByText('New backlog item')).toBeInTheDocument();
+    expect(screen.getByText('New idea')).toBeInTheDocument();
   });
 
   it('renders a loading placeholder until the global sync resolves', () => {

@@ -1,5 +1,6 @@
 /**
- * NewTaskDialog — the "+ New backlog item" dialog.
+ * NewTaskDialog — the "+ New idea" dialog (idea-only: hand-created entities are
+ * always ideas; epics/tasks are minted by the planner).
  *
  * Covers the default-project chain (filterProjectId ?? projectId ?? projects[0]),
  * an explicit pick winning, create ALWAYS sending the selected id (not the raw
@@ -126,15 +127,6 @@ describe('NewTaskDialog — create', () => {
 });
 
 describe('NewTaskDialog — idea size hint (IDEA-009)', () => {
-  it('shows the Size select for ideas only', () => {
-    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
-    expect(screen.getByTestId('new-task-scope')).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'task' } });
-    expect(screen.queryByTestId('new-task-scope')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'epic' } });
-    expect(screen.queryByTestId('new-task-scope')).not.toBeInTheDocument();
-  });
-
   it('sends the picked scope on create', async () => {
     render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'a big one' } });
@@ -152,15 +144,13 @@ describe('NewTaskDialog — idea size hint (IDEA-009)', () => {
     expect(mockCreate.mock.calls[0][0]).not.toHaveProperty('scope');
   });
 
-  it('drops a picked scope when the type is switched off idea before submit', async () => {
+  it('always creates an idea — there is no type picker', async () => {
     render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
-    fireEvent.change(screen.getByTestId('new-task-scope'), { target: { value: 'small' } });
-    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'task' } });
-    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'now a task' } });
+    expect(screen.queryByLabelText('Task type')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'anything' } });
     fireEvent.click(screen.getByTestId('new-task-submit'));
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
-    expect(mockCreate.mock.calls[0][0]).toMatchObject({ type: 'task' });
-    expect(mockCreate.mock.calls[0][0]).not.toHaveProperty('scope');
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({ type: 'idea' });
   });
 });
 
