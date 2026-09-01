@@ -50,6 +50,21 @@
  * holds, the container it covers), because Submit disconnects before it
  * connects; and a run that only unlinks skips Tasks/States/Reconcile entirely,
  * since those steps describe mapped groups it does not have.
+ *
+ * WORKSPACE-ROW MODE (`meta.workspaceBound` on a FRESH connect — beads today).
+ * A workspace-bound provider has no account to authorize into: it has one
+ * workspace per repository, found by probing that repository. So there is
+ * nothing for Step 0 to ask and the wizard opens on Map, exactly as add-mapping
+ * mode does — but its Map step is a PER-PROJECT SURFACE rather than a list of
+ * one account's groups: one row per cyboflow project, each row probing its OWN
+ * repository and carrying its OWN credentials `{ projectId, workspaceDirToken? }`
+ * from that probe through to its `connect`.
+ *
+ * Which makes the group tree something this mode SYNTHESIZES rather than
+ * fetches — no single credential could stand for N repositories — so group ids
+ * are namespaced by project (every row's probe answers with the same
+ * adapter-side id) and `mappings` points each group at its own row's project,
+ * never at another. Everything downstream reads that tree unchanged.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
@@ -123,6 +138,28 @@ interface MappingProgress {
   error: string | null;
 }
 
+/**
+ * WORKSPACE-ROW MODE — what one project row's probe of its own repository found.
+ *
+ * The three failures are kept apart because they need three different offers:
+ * 'missing' is the one `bd init` fixes, 'missing-cli' is a fact about the
+ * MACHINE (so the list states it once, and those rows get no controls at all),
+ * and 'error' is the honest remainder that only re-probing can move.
+ */
+type WorkspaceRowState =
+  | { status: 'probing' }
+  | { status: 'detected'; group: TrackerGroup }
+  | { status: 'missing'; error: string }
+  | { status: 'missing-cli'; error: string }
+  | { status: 'error'; error: string };
+
+/**
+ * A row action in flight. The probe is not one of these — it has its own
+ * 'probing' status above — so a row can be initializing while still showing the
+ * answer the last probe gave it.
+ */
+type WorkspaceRowAction = 'initializing' | 'picking';
+
 const MODE_OPTIONS: readonly { value: TrackerSelectionMode; label: string }[] = [
   { value: 'all', label: 'All tasks' },
   { value: 'assignee', label: 'By assignee' },
@@ -166,6 +203,13 @@ function errorMessage(err: unknown): string {
 }
 
 /**
+ * Default for the `connectedProjectIds` prop. A module constant rather than a
+ * `= []` default, so the identity is stable across renders and the row-probe
+ * effect that lists it does not re-fire on every one.
+ */
+const NO_CONNECTED_PROJECTS: readonly number[] = [];
+
+/**
  * Whether a live connection's recorded scope names the exact slice a mappable
  * group covers. The whole triple is the identity — two rows under the same
  * container are different mappings unless the narrow matches too.
@@ -186,12 +230,12 @@ export interface TrackerWizardModalProps {
   provider: TrackerProvider;
   projectId: number;
   /**
-   * The active project's repo path, DISPLAY ONLY — the Detect step's "looking
-   * in …" caption for a keyless provider. It is never sent anywhere: `projectId`
-   * is what crosses the wire, and main resolves the path itself. Null/absent
-   * simply drops the caption.
+   * Projects this provider ALREADY has a live connection for. Display only, and
+   * only in workspace-row mode: such a project's row is inert ("Connected") and,
+   * the half that matters, is never probed — one saved CLI spawn per row, for an
+   * answer the catalog already holds. Defaults to none.
    */
-  projectPath?: string | null;
+  connectedProjectIds?: readonly number[];
   onClose: () => void;
   /** Fired after every mapping's `connect` resolves so the catalog can re-read its rows. */
   onConnected: () => void;
@@ -208,7 +252,7 @@ export function TrackerWizardModal({
   isOpen,
   provider,
   projectId,
-  projectPath = null,
+  connectedProjectIds = NO_CONNECTED_PROJECTS,
   onClose,
   onConnected,
   sourceConnection,
@@ -216,11 +260,23 @@ export function TrackerWizardModal({
   const meta = providerMeta(provider);
 
   /**
-   * The first step this run owns. Add-mapping mode starts on Map because its
-   * authorization already happened — Step 0 is not skipped-but-present, it is
-   * absent, so every index-based guard below reads this rather than 0.
+   * WORKSPACE-ROW MODE: a fresh connect for a provider whose workspaces are
+   * bound to repositories rather than to an account (see the header). The Map
+   * step becomes a per-project surface and every credential in the run is a
+   * ROW's, so this is the flag the whole file branches on — never the provider
+   * name. Add-mapping mode is deliberately excluded: it extends ONE existing
+   * connection's workspace, which is a different question entirely.
    */
-  const firstStep = sourceConnection !== undefined ? MAP_STEP : 0;
+  const workspaceRowMode = meta.workspaceBound && sourceConnection === undefined;
+
+  /**
+   * The first step this run owns. Add-mapping mode starts on Map because its
+   * authorization already happened, and workspace-row mode because there is no
+   * account to authorize against at all — Step 0 is not skipped-but-present in
+   * either, it is absent, so every index-based guard below reads this rather
+   * than 0.
+   */
+  const firstStep = sourceConnection !== undefined || meta.workspaceBound ? MAP_STEP : 0;
 
   // ── Navigation ────────────────────────────────────────────────────────────
   const [step, setStep] = useState(firstStep);
@@ -241,18 +297,6 @@ export function TrackerWizardModal({
   const [validating, setValidating] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<TrackerWorkspaceIdentity | null>(null);
-  /**
-   * KEYLESS ONLY — the folder the user pointed Detect at instead of the
-   * project's repo, as main handed it back: an opaque `token` to send and a
-   * `path` to show. Null is the ordinary case, "probe the project's repo".
-   *
-   * The token is the ONLY half that goes back over the wire; `path` exists so
-   * the step can say which directory it is about to look in.
-   */
-  const [workspaceDir, setWorkspaceDir] = useState<{ token: string; path: string } | null>(null);
-  const [picking, setPicking] = useState(false);
-  /** KEYLESS ONLY — `bd init --stealth` is running in the probed folder. */
-  const [initializing, setInitializing] = useState(false);
 
   // ── Step 1 · map ──────────────────────────────────────────────────────────
   const [projects, setProjects] = useState<Project[]>([]);
@@ -275,6 +319,39 @@ export function TrackerWizardModal({
    * `connect` in this run executes they will already be retired.
    */
   const [unlinkIds, setUnlinkIds] = useState<Set<string>>(() => new Set());
+
+  // ── Step 1 · map · workspace rows (workspace-row mode only) ───────────────
+  /** cyboflow project id → what that project's repository probe found. */
+  const [rowStates, setRowStates] = useState<Record<number, WorkspaceRowState>>({});
+  /**
+   * Per-row folder override, as main handed it back: an opaque `token` to send
+   * and a `path` to show. Absent is the ordinary case, "probe the project's
+   * repo". The token is the ONLY half that goes back over the wire.
+   */
+  const [rowDirs, setRowDirs] = useState<Record<number, { token: string; path: string }>>({});
+  const [rowActions, setRowActions] = useState<Record<number, WorkspaceRowAction>>({});
+  /**
+   * What a row's last ACTION failed with — a refused init, a picker that threw.
+   * Kept apart from `rowStates` so an action failure never rewrites the answer
+   * the probe gave: a row whose init was refused is still a row with no
+   * workspace, and must keep offering the fix.
+   */
+  const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+  /**
+   * Version stamp for the row probes, PER ROW — a row's answer supersedes only
+   * its own earlier ones, so a slow probe for one repository cannot discard a
+   * fresh answer for another (Detect clicked twice in a row is the case this
+   * catches: without it the earlier request can land last and install a stale
+   * answer). Deliberately not `probeVersionRef`, which every mapping edit bumps
+   * — and a landing row probe seeds a mapping.
+   */
+  const rowProbeVersionsRef = useRef<Record<number, number>>({});
+  /**
+   * Rows the mount sweep has already fired at. The sweep re-runs whenever its
+   * inputs change identity (a prop array the catalog composes inline), and a
+   * re-run must not spawn a second CLI probe per project.
+   */
+  const probedPidsRef = useRef<Set<number>>(new Set());
 
   // ── Step 2 · selection ────────────────────────────────────────────────────
   const [issuesByGroup, setIssuesByGroup] = useState<Record<string, TrackerIssue[]>>({});
@@ -350,15 +427,6 @@ export function TrackerWizardModal({
   // Derived
   // -------------------------------------------------------------------------
 
-  const workspaceDirToken = workspaceDir?.token ?? null;
-  /**
-   * The directory a keyless Detect will probe — the picked folder when there is
-   * one, else the active project's repo. Null only when the caller passed no
-   * project path, which just drops the caption. Display text: main resolves the
-   * real thing from the id and the token.
-   */
-  const probedWorkspacePath = workspaceDir?.path ?? projectPath;
-
   const credentials = useMemo<TrackerCredentialsInput>(() => {
     const trimmedBase = baseUrl.trim();
     // Plane workspace slugs are lowercase URL slugs; users naturally type the
@@ -370,22 +438,16 @@ export function TrackerWizardModal({
       // the router's schema would read as a keyed provider missing its key.
       // It sends the ACTIVE PROJECT instead: main resolves that project's repo
       // path and probes the workspace there, so nothing path-shaped that this
-      // renderer composed decides where the CLI runs. A picked folder rides
-      // along as main's own TOKEN for it, which is the same rule one step over:
-      // the override says WHICH directory, and only main ever knew its name.
-      ...(meta.needsApiKey
-        ? { apiKey: apiKey.trim() }
-        : {
-            projectId,
-            ...(workspaceDirToken !== null ? { workspaceDirToken } : {}),
-          }),
+      // renderer composed decides where the CLI runs. Workspace-row mode never
+      // reads this memo — its credentials are per row (`rowCredentials`), one
+      // project each; this is the run-wide shape the other paths use.
+      ...(meta.needsApiKey ? { apiKey: apiKey.trim() } : { projectId }),
       ...(meta.defaultBaseUrl !== null && trimmedBase.length > 0 ? { baseUrl: trimmedBase } : {}),
       ...(meta.needsWorkspaceSlug && trimmedSlug.length > 0 ? { workspaceSlug: trimmedSlug } : {}),
     };
   }, [
     provider,
     projectId,
-    workspaceDirToken,
     apiKey,
     baseUrl,
     workspaceSlug,
@@ -430,10 +492,46 @@ export function TrackerWizardModal({
     [sourceConnection, identity],
   );
 
+  /**
+   * The projects the Map step lists, ACTIVE FIRST and then the list's own order.
+   * The active project is the one the user opened the wizard from, so it leads;
+   * this is also the order the synthesized tree — and therefore every downstream
+   * probe, connect and Review row — follows.
+   */
+  const orderedProjects = useMemo<Project[]>(
+    () =>
+      workspaceRowMode
+        ? [
+            ...projects.filter((p) => p.id === projectId),
+            ...projects.filter((p) => p.id !== projectId),
+          ]
+        : projects,
+    [workspaceRowMode, projects, projectId],
+  );
+
+  /**
+   * The group tree workspace-row mode SYNTHESIZES instead of fetching. No single
+   * `wizardGroups` call could stand for N repositories, so the tree is assembled
+   * from the rows that came back detected — one section, in `orderedProjects`
+   * order — and everything downstream reads it exactly as it reads a fetched one.
+   */
+  const workspaceGroupTree = useMemo<TrackerGroupTree | null>(() => {
+    if (!workspaceRowMode) return null;
+    const groups: TrackerGroup[] = [];
+    for (const project of orderedProjects) {
+      const row = rowStates[project.id];
+      if (row !== undefined && row.status === 'detected') groups.push(row.group);
+    }
+    return { sections: [{ label: 'Workspaces', groups }] };
+  }, [workspaceRowMode, orderedProjects, rowStates]);
+
+  /** The tree this run actually maps from — synthesized here, fetched everywhere else. */
+  const effectiveGroupTree = workspaceRowMode ? workspaceGroupTree : groupTree;
+
   /** Every group in tree order — the order mappings, probes and connects follow. */
   const allGroups = useMemo<TrackerGroup[]>(
-    () => (groupTree?.sections ?? []).flatMap((s) => s.groups),
-    [groupTree],
+    () => (effectiveGroupTree?.sections ?? []).flatMap((s) => s.groups),
+    [effectiveGroupTree],
   );
 
   const mappedGroups = useMemo(
@@ -812,6 +910,185 @@ export function TrackerWizardModal({
     (step === 2 && mode === 'manual' && includedIssues.length === 0);
 
   // -------------------------------------------------------------------------
+  // Workspace rows — one project, one repository, one set of credentials
+  // -------------------------------------------------------------------------
+
+  /**
+   * ONE row's credential source. Every probe, init and connect a row fires
+   * carries this — its own project id, plus the folder token when that row was
+   * pointed somewhere else — so a row can never answer for another row's
+   * repository. Nothing path-shaped is composed here: main resolves the
+   * directory from the id, or from the token it minted for the picked folder.
+   */
+  const rowCredentials = (
+    pid: number,
+    dir: { token: string; path: string } | null = rowDirs[pid] ?? null,
+  ): TrackerCredentialsInput => ({
+    provider,
+    projectId: pid,
+    ...(dir !== null ? { workspaceDirToken: dir.token } : {}),
+  });
+
+  /**
+   * The id a row's group is stored under. Every row's probe answers with the
+   * SAME adapter-side group id (one workspace, one group), and that id keys
+   * `mappings`, `issuesByGroup` and `progress` — so without the row's project in
+   * it, N rows would collide on one entry.
+   */
+  const workspaceGroupId = (pid: number, rawId: string): string => `${provider}:${pid}:${rawId}`;
+
+  /** The inverse of {@link workspaceGroupId}: namespaced id → the row that produced it. */
+  const workspaceRowPid = useMemo<Record<string, number>>(() => {
+    const out: Record<string, number> = {};
+    for (const [key, state] of Object.entries(rowStates)) {
+      if (state.status === 'detected') out[state.group.id] = Number(key);
+    }
+    return out;
+  }, [rowStates]);
+
+  /**
+   * The credential source ONE group's probes ride on. Ordinarily every group in
+   * a run shares `probeSource`; in workspace-row mode each group is a different
+   * repository, so each answers with its own row's credentials.
+   */
+  const probeSourceForGroup = (group: TrackerGroup): TrackerWizardSourceInput =>
+    workspaceRowMode
+      ? { credentials: rowCredentials(workspaceRowPid[group.id] ?? projectId) }
+      : probeSource;
+
+  const clearRowError = (pid: number): void =>
+    setRowErrors((prev) => {
+      if (prev[pid] === undefined) return prev;
+      const next = { ...prev };
+      delete next[pid];
+      return next;
+    });
+
+  const setRowAction = (pid: number, action: WorkspaceRowAction | null): void =>
+    setRowActions((prev) => {
+      if (action !== null) return { ...prev, [pid]: action };
+      if (prev[pid] === undefined) return prev;
+      const next = { ...prev };
+      delete next[pid];
+      return next;
+    });
+
+  /**
+   * Ask ONE row's repository whether it holds a workspace.
+   *
+   * `dir` is passed explicitly by the folder picker and the reset beside it,
+   * which both re-probe in the same tick they change the row's folder — before
+   * the re-render that would fold it into `rowDirs`; every other caller lets it
+   * default to what the row already holds.
+   */
+  const probeRow = async (
+    pid: number,
+    dir: { token: string; path: string } | null = rowDirs[pid] ?? null,
+  ): Promise<void> => {
+    // Claim this row's next version before the await, so a later probe for the
+    // same row supersedes this one rather than racing it.
+    const version = (rowProbeVersionsRef.current[pid] ?? 0) + 1;
+    rowProbeVersionsRef.current[pid] = version;
+    clearRowError(pid);
+    setRowStates((prev) => ({ ...prev, [pid]: { status: 'probing' } }));
+    try {
+      const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({
+        credentials: rowCredentials(pid, dir),
+      });
+      if (rowProbeVersionsRef.current[pid] !== version) return;
+      // A workspace-bound provider's tree is degenerate by construction: one
+      // section holding the one workspace that repository resolves to.
+      const group = tree.sections[0]?.groups[0];
+      if (group === undefined) {
+        setRowStates((prev) => ({
+          ...prev,
+          [pid]: {
+            status: 'error',
+            error: `${meta.name} returned no workspace for this project.`,
+          },
+        }));
+        return;
+      }
+      const scoped: TrackerGroup = { ...group, id: workspaceGroupId(pid, group.id) };
+      setRowStates((prev) => ({ ...prev, [pid]: { status: 'detected', group: scoped } }));
+      // Seed Sync for the ACTIVE project's row alone, and only where the user
+      // has not answered yet: it is the project the wizard was opened from, so
+      // syncing it is the near-certain intent, while every other row defaulting
+      // to Sync would connect repositories nobody asked about. Never overwrites
+      // a "Don't sync" the user chose.
+      if (pid === projectId) {
+        setMappings((prev) =>
+          prev[scoped.id] === undefined ? { ...prev, [scoped.id]: pid } : prev,
+        );
+      }
+    } catch (err) {
+      if (rowProbeVersionsRef.current[pid] !== version) return;
+      const message = errorMessage(err);
+      const failure = classifyKeylessDetectFailure(message);
+      setRowStates((prev) => ({
+        ...prev,
+        [pid]:
+          failure === 'missing-workspace'
+            ? { status: 'missing', error: message }
+            : failure === 'missing-cli'
+              ? { status: 'missing-cli', error: message }
+              : { status: 'error', error: message },
+      }));
+    }
+  };
+
+  /**
+   * Create the workspace a row's probe failed to find, then re-probe that row.
+   *
+   * Runs with the ROW's own credentials, so the init lands exactly where that
+   * row's probe looked — this renderer never learns which directory that was.
+   * A REFUSED init does not re-probe: there is nothing new to find, and the
+   * message belongs beside the offer that failed.
+   */
+  const handleRowInit = async (pid: number): Promise<void> => {
+    setRowAction(pid, 'initializing');
+    clearRowError(pid);
+    try {
+      await trpc.cyboflow.tracker.wizardInitWorkspace.mutate({ credentials: rowCredentials(pid) });
+      await probeRow(pid);
+    } catch (err) {
+      setRowErrors((prev) => ({ ...prev, [pid]: errorMessage(err) }));
+    } finally {
+      setRowAction(pid, null);
+    }
+  };
+
+  /**
+   * Point ONE row at a folder of the user's choosing, then re-probe it there.
+   * A cancelled dialog comes back as null and must change nothing at all — the
+   * user declining a dialog is not a reason to retire the row's answer.
+   */
+  const handleRowPick = async (pid: number): Promise<void> => {
+    setRowAction(pid, 'picking');
+    clearRowError(pid);
+    try {
+      const picked = await trpc.cyboflow.tracker.wizardPickWorkspace.mutate({ provider });
+      if (picked === null) return;
+      setRowDirs((prev) => ({ ...prev, [pid]: picked }));
+      await probeRow(pid, picked);
+    } catch (err) {
+      setRowErrors((prev) => ({ ...prev, [pid]: errorMessage(err) }));
+    } finally {
+      setRowAction(pid, null);
+    }
+  };
+
+  /** Drop a row's picked folder and go back to probing its repository. */
+  const handleRowUseRepo = (pid: number): void => {
+    setRowDirs((prev) => {
+      const next = { ...prev };
+      delete next[pid];
+      return next;
+    });
+    void probeRow(pid, null);
+  };
+
+  // -------------------------------------------------------------------------
   // Invalidation — a changed upstream answer drops exactly what depended on it
   // -------------------------------------------------------------------------
 
@@ -842,11 +1119,15 @@ export function TrackerWizardModal({
   };
 
   /**
-   * beads-only: pre-select "Sync into <project>" for every group a fresh tree
-   * hands back, since a workspace-bound provider's Map row is sync/don't-sync
-   * against the wizard's OWN project rather than a project picker (see
-   * `workspaceBound` in trackerVocabulary.ts) — without this Next would stay
-   * disabled until the user touched a control that only has one real choice.
+   * ADD-MAPPING MODE for a workspace-bound provider: pre-select "Sync into
+   * <project>" for every group the connection's tree hands back, since its Map
+   * row is sync/don't-sync against the wizard's OWN project rather than a
+   * project picker (see `workspaceBound` in trackerVocabulary.ts) — without this
+   * Next would stay disabled until the user touched a control that only has one
+   * real choice.
+   *
+   * A FRESH workspace-bound connect never reaches here: it seeds per row, in
+   * `probeRow`, and only for the active project's row.
    * Only fills a group with no mapping yet, so it never overwrites a user's
    * "Don't sync"; called right where the tree lands (both `ensureGroups` and
    * the add-mapping mount probe), never from render.
@@ -879,15 +1160,15 @@ export function TrackerWizardModal({
 
   // Editing a credential FIELD is the other way that happens.
   //
-  // Inert in add-mapping mode: no credential input renders there, so the only
-  // time this could fire is the mount pass — where it would retire the inherited
-  // identity and clamp the rail behind a Step 0 that does not exist.
+  // Inert in add-mapping AND workspace-row mode: neither renders a credential
+  // input, so the only time this could fire is the mount pass — where it would
+  // clamp the rail behind a Step 0 that does not exist in either.
   useEffect(() => {
-    if (sourceConnection !== undefined) return;
+    if (sourceConnection !== undefined || workspaceRowMode) return;
     retireProbedCredential();
     // The credential FIELDS are the trigger, and only they: retireProbedCredential
     // is re-created every render, so listing it would fire this on every one.
-  }, [apiKey, baseUrl, workspaceSlug, sourceConnection]);
+  }, [apiKey, baseUrl, workspaceSlug, sourceConnection, workspaceRowMode]);
 
   // The Map step's project list is a local read, loaded once per open. A failed
   // load leaves the list empty and the step unable to map anything.
@@ -929,6 +1210,36 @@ export function TrackerWizardModal({
     setReconcileLoaded(false);
     setMaxStep((m) => Math.min(m, 3));
   }, [mode, assignees, manual]);
+
+  // `probeRow` closes over the row state it reads and is re-created every
+  // render, so the sweep below cannot list it as a dependency without re-firing
+  // on every one. It reaches it through this ref instead, refreshed after each
+  // render — declared BEFORE the sweep so the refresh runs first.
+  const probeRowRef = useRef(probeRow);
+  useEffect(() => {
+    probeRowRef.current = probeRow;
+  });
+
+  // WORKSPACE-ROW MODE's mount sweep: probe every project's repository at once,
+  // as soon as the project list lands. Concurrent rather than sequential — each
+  // is an independent CLI spawn against a different directory, and serialising
+  // them would make an eight-project list feel broken.
+  //
+  // `probedPidsRef` is what makes re-running this harmless: `connectedProjectIds`
+  // is composed by the catalog and `projects` is re-set on every load, so the
+  // effect can fire more than once and must not spawn a second probe per row. A
+  // row the user re-detects by hand is not re-fired either, by the same rule.
+  useEffect(() => {
+    if (!isOpen || !workspaceRowMode) return;
+    for (const project of projects) {
+      // An already-connected project's answer is on its row as a chip; probing
+      // it would spend a spawn to learn what the catalog already knows.
+      if (connectedProjectIds.includes(project.id)) continue;
+      if (probedPidsRef.current.has(project.id)) continue;
+      probedPidsRef.current.add(project.id);
+      void probeRowRef.current(project.id);
+    }
+  }, [isOpen, workspaceRowMode, projects, connectedProjectIds]);
 
   // -------------------------------------------------------------------------
   // Add-mapping mount probes
@@ -987,7 +1298,10 @@ export function TrackerWizardModal({
   // -------------------------------------------------------------------------
 
   const ensureGroups = async (): Promise<void> => {
-    if (groupTree !== null) return;
+    // Workspace-row mode fetches nothing here: its tree is synthesized from the
+    // per-row probes, and one credential-carrying call would ask a single
+    // repository to answer for all of them.
+    if (workspaceRowMode || groupTree !== null) return;
     const version = probeVersionRef.current;
     const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({ ...probeSource });
     if (probeVersionRef.current !== version) return;
@@ -1003,7 +1317,7 @@ export function TrackerWizardModal({
     const next: Record<string, TrackerIssue[]> = {};
     for (const group of mappedGroups) {
       next[group.id] = await trpc.cyboflow.tracker.wizardIssues.mutate({
-        ...probeSource,
+        ...probeSourceForGroup(group),
         selection: group.selection,
       });
     }
@@ -1019,9 +1333,13 @@ export function TrackerWizardModal({
     const nextMapping: Record<string, TrackerStateMapping> = {};
     for (const scope of stateScopes) {
       // Any group in the scope answers for all of them — that is what sharing a
-      // scope key means, so only one probe per table is fired.
+      // scope key means, so only one probe per table is fired. That holds across
+      // REPOSITORIES too in workspace-row mode: bd's state vocabulary is fixed
+      // by the tool, not by the workspace, so every row reports the same
+      // `stateScopeKey` and one table (probed through the first row's
+      // credentials) genuinely describes them all.
       const rows = await trpc.cyboflow.tracker.wizardStates.mutate({
-        ...probeSource,
+        ...probeSourceForGroup(scope.groups[0]),
         selection: scope.groups[0].selection,
       });
       nextStates[scope.key] = rows;
@@ -1042,7 +1360,14 @@ export function TrackerWizardModal({
   const ensureFieldOptions = async (): Promise<void> => {
     if (fieldOptionsLoaded) return;
     const version = probeVersionRef.current;
-    const options = await trpc.cyboflow.tracker.wizardFieldOptions.mutate({ ...probeSource });
+    // Workspace-row mode has no run-wide credential to send, and no need for
+    // one: the priority/type vocabulary is the provider's, identical in every
+    // workspace, so the first mapped row answers for the whole run.
+    const source =
+      workspaceRowMode && mappedGroups.length > 0
+        ? probeSourceForGroup(mappedGroups[0])
+        : probeSource;
+    const options = await trpc.cyboflow.tracker.wizardFieldOptions.mutate({ ...source });
     if (probeVersionRef.current !== version) return;
     setFieldOptions(options);
     setPriorityMapping(seedPriorityMapping(options.defaultPriorityMapping.toProvider, priorityMapping ?? undefined));
@@ -1110,18 +1435,11 @@ export function TrackerWizardModal({
     }
   };
 
-  /**
-   * `probeWith` defaults to the memo, and is passed explicitly only by the
-   * folder picker: it re-detects in the same tick it stores the token, before
-   * the re-render that would fold that token into `credentials`.
-   */
-  const handleAuthorize = async (probeWith: TrackerCredentialsInput = credentials): Promise<void> => {
+  const handleAuthorize = async (): Promise<void> => {
     setValidating(true);
     setAuthError(null);
     try {
-      const result = await trpc.cyboflow.tracker.wizardValidate.mutate({
-        credentials: probeWith,
-      });
+      const result = await trpc.cyboflow.tracker.wizardValidate.mutate({ credentials });
       setIdentity(result);
     } catch (err) {
       setIdentity(null);
@@ -1131,61 +1449,13 @@ export function TrackerWizardModal({
     }
   };
 
-  /**
-   * KEYLESS ONLY — point Detect at a folder of the user's choosing, then
-   * immediately re-run it there.
-   *
-   * The mutation opens a NATIVE dialog in main and answers with a token; a
-   * cancel comes back as null and must change nothing at all, since the user
-   * declining a dialog is not a reason to retire the workspace they already
-   * detected. A successful pick is a different workspace, so it retires
-   * everything the previous one produced before re-detecting — the same
-   * invalidation an edited API key triggers.
-   */
-  const handlePickWorkspace = async (): Promise<void> => {
-    setPicking(true);
-    try {
-      const picked = await trpc.cyboflow.tracker.wizardPickWorkspace.mutate({ provider });
-      if (picked === null) return;
-      setWorkspaceDir(picked);
-      retireProbedCredential();
-      await handleAuthorize({ ...credentials, workspaceDirToken: picked.token });
-    } catch (err) {
-      setAuthError(errorMessage(err));
-    } finally {
-      setPicking(false);
-    }
-  };
-
-  /**
-   * KEYLESS ONLY — create the workspace Detect just failed to find, then
-   * re-detect it.
-   *
-   * The SAME credentials the failed probe used, so the workspace is created
-   * exactly where that probe looked: main resolves the folder from the memo's
-   * project id and folder token, and this renderer never learns which
-   * directory that was. On success the error is cleared and `handleAuthorize`
-   * runs, which is what turns a fresh workspace into the identity card — this
-   * call reports no identity of its own.
-   */
-  const handleInitWorkspace = async (): Promise<void> => {
-    setInitializing(true);
-    try {
-      await trpc.cyboflow.tracker.wizardInitWorkspace.mutate({ credentials });
-      setAuthError(null);
-      await handleAuthorize();
-    } catch (err) {
-      setAuthError(errorMessage(err));
-    } finally {
-      setInitializing(false);
-    }
-  };
-
   const goToStep = async (target: number): Promise<void> => {
     if (target < firstStep || target > LAST_STEP) return;
     // Step 0 is the gate: nothing downstream exists without a validated key.
-    // Add-mapping mode enters already past it, carrying the connection's identity.
-    if (target > firstStep && shownIdentity === null) return;
+    // Add-mapping mode enters already past it, carrying the connection's
+    // identity — and a workspace-bound run has no single identity to gate on at
+    // all: its rows are N workspaces, each vouched for by its own probe.
+    if (!meta.workspaceBound && target > firstStep && shownIdentity === null) return;
     // The three middle steps describe mapped groups; with none they are not
     // enterable in EITHER direction, which is also what makes Back from Review
     // land on Map rather than on an empty Reconcile (see `prevStepFrom`).
@@ -1346,10 +1616,12 @@ export function TrackerWizardModal({
           await trpc.cyboflow.tracker.connect.mutate({
             projectId: pid,
             // Exactly one credential source, same rule as the probes: the pasted
-            // key, or the connection whose stored key main resolves on its side.
+            // key, the connection whose stored key main resolves on its side,
+            // or — in workspace-row mode — the row's own credentials. `pid` IS
+            // that row's project there, since a row can only map to itself.
             ...(credentialCarrierId !== undefined
               ? { sourceConnectionId: credentialCarrierId }
-              : { credentials }),
+              : { credentials: workspaceRowMode ? rowCredentials(pid) : credentials }),
             source: group.selection,
             sourceLabel: group.sourceLabel,
             selectionMode: mode,
@@ -1402,37 +1674,23 @@ export function TrackerWizardModal({
   // Step bodies
   // -------------------------------------------------------------------------
 
+  /**
+   * Step 0, and it is a KEYED step by construction: the only provider with
+   * nothing to paste is workspace-bound, and `firstStep` drops this step
+   * entirely for those — a workspace-bound run authorizes per row on the Map
+   * step instead. So nothing here branches on `needsApiKey`.
+   */
   const renderConnect = (): React.JSX.Element => (
     <div className="flex flex-col items-center gap-4 text-center">
       <ProviderTile mark={meta.mark} size="lg" />
-      {/* "Authorize" is the wrong verb for a provider with nothing to
-          authorize against — this step finds a local workspace. */}
-      <Eyebrow>{meta.needsApiKey ? STEP_EYEBROWS[0] : 'Step 01 · Detect'}</Eyebrow>
+      <Eyebrow>{STEP_EYEBROWS[0]}</Eyebrow>
       <h3 className="text-lg font-bold text-text-primary">Connect {meta.name}</h3>
       <p className="max-w-[430px] text-xs leading-relaxed text-text-secondary">
-        {meta.needsApiKey ? (
-          <>
-            Paste a {meta.apiKeyLabel.toLowerCase()}. Cyboflow validates it against {meta.name}{' '}
-            before anything is stored, and the key never leaves this machine.
-          </>
-        ) : (
-          <>
-            {meta.name} has no API key — it runs locally. Cyboflow looks for an initialized{' '}
-            <code>bd</code> workspace in this project&rsquo;s repository and binds the connection to
-            the database it finds.
-          </>
-        )}
+        Paste a {meta.apiKeyLabel.toLowerCase()}. Cyboflow validates it against {meta.name} before
+        anything is stored, and the key never leaves this machine.
       </p>
 
-      <div
-        className={cn(
-          CARD,
-          'w-full max-w-[440px] space-y-3 p-4 text-left',
-          // A keyless provider with no slug and no instance URL has no fields
-          // at all; the empty bordered card would read as a broken form.
-          !meta.needsApiKey && !meta.needsWorkspaceSlug && meta.defaultBaseUrl === null && 'hidden',
-        )}
-      >
+      <div className={cn(CARD, 'w-full max-w-[440px] space-y-3 p-4 text-left')}>
         {meta.needsApiKey && (
           <label className="block">
             <Eyebrow className="mb-1.5">{meta.apiKeyLabel}</Eyebrow>
@@ -1495,60 +1753,6 @@ export function TrackerWizardModal({
         <p className="mt-2 text-[11px] text-text-tertiary">{meta.scopeFootnote}</p>
       </div>
 
-      {/*
-        WHICH FOLDER, said out loud. Detect probes one directory and until now
-        never named it, so the commonest failure — the wrong cyboflow project
-        being active — arrived as a bare "no beads database found" about a repo
-        the user was not thinking about. The picker underneath is the escape
-        hatch for the workspaces that legitimately are not at the project's
-        root (a monorepo subdirectory, a workspace kept outside the repo):
-        secondary to Detect, because it is the exception.
-      */}
-      {!meta.needsApiKey && (
-        <div className="flex w-full max-w-[440px] flex-col items-center gap-2">
-          {probedWorkspacePath !== null && (
-            <p
-              className="text-[11px] leading-relaxed text-text-tertiary"
-              data-testid="tracker-probed-path"
-            >
-              Looking in <code className="text-text-secondary">{probedWorkspacePath}</code>
-              {workspaceDir !== null && (
-                <>
-                  {' · '}
-                  <button
-                    type="button"
-                    className="underline hover:text-text-secondary"
-                    // Retires the identity along with the token, exactly as
-                    // picking one does: an identity probed in the folder the
-                    // user just abandoned would otherwise stay on screen while
-                    // the caption named a different directory, and Continue
-                    // would carry it into a connect anchored somewhere else.
-                    onClick={() => {
-                      setWorkspaceDir(null);
-                      retireProbedCredential();
-                    }}
-                  >
-                    Use the project folder
-                  </button>
-                </>
-              )}
-            </p>
-          )}
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="rounded-none"
-            disabled={picking || validating}
-            loading={picking}
-            loadingText="Choosing a folder…"
-            onClick={() => void handlePickWorkspace()}
-          >
-            Point at a {meta.name.toLowerCase()} workspace…
-          </Button>
-        </div>
-      )}
-
       {identity === null ? (
         <div className="flex flex-col items-center gap-2">
           <Button
@@ -1556,55 +1760,16 @@ export function TrackerWizardModal({
             variant="primary"
             size="sm"
             className="rounded-none"
-            // Nothing to type for a keyless provider, so the only things that
-            // can disable Detect are a probe already in flight and the two
-            // folder-scoped actions it would race — the dialog and the init.
-            disabled={
-              (meta.needsApiKey && apiKey.trim().length === 0) ||
-              validating ||
-              picking ||
-              initializing
-            }
+            disabled={apiKey.trim().length === 0 || validating}
             loading={validating}
-            loadingText={
-              meta.needsApiKey ? `Checking with ${meta.name}…` : 'Looking for a workspace…'
-            }
+            loadingText={`Checking with ${meta.name}…`}
             onClick={() => void handleAuthorize()}
           >
-            {meta.needsApiKey ? 'Authorize' : 'Detect'}
+            Authorize
           </Button>
           {authError !== null && (
             <div className="max-w-[440px] space-y-1.5 text-left" role="alert">
               <p className="text-xs text-status-error">{authError}</p>
-              {/* The two keyless failures need DIFFERENT fixes, and only one of
-                  them warrants the init disclosure — a missing CLI is not
-                  helped by being told what `bd init` commits. */}
-              {!meta.needsApiKey &&
-                classifyKeylessDetectFailure(authError) === 'missing-workspace' && (
-                  <>
-                    {/* Above the disclosure, which reads as the caption for
-                        it: the button is the offer, the lines say what it
-                        does to a repo the user may be sharing. */}
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      className="rounded-none"
-                      data-testid="tracker-init-workspace"
-                      disabled={initializing || validating || picking}
-                      loading={initializing}
-                      loadingText="Initializing…"
-                      onClick={() => void handleInitWorkspace()}
-                    >
-                      Initialize beads here
-                    </Button>
-                    {BEADS_INIT_DISCLOSURE.map((line) => (
-                      <p key={line} className="text-[11px] leading-relaxed text-text-tertiary">
-                        {line}
-                      </p>
-                    ))}
-                  </>
-                )}
             </div>
           )}
         </div>
@@ -1619,25 +1784,11 @@ export function TrackerWizardModal({
             </span>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-text-primary">
-                {meta.needsApiKey
-                  ? `Authorized as ${identity.actorLabel}`
-                  : `Workspace found · syncing as ${identity.actorLabel}`}
+                Authorized as {identity.actorLabel}
               </p>
               <p className="mt-0.5 text-xs text-text-secondary">
                 workspace {identity.workspaceName}
               </p>
-              {/* Which directory the connection will be BOUND to — the same
-                  question the caption above answers about the probe, worth
-                  repeating here because this is the answer the user carries
-                  into the rest of the wizard. */}
-              {!meta.needsApiKey && probedWorkspacePath !== null && (
-                <p
-                  className="mt-0.5 break-all text-[11px] text-text-tertiary"
-                  data-testid="tracker-bound-path"
-                >
-                  {probedWorkspacePath}
-                </p>
-              )}
             </div>
           </div>
           <div className="mt-3 flex justify-end">
@@ -1657,6 +1808,201 @@ export function TrackerWizardModal({
     </div>
   );
 
+  /**
+   * The right-hand controls of ONE workspace row — everything that depends on
+   * what that project's repository answered.
+   */
+  const renderWorkspaceRowControls = (project: Project): React.JSX.Element | null => {
+    const pid = project.id;
+    const row = rowStates[pid];
+    const action = rowActions[pid];
+    const busy = action !== undefined;
+
+    // The catalog already knows this one; it was never probed.
+    if (connectedProjectIds.includes(pid)) {
+      return (
+        <span
+          className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary"
+          data-testid={`tracker-row-connected-${pid}`}
+        >
+          Connected
+        </span>
+      );
+    }
+
+    if (row === undefined || row.status === 'probing') {
+      return <span className="text-[11px] text-text-tertiary">Checking…</span>;
+    }
+
+    // The binary is machine-wide: the one banner above the list says so, and a
+    // per-row control would offer a fix this row cannot apply.
+    if (row.status === 'missing-cli') return null;
+
+    const detect = (
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        className="rounded-none"
+        data-testid={`tracker-row-detect-${pid}`}
+        disabled={busy}
+        onClick={() => void probeRow(pid)}
+      >
+        Detect
+      </Button>
+    );
+
+    if (row.status === 'detected') {
+      return (
+        <>
+          {row.group.key !== null && (
+            <span className="rounded-none bg-surface-secondary px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.12em] text-text-tertiary">
+              {row.group.key}
+            </span>
+          )}
+          {/* The target is FIXED to this row's own project — a workspace bound
+              to one repository has no business feeding another. */}
+          <select
+            aria-label={`Sync the ${meta.name.toLowerCase()} workspace in ${project.name}`}
+            data-testid={`tracker-row-sync-${pid}`}
+            value={mappings[row.group.id] === undefined ? '' : String(mappings[row.group.id])}
+            onChange={(e) => handleMap(row.group.id, e.target.value)}
+            className={cn(trackerSelectClass, 'max-w-[220px]')}
+          >
+            <option value={String(pid)}>Sync into {project.name}</option>
+            <option value="">Don&apos;t sync</option>
+          </select>
+        </>
+      );
+    }
+
+    // 'error' — a lock timeout, an unreadable metadata file, a version below the
+    // floor. The message is on the row already; only re-probing can move it.
+    if (row.status === 'error') return detect;
+
+    // 'missing' — the one failure `bd init` fixes. Initialize leads, Detect is
+    // the re-check after fixing it by hand, and the picker is the exception:
+    // the workspace is real but not at the project's root.
+    return (
+      <>
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          className="rounded-none"
+          data-testid={`tracker-row-init-${pid}`}
+          disabled={busy}
+          loading={action === 'initializing'}
+          loadingText="Initializing…"
+          onClick={() => void handleRowInit(pid)}
+        >
+          Initialize
+        </Button>
+        {detect}
+        <button
+          type="button"
+          className="text-[11px] text-text-tertiary underline hover:text-text-secondary disabled:no-underline"
+          data-testid={`tracker-row-pick-${pid}`}
+          disabled={busy}
+          onClick={() => void handleRowPick(pid)}
+        >
+          {action === 'picking' ? 'Choosing a folder…' : 'Point at a folder…'}
+        </button>
+      </>
+    );
+  };
+
+  /** One project's row: what is being checked on the left, what it found on the right. */
+  const renderWorkspaceRow = (project: Project): React.JSX.Element => {
+    const pid = project.id;
+    const row = rowStates[pid];
+    const dir = rowDirs[pid];
+    const rowError = rowErrors[pid];
+
+    return (
+      <div
+        key={pid}
+        className={cn(CARD, 'flex items-start gap-3 px-3 py-2')}
+        data-testid={`tracker-workspace-row-${pid}`}
+      >
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-bold text-text-primary">{project.name}</p>
+          {/* WHICH FOLDER, said out loud — the commonest failure is a repository
+              the user was not thinking about. Display text only: main resolves
+              the directory it actually spawns in from the id or the token. */}
+          <p className="truncate text-[11px] text-text-tertiary">
+            {dir === undefined ? project.path : dir.path}
+            {dir !== undefined && (
+              <>
+                {' · '}
+                <button
+                  type="button"
+                  className="underline hover:text-text-secondary"
+                  data-testid={`tracker-row-use-repo-${pid}`}
+                  onClick={() => handleRowUseRepo(pid)}
+                >
+                  use the repo folder
+                </button>
+              </>
+            )}
+          </p>
+          {row !== undefined && row.status === 'error' && (
+            <p className="mt-1 text-[11px] text-status-error">{row.error}</p>
+          )}
+          {rowError !== undefined && (
+            <p role="alert" className="mt-1 text-[11px] text-status-error">
+              {rowError}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {renderWorkspaceRowControls(project)}
+        </div>
+      </div>
+    );
+  };
+
+  /**
+   * The workspace-bound Map step: one row per cyboflow project, each answering
+   * for its own repository, in place of a single account's group list.
+   */
+  const renderWorkspaceRows = (): React.JSX.Element => {
+    let missingCliMessage: string | null = null;
+    let anyMissing = false;
+    for (const project of orderedProjects) {
+      const row = rowStates[project.id];
+      if (row === undefined) continue;
+      if (row.status === 'missing-cli' && missingCliMessage === null) missingCliMessage = row.error;
+      if (row.status === 'missing') anyMissing = true;
+    }
+
+    return (
+      <div className="space-y-3">
+        {/* One fact about the MACHINE, not N facts about N repositories. */}
+        {missingCliMessage !== null && (
+          <p
+            role="alert"
+            className={cn(CARD, 'px-3 py-2 text-xs text-status-error')}
+            data-testid="tracker-missing-cli"
+          >
+            {missingCliMessage}
+          </p>
+        )}
+
+        <div className="space-y-1.5">{orderedProjects.map(renderWorkspaceRow)}</div>
+
+        {/* The caption for every Initialize button above: what the offer does to
+            a repository the user may be sharing, said once. */}
+        {anyMissing &&
+          BEADS_INIT_DISCLOSURE.map((line) => (
+            <p key={line} className="text-[11px] leading-relaxed text-text-tertiary">
+              {line}
+            </p>
+          ))}
+      </div>
+    );
+  };
+
   const renderMap = (): React.JSX.Element => (
     <div className="space-y-5">
       <div>
@@ -1665,7 +2011,12 @@ export function TrackerWizardModal({
           Map {meta.name} onto cyboflow projects
         </h3>
         <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-secondary">
-          {meta.workspaceBound ? (
+          {workspaceRowMode ? (
+            <>
+              Each project&rsquo;s repository is checked for a {meta.name.toLowerCase()} workspace.
+              Choose which ones to sync — or initialize one where none exists.
+            </>
+          ) : meta.workspaceBound ? (
             <>
               This workspace is bound to the folder it was detected in. Choose whether to sync it
               into this project.
@@ -1739,6 +2090,10 @@ export function TrackerWizardModal({
         <Eyebrow>Available to map</Eyebrow>
       )}
 
+      {workspaceRowMode && renderWorkspaceRows()}
+
+      {/* Empty in workspace-row mode by construction — `groupTree` is the
+          FETCHED tree, and that mode never fetches one. */}
       {(groupTree?.sections ?? []).map((section) => {
         // Add-mapping mode lists only what is still free: a covered scope has a
         // linked row above instead, so one group cannot be pointed at two
@@ -1820,8 +2175,10 @@ export function TrackerWizardModal({
 
       {/* No tree and no fetch in flight: the probe failed and nothing else can
           re-run it from here. Keyed off the missing tree rather than the step
-          error, which a rail click clears while the step stays empty. */}
-      {groupTree === null && !loading && (
+          error, which a rail click clears while the step stays empty. Never in
+          workspace-row mode: a null `groupTree` is that mode's steady state, and
+          each row carries its own Detect. */}
+      {!workspaceRowMode && groupTree === null && !loading && (
         <div
           className={cn(CARD, 'flex items-center justify-between gap-3 px-3 py-4')}
           data-testid="tracker-groups-retry"

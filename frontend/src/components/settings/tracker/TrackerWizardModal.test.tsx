@@ -29,12 +29,21 @@
  * sibling-aware answers ride on the same data — the push target a kept sibling
  * holds is never claimed (and a staged unlink releases it), and scope overlap is
  * computed against the kept siblings in both directions.
+ *
+ * Plus WORKSPACE-ROW MODE (beads on a fresh connect), where the Map step is a
+ * per-PROJECT surface rather than one account's group list: no Step 0 at all,
+ * one row per cyboflow project probing its OWN repository, and per-row
+ * credentials carried from that probe through Initialize, the folder picker and
+ * `connect`. The assertions doing the real work are the ones about WHOSE
+ * credentials each call carries — a row answering for another row's repository
+ * is the failure this whole shape exists to prevent.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   TrackerConnectionSummary,
+  TrackerCredentialsInput,
   TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
@@ -159,6 +168,37 @@ const GROUPS: TrackerGroupTree = {
     },
   ],
 };
+
+/**
+ * What every beads repository answers with: one section, one group, and the
+ * SAME adapter-side id whatever the repository (`beadsAdapter.listGroups`) —
+ * which is exactly why the wizard has to namespace it per project row.
+ */
+function beadsTree(prefix: string): TrackerGroupTree {
+  return {
+    sections: [
+      {
+        label: 'Workspace',
+        groups: [
+          {
+            id: 'workspace',
+            name: prefix,
+            key: prefix,
+            sourceLabel: prefix,
+            selection: { containerId: 'workspace', narrowId: 'all', narrowKind: 'all' },
+            stateScopeKey: 'workspace',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** The two keyless failures the wizard must tell apart, in `bd`'s own wording. */
+const NO_WORKSPACE = new Error('[beads] no beads database found — run `bd init` in this repo');
+const NO_CLI = new Error(
+  '[beads] `bd` was not found on PATH — install beads and re-detect this connection.',
+);
 
 function makeIssue(overrides: Partial<TrackerIssue> & Pick<TrackerIssue, 'externalId'>): TrackerIssue {
   return {
@@ -546,6 +586,10 @@ describe('TrackerWizardModal — Map step', () => {
       within(select).getByRole('option', { name: "— Don't import" }),
     ).toBeInTheDocument();
     expect(within(select).getAllByRole('option')).toHaveLength(1 + PROJECTS.length);
+    // A keyed provider keeps its Step 0 and its group list — the per-project
+    // workspace rows belong to workspace-bound providers alone.
+    expect(screen.getByTestId('tracker-step-0')).toBeInTheDocument();
+    expect(screen.queryAllByTestId(/^tracker-workspace-row-/)).toHaveLength(0);
   });
 
   it('offers a push-target radio only where two groups share one project', async () => {
@@ -1493,351 +1537,382 @@ describe('TrackerWizardModal — add-mapping mode · submit', () => {
   });
 });
 
+
 // ---------------------------------------------------------------------------
-// Keyless Step 0 (beads) — Detect instead of Authorize
+// WORKSPACE-ROW MODE (beads, fresh connect) — the Map step IS the per-project
+// surface, and there is no Step 0 in front of it
 // ---------------------------------------------------------------------------
 
 /**
- * A provider with `needsApiKey: false` has no key to paste, so Step 0 becomes a
- * DETECT of the local workspace. What these pin down is everything a wrong
- * answer here would cost: a key field that must not render, a probe that must
- * carry the active project (main resolves the repo path from it — a renderer
- * may not send a path), and the two failures needing DIFFERENT copy, only one
- * of which warrants the `bd init` disclosure.
+ * A workspace-bound provider has no account to authorize into: one workspace per
+ * repository, found by probing that repository. So the wizard opens on Map and
+ * that step lists every cyboflow project, each row answering for its own repo.
+ *
+ * What these pin down is the thing a wrong answer costs: a row must probe,
+ * initialize and connect with ITS OWN credentials — its project id, plus the
+ * folder token when it was pointed elsewhere — because a row that borrows
+ * another's would silently bind the wrong repository to the wrong project. The
+ * rest (the folder is display text only, `bd` missing is one fact about the
+ * machine, an already-connected project is never probed) hangs off that.
  */
-describe('TrackerWizardModal — keyless connect', () => {
-  function renderKeyless(projectPath: string | null = '/dev/cyboflow'): void {
+describe('TrackerWizardModal — beads workspace rows', () => {
+  /** What each project's repository answers, by project id. An Error rejects. */
+  let repoAnswers: Record<number, string | Error>;
+  /** What a picked folder answers, by the token main minted for it. */
+  let tokenAnswers: Record<string, string | Error>;
+
+  beforeEach(() => {
+    repoAnswers = { 7: 'cf', 9: 'web' };
+    tokenAnswers = {};
+    // Answered from the CREDENTIALS, since the wizard fires one call per row and
+    // a call-index stub would encode probe order — which is concurrent — as fact.
+    mockGroups.mockImplementation(
+      (input: { credentials?: TrackerCredentialsInput }): Promise<TrackerGroupTree> => {
+        const credentials = input.credentials;
+        // A fresh workspace-bound run has no connection to name, so a probe with
+        // no credentials at all would be the bug, not a fixture case.
+        if (credentials === undefined) return Promise.reject(new Error('probe carried no credentials'));
+        const token = credentials.workspaceDirToken;
+        const answer =
+          token !== undefined ? tokenAnswers[token] : repoAnswers[credentials.projectId ?? -1];
+        if (answer === undefined) return Promise.reject(NO_WORKSPACE);
+        if (answer instanceof Error) return Promise.reject(answer);
+        return Promise.resolve(beadsTree(answer));
+      },
+    );
+    // Nothing pre-existing in either backlog; this suite is about the rows.
+    mockReconcile.mockResolvedValue([]);
+  });
+
+  function renderBeads(connected: number[] = []): void {
     render(
       <TrackerWizardModal
         isOpen
         provider="beads"
         projectId={7}
-        projectPath={projectPath}
+        connectedProjectIds={connected}
         onClose={onClose}
         onConnected={onConnected}
       />,
     );
   }
 
-  it('renders Detect with no key input, and probes with the active project id', async () => {
-    mockValidate.mockResolvedValue({
-      workspaceId: 'inst-1',
-      workspaceName: 'cf',
-      actorLabel: 'J. Kesteva',
-    });
-    renderKeyless();
-
-    expect(screen.queryByLabelText(/api key|token|workspace/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Authorize' })).not.toBeInTheDocument();
-    const detect = screen.getByRole('button', { name: 'Detect' });
-    // Nothing to type, so it must be usable from the first frame — an
-    // "empty key" gate here would make the step impossible to leave.
-    expect(detect).toBeEnabled();
-
-    fireEvent.click(detect);
-    await screen.findByTestId('tracker-authorized-card');
-
-    expect(mockValidate).toHaveBeenCalledWith({
-      credentials: { provider: 'beads', projectId: 7 },
-    });
-  });
-
-  it('offers the init button and disclosure when the repo has no workspace, and neither when `bd` is missing', async () => {
-    mockValidate.mockRejectedValue(
-      new Error('[beads] no beads database found — run `bd init` in this repo'),
-    );
-    renderKeyless();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('no beads database found');
-    expect(within(alert).getByTestId('tracker-init-workspace')).toBeEnabled();
-    // The disclosure is load-bearing, not decoration: it says what the button
-    // above it does to a repo the user may be sharing, and why it is not the
-    // plain `bd init` that commits to it.
-    expect(alert).toHaveTextContent('bd init --stealth');
-    expect(alert).toHaveTextContent('.git/info/exclude');
-    expect(alert).toHaveTextContent('commits 18 files');
-
-    // A MISSING BINARY is a different fix: there is nothing to initialize with,
-    // and telling the user what `bd init` commits does not help them install it.
-    mockValidate.mockRejectedValue(
-      new Error('[beads] `bd` was not found on PATH — install beads and re-detect this connection.'),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
-    await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('was not found on PATH'),
-    );
-    expect(screen.getByRole('alert')).not.toHaveTextContent('bd init --stealth');
-    expect(screen.queryByTestId('tracker-init-workspace')).not.toBeInTheDocument();
-  });
-
-  /** Fail Detect with the missing-workspace error and wait for the init offer. */
-  async function detectMissingWorkspace(): Promise<HTMLElement> {
-    mockValidate.mockRejectedValueOnce(
-      new Error('[beads] no beads database found — run `bd init` in this repo'),
-    );
-    renderKeyless();
-    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
-    return screen.findByTestId('tracker-init-workspace');
+  /** Open the wizard and wait until every row's mount probe has settled. */
+  async function openRows(connected: number[] = []): Promise<void> {
+    renderBeads(connected);
+    await screen.findByTestId('tracker-workspace-row-7');
+    await waitFor(() => expect(screen.queryAllByText('Checking…')).toHaveLength(0));
   }
 
-  it('initializes with the credentials the failed probe used, then re-detects', async () => {
-    const init = await detectMissingWorkspace();
+  it('opens on Map with one row per project, the active one first, and no Connect step', async () => {
+    await openRows();
+
+    // Step 0 is ABSENT, not disabled — there is nothing to authorize against.
+    expect(screen.queryByTestId('tracker-step-0')).not.toBeInTheDocument();
+    expect(mockValidate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('tracker-step-1')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByText('Step 1 of 5')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument();
+
+    const rows = screen.getAllByTestId(/^tracker-workspace-row-/);
+    expect(rows.map((row) => row.getAttribute('data-testid'))).toEqual([
+      'tracker-workspace-row-7',
+      'tracker-workspace-row-9',
+    ]);
+    // Each row names the folder it is about to check — the commonest failure is
+    // a repository the user was not thinking about.
+    expect(within(rows[0]).getByText('/dev/cyboflow')).toBeInTheDocument();
+    expect(within(rows[1]).getByText('/dev/website')).toBeInTheDocument();
+
+    // One probe per row, each carrying that row's own project and no path.
+    expect(mockGroups).toHaveBeenCalledTimes(2);
+    expect(mockGroups).toHaveBeenCalledWith({ credentials: { provider: 'beads', projectId: 7 } });
+    expect(mockGroups).toHaveBeenCalledWith({ credentials: { provider: 'beads', projectId: 9 } });
+  });
+
+  it('seeds Sync for the active project alone, into that row’s own project', async () => {
+    await openRows();
+
+    expect(screen.getByTestId('tracker-row-sync-7')).toHaveValue('7');
+    expect(screen.getByTestId('tracker-row-sync-9')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+
+    // Two options, and the sync target is the ROW's project — never another.
+    const website = screen.getByTestId('tracker-row-sync-9');
+    expect(within(website).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'Sync into Website',
+      "Don't sync",
+    ]);
+    expect(within(website).getByRole('option', { name: 'Sync into Website' })).toHaveValue('9');
+  });
+
+  it('blocks Continue once every row is set to Don’t sync', async () => {
+    await openRows();
+
+    fireEvent.change(screen.getByTestId('tracker-row-sync-7'), { target: { value: '' } });
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  });
+
+  it('initializes a row with that row’s credentials, then re-probes it', async () => {
+    repoAnswers = { 7: 'cf', 9: NO_WORKSPACE };
+    await openRows();
+
+    // No workspace, so no sync choice yet — an offer to create one instead.
+    expect(screen.queryByTestId('tracker-row-sync-9')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tracker-row-init-9')).toBeEnabled();
+    // The disclosure is the caption for that offer: what it does to a repo the
+    // user may be sharing.
+    expect(screen.getByText(/\.git\/info\/exclude/)).toBeInTheDocument();
+    expect(screen.getByText(/commits 18 files/)).toBeInTheDocument();
+
     mockInitWorkspace.mockResolvedValue(undefined);
-    mockValidate.mockResolvedValue({
-      workspaceId: 'inst-1',
-      workspaceName: 'cyboflow',
-      actorLabel: 'J. Kesteva',
-    });
+    repoAnswers[9] = 'web';
+    fireEvent.click(screen.getByTestId('tracker-row-init-9'));
 
-    fireEvent.click(init);
-    await screen.findByTestId('tracker-authorized-card');
-
-    // Same credentials as the probe — main resolves the folder from them, so
-    // the workspace is created exactly where Detect just looked.
+    await screen.findByTestId('tracker-row-sync-9');
     expect(mockInitWorkspace).toHaveBeenCalledWith({
-      credentials: { provider: 'beads', projectId: 7 },
+      credentials: { provider: 'beads', projectId: 9 },
     });
-    // The re-detect is what produces the identity; init reports none.
-    expect(mockValidate).toHaveBeenCalledTimes(2);
+    // Only that row moved, and the re-probe does not seed a non-active row.
+    expect(screen.getByTestId('tracker-row-sync-9')).toHaveValue('');
+    expect(screen.getByTestId('tracker-row-sync-7')).toHaveValue('7');
   });
 
-  it('carries a picked folder into the init, so it lands there and not in the repo', async () => {
-    mockPickWorkspace.mockResolvedValue({ token: 'tok-1', path: '/dev/monorepo/packages/api' });
-    mockValidate.mockRejectedValue(
-      new Error('[beads] no beads database found — run `bd init` in this repo'),
-    );
-    renderKeyless();
+  it('renders the init disclosure once for the whole list, not per row', async () => {
+    repoAnswers = { 7: NO_WORKSPACE, 9: NO_WORKSPACE };
+    await openRows();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Point at a beads workspace…' }));
-    const init = await screen.findByTestId('tracker-init-workspace');
-    mockInitWorkspace.mockResolvedValue(undefined);
-    fireEvent.click(init);
-
-    await waitFor(() =>
-      expect(mockInitWorkspace).toHaveBeenCalledWith({
-        credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
-      }),
-    );
+    // Two rows offering Initialize, one caption underneath them — the text is
+    // about what `bd init` does, which is the same fact for every repository.
+    expect(screen.getByTestId('tracker-row-init-7')).toBeInTheDocument();
+    expect(screen.getByTestId('tracker-row-init-9')).toBeInTheDocument();
+    expect(screen.getAllByText(/commits 18 files/)).toHaveLength(1);
   });
 
-  it('reports a failed init in the error slot and does NOT re-detect', async () => {
-    const init = await detectMissingWorkspace();
+  it('reports a refused init on the row and does not re-probe', async () => {
+    repoAnswers = { 7: 'cf', 9: NO_WORKSPACE };
+    await openRows();
+    mockGroups.mockClear();
     mockInitWorkspace.mockRejectedValue(
       new Error('[beads] Error: This workspace is already initialized'),
     );
 
-    fireEvent.click(init);
+    fireEvent.click(screen.getByTestId('tracker-row-init-9'));
+
+    const row = screen.getByTestId('tracker-workspace-row-9');
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('already initialized'),
+      expect(within(row).getByRole('alert')).toHaveTextContent('already initialized'),
     );
-    // One probe, the original failed one: a refused init has nothing to detect.
-    expect(mockValidate).toHaveBeenCalledTimes(1);
-    expect(screen.queryByTestId('tracker-authorized-card')).not.toBeInTheDocument();
-  });
-});
-
-/**
- * Pointing Detect somewhere else.
- *
- * Two halves, and the second only makes sense because of the first: the step
- * now SAYS which folder it probes (the wrong active project used to surface as
- * a bare "no workspace" about a repo the user was not thinking about), and it
- * can be pointed at another one — a monorepo subdirectory, a workspace outside
- * the repo. What the renderer sends for that folder is a TOKEN main minted, so
- * the "renderer never names a path a CLI is spawned in" rule survives the
- * override intact; that is the assertion doing the real work below.
- */
-describe('TrackerWizardModal — keyless workspace picker', () => {
-  const PICKED = { token: 'tok-1', path: '/dev/monorepo/packages/api' };
-
-  function renderKeyless(projectPath: string | null = '/dev/cyboflow'): void {
-    render(
-      <TrackerWizardModal
-        isOpen
-        provider="beads"
-        projectId={7}
-        projectPath={projectPath}
-        onClose={onClose}
-        onConnected={onConnected}
-      />,
-    );
-  }
-
-  const pickerButton = (): HTMLElement =>
-    screen.getByRole('button', { name: 'Point at a beads workspace…' });
-
-  /**
-   * Click the picker and wait until the whole exchange has settled. The button
-   * wears its loading label while the dialog is open, so it only answers to
-   * this name again once the pick — and the re-detect behind it — is done.
-   */
-  async function pickFolder(): Promise<void> {
-    fireEvent.click(pickerButton());
-    await waitFor(() => expect(pickerButton()).toBeEnabled());
-  }
-
-  it('offers the picker and names the folder Detect will probe', async () => {
-    renderKeyless();
-
-    // waitFor, not a bare assertion, so the mount's project-list read settles
-    // inside the test rather than after it.
-    await waitFor(() => expect(pickerButton()).toBeEnabled());
-    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow');
+    // A refused init has nothing new to find, and the offer stays put.
+    expect(mockGroups).not.toHaveBeenCalled();
+    expect(screen.getByTestId('tracker-row-init-9')).toBeInTheDocument();
   });
 
-  it('offers neither to a KEYED provider — there is no local workspace to point at', async () => {
-    renderWizard();
+  it('carries a per-row picked folder into that row’s probe and its init', async () => {
+    repoAnswers = { 7: 'cf', 9: NO_WORKSPACE };
+    await openRows();
 
+    mockPickWorkspace.mockResolvedValue({ token: 'tok-9', path: '/dev/monorepo/packages/api' });
+    tokenAnswers['tok-9'] = NO_WORKSPACE;
+    fireEvent.click(screen.getByTestId('tracker-row-pick-9'));
+
+    // A TOKEN and the row's project id — never a path, which the renderer only
+    // ever holds as the display text below.
     await waitFor(() =>
-      expect(
-        screen.queryByRole('button', { name: 'Point at a beads workspace…' }),
-      ).not.toBeInTheDocument(),
-    );
-    expect(screen.queryByTestId('tracker-probed-path')).not.toBeInTheDocument();
-  });
-
-  it('sends the picked folder as an opaque token and re-detects there', async () => {
-    mockPickWorkspace.mockResolvedValue(PICKED);
-    renderKeyless();
-
-    await pickFolder();
-    await screen.findByTestId('tracker-authorized-card');
-
-    expect(mockPickWorkspace).toHaveBeenCalledWith({ provider: 'beads' });
-    // A TOKEN and the project id — never the path, which the renderer only ever
-    // holds as display text.
-    expect(mockValidate).toHaveBeenCalledWith({
-      credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
-    });
-    // And the step says where it looked, in both places it can be read.
-    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent(PICKED.path);
-    expect(screen.getByTestId('tracker-bound-path')).toHaveTextContent(PICKED.path);
-  });
-
-  it('changes nothing at all when the folder dialog is cancelled', async () => {
-    mockPickWorkspace.mockResolvedValue(null);
-    renderKeyless();
-
-    await pickFolder();
-
-    expect(mockPickWorkspace).toHaveBeenCalled();
-    // Declining a dialog is not an instruction to re-probe anything.
-    expect(mockValidate).not.toHaveBeenCalled();
-    expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow');
-  });
-
-  it('drops the token again when the user goes back to the project folder', async () => {
-    mockPickWorkspace.mockResolvedValue(PICKED);
-    renderKeyless();
-
-    await pickFolder();
-    await screen.findByTestId('tracker-authorized-card');
-    fireEvent.click(screen.getByRole('button', { name: 'Use the project folder' }));
-
-    await waitFor(() =>
-      expect(screen.getByTestId('tracker-probed-path')).toHaveTextContent('/dev/cyboflow'),
-    );
-    // The reset is only offered while a pick is active.
-    expect(
-      screen.queryByRole('button', { name: 'Use the project folder' }),
-    ).not.toBeInTheDocument();
-
-    // And the next Detect goes back to being anchored by the project alone.
-    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
-    await waitFor(() =>
-      expect(mockValidate).toHaveBeenLastCalledWith({
-        credentials: { provider: 'beads', projectId: 7 },
+      expect(mockGroups).toHaveBeenCalledWith({
+        credentials: { provider: 'beads', projectId: 9, workspaceDirToken: 'tok-9' },
       }),
     );
+    const row = screen.getByTestId('tracker-workspace-row-9');
+    expect(within(row).getByText(/\/dev\/monorepo\/packages\/api/)).toBeInTheDocument();
+
+    mockInitWorkspace.mockResolvedValue(undefined);
+    tokenAnswers['tok-9'] = 'api';
+    fireEvent.click(await screen.findByTestId('tracker-row-init-9'));
+    await screen.findByTestId('tracker-row-sync-9');
+
+    expect(mockInitWorkspace).toHaveBeenCalledWith({
+      credentials: { provider: 'beads', projectId: 9, workspaceDirToken: 'tok-9' },
+    });
+    // The pick is that ROW's, so no other row's call ever carries the token.
+    for (const call of mockGroups.mock.calls) {
+      const credentials = call[0].credentials;
+      if (credentials?.workspaceDirToken !== undefined) expect(credentials.projectId).toBe(9);
+    }
   });
 
-  it('drops the caption when the caller knows no project path', async () => {
-    // Nothing to name is not the same as naming nothing — an empty "Looking in"
-    // would read as a bug. The picker stays, since it is the way out.
-    renderKeyless(null);
+  it('changes nothing when a row’s folder dialog is cancelled', async () => {
+    repoAnswers = { 7: 'cf', 9: NO_WORKSPACE };
+    await openRows();
+    mockGroups.mockClear();
+    mockPickWorkspace.mockResolvedValue(null);
 
-    await waitFor(() => expect(pickerButton()).toBeEnabled());
-    expect(screen.queryByTestId('tracker-probed-path')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('tracker-row-pick-9'));
+
+    await waitFor(() => expect(mockPickWorkspace).toHaveBeenCalledWith({ provider: 'beads' }));
+    // Declining a dialog is not an instruction to re-probe anything.
+    expect(mockGroups).not.toHaveBeenCalled();
+    expect(
+      within(screen.getByTestId('tracker-workspace-row-9')).getByText('/dev/website'),
+    ).toBeInTheDocument();
+  });
+
+  it('goes back to the repo folder when a row’s pick is reset', async () => {
+    repoAnswers = { 7: 'cf', 9: NO_WORKSPACE };
+    tokenAnswers['tok-9'] = NO_WORKSPACE;
+    mockPickWorkspace.mockResolvedValue({ token: 'tok-9', path: '/dev/monorepo/packages/api' });
+    await openRows();
+
+    fireEvent.click(screen.getByTestId('tracker-row-pick-9'));
+    const reset = await screen.findByTestId('tracker-row-use-repo-9');
+    mockGroups.mockClear();
+    fireEvent.click(reset);
+
+    await waitFor(() =>
+      expect(mockGroups).toHaveBeenCalledWith({ credentials: { provider: 'beads', projectId: 9 } }),
+    );
+    expect(screen.queryByTestId('tracker-row-use-repo-9')).not.toBeInTheDocument();
+  });
+
+  it('renders an already-connected project inert and never probes it', async () => {
+    await openRows([9]);
+
+    expect(screen.getByTestId('tracker-row-connected-9')).toHaveTextContent('Connected');
+    expect(screen.queryByTestId('tracker-row-sync-9')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tracker-row-detect-9')).not.toBeInTheDocument();
+    // The catalog already holds that answer — probing it would spend a spawn.
+    expect(mockGroups).toHaveBeenCalledTimes(1);
+    expect(mockGroups).toHaveBeenCalledWith({ credentials: { provider: 'beads', projectId: 7 } });
+  });
+
+  it('states a missing `bd` once above the list, and offers those rows nothing', async () => {
+    repoAnswers = { 7: NO_CLI, 9: NO_CLI };
+    await openRows();
+
+    // Machine-wide, so one banner rather than a copy per repository.
+    expect(screen.getAllByTestId('tracker-missing-cli')).toHaveLength(1);
+    expect(screen.getByTestId('tracker-missing-cli')).toHaveTextContent('was not found on PATH');
+    for (const pid of [7, 9]) {
+      expect(screen.queryByTestId(`tracker-row-init-${pid}`)).not.toBeInTheDocument();
+      expect(screen.queryByTestId(`tracker-row-detect-${pid}`)).not.toBeInTheDocument();
+    }
+    // Nothing to initialize with, so the init disclosure is not shown either.
+    expect(screen.queryByText(/bd init --stealth/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
+  });
+
+  it('shows an unclassified failure verbatim with a Detect and no Initialize', async () => {
+    repoAnswers = { 7: new Error('[beads] bd: database is locked'), 9: 'web' };
+    await openRows();
+
+    const row = screen.getByTestId('tracker-workspace-row-7');
+    expect(within(row).getByText('[beads] bd: database is locked')).toBeInTheDocument();
+    // There is no workspace to create here — only re-probing can move it.
+    expect(screen.queryByTestId('tracker-row-init-7')).not.toBeInTheDocument();
+
+    repoAnswers[7] = 'cf';
+    fireEvent.click(screen.getByTestId('tracker-row-detect-7'));
+
+    await screen.findByTestId('tracker-row-sync-7');
+    // The hand re-probe seeds the active row exactly as the mount sweep would.
+    expect(screen.getByTestId('tracker-row-sync-7')).toHaveValue('7');
+  });
+
+  it('connects every synced row with its OWN credentials and its own project', async () => {
+    await openRows();
+    fireEvent.change(screen.getByTestId('tracker-row-sync-9'), { target: { value: '9' } });
+    await advance(4); // → Tasks → States → Reconcile → Review
+
+    // Two repositories, one state table: bd's vocabulary is the tool's, not the
+    // workspace's, so both rows report the same scope key.
+    expect(mockStates).toHaveBeenCalledTimes(1);
+    expect(mockIssues).toHaveBeenCalledWith({
+      credentials: { provider: 'beads', projectId: 9 },
+      selection: { containerId: 'workspace', narrowId: 'all', narrowKind: 'all' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Connect & sync 0 issues/ }));
+    await waitFor(() => expect(mockConnect).toHaveBeenCalledTimes(2));
+
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        projectId: 7,
+        credentials: { provider: 'beads', projectId: 7 },
+        sourceLabel: 'cf',
+      }),
+    );
+    expect(mockConnect).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        projectId: 9,
+        credentials: { provider: 'beads', projectId: 9 },
+        sourceLabel: 'web',
+      }),
+    );
+    // A fresh run reuses no authorization, so nothing names a connection.
+    for (const call of mockConnect.mock.calls) {
+      expect(call[0]).not.toHaveProperty('sourceConnectionId');
+    }
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
 
-// ---------------------------------------------------------------------------
-// beads Map step — workspace-bound sync/don't-sync (not a project picker)
-// ---------------------------------------------------------------------------
-
 /**
- * beads has exactly one workspace, anchored to the folder Detect probed — the
- * Map step's per-group select degenerates to sync/don't-sync into THIS
- * wizard's own project rather than the full cyboflow project dropdown every
- * other provider offers (see `workspaceBound` in trackerVocabulary.ts).
+ * ADD-MAPPING MODE for beads is a DIFFERENT question — extend one existing
+ * connection's authorization — so it keeps the single bound-workspace row it
+ * always had rather than the per-project surface above.
  */
-describe('TrackerWizardModal — beads workspace-bound Map step', () => {
-  const BEADS_GROUPS: TrackerGroupTree = {
-    sections: [
-      {
-        label: 'Workspace',
-        groups: [
-          {
-            id: 'ws-1',
-            name: 'Local workspace',
-            key: null,
-            sourceLabel: 'Local workspace (bd)',
-            selection: { containerId: 'bd', narrowId: 'all', narrowKind: 'all' },
-            stateScopeKey: 'bd',
-          },
-        ],
-      },
-    ],
+describe('TrackerWizardModal — beads add-mapping mode', () => {
+  const BEADS_CONNECTION: TrackerConnectionSummary = {
+    ...SOURCE_CONNECTION,
+    provider: 'beads',
+    workspaceName: 'cf',
+    sourceLabel: 'cf',
+    sourceScope: { containerId: 'workspace', narrowId: 'all', narrowKind: 'all' },
   };
 
-  function renderBeads(): void {
+  function renderBeadsAddMapping(): void {
     render(
       <TrackerWizardModal
         isOpen
         provider="beads"
         projectId={7}
-        projectPath="/dev/cyboflow"
+        sourceConnection={BEADS_CONNECTION}
         onClose={onClose}
         onConnected={onConnected}
       />,
     );
   }
 
-  /** Detect, then land on Map with the single-group beads tree installed. */
-  async function detectToMap(): Promise<void> {
-    mockGroups.mockResolvedValue(BEADS_GROUPS);
-    renderBeads();
-    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
-    await screen.findByTestId('tracker-authorized-card');
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByText('Map Beads onto cyboflow projects');
-    await screen.findByLabelText('Sync Local workspace into this project');
-  }
+  it('probes the connection, not the projects, and lists its one linked row', async () => {
+    mockGroups.mockResolvedValue(beadsTree('cf'));
+    mockMappings.mockResolvedValue([BEADS_CONNECTION]);
+    renderBeadsAddMapping();
 
-  it('renders exactly two options — Sync into <project> and Don’t sync', async () => {
-    await detectToMap();
-
-    const select = screen.getByLabelText('Sync Local workspace into this project');
-    const options = within(select).getAllByRole('option');
-    expect(options.map((o) => o.textContent)).toEqual(['Sync into Cyboflow', "Don't sync"]);
+    const linked = await screen.findByTestId('tracker-linked-conn-src');
+    expect(within(linked).getByText('cf → Cyboflow')).toBeInTheDocument();
+    // Not the per-project row surface: this mode extends ONE workspace's
+    // authorization, and the connection already says which workspace that is.
+    expect(screen.queryByTestId('tracker-workspace-row-7')).not.toBeInTheDocument();
+    expect(mockGroups).toHaveBeenCalledTimes(1);
+    expect(mockGroups).toHaveBeenCalledWith({ connectionId: 'conn-src' });
   });
 
-  it('defaults to Sync into the wizard’s own project, so Continue is enabled untouched', async () => {
-    await detectToMap();
+  it('still seeds Sync on the bound row when no sibling covers it yet', async () => {
+    mockGroups.mockResolvedValue(beadsTree('cf'));
+    // A legacy row with no recorded scope covers nothing, so the group stays
+    // mappable — and a workspace-bound row is sync/don't-sync, pre-answered.
+    mockMappings.mockResolvedValue([{ ...BEADS_CONNECTION, sourceScope: null }]);
+    renderBeadsAddMapping();
 
-    const select = screen.getByLabelText('Sync Local workspace into this project');
+    const select = await screen.findByLabelText('Sync cf into this project');
+    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'Sync into Cyboflow',
+      "Don't sync",
+    ]);
     expect(select).toHaveValue('7');
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
-  });
-
-  it('disables Continue once the user picks Don’t sync', async () => {
-    await detectToMap();
-
-    fireEvent.change(screen.getByLabelText('Sync Local workspace into this project'), {
-      target: { value: '' },
-    });
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   });
 });
