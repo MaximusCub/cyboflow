@@ -82,6 +82,8 @@ beforeEach(() => {
     wizardOpts: null,
     humanReviewOpen: false,
     backlogOpen: false,
+    settingsOpen: false,
+    settingsTab: 'general',
   });
   useCyboflowStore.setState({ activeRunId: null, selectedSessionId: null });
   useActiveRunsStore.setState({ runsByProject: {} });
@@ -135,6 +137,20 @@ describe('useGlobalKeyboardShortcuts — dispatch', () => {
     expect(useNavigationStore.getState().backlogOpen).toBe(true);
     pressCtrl('l');
     expect(useNavigationStore.getState().backlogOpen).toBe(false);
+  });
+
+  it('mod+, opens Settings on the general tab', () => {
+    renderHook(() => useGlobalKeyboardShortcuts());
+    pressCtrl(',');
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
+    expect(useNavigationStore.getState().settingsTab).toBe('general');
+  });
+
+  it('mod+/ opens Settings on the shortcuts tab', () => {
+    renderHook(() => useGlobalKeyboardShortcuts());
+    pressCtrl('/');
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
+    expect(useNavigationStore.getState().settingsTab).toBe('shortcuts');
   });
 
   it('calls preventDefault on a match (⌘[ / ⌘] are browser history nav)', () => {

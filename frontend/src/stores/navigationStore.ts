@@ -9,6 +9,7 @@ function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflo
 /** Tabs the Settings dialog can open on (mirrors Settings.tsx's own union). */
 export type SettingsTab =
   | 'general'
+  | 'shortcuts'
   | 'ai'
   | 'assistant'
   | 'integrations'

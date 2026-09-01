@@ -151,6 +151,12 @@ function dispatchShortcut(action: ShortcutAction): void {
     case 'toggleBacklog':
       useNavigationStore.getState().toggleBacklog();
       return;
+    case 'openSettings':
+      useNavigationStore.getState().openSettings('general');
+      return;
+    case 'openShortcuts':
+      useNavigationStore.getState().openSettings('shortcuts');
+      return;
   }
 }
 

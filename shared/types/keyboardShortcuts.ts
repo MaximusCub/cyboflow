@@ -1,7 +1,7 @@
 /**
  * Shared types for the global keyboard-shortcuts feature.
  *
- * Six actions are bound to a fixed default keybinding, user-remappable via
+ * Eight actions are bound to a fixed default keybinding, user-remappable via
  * Settings and stored SPARSE (only non-default entries) as
  * `AppConfig.keyboardShortcuts` — mirrors the `sprintMaxTasks` override
  * pattern in `shared/types/sprintBatch.ts`: an install that never touches the
@@ -54,14 +54,16 @@
  *     it would collapse 'mod+r' and 'mod+shift+r' into one binding.
  */
 
-/** The six shortcut-bindable actions. */
+/** The shortcut-bindable actions. */
 export type ShortcutAction =
   | 'newSession'
   | 'toggleLeftRail'
   | 'toggleRightRail'
   | 'toggleChat'
   | 'toggleReviewQueue'
-  | 'toggleBacklog';
+  | 'toggleBacklog'
+  | 'openSettings'
+  | 'openShortcuts';
 
 /**
  * Every {@link ShortcutAction}, for callers that need to iterate the full set
@@ -75,6 +77,8 @@ export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = [
   'toggleChat',
   'toggleReviewQueue',
   'toggleBacklog',
+  'openSettings',
+  'openShortcuts',
 ] as const;
 
 /** Runtime guard for an unknown key — true only for a real {@link ShortcutAction}. */
@@ -90,6 +94,12 @@ export const KEYBOARD_SHORTCUT_DEFAULTS: Readonly<Record<ShortcutAction, string>
   toggleChat: "mod+'",
   toggleReviewQueue: 'mod+r',
   toggleBacklog: 'mod+l',
+  // The macOS-standard Preferences chord; free here because the custom
+  // application menu's 'appMenu' role carries no Preferences item.
+  openSettings: 'mod+,',
+  // The Slack/Linear/GitHub-conventional "show keyboard shortcuts" chord —
+  // opens Settings directly on the Shortcuts tab.
+  openShortcuts: 'mod+/',
 };
 
 /**

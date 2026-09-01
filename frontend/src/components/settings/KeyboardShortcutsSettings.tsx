@@ -20,6 +20,8 @@ const ACTION_LABELS: Readonly<Record<ShortcutAction, string>> = {
   toggleChat: 'Toggle chat',
   toggleReviewQueue: 'Human review queue',
   toggleBacklog: 'Task backlog',
+  openSettings: 'Open settings',
+  openShortcuts: 'Open this shortcuts page',
 };
 
 /** `event.key` values a bare modifier press reports — never a real binding on its own. */

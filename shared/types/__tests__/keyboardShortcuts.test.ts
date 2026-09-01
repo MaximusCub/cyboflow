@@ -43,7 +43,7 @@ function baseEvent(overrides: Partial<ShortcutMatchEvent> = {}): ShortcutMatchEv
 }
 
 describe('KEYBOARD_SHORTCUT_DEFAULTS / SHORTCUT_ACTIONS', () => {
-  it('declares exactly the six spec\'d actions with their spec\'d default bindings', () => {
+  it('declares exactly the eight spec\'d actions with their spec\'d default bindings', () => {
     expect(KEYBOARD_SHORTCUT_DEFAULTS).toEqual({
       newSession: 'mod+n',
       toggleLeftRail: 'mod+[',
@@ -51,8 +51,10 @@ describe('KEYBOARD_SHORTCUT_DEFAULTS / SHORTCUT_ACTIONS', () => {
       toggleChat: "mod+'",
       toggleReviewQueue: 'mod+r',
       toggleBacklog: 'mod+l',
+      openSettings: 'mod+,',
+      openShortcuts: 'mod+/',
     });
-    expect(SHORTCUT_ACTIONS).toHaveLength(6);
+    expect(SHORTCUT_ACTIONS).toHaveLength(8);
     expect(new Set(SHORTCUT_ACTIONS)).toEqual(new Set(Object.keys(KEYBOARD_SHORTCUT_DEFAULTS)));
   });
 
@@ -336,6 +338,8 @@ describe('resolveShortcut / resolveAllShortcuts', () => {
       toggleChat: "mod+'",
       toggleReviewQueue: 'mod+r',
       toggleBacklog: 'mod+l', // malformed override degrades to the default
+      openSettings: 'mod+,',
+      openShortcuts: 'mod+/',
     });
   });
 
