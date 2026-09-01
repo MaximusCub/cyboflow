@@ -110,6 +110,7 @@
     "@trpc/client": "^11.17.0",
     "@trpc/server": "^11.17.0",
     "better-sqlite3": "^11.7.0",
+    "builder-util-runtime": "9.7.0",
     "electron-updater": "^6.3.9",
     "glob": "^11.1.0",
     "p-queue": "^7.4.1",
