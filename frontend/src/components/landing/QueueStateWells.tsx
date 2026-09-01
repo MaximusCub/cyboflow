@@ -28,7 +28,7 @@ export function LoadErrorPanel({ onRetry }: { onRetry: () => void }): React.JSX.
   return (
     <div
       data-testid="rq-state-well-error"
-      className="flex flex-col items-center gap-1.5 border border-border-primary bg-surface-primary px-[18px] py-[26px] text-center shadow-[inset_3px_0_0_var(--color-status-error)]"
+      className="flex flex-col items-center gap-1.5 border border-border-primary bg-surface-raised px-[18px] py-[26px] text-center shadow-[inset_3px_0_0_var(--color-status-error)]"
     >
       <AlertTriangle className="h-[18px] w-[18px] text-status-error" strokeWidth={1.8} />
       <div className="text-[14px] font-bold text-status-error">Couldn&rsquo;t load the review queue</div>
@@ -177,7 +177,7 @@ export function AllIdleStrip({ sessionCount }: { sessionCount: number }): React.
   return (
     <div
       data-testid="rq-state-well-all-idle"
-      className="flex items-center gap-2.5 border border-border-primary bg-surface-primary px-3.5 py-[11px] shadow-[inset_3px_0_0_var(--color-status-success)]"
+      className="flex items-center gap-2.5 border border-border-primary bg-surface-raised px-3.5 py-[11px] shadow-[inset_3px_0_0_var(--color-status-success)]"
     >
       <CheckCircle2 className="h-[15px] w-[15px] shrink-0 text-status-success" strokeWidth={2} />
       <span className="shrink-0 text-[12px] font-bold text-status-success">Nothing is blocked</span>

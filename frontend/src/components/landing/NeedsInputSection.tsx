@@ -27,7 +27,7 @@ function AskCard({ children }: { children: React.ReactNode }): React.JSX.Element
   return (
     <div
       data-testid="rq-needs-input-row"
-      className="flex flex-col gap-[7px] border border-border-primary bg-surface-primary px-3.5 py-[11px] shadow-[inset_3px_0_0_var(--color-status-error)]"
+      className="flex flex-col gap-[7px] border border-border-primary bg-surface-raised px-3.5 py-[11px] shadow-[inset_3px_0_0_var(--color-status-error)]"
     >
       {children}
     </div>

@@ -108,7 +108,7 @@ function PickRow({
     <label
       data-testid={testId}
       title={disabledReason ?? undefined}
-      className={`flex items-center gap-[7px] border bg-surface-primary px-[11px] py-[7px] ${
+      className={`flex items-center gap-[7px] border bg-surface-raised px-[11px] py-[7px] ${
         checked ? 'border-interactive' : 'border-border-primary'
       } ${disabledReason === null ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
     >
@@ -355,7 +355,7 @@ export function BacklogSection({
         count={counts.items}
       />
 
-      <div className="flex flex-wrap items-center gap-x-[18px] gap-y-2.5 border border-border-primary bg-surface-primary px-3.5 py-2.5">
+      <div className="flex flex-wrap items-center gap-x-[18px] gap-y-2.5 border border-border-primary bg-surface-raised px-3.5 py-2.5">
         {FUNNEL_POSITIONS.map((position) => (
           <div
             key={position}

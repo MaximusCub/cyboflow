@@ -116,7 +116,7 @@ function CollapsedRow({
           onExpand();
         }
       }}
-      className="flex w-full cursor-pointer items-center gap-2.5 border border-border-primary bg-surface-primary px-3.5 py-2 text-left transition-colors hover:border-border-hover"
+      className="flex w-full cursor-pointer items-center gap-2.5 border border-border-primary bg-surface-raised px-3.5 py-2 text-left transition-colors hover:border-border-hover"
     >
       <span aria-hidden="true" className={`h-[7px] w-[7px] shrink-0 rounded-full ${DOT_CLASS[facts.statusTone]}`} />
       <span className="shrink-0 text-[12px] font-bold text-text-primary">{facts.name}</span>
@@ -168,7 +168,7 @@ function ExpandedRow({
   return (
     <div
       data-testid="rq-ready-expanded"
-      className="flex flex-col gap-2.5 border border-interactive bg-surface-primary px-3.5 py-[11px]"
+      className="flex flex-col gap-2.5 border border-interactive bg-surface-raised px-3.5 py-[11px]"
     >
       <div className="flex items-center gap-2.5">
         <span aria-hidden="true" className={`h-[7px] w-[7px] shrink-0 rounded-full ${DOT_CLASS[facts.statusTone]}`} />

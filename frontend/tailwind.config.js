@@ -74,6 +74,7 @@ export default {
         // Surface colors
         'surface': {
           'primary': 'var(--color-surface-primary)',
+          'raised': 'var(--color-surface-raised)',
           'secondary': 'var(--color-surface-secondary)',
           'tertiary': 'var(--color-surface-tertiary)',
           'sunken': 'var(--color-surface-sunken)',

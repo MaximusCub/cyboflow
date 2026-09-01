@@ -35,7 +35,7 @@ function HumanTaskRow({
   };
 
   return (
-    <div className="flex flex-col gap-1.5 border border-border-primary bg-surface-primary px-3.5 py-2.5 shadow-[inset_3px_0_0_var(--color-status-info)]">
+    <div className="flex flex-col gap-1.5 border border-border-primary bg-surface-raised px-3.5 py-2.5 shadow-[inset_3px_0_0_var(--color-status-info)]">
       <div className="flex items-center gap-2">
         <span className="eyebrow shrink-0 text-status-info">Action</span>
         <span className="min-w-0 truncate text-[12.5px] font-bold text-text-primary" title={item.title}>

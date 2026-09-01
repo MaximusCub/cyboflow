@@ -101,7 +101,7 @@ function ActionCard({
   return (
     <div
       data-testid={`rq-action-card-${action.kind}`}
-      className={`flex flex-col gap-[7px] border ${border} bg-surface-primary px-[13px] py-[11px]`}
+      className={`flex flex-col gap-[7px] border ${border} bg-surface-raised px-[13px] py-[11px]`}
     >
       <div className="flex items-center gap-2">
         <span

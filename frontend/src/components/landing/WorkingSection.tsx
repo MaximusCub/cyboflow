@@ -51,7 +51,7 @@ function Row({ entry, onOpen }: { entry: WorkingRow; onOpen: () => void }): Reac
           onOpen();
         }
       }}
-      className="flex w-full cursor-pointer items-center gap-2.5 border border-border-primary bg-surface-primary px-3.5 py-2 text-left transition-colors hover:border-border-hover"
+      className="flex w-full cursor-pointer items-center gap-2.5 border border-border-primary bg-surface-raised px-3.5 py-2 text-left transition-colors hover:border-border-hover"
     >
       <span
         aria-hidden="true"
