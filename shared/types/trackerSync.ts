@@ -13,16 +13,72 @@
  */
 import type { EntityCategory, Priority } from './tasks';
 
-export type TrackerProvider = 'linear' | 'plane' | 'dart';
+export type TrackerProvider = 'linear' | 'plane' | 'dart' | 'beads';
+
+/**
+ * Does this provider need a stored credential at all? False only for beads
+ * (docs/proposals/tracker-beads-provider.md "1. Keyless connect"): its
+ * transport is a local `bd` CLI probe of the project's own workspace, not an
+ * API key, and its `secret_ciphertext` stays NULL for the connection's whole
+ * life.
+ *
+ * THE single definition, and it lives in shared/ rather than beside the other
+ * provider tables in main/src/services/trackerSync/providerCapabilities.ts for
+ * one reason: the tRPC router validates the credential shape and may not
+ * import main/src/services/* (the standalone-typecheck invariant). A second
+ * copy there would be a boolean whose two halves can disagree about whether a
+ * keyless connect is legal — which is the guard, not a cosmetic fact.
+ */
+export const PROVIDER_NEEDS_SECRET: Record<TrackerProvider, boolean> = {
+  linear: true,
+  plane: true,
+  dart: true,
+  beads: false,
+};
+
+/** Convenience wrapper over {@link PROVIDER_NEEDS_SECRET}. */
+export function providerNeedsSecret(provider: TrackerProvider): boolean {
+  return PROVIDER_NEEDS_SECRET[provider];
+}
 
 /** Renderer→main, connect-time only. */
 export interface TrackerCredentialsInput {
   provider: TrackerProvider;
-  apiKey: string;
+  /**
+   * Absent ONLY for a provider {@link providerNeedsSecret} answers false for
+   * (beads). Every keyed provider still requires it, enforced at the router's
+   * zod schema and again in the service — an absent key must never reach an
+   * adapter as an empty string that the remote answers with a 401 the user
+   * cannot act on.
+   */
+  apiKey?: string;
   /** Plane self-hosted instance origin; omitted = the provider's cloud default. */
   baseUrl?: string;
   /** Plane only: the workspace slug all API paths are scoped under. */
   workspaceSlug?: string;
+  /**
+   * beads only: the cyboflow project whose repo path anchors the `bd`
+   * workspace to probe. The renderer sends the ID, never a path — main
+   * resolves it (TrackerSyncServiceDeps.resolveProjectPath), so no filesystem
+   * path a renderer composed can steer where the CLI is spawned.
+   */
+  projectId?: number;
+  /**
+   * beads only, and OPTIONAL: an override for where the workspace is, when it
+   * is not at the project's repo path (a monorepo subdirectory, a workspace
+   * kept outside the repo entirely).
+   *
+   * A TOKEN, never a path, for exactly the reason `projectId` is an id: main
+   * ran the native folder dialog itself and minted this token against the
+   * directory the USER chose, holding the mapping in its own memory. The
+   * renderer receives the token, echoes it back, and at no point names a
+   * filesystem path that main would spawn a CLI in — so the override widens
+   * WHICH directory can be picked without widening WHO gets to pick it.
+   *
+   * Takes precedence over `projectId` when both are present (the wizard always
+   * sends the project id; the token says "not that one").
+   */
+  workspaceDirToken?: string;
 }
 
 /**
@@ -45,6 +101,74 @@ export interface TrackerWorkspaceIdentity {
   workspaceName: string;
   /** Display attribution for the authorizing user, e.g. "J. Kesteva". */
   actorLabel: string;
+}
+
+/**
+ * WHICH recovery a paused KEYLESS connection needs
+ * (docs/proposals/tracker-beads-provider.md, "Replacement recovery is an
+ * explicit state machine"). Derived by COMPARING a live expectation-free probe
+ * against the row's two identity columns — never by reading an error message,
+ * because the same pause reaches the user through several wordings and only the
+ * ids can say which of these three shapes it actually is.
+ *
+ *   'healthy'  — both halves still match. The pause was transient (`bd` lock
+ *                contention, a spawn that timed out); a plain resume is enough.
+ *   'redetect' — the probe itself failed: no workspace resolves at the stored
+ *                path any more (the repo moved, `.beads` is gone, `bd` is not
+ *                installed). Re-detect re-anchors it.
+ *   'renamed'  — same database instance, DIFFERENT issue prefix: `bd
+ *                rename-prefix` rewrote every issue id suffix-preserved, so the
+ *                links can be remapped deterministically.
+ *   'replaced' — a DIFFERENT database instance at the same path (`rm -rf .beads
+ *                && bd init`). Every linked issue belongs to a database that no
+ *                longer exists; only "adopt the new workspace" can recover, and
+ *                it is destructive enough to need an explicit confirmation.
+ */
+export type TrackerRecoveryClass = 'healthy' | 'redetect' | 'renamed' | 'replaced';
+
+/** {@link TrackerRecoveryClass} plus the ids the UI needs to explain the verdict. */
+export interface TrackerRecoveryProbe {
+  connectionId: string;
+  recovery: TrackerRecoveryClass;
+  /** The row's `workspace_id` / `workspace_name` — what the connection is bound to. */
+  boundWorkspaceId: string | null;
+  boundWorkspaceName: string | null;
+  /** What the live probe reported; both null when the probe failed ('redetect'). */
+  currentWorkspaceId: string | null;
+  currentWorkspaceName: string | null;
+  /** The probe's own failure message, verbatim; null unless `recovery` is 'redetect'. */
+  probeError: string | null;
+}
+
+/** {@link TrackerRecoveryClass} `'renamed'`'s repair — what the remap rewrote. */
+export interface TrackerRemapResult {
+  /** Links rewritten from `<old>-<suffix>` to `<new>-<suffix>`. */
+  remappedLinks: number;
+  /** Unresolved outbox rows whose external id (or mirrored parent) was rewritten. */
+  remappedOutboxRows: number;
+  /** The new prefix, now the connection's `workspace_name`. */
+  workspaceName: string;
+  /**
+   * External ids that did NOT carry the old prefix, left exactly as they are and
+   * surfaced as a review finding. Should always be empty — a rename rewrites the
+   * whole workspace — so a non-empty list means something this remap cannot
+   * explain, and guessing at it would repoint a link at an unrelated issue.
+   */
+  unmatchedExternalIds: string[];
+}
+
+/** {@link TrackerRecoveryClass} `'replaced'`'s repair — what the adoption did. */
+export interface TrackerAdoptionResult {
+  /** The fresh connection bound to the new database instance. */
+  newConnectionId: string;
+  /** Links of the retired connection that were orphaned (entities are never archived). */
+  orphanedLinks: number;
+  /** Unresolved outbox rows settled as cancelled, each one a review finding. */
+  cancelledWrites: number;
+  /** Orphaned links CONCLUSIVELY re-pointed onto an issue in the new workspace. */
+  relinked: number;
+  /** Plausible-but-inconclusive matches filed for the user to confirm; nothing was imported for them. */
+  ambiguous: number;
 }
 
 /**
@@ -310,6 +434,35 @@ export interface TrackerIssue {
    * is gone from every `description` an adapter returns.
    */
   recoveryClientKey: string | null;
+  /**
+   * OPAQUE compare-for-equality content fingerprint, populated only by
+   * adapters whose `capabilities.requiresIdReconciliation` is true (beads —
+   * docs/proposals/tracker-beads-provider.md, "4. Pull reconciliation"). The
+   * same value {@link import('../../main/src/services/trackerSync/adapterTypes').TrackerAdapter.listIssueRevisions}
+   * pairs with each id, surfaced here as well so the reconciliation sweep can
+   * stamp a link's last-seen fingerprint from ANY issue the adapter returns
+   * (a listing row, a point fetch, or a write's post-write echo) rather than
+   * only from the sweep projection.
+   *
+   * NOT the concurrency token: {@link concurrencyToken} identifies one remote
+   * WRITE (beads: a Dolt `CommitHash`) and gates a guarded update, whereas
+   * this identifies remote CONTENT and answers "has this issue changed since
+   * we last looked" for an adapter whose `updatedAt` cannot be trusted to
+   * advance. Never parsed, ordered, or compared across adapters.
+   */
+  revision?: string;
+  /**
+   * Opaque concurrency token for a GUARDED write (migration 123's
+   * `guardedUpdates` capability) — populated only by adapters that support
+   * detect-after-write concurrency checking (beads: the newest Dolt
+   * `CommitHash` from `bd history`, captured alongside the pre-send read).
+   * `undefined` on every adapter that does not declare `guardedUpdates`
+   * (Linear, Plane, Dart today); those never populate this field. See
+   * `updateIssueState`/`updateIssueContent`'s optional `expectedToken`
+   * parameter in adapterTypes.ts and `TrackerRevisionMismatchError` in
+   * errors.ts for how the token is consumed.
+   */
+  concurrencyToken?: string;
 }
 
 export type TrackerSelectionMode = 'all' | 'assignee' | 'manual';

@@ -1,0 +1,281 @@
+$ pwd
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla
+$ bd init --non-interactive
+  Repository ID: e14d2f07
+  Clone ID: 4b50b4a32c32bddf
+  Hooks installed to: .beads/hooks/
+  ✓ Created AGENTS.md with agent instructions
+Installing Claude hooks for this project...
+✓ Registered SessionStart hook
+Installing Claude Code integration...
+✓ Created new CLAUDE.md with beads integration
+
+✓ Claude Code integration installed
+  File: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/CLAUDE.md
+No additional configuration needed!
+
+✓ Claude Code integration installed
+  Settings: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/.claude/settings.json
+
+Restart Claude Code for changes to take effect.
+Installing Beads agent skill...
+✓ Beads agent skill installed
+  Skill: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/.agents/skills/beads/SKILL.md
+Installing Codex native hooks for this project...
+✓ Codex native hooks installed
+Installing Codex instructions for this project...
+✓ Codex instructions installed
+  File: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-vanilla/AGENTS.md
+Restart Codex if it is already running.
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f1_vanilla
+  Issue prefix: f1-vanilla
+  Issues will be named: f1-vanilla-<hash> (e.g., f1-vanilla-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+--- inventory ---
+$ git status --porcelain
+$ find .beads -type f | sort
+.beads/.gitignore
+.beads/.local_version
+.beads/README.md
+.beads/config.yaml
+.beads/embeddeddolt/.lock
+.beads/embeddeddolt/f1_vanilla/.dolt/config.json
+.beads/embeddeddolt/f1_vanilla/.dolt/noms/LOCK
+.beads/embeddeddolt/f1_vanilla/.dolt/noms/journal.idx
+.beads/embeddeddolt/f1_vanilla/.dolt/noms/manifest
+.beads/embeddeddolt/f1_vanilla/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+.beads/embeddeddolt/f1_vanilla/.dolt/repo_state.json
+.beads/hooks/post-checkout
+.beads/hooks/post-merge
+.beads/hooks/pre-commit
+.beads/hooks/pre-push
+.beads/hooks/prepare-commit-msg
+.beads/interactions.jsonl
+.beads/metadata.json
+$ find . -maxdepth 1 -mindepth 1 | sort
+./.agents
+./.beads
+./.claude
+./.codex
+./.git
+./.gitignore
+./AGENTS.md
+./CLAUDE.md
+$ ls -la .git/hooks | grep -v sample
+total 128
+drwxr-xr-x@ 16 raimundoesteva  wheel   512 Aug 26 21:31 .
+drwxr-xr-x@ 12 raimundoesteva  wheel   384 Aug 26 21:32 ..
+$ cat .git/info/exclude 2>&1
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+$ cat .beads/metadata.json
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f1_vanilla",
+  "project_id": "05ee9c62-002e-4056-97b4-e9850b7ca472"
+}$ du -sh .beads
+2.1M	.beads
+--- git log ---
+$ git log --oneline --stat
+92302c2 bd init: initialize beads issue tracking
+ .agents/skills/beads/SKILL.md           |  80 ++++++++++++++++++++
+ .agents/skills/beads/agents/openai.yaml |   4 +
+ .beads/.gitignore                       |  77 +++++++++++++++++++
+ .beads/README.md                        |  81 ++++++++++++++++++++
+ .beads/config.yaml                      |  66 +++++++++++++++++
+ .beads/hooks/post-checkout              |  33 +++++++++
+ .beads/hooks/post-merge                 |  33 +++++++++
+ .beads/hooks/pre-commit                 |  33 +++++++++
+ .beads/hooks/pre-push                   |  33 +++++++++
+ .beads/hooks/prepare-commit-msg         |  33 +++++++++
+ .beads/interactions.jsonl               |   0
+ .beads/metadata.json                    |   7 ++
+ .claude/settings.json                   |  15 ++++
+ .codex/config.toml                      |   2 +
+ .codex/hooks.json                       |  51 +++++++++++++
+ .gitignore                              |   6 ++
+ AGENTS.md                               | 127 ++++++++++++++++++++++++++++++++
+ CLAUDE.md                               |  77 +++++++++++++++++++
+ 18 files changed, 758 insertions(+)
+76fa74a init
+--- .gitignore ---
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+--- .claude/settings.json ---
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime --hook-json",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  }
+}--- ls .git/hooks (all incl sample) ---
+applypatch-msg.sample
+commit-msg.sample
+fsmonitor-watchman.sample
+post-update.sample
+pre-applypatch.sample
+pre-commit.sample
+pre-merge-commit.sample
+pre-push.sample
+pre-rebase.sample
+pre-receive.sample
+prepare-commit-msg.sample
+push-to-checkout.sample
+sendemail-validate.sample
+update.sample
+--- diff of .git/hooks/pre-commit vs .beads/hooks/pre-commit (existence check) ---
+ls: .git/hooks/pre-commit: No such file or directory
+--- AGENTS.md head ---
+# Agent Instructions
+
+This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+
+> **Architecture in one line:** Issues live in a local Dolt database
+> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
+> git-compatible protocol), stored under `refs/dolt/data` on your git
+> remote — separate from `refs/heads/*` where your code lives.
+> `.beads/issues.jsonl` is a passive export, not the wire protocol.
+>
+> See [SYNC_CONCEPTS.md](https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md)
+> for the one-screen overview and anti-patterns (don't treat JSONL as the
+> source of truth; don't `bd import` during normal operation; don't
+> reach for third-party Dolt hosting before trying the default).
+
+## Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+--- .beads/.gitignore ---
+# Dolt database (managed by Dolt, not git)
+dolt/
+embeddeddolt/
+proxieddb/
+
+# Runtime files
+bd.sock
+bd.sock.startlock
+sync-state.json
+last-touched
+.exclusive-lock
+
+# Daemon runtime (lock, log, pid)
+daemon.*
+
+# Push state (runtime, per-machine)
+push-state.json
+
+# Lock files (various runtime locks)
+*.lock
+
+# Credential key (encryption key for federation peer auth — never commit)
+.beads-credential-key
+
+# Local version tracking (prevents upgrade notification spam after git ops)
+.local_version
+
+proxied_server_client_info.json
+
+# Worktree redirect file (contains relative path to main repo's .beads/)
+# Must not be committed as paths would be wrong in other clones
+redirect
+
+# Sync state (local-only, per-machine)
+# These files are machine-specific and should not be shared across clones
+.sync.lock
+export-state/
+export-state.json
+last_pull
+
+# Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
+ephemeral.sqlite3
+ephemeral.sqlite3-journal
+ephemeral.sqlite3-wal
+ephemeral.sqlite3-shm
+
+# Dolt server management (auto-started by bd)
+dolt-server.pid
+dolt-server.log
+dolt-server.lock
+dolt-server.port
+dolt-server.activity
+
+# Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
+dolt-pprof/
+
+# Corrupt backup directories (created by bd doctor --fix recovery)
+*.corrupt.backup/
+
+# Backup data (auto-exported JSONL, local-only)
+backup/
+
+# Per-project environment file (Dolt connection config, GH#2520)
+.env
+
+# Legacy files (from pre-Dolt versions)
+*.db
+*.db?*
+*.db-journal
+*.db-wal
+*.db-shm
+db.sqlite
+bd.db
+# NOTE: Do NOT add negation patterns here.
+# They would override fork protection in .git/info/exclude.
+# Config files (metadata.json, config.yaml) are tracked by git by default
+# since no pattern above ignores them.
+--- git show --stat HEAD (full) already captured above ---
+--- git ls-files | grep beads ---
+.agents/skills/beads/SKILL.md
+.agents/skills/beads/agents/openai.yaml
+.beads/.gitignore
+.beads/README.md
+.beads/config.yaml
+.beads/hooks/post-checkout
+.beads/hooks/post-merge
+.beads/hooks/pre-commit
+.beads/hooks/pre-push
+.beads/hooks/prepare-commit-msg
+.beads/interactions.jsonl
+.beads/metadata.json
+--- .dolt/config.json ---
+{}--- .dolt/repo_state.json ---
+{
+  "head": "refs/heads/main",
+  "remotes": {},
+  "backups": {},
+  "branches": {}
+}

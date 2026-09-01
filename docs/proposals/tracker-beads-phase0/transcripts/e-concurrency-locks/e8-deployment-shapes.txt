@@ -1,0 +1,25 @@
+=== E8a: HAZARD — does unlinking the LOCK file while held defeat the mutex? ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=38362 holding 15.0s
+$ rm -f <LOCK>  (simulates git clean / rm -rf race while bd is running)
+rm exit=0
+bd update rc=0 elapsed=0.664s  (~0.4s => LOCK DEFEATED by unlink: two writers can run concurrently)
+STDOUT>>>
+✓ Updated issue: elock-0y1 — E4 target X
+<<<
+STDERR>>>
+<<<
+HOLDER: released
+$ ls -la <noms>/LOCK (recreated?)
+-rw-------@ 1 raimundoesteva  wheel  0 Aug 26 21:47 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+---
+=== E8b: two DIFFERENT cwds sharing ONE .beads dir via BEADS_DIR (cyboflow worktree shape) ===
+$ cd wtA && BEADS_DIR=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads bd list --all --json | python3 -c 'import json,sys;print("count=",len(json.load(sys.stdin)))'
+count= 5
+exit=0
+--- do two cwds sharing BEADS_DIR contend on the SAME lock?
+wall=1.348s (if ~2x single => they serialize on the shared lock)
+wtA rc=0 elapsed=0.460s
+wtB rc=0 elapsed=1.274s
+stderrA: 
+stderrB: 
+---

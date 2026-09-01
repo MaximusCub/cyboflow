@@ -1,0 +1,31 @@
+special ids: bp-4em bp-pni bp-oha bp-wisp-yrv bp-jbk bp-8lr bp-z3s
+
+=== (1) bd list --json (default) ===
+59
+  bp-4em present=0
+  bp-pni present=1
+  bp-oha present=0
+  bp-wisp-yrv present=0
+  bp-jbk present=1
+  bp-8lr present=1
+  bp-z3s present=1
+
+=== (2) bd list --all --json ===
+60
+  bp-4em present=0
+  bp-pni present=1
+  bp-oha present=0
+  bp-wisp-yrv present=0
+  bp-jbk present=1
+  bp-8lr present=1
+  bp-z3s present=1
+
+=== (3) bd list --all --include-gates --include-infra --include-templates --json ===
+63
+  bp-4em present=1
+  bp-pni present=1
+  bp-oha present=1
+  bp-wisp-yrv present=1
+  bp-jbk present=1
+  bp-8lr present=1
+  bp-z3s present=1

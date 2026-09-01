@@ -1,0 +1,15 @@
+$ bd show --help | grep -i format
+      --json                      Output in JSON format
+
+=== digraph with real deps (bp-fgk -> bp-qjd) ===
+bp-fgk bp-qjd
+exit=0
+
+=== try bd list --format '{{.ID}}
+' explicit newline char via printf template ===
+raw bytes:
+       0
+
+=== try lowercase field id ===
+bytes:
+       0

@@ -1,0 +1,23 @@
+=== A1 SUMMARY ===
+bd list --help documents: -n, --limit int   Limit results (default 50, use 0 for unlimited) (default 50)
+
+$ bd count
+55
+
+$ bd list --json (no envelope) | jq length
+55
+
+$ BD_JSON_ENVELOPE=1 bd list --json | jq '.data|length'
+55
+
+$ bd list --flat | grep -c '^○'
+55
+
+$ bd list --limit 30 --json | jq length   (explicit limit IS honored)
+30
+
+$ bd list --limit 0 --json | jq length
+55
+
+$ bd list -n 20 --json | jq length  (short flag)
+20

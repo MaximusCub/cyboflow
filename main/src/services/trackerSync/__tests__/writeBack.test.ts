@@ -35,6 +35,7 @@ import { DatabaseService } from '../../../database/database';
 import type { TrackerOutboxRow } from '../../../database/models';
 import type { BacklogTaskItem, TaskChangeAction, TaskChangedEvent, TaskType } from '../../../../../shared/types/tasks';
 import { insertConnection, upsertLink, listUnresolvedOutbox, updateBaseline, getLinkByEntity, type NewConnectionRow } from '../store';
+import { PROVIDER_ADAPTER_GUARDS_UPDATES } from '../providerCapabilities';
 import { resolveStageIds } from '../stateMapping';
 import { createWriteBackListener, type WriteBackBaselineStamp } from '../writeBack';
 
@@ -91,6 +92,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     archive_sync_mode: 'off',
     priority_mapping_json: '{}',
     category_mapping_json: '{}',
+    config_generation: 0,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -1043,5 +1045,124 @@ describe('writeBack — archive trigger', () => {
     // …so a LATER archive is a genuine first write again.
     listener.handleTaskChanged(archivedEvent());
     expect(outbox().map((row) => row.kind)).toEqual(['archive_issue']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The guarded-update enqueue gate
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider that REQUIRES guarded writes but whose shipped adapter cannot make
+ * them (docs/proposals/tracker-beads-provider.md, "The disable must be
+ * expressible"). Simulated by flipping the provision table for the duration of
+ * one test — the requirement half is a permanent fact about beads, the
+ * provision half is a fact about the build, and only the pair gates the
+ * enqueue.
+ *
+ * The gate lives HERE, at enqueue, rather than only at drain, for the reason
+ * invariant 5 gives for the 'off' modes: a queued row nothing will ever send is
+ * a permanent inbound stall, because the blocker that halts the inbound batch
+ * at an issue is KIND-AGNOSTIC.
+ */
+function withDegradedGuards(body: () => void): void {
+  const restore = PROVIDER_ADAPTER_GUARDS_UPDATES.beads;
+  PROVIDER_ADAPTER_GUARDS_UPDATES.beads = false;
+  try {
+    body();
+  } finally {
+    PROVIDER_ADAPTER_GUARDS_UPDATES.beads = restore;
+  }
+}
+
+describe('writeBack — guarded-update enqueue gate', () => {
+  it('enqueues nothing for a stage move when the adapter cannot guard', () => {
+    withDegradedGuards(() => {
+      const connectionId = seedConnection({ provider: 'beads' });
+      seedIdea('ide_1', 'IDEA-1', stageIds.done);
+      upsertLink(raw, {
+        connection_id: connectionId,
+        entity_type: 'idea',
+        entity_id: 'ide_1',
+        provider: 'beads',
+        external_id: 'ext-1',
+      });
+
+      makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+      expect(outbox()).toHaveLength(0);
+    });
+  });
+
+  /**
+   * The content scenario, set up once. Returned as a closure so the SAME
+   * scenario can be run degraded and undegraded — a gate test that only ever
+   * asserts "nothing was enqueued" cannot tell a working gate from a scenario
+   * that would have enqueued nothing anyway.
+   */
+  function seedContentScenario(): () => void {
+    const connectionId = seedConnection({
+      provider: 'beads',
+      content_sync_mode: 'auto',
+    });
+    seedIdea('ide_1', 'IDEA-1');
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'beads',
+      external_id: 'ext-1',
+      baseline_json: JSON.stringify({
+        title: 'Remote title',
+        description: null,
+        stateId: 'open',
+        priority: '2',
+        category: 'feature',
+      }),
+    });
+    const listener = makeListener();
+    return () => {
+      listener.handleTaskChanged(
+        makeEvent('ide_1', 'idea', stageIds.idea, { title: 'Edited' }, 'updated'),
+      );
+    };
+  }
+
+  it('enqueues nothing for a content edit when the adapter cannot guard', () => {
+    const run = seedContentScenario();
+    withDegradedGuards(run);
+    expect(outbox()).toHaveLength(0);
+
+    // POSITIVE CONTROL, same scenario: the gate is what suppressed it, not the
+    // fixture.
+    run();
+    expect(outbox().map((row) => row.kind)).toEqual(['update_content']);
+  });
+
+  it('CREATES still flow — a fresh issue has no concurrent editor to race', () => {
+    withDegradedGuards(() => {
+      seedConnection({ id: 'conn-1', provider: 'beads' });
+      seedIdea('ide_1', 'IDEA-1');
+
+      makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.idea, {}, 'created'));
+
+      expect(outbox().map((row) => row.kind)).toEqual(['create_issue']);
+    });
+  });
+
+  it('the SHIPPED beads adapter guards, so nothing is gated in the ordinary build', () => {
+    const connectionId = seedConnection({ provider: 'beads' });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'idea',
+      entity_id: 'ide_1',
+      provider: 'beads',
+      external_id: 'ext-1',
+    });
+
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+    expect(outbox().map((row) => row.kind)).toEqual(['update_state']);
   });
 });

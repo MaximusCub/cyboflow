@@ -1,0 +1,51 @@
+### create under TZ=America/New_York
+$ TZ=America/New_York bd create 'B4 tz-ny issue' --json
+{
+  "created_at": "2026-08-27T04:36:48.322326Z",
+  "created_by": "Krishna",
+  "id": "bct-3sn",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "B4 tz-ny issue",
+  "updated_at": "2026-08-27T04:36:48.322326Z"
+}
+exit=0
+
+### create under TZ=UTC
+$ TZ=UTC bd create 'B4 tz-utc issue' --json
+{
+  "created_at": "2026-08-27T04:36:49.118836Z",
+  "created_by": "Krishna",
+  "id": "bct-94q",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "B4 tz-utc issue",
+  "updated_at": "2026-08-27T04:36:49.118836Z"
+}
+exit=0
+
+### create under TZ=Pacific/Kiritimati (UTC+14, extreme offset)
+$ TZ=Pacific/Kiritimati bd create 'B4 tz-extreme issue' --json
+{
+  "created_at": "2026-08-27T04:36:50.013068Z",
+  "created_by": "Krishna",
+  "id": "bct-2c7",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "B4 tz-extreme issue",
+  "updated_at": "2026-08-27T04:36:50.013068Z"
+}
+exit=0
+
+### system date for reference (host TZ, no override):
+Thu Aug 27 04:36:50 UTC 2026
+Wed Aug 26 21:36:50 PDT 2026

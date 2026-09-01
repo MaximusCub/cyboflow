@@ -1,0 +1,72 @@
+=== does --include-gates work WITHOUT --all? (bp-4em, bp-oha are status=open gates) ===
+$ bd list --include-gates --json | jq '[.[] | select(.id=="bp-4em" or .id=="bp-oha")]'
+[
+  {
+    "id": "bp-oha",
+    "title": "Gate: human",
+    "description": "Ad-hoc gate blocking bp-8b8\n\nReason: phase0 gate probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "gate",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:04Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:04Z",
+    "await_type": "human",
+    "dependency_count": 0,
+    "dependent_count": 1,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-4em",
+    "title": "direct gate type attempt",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "gate",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:33:50Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:50Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== does --include-infra work WITHOUT --all? (bp-wisp-yrv, bp-wisp-2pi are status=open) ===
+[
+  {
+    "id": "bp-wisp-2pi",
+    "title": "infra probe message",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:34Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:34Z",
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-wisp-yrv",
+    "title": "ephemeral probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:05Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:05Z",
+    "ephemeral": true,
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== negative control: --include-gates should NOT reveal a closed non-gate issue (bp-akt, bp-ppn) ===
+0
+(expect 0 -- include-gates is not a synonym for --all)

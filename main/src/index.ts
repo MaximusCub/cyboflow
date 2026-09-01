@@ -1953,6 +1953,27 @@ async function initializeServices(): Promise<boolean> {
     db: databaseService.getDb(),
     router: taskChangeRouter,
     reviewRouter: reviewItemRouter,
+    // Keyless providers (beads) anchor their workspace to the project's repo.
+    // Resolved HERE rather than in the service so the renderer only ever sends
+    // a project id — no filesystem path it composes can decide where a CLI is
+    // spawned. See TrackerSyncServiceDeps.resolveProjectPath.
+    resolveProjectPath: (id) => sessionManager.getProjectById(id)?.path?.trim() || null,
+    // The OTHER anchor a keyless connection can have: a folder the user points
+    // at when the workspace is not at the project's repo path (a monorepo
+    // subdirectory, a workspace kept outside the repo). The dialog runs HERE,
+    // in main, so the chosen path never has to be composed by — or returned
+    // to — the renderer; it gets a token. See
+    // TrackerSyncServiceDeps.pickWorkspaceDirectory.
+    pickWorkspaceDirectory: async () => {
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        // `dontAddToRecent` keeps a beads workspace out of the OS recent-items
+        // list — this is a wiring step, not a document the user opened.
+        properties: ['openDirectory', 'dontAddToRecent'],
+        title: 'Point at a beads workspace',
+      });
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+    },
     logger: cyboflowLogger,
   });
   trackerSyncService.start();

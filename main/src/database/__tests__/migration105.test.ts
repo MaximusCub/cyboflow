@@ -108,6 +108,9 @@ describe('Migration 105: dart as a third tracker provider', () => {
       // Appended by 112 (content/archive write-back modes + mapping
       // overlays) — asserted for real in migration118.test.ts.
       'content_sync_mode', 'archive_sync_mode', 'priority_mapping_json', 'category_mapping_json',
+      // Appended by 129 (beads as a fourth provider + the reconciliation
+      // ledger's generation counter) — asserted for real in migration123.test.ts.
+      'config_generation',
     ]);
     expect(columnNames(raw, 'entity_external_links')).toEqual([
       'id', 'connection_id', 'entity_type', 'entity_id', 'provider', 'external_id',

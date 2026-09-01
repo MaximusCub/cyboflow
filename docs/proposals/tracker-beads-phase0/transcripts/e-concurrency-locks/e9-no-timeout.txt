@@ -1,0 +1,10 @@
+=== E9: 200-second lock hold — is there ANY client-side deadline? ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=38582 holding 200.0s
+HOLDER: released
+bd update rc=0 elapsed=200.853s
+STDOUT>>>
+✓ Updated issue: elock-0y1 — E4 target X
+<<<
+STDERR>>>
+<<<
+---

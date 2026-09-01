@@ -238,6 +238,13 @@ export function TrackerIntegrationSection(): React.JSX.Element {
           isOpen
           provider={wizardProvider}
           projectId={activeProjectId}
+          // Which projects this provider already covers — the workspace-bound
+          // Map step renders those rows inert instead of probing them. Read off
+          // the connections this section already holds, live rows only: a
+          // disconnected one covers nothing.
+          connectedProjectIds={connections
+            .filter((c) => c.provider === wizardProvider && c.status !== 'disconnected')
+            .map((c) => c.projectId)}
           onClose={() => setWizardProvider(null)}
           onConnected={refresh}
         />

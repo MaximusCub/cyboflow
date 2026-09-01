@@ -1,0 +1,19 @@
+$ bd gate create --blocks bp-8b8 --reason 'phase0 gate probe' --silent
+✓ Created gate bp-oha (type: human)
+  Blocks: bp-8b8 (gate target)
+  Reason: phase0 gate probe
+
+Resolve with: bd gate resolve bp-oha
+exit=0
+
+$ bd create --title 'ephemeral probe' --ephemeral --silent
+eph=bp-wisp-yrv
+
+$ bd create --title 'wisp probe' --wisp-type heartbeat --silent
+wisp=bp-jbk exit=0
+
+$ bd create --title 'mol-type swarm probe' --mol-type swarm --silent
+mol=bp-8lr exit=0
+
+$ bd create --title 'deferred probe' --defer +1d --silent
+defr=bp-z3s exit=0

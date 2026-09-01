@@ -1,0 +1,93 @@
+=== E4 setup: create issues X and Y ===
+{
+  "data": {
+    "id": "elock-0y1",
+    "title": "E4 target X",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:30.739629Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:30.739629Z"
+  },
+  "schema_version": 1
+}
+{
+  "data": {
+    "id": "elock-6gt",
+    "title": "E4 target Y",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:31.285911Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:31.285911Z"
+  },
+  "schema_version": 1
+}
+---
+=== E4a: two loops x 50 writes on DIFFERENT issues (elock-0y1 vs elock-6gt) ===
+(eval):22: no matches found: out/e4/A-*.err
+A progress 20/50
+B progress 20/50
+A progress 40/50
+B progress 40/50
+A DONE
+B DONE
+wall=49.976s for 100 writes across 2 procs
+exit code histogram (A+B):
+ 100 0
+elapsed stats: min/median/max
+min=0.411 median=0.510 p90=1.691 max=9.813 n=100
+non-empty stderr files:
+(count of non-empty stderr shown above)
+---
+=== E4b: two loops x 50 writes on the SAME issue (elock-0y1) ===
+(eval):6: no matches found: out/e4/C-*.err
+C progress 20/50
+D progress 20/50
+D progress 40/50
+C progress 40/50
+D DONE
+C DONE
+wall=51.659s for 100 writes to the SAME row
+exit code histogram (C+D):
+ 100 0
+min=0.418 median=0.530 p90=1.839 max=5.859 n=100
+non-empty stderr files:
+---
+=== E4c: 8 SIMULTANEOUS single bd update (max parallelism burst), 3 rounds ===
+--- round 1
+(eval):9: no matches found: out/e4h/*.rc
+wall=5.640s
+w1 rc=0 elapsed=2.261s errbytes=0
+w2 rc=0 elapsed=2.884s errbytes=0
+w3 rc=0 elapsed=3.843s errbytes=0
+w4 rc=0 elapsed=1.010s errbytes=0
+w5 rc=0 elapsed=0.664s errbytes=0
+w6 rc=0 elapsed=1.940s errbytes=0
+w7 rc=0 elapsed=1.615s errbytes=0
+w8 rc=0 elapsed=5.548s errbytes=0
+--- round 2
+wall=4.642s
+w1 rc=0 elapsed=0.643s errbytes=0
+w2 rc=0 elapsed=1.659s errbytes=0
+w3 rc=0 elapsed=2.837s errbytes=0
+w4 rc=0 elapsed=4.559s errbytes=0
+w5 rc=0 elapsed=1.266s errbytes=0
+w6 rc=0 elapsed=3.103s errbytes=0
+w7 rc=0 elapsed=3.885s errbytes=0
+w8 rc=0 elapsed=2.045s errbytes=0
+--- round 3
+wall=3.521s
+w1 rc=0 elapsed=2.214s errbytes=0
+w2 rc=0 elapsed=2.175s errbytes=0
+w3 rc=0 elapsed=1.273s errbytes=0
+w4 rc=0 elapsed=1.874s errbytes=0
+w5 rc=0 elapsed=3.034s errbytes=0
+w6 rc=0 elapsed=3.438s errbytes=0
+w7 rc=0 elapsed=0.965s errbytes=0
+w8 rc=0 elapsed=0.524s errbytes=0
+---

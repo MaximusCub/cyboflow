@@ -1,0 +1,59 @@
+=== baseline: serial single-command latency (bd list, bd update) ===
+bd list run 1: rc=0 elapsed=0.358s
+bd list run 2: rc=0 elapsed=0.359s
+bd list run 3: rc=0 elapsed=0.359s
+bd update run 1: rc=0 elapsed=0.409s
+bd update run 2: rc=0 elapsed=0.417s
+bd update run 3: rc=0 elapsed=0.406s
+---
+=== E2: 8 simultaneous 'BD_JSON_ENVELOPE=1 bd list --all --json', 3 rounds ===
+--- round 1
+(eval):9: no matches found: out/e2/*
+wall=4.026s
+worker1 rc=0 elapsed=1.645s stdout_bytes=848 stderr_bytes=0
+worker2 rc=0 elapsed=1.405s stdout_bytes=848 stderr_bytes=0
+worker3 rc=0 elapsed=3.946s stdout_bytes=848 stderr_bytes=0
+worker4 rc=0 elapsed=0.667s stdout_bytes=848 stderr_bytes=0
+worker5 rc=0 elapsed=1.075s stdout_bytes=848 stderr_bytes=0
+worker6 rc=0 elapsed=2.425s stdout_bytes=848 stderr_bytes=0
+worker7 rc=0 elapsed=1.969s stdout_bytes=848 stderr_bytes=0
+worker8 rc=0 elapsed=2.184s stdout_bytes=848 stderr_bytes=0
+--- round 2
+wall=3.184s
+worker1 rc=0 elapsed=1.697s stdout_bytes=848 stderr_bytes=0
+worker2 rc=0 elapsed=0.453s stdout_bytes=848 stderr_bytes=0
+worker3 rc=0 elapsed=2.230s stdout_bytes=848 stderr_bytes=0
+worker4 rc=0 elapsed=1.371s stdout_bytes=848 stderr_bytes=0
+worker5 rc=0 elapsed=2.000s stdout_bytes=848 stderr_bytes=0
+worker6 rc=0 elapsed=0.841s stdout_bytes=848 stderr_bytes=0
+worker7 rc=0 elapsed=2.707s stdout_bytes=848 stderr_bytes=0
+worker8 rc=0 elapsed=3.103s stdout_bytes=848 stderr_bytes=0
+--- round 3
+wall=2.739s
+worker1 rc=0 elapsed=2.251s stdout_bytes=848 stderr_bytes=0
+worker2 rc=0 elapsed=0.449s stdout_bytes=848 stderr_bytes=0
+worker3 rc=0 elapsed=2.661s stdout_bytes=848 stderr_bytes=0
+worker4 rc=0 elapsed=2.544s stdout_bytes=848 stderr_bytes=0
+worker5 rc=0 elapsed=0.838s stdout_bytes=848 stderr_bytes=0
+worker6 rc=0 elapsed=2.314s stdout_bytes=848 stderr_bytes=0
+worker7 rc=0 elapsed=1.439s stdout_bytes=848 stderr_bytes=0
+worker8 rc=0 elapsed=1.996s stdout_bytes=848 stderr_bytes=0
+---
+=== E2-CONTROL (negative control for CPU-vs-lock): init 4 SEPARATE workspaces ===
+ws1 initialized
+ws2 initialized
+ws3 initialized
+ws4 initialized
+--- CONTROL A: 4 concurrent bd list against 4 DIFFERENT workspaces
+wall=0.887s
+ws1 rc=0 elapsed=0.809s
+ws2 rc=0 elapsed=0.803s
+ws3 rc=0 elapsed=0.761s
+ws4 rc=0 elapsed=0.761s
+--- CONTROL B: 4 concurrent bd list against the SAME workspace (elock)
+wall=2.813s
+same-ws w1 rc=0 elapsed=0.819s
+same-ws w2 rc=0 elapsed=2.196s
+same-ws w3 rc=0 elapsed=2.044s
+same-ws w4 rc=0 elapsed=2.733s
+---

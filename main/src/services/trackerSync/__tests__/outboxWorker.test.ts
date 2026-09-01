@@ -39,6 +39,7 @@ import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
 import type {
   EntityExternalLinkRow,
+  TrackerConflictRow,
   TrackerConnectionRow,
   TrackerOutboxRow,
 } from '../../../database/models';
@@ -60,7 +61,7 @@ import type {
   TrackerAdapterCapabilities,
   TrackerFieldOptionsRaw,
 } from '../adapterTypes';
-import { TrackerApiError, TrackerAuthError } from '../errors';
+import { TrackerApiError, TrackerAuthError, TrackerRevisionMismatchError } from '../errors';
 import {
   enqueueOutbox,
   getConnection,
@@ -124,6 +125,8 @@ afterEach(() => {
 interface UpdateCall {
   externalId: string;
   stateId: string;
+  /** The guarded-update pre-send token, when the caller forwarded one. */
+  expectedToken?: string;
 }
 interface CreateCall {
   /** Null on a top-level `createIssue` (the push direction). */
@@ -148,6 +151,8 @@ class FakeAdapter implements TrackerAdapter {
     idempotentCreate: true,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'trash',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   states: TrackerState[] = STATES;
@@ -180,7 +185,11 @@ class FakeAdapter implements TrackerAdapter {
 
   readonly updateCalls: UpdateCall[] = [];
   readonly createCalls: CreateCall[] = [];
-  readonly contentCalls: Array<{ externalId: string; patch: IssueContentPatch }> = [];
+  readonly contentCalls: Array<{
+    externalId: string;
+    patch: IssueContentPatch;
+    expectedToken?: string;
+  }> = [];
   readonly archiveCalls: string[] = [];
   listStatesCalls = 0;
   listIssuesCalls = 0;
@@ -248,8 +257,12 @@ class FakeAdapter implements TrackerAdapter {
       stateId: draft.stateId ?? 'state-backlog',
     });
   }
-  async updateIssueState(externalId: string, stateId: string): Promise<void> {
-    this.updateCalls.push({ externalId, stateId });
+  async updateIssueState(
+    externalId: string,
+    stateId: string,
+    expectedToken?: string,
+  ): Promise<void> {
+    this.updateCalls.push({ externalId, stateId, expectedToken });
     if (this.failUpdate) throw this.takeFailure('failUpdate');
   }
   /**
@@ -260,8 +273,9 @@ class FakeAdapter implements TrackerAdapter {
   async updateIssueContent(
     externalId: string,
     patch: IssueContentPatch,
+    expectedToken?: string,
   ): Promise<TrackerIssue | null> {
-    this.contentCalls.push({ externalId, patch });
+    this.contentCalls.push({ externalId, patch, expectedToken });
     // The concurrent-edit seam: whatever a test does here happens between the
     // send and the settle, exactly as a real user edit would.
     this.onContentWrite?.();
@@ -316,6 +330,8 @@ class FakeMarkerAdapter extends FakeAdapter {
     idempotentCreate: false,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'none',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   /** externalId -> the client key stamped into that issue's description. */
@@ -506,6 +522,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     archive_sync_mode: 'off',
     priority_mapping_json: '{}',
     category_mapping_json: '{}',
+    config_generation: 0,
     mirror_subissues: 1,
     conflict_mode: 'auto',
     cursor_updated_at: null,
@@ -625,7 +642,7 @@ function linkTask(
   connectionId: string,
   externalId: string,
   baseline: Record<string, unknown>,
-  provider: 'linear' | 'plane' | 'dart' = 'linear',
+  provider: TrackerProvider = 'linear',
   entityId = 'tsk_1',
 ): EntityExternalLinkRow {
   return upsertLink(raw, {
@@ -2586,5 +2603,252 @@ describe('toSqliteUtc', () => {
 
   it('leaves an unparseable value untouched rather than inventing a timestamp', () => {
     expect(toSqliteUtc('not a date')).toBe('not a date');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guarded updates (capabilities.guardedUpdates — beads)
+// ---------------------------------------------------------------------------
+
+/**
+ * A guarded provider's fake: it declares `guardedUpdates`, so the drain must
+ * take a PRE-SEND read, forward that read's `concurrencyToken`, and consume a
+ * `TrackerRevisionMismatchError` as the detect-after-write outcome it is —
+ * never as a retryable transport failure.
+ */
+class GuardedAdapter extends FakeAdapter {
+  override provider: TrackerProvider = 'beads';
+  override capabilities: TrackerAdapterCapabilities = {
+    nativeParentAutoClose: false,
+    selfHostedBaseUrl: false,
+    idempotentCreate: false,
+    contentWrite: { title: true, description: true, priority: true, category: true },
+    archive: 'none',
+    requiresIdReconciliation: true,
+    guardedUpdates: true,
+  };
+  async listIssueRevisions(): Promise<Array<{ id: string; revision: string }>> {
+    return this.issues.map((issue) => ({ id: issue.externalId, revision: issue.revision ?? 'r' }));
+  }
+}
+
+/** An adapter for a requires-guarded provider that CANNOT guard — the degraded pairing. */
+class DegradedBeadsAdapter extends GuardedAdapter {
+  override capabilities: TrackerAdapterCapabilities = {
+    ...new GuardedAdapter().capabilities,
+    guardedUpdates: false,
+  };
+}
+
+function openConflicts(connectionId: string): TrackerConflictRow[] {
+  return raw
+    .prepare('SELECT * FROM tracker_conflicts WHERE connection_id = ? ORDER BY id ASC')
+    .all(connectionId) as TrackerConflictRow[];
+}
+
+describe('drainOutbox — guarded state writes', () => {
+  it('forwards the pre-send read’s concurrency token to the adapter', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new GuardedAdapter();
+    adapter.issuesById.set('ext-1', makeIssue('ext-1', { concurrencyToken: 'commit-aaa' }));
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.updateCalls).toEqual([
+      { externalId: 'ext-1', stateId: 'state-done', expectedToken: 'commit-aaa' },
+    ]);
+  });
+
+  it('holds a genuine mismatch as a field conflict carrying the recovered remote value', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    const link = linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const row = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new GuardedAdapter();
+    adapter.issuesById.set('ext-1', makeIssue('ext-1', { concurrencyToken: 'commit-aaa' }));
+    // A concurrent `bd` write moved the status to CANCELLED; ours overwrote it.
+    adapter.failUpdate = new TrackerRevisionMismatchError(
+      'interleaved write on stateId',
+      ['stateId'],
+      makeIssue('ext-1', { stateId: 'state-canceled' }),
+    );
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.guardedConflicts).toBe(1);
+    expect(report.guardedConverged).toBe(0);
+    // NO RETRY: the write landed, so the row is settled, not rescheduled.
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('done');
+    expect(settled.next_attempt_at).toBeNull();
+    expect(settled.last_error).toContain('overwrote a concurrent tracker edit on stateId');
+
+    const conflicts = openConflicts(connection.id);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({
+      kind: 'field_conflict',
+      // 'stateId' is TrackerIssue's spelling; the conflict table calls it 'stage'.
+      field: 'stage',
+      link_id: link.id,
+      local_value: 'state-done',
+      // The clobbered value, recovered from the adapter's own history — the
+      // only record it has anywhere.
+      remote_value: 'state-canceled',
+      state: 'open',
+    });
+    expect(JSON.parse(conflicts[0].payload_json ?? '{}')).toMatchObject({
+      externalId: 'ext-1',
+      guardedOverwrite: true,
+    });
+  });
+
+  it('settles done with no conflict when the concurrent write already set our value', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const row = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new GuardedAdapter();
+    adapter.issuesById.set('ext-1', makeIssue('ext-1', { concurrencyToken: 'commit-aaa' }));
+    adapter.failUpdate = new TrackerRevisionMismatchError(
+      'interleaved write on stateId',
+      ['stateId'],
+      // Converged: the other writer moved it to the SAME state we were writing.
+      makeIssue('ext-1', { stateId: 'state-done' }),
+    );
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.guardedConverged).toBe(1);
+    expect(report.guardedConflicts).toBe(0);
+    expect(openConflicts(connection.id)).toHaveLength(0);
+    const settled = fetchOutbox(row.id);
+    expect(settled.state).toBe('done');
+    expect(settled.last_error).toContain('converged');
+  });
+
+  it('settles a state write done when the pre-send read finds the issue gone', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const row = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new GuardedAdapter();
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.updateCalls).toHaveLength(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
+  });
+
+  it('an unguarded provider still sends without a pre-send read', async () => {
+    const connection = seedConnection();
+    linkTask(connection.id, 'ext-1', BASE_BASELINE);
+    enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new FakeAdapter();
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.updateCalls).toEqual([
+      { externalId: 'ext-1', stateId: 'state-done', expectedToken: undefined },
+    ]);
+  });
+});
+
+describe('drainOutbox — guarded content writes', () => {
+  it('forwards the divergence check’s own read as the guard token', async () => {
+    const connection = seedConnection({ provider: 'beads', content_sync_mode: 'auto' });
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const adapter = new GuardedAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE, { concurrencyToken: 'commit-bbb' });
+    enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+
+    await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.contentCalls).toHaveLength(1);
+    expect(adapter.contentCalls[0].expectedToken).toBe('commit-bbb');
+    // ONE read, not two: the lost-update guard's pre-send fetch IS the token
+    // capture.
+    expect(adapter.contentCalls[0].patch.title).toBe('New title');
+  });
+
+  it('holds a clobbered content field as a conflict and never retries', async () => {
+    const connection = seedConnection({ provider: 'beads', content_sync_mode: 'auto' });
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const adapter = new GuardedAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE, { concurrencyToken: 'commit-bbb' });
+    adapter.failContent = new TrackerRevisionMismatchError(
+      'interleaved write on title',
+      ['title'],
+      makeIssue('ext-1', { title: 'Their title' }),
+    );
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.guardedConflicts).toBe(1);
+    expect(report.contentWritten).toBe(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
+    expect(fetchOutbox(row.id).next_attempt_at).toBeNull();
+    expect(openConflicts(connection.id)[0]).toMatchObject({
+      field: 'title',
+      local_value: 'New title',
+      remote_value: 'Their title',
+      state: 'open',
+    });
+  });
+
+  it('ignores a reported field this write never patched', async () => {
+    const connection = seedConnection({ provider: 'beads', content_sync_mode: 'auto' });
+    seedTask('tsk_1', { title: 'New title' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const adapter = new GuardedAdapter();
+    seedRemote(adapter, 'ext-1', BASE_BASELINE, { concurrencyToken: 'commit-bbb' });
+    // The interleave touched the DESCRIPTION; our patch only carried the title,
+    // so nothing of ours clobbered anything of theirs.
+    adapter.failContent = new TrackerRevisionMismatchError(
+      'interleaved write on description',
+      ['description'],
+      makeIssue('ext-1', { description: 'their notes' }),
+    );
+    const row = enqueueContentWrite(connection.id, 'ext-1', 'tsk_1');
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.guardedConflicts).toBe(0);
+    expect(report.guardedConverged).toBe(1);
+    expect(openConflicts(connection.id)).toHaveLength(0);
+    expect(fetchOutbox(row.id).state).toBe('done');
+  });
+});
+
+describe('drainOutbox — a requires-guarded provider whose adapter cannot guard', () => {
+  it('REFUSES an update_state row terminally rather than sending it unguarded', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    linkTask(connection.id, 'ext-1', BASE_BASELINE, 'beads');
+    const row = enqueueStateWrite(connection.id, 'ext-1', 'completed');
+    const adapter = new DegradedBeadsAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(adapter.updateCalls).toHaveLength(0);
+    expect(report.failedTerminal).toBe(1);
+    const settled = fetchOutbox(row.id);
+    // TERMINAL, not held: a row no drain will ever send would halt the
+    // kind-agnostic inbound blocker at this issue forever.
+    expect(settled.state).toBe('failed');
+    expect(settled.last_error).toContain('requires guarded updates');
+  });
+
+  it('still drains a CREATE — a fresh issue has no concurrent editor to race', async () => {
+    const connection = seedConnection({ provider: 'beads' });
+    seedIdeaRow('idea_1');
+    const row = enqueueCreate(connection.id, 'tsk_1', 'client-key-1');
+    seedTask('tsk_1');
+    const adapter = new DegradedBeadsAdapter();
+
+    const report = await drainOutbox(makeDeps(adapter), connection);
+
+    expect(report.created).toBe(1);
+    expect(fetchOutbox(row.id).state).toBe('done');
   });
 });

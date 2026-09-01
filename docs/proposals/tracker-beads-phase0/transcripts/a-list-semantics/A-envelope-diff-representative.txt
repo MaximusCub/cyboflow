@@ -1,0 +1,56 @@
+=== envelope diff, bd count --json ===
+-- no BD_JSON_ENVELOPE --
+{
+  "count": 73,
+  "schema_version": 1
+}
+-- BD_JSON_ENVELOPE=1 --
+{
+  "data": {
+    "count": 73
+  },
+  "schema_version": 1
+}
+
+=== envelope diff, bd show --json (single id, no --all) ===
+-- no BD_JSON_ENVELOPE --
+[
+  {
+    "id": "bp-akt",
+    "title": "bulk 01",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:21Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:13Z",
+    "closed_at": "2026-08-27T04:33:13Z",
+    "close_reason": "phase0 close probe",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+-- BD_JSON_ENVELOPE=1 --
+{
+  "data": [
+    {
+      "id": "bp-akt",
+      "title": "bulk 01",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:21Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:33:13Z",
+      "closed_at": "2026-08-27T04:33:13Z",
+      "close_reason": "phase0 close probe",
+      "dependent_count": 0,
+      "dependency_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}

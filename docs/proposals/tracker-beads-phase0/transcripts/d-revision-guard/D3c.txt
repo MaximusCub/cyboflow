@@ -1,0 +1,41 @@
+=== D3c: does bd update --json report the PRE-write revision? ===
+$ bd create 'D3c probe' --json   (fresh issue)
+{
+  "created_at": "2026-08-27T04:36:50.360876Z",
+  "created_by": "Krishna",
+  "id": "dg-v42",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "D3c probe",
+  "updated_at": "2026-08-27T04:36:50.360876Z"
+}
+exit=0
+PRE-write state (what an engine would have read):
+    "title": "D3c probe",
+    "updated_at": "2026-08-27T04:36:50Z",
+$ BD_JSON_ENVELOPE=1 bd update dg-v42 --title 'D3c AFTER' --json   (full output)
+{
+  "data": [
+    {
+      "id": "dg-v42",
+      "title": "D3c AFTER",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:36:50Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:37:03Z"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+-> keys present in update output:
+['created_at', 'created_by', 'id', 'issue_type', 'notes', 'owner', 'priority', 'status', 'title', 'updated_at']
+exit=0
+CONCLUSION CHECK: any key containing prev/old/before/from/expected?
+grep-exit=1 (1 = none found)

@@ -1,0 +1,262 @@
+$ ls -laR .beads/ | head -120
+total 40
+drwx------@ 9 raimundoesteva  wheel   288 Aug 26 21:31 .
+drwxr-xr-x@ 7 raimundoesteva  wheel   224 Aug 26 21:31 ..
+-rw-------@ 1 raimundoesteva  wheel  1758 Aug 26 21:31 .gitignore
+-rw-------@ 1 raimundoesteva  wheel     6 Aug 26 21:31 .local_version
+-rw-r--r--@ 1 raimundoesteva  wheel  2283 Aug 26 21:31 README.md
+-rw-------@ 1 raimundoesteva  wheel  2622 Aug 26 21:31 config.yaml
+drwx------@ 4 raimundoesteva  wheel   128 Aug 26 21:31 embeddeddolt
+-rw-r--r--@ 1 raimundoesteva  wheel     0 Aug 26 21:31 interactions.jsonl
+-rw-------@ 1 raimundoesteva  wheel   156 Aug 26 21:31 metadata.json
+
+.beads//embeddeddolt:
+total 0
+drwx------@ 4 raimundoesteva  wheel  128 Aug 26 21:31 .
+drwx------@ 9 raimundoesteva  wheel  288 Aug 26 21:31 ..
+-rw-------@ 1 raimundoesteva  wheel    0 Aug 26 21:31 .lock
+drwxr-xr-x@ 3 raimundoesteva  wheel   96 Aug 26 21:31 elock
+
+.beads//embeddeddolt/elock:
+total 0
+drwxr-xr-x@ 3 raimundoesteva  wheel   96 Aug 26 21:31 .
+drwx------@ 4 raimundoesteva  wheel  128 Aug 26 21:31 ..
+drwxr-xr-x@ 6 raimundoesteva  wheel  192 Aug 26 21:31 .dolt
+
+.beads//embeddeddolt/elock/.dolt:
+total 16
+drwxr-xr-x@ 6 raimundoesteva  wheel  192 Aug 26 21:31 .
+drwxr-xr-x@ 3 raimundoesteva  wheel   96 Aug 26 21:31 ..
+-rwxrwxrwx@ 1 raimundoesteva  wheel    2 Aug 26 21:31 config.json
+drwxr-xr-x@ 7 raimundoesteva  wheel  224 Aug 26 21:31 noms
+-rwxrwxrwx@ 1 raimundoesteva  wheel   83 Aug 26 21:31 repo_state.json
+drwxr-xr-x@ 2 raimundoesteva  wheel   64 Aug 26 21:31 temptf
+
+.beads//embeddeddolt/elock/.dolt/noms:
+total 4312
+drwxr-xr-x@ 7 raimundoesteva  wheel      224 Aug 26 21:31 .
+drwxr-xr-x@ 6 raimundoesteva  wheel      192 Aug 26 21:31 ..
+-rw-------@ 1 raimundoesteva  wheel        0 Aug 26 21:31 LOCK
+-rw-r--r--@ 1 raimundoesteva  wheel    53882 Aug 26 21:31 journal.idx
+-rw-------@ 1 raimundoesteva  wheel      147 Aug 26 21:31 manifest
+drwxr-xr-x@ 2 raimundoesteva  wheel       64 Aug 26 21:31 oldgen
+-rw-r--r--@ 1 raimundoesteva  wheel  1237287 Aug 26 21:31 vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+
+.beads//embeddeddolt/elock/.dolt/noms/oldgen:
+total 0
+drwxr-xr-x@ 2 raimundoesteva  wheel   64 Aug 26 21:31 .
+drwxr-xr-x@ 7 raimundoesteva  wheel  224 Aug 26 21:31 ..
+
+.beads//embeddeddolt/elock/.dolt/temptf:
+total 0
+drwxr-xr-x@ 2 raimundoesteva  wheel   64 Aug 26 21:31 .
+drwxr-xr-x@ 6 raimundoesteva  wheel  192 Aug 26 21:31 ..
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd create 'lock probe A' -p 1 --json
+{
+  "data": {
+    "id": "elock-w9n",
+    "title": "lock probe A",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26.23628Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26.23628Z"
+  },
+  "schema_version": 1
+}
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd create 'lock probe B' -p 1 --json
+{
+  "data": {
+    "id": "elock-l0n",
+    "title": "lock probe B",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27.276547Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27.276547Z"
+  },
+  "schema_version": 1
+}
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd list --all --json | head -40
+{
+  "data": [
+    {
+      "id": "elock-l0n",
+      "title": "lock probe B",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:27Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:27Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    },
+    {
+      "id": "elock-w9n",
+      "title": "lock probe A",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:26Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:26Z",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+---
+$ bd list --all --json | head -25
+[
+  {
+    "id": "elock-l0n",
+    "title": "lock probe B",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "elock-w9n",
+    "title": "lock probe A",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+exit=0
+---
+$ bd show elock-w9n --json | head -25
+[
+  {
+    "id": "elock-w9n",
+    "title": "lock probe A",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+exit=0
+---
+$ BD_JSON_ENVELOPE=1 bd show elock-w9n --json | head -12
+{
+  "data": [
+    {
+      "id": "elock-w9n",
+      "title": "lock probe A",
+      "status": "open",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:26Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:26Z",
+exit=0
+---
+$ ps -eo pid,comm,args | grep -Ei '[b]d |[d]olt' | head -20; echo '(bd/dolt processes at rest above)'
+ 5318 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=353259776404 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708996619331833 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=103
+22844 /opt/homebrew/bi /opt/homebrew/bin/bd send-metrics
+22956 /bin/zsh         /bin/zsh -c source /Users/raimundoesteva/.claude/shell-snapshots/snapshot-zsh-1787781860273-s8coh8.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012: && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'BASE=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks\012T="$BASE/t.sh"\012"$T" e1-lock "ps -eo pid,comm,args | grep -Ei '"'"'[b]d |[d]olt'"'"' | head -20; echo '"'"'(bd/dolt processes at rest above)'"'"'"\012cd "$BASE"\012# background write loop for ~12s\012( for i in $(seq 1 60); do bd update elock-w9n -p $(( (i % 3) + 1 )) >/dev/null 2>&1; done ) &\012LOOP=$!\012sleep 0.7\012{\012echo "\$ (during write loop) lsof +D .beads 2>/dev/null | head -40"\012lsof +D "$BASE/.beads" 2>/dev/null | head -40\012echo "exit=$?"\012echo "---"\012echo "\$ (during write loop) ps -eo pid,args | grep [b]d"\012ps -eo pid,args | grep '"'"'[b]d '"'"' | head -10\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012sleep 0.5\012BDPID=$(pgrep -n -f "bd update elock" || true)\012{\012echo "\$ lsof -p <bd pid $BDPID> | grep -Ei '"'"'beads|dolt|noms|lock'"'"'"\012lsof -p "$BDPID" 2>/dev/null | grep -Ei '"'"'beads|dolt|noms|lock'"'"' | head -30\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012wait $LOOP\012echo "loop done"\012tail -50 "$BASE/transcripts/e1-lock.txt"' && pwd -P >| /tmp/claude-9272-cwd
+22958 /bin/zsh         /bin/zsh /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/t.sh e1-lock ps -eo pid,comm,args | grep -Ei '[b]d |[d]olt' | head -20; echo '(bd/dolt processes at rest above)'
+93011 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=5 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656231343 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708990997080739 --background-page deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=62
+93014 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=7 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656424581 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708992871164437 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=78
+93015 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=6 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656427250 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708991934122588 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=78
+93016 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=8 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656431579 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708993808206286 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=78
+93017 /Applications/Su /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=9 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656439010 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708994745248135 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=78
+(bd/dolt processes at rest above)
+exit=0
+---
+$ (during write loop) lsof +D .beads 2>/dev/null | head -40
+COMMAND   PID           USER   FD   TYPE DEVICE SIZE/OFF      NODE NAME
+beads   22971 raimundoesteva    6u   REG   1,15        0 184256711 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+beads   22971 raimundoesteva    7r   DIR   1,15      256 184256708 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+beads   22971 raimundoesteva    8u   REG   1,15  1289807 184256713 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+beads   22971 raimundoesteva    9r   DIR   1,15       64 184256712 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/oldgen
+beads   22971 raimundoesteva   10u   REG   1,15    49152 184256714 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/journal.idx
+exit=0
+---
+$ (during write loop) ps -eo pid,args | grep [b]d
+ 5318 /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=353259776404 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708996619331833 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=103
+22844 /opt/homebrew/bin/bd send-metrics
+22956 /bin/zsh -c source /Users/raimundoesteva/.claude/shell-snapshots/snapshot-zsh-1787781860273-s8coh8.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012: && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'BASE=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks\012T="$BASE/t.sh"\012"$T" e1-lock "ps -eo pid,comm,args | grep -Ei '"'"'[b]d |[d]olt'"'"' | head -20; echo '"'"'(bd/dolt processes at rest above)'"'"'"\012cd "$BASE"\012# background write loop for ~12s\012( for i in $(seq 1 60); do bd update elock-w9n -p $(( (i % 3) + 1 )) >/dev/null 2>&1; done ) &\012LOOP=$!\012sleep 0.7\012{\012echo "\$ (during write loop) lsof +D .beads 2>/dev/null | head -40"\012lsof +D "$BASE/.beads" 2>/dev/null | head -40\012echo "exit=$?"\012echo "---"\012echo "\$ (during write loop) ps -eo pid,args | grep [b]d"\012ps -eo pid,args | grep '"'"'[b]d '"'"' | head -10\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012sleep 0.5\012BDPID=$(pgrep -n -f "bd update elock" || true)\012{\012echo "\$ lsof -p <bd pid $BDPID> | grep -Ei '"'"'beads|dolt|noms|lock'"'"'"\012lsof -p "$BDPID" 2>/dev/null | grep -Ei '"'"'beads|dolt|noms|lock'"'"' | head -30\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012wait $LOOP\012echo "loop done"\012tail -50 "$BASE/transcripts/e1-lock.txt"' && pwd -P >| /tmp/claude-9272-cwd
+22962 /bin/zsh -c source /Users/raimundoesteva/.claude/shell-snapshots/snapshot-zsh-1787781860273-s8coh8.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012: && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'BASE=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks\012T="$BASE/t.sh"\012"$T" e1-lock "ps -eo pid,comm,args | grep -Ei '"'"'[b]d |[d]olt'"'"' | head -20; echo '"'"'(bd/dolt processes at rest above)'"'"'"\012cd "$BASE"\012# background write loop for ~12s\012( for i in $(seq 1 60); do bd update elock-w9n -p $(( (i % 3) + 1 )) >/dev/null 2>&1; done ) &\012LOOP=$!\012sleep 0.7\012{\012echo "\$ (during write loop) lsof +D .beads 2>/dev/null | head -40"\012lsof +D "$BASE/.beads" 2>/dev/null | head -40\012echo "exit=$?"\012echo "---"\012echo "\$ (during write loop) ps -eo pid,args | grep [b]d"\012ps -eo pid,args | grep '"'"'[b]d '"'"' | head -10\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012sleep 0.5\012BDPID=$(pgrep -n -f "bd update elock" || true)\012{\012echo "\$ lsof -p <bd pid $BDPID> | grep -Ei '"'"'beads|dolt|noms|lock'"'"'"\012lsof -p "$BDPID" 2>/dev/null | grep -Ei '"'"'beads|dolt|noms|lock'"'"' | head -30\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012wait $LOOP\012echo "loop done"\012tail -50 "$BASE/transcripts/e1-lock.txt"' && pwd -P >| /tmp/claude-9272-cwd
+22977 /bin/zsh -c source /Users/raimundoesteva/.claude/shell-snapshots/snapshot-zsh-1787781860273-s8coh8.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012: && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/c-crud-metadata\012F=transcripts/C3-metadata.txt\012UUID1="probe-uuid-1-11111111-2222-3333-4444-555555555555"\012UUID2="probe-uuid-2-66666666-7777-8888-9999-000000000000"\012{\012  echo "UUID1=$UUID1"\012  echo "UUID2=$UUID2"\012  echo\012  echo "$ bd create '"'"'c3 metadata-at-create'"'"' --metadata '"'"'{\"cyboflow_client_key\":\"$UUID1\"}'"'"' --json"\012  BD_JSON_ENVELOPE=1 bd create "c3 metadata-at-create" --metadata "{\"cyboflow_client_key\":\"$UUID1\"}" --json\012  echo "exit=$?"\012} > "$F" 2>&1\012cat "$F"' < /dev/null && pwd -P >| /tmp/claude-e45b-cwd
+22979 bd create c3 metadata-at-create --metadata {"cyboflow_client_key":"probe-uuid-1-11111111-2222-3333-4444-555555555555"} --json
+22989 bd update elock-w9n -p 1
+22997 /bin/zsh -c source /Users/raimundoesteva/.claude/shell-snapshots/snapshot-zsh-1787781860273-s8coh8.sh 2>/dev/null || true && export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012export CODEX_COMPANION_SESSION_ID='c83dede6-2af5-4ea1-b0fc-f9f1686e98c0'\012export CODEX_COMPANION_TRANSCRIPT_PATH='/Users/raimundoesteva/.claude/projects/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0.jsonl'\012export CLAUDE_PLUGIN_DATA='/Users/raimundoesteva/.claude/plugins/data/codex-openai-codex'\012: && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'BASE=/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks\012T="$BASE/t.sh"\012"$T" e1-lock "ps -eo pid,comm,args | grep -Ei '"'"'[b]d |[d]olt'"'"' | head -20; echo '"'"'(bd/dolt processes at rest above)'"'"'"\012cd "$BASE"\012# background write loop for ~12s\012( for i in $(seq 1 60); do bd update elock-w9n -p $(( (i % 3) + 1 )) >/dev/null 2>&1; done ) &\012LOOP=$!\012sleep 0.7\012{\012echo "\$ (during write loop) lsof +D .beads 2>/dev/null | head -40"\012lsof +D "$BASE/.beads" 2>/dev/null | head -40\012echo "exit=$?"\012echo "---"\012echo "\$ (during write loop) ps -eo pid,args | grep [b]d"\012ps -eo pid,args | grep '"'"'[b]d '"'"' | head -10\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012sleep 0.5\012BDPID=$(pgrep -n -f "bd update elock" || true)\012{\012echo "\$ lsof -p <bd pid $BDPID> | grep -Ei '"'"'beads|dolt|noms|lock'"'"'"\012lsof -p "$BDPID" 2>/dev/null | grep -Ei '"'"'beads|dolt|noms|lock'"'"' | head -30\012echo "---"\012} >> "$BASE/transcripts/e1-lock.txt" 2>&1\012wait $LOOP\012echo "loop done"\012tail -50 "$BASE/transcripts/e1-lock.txt"' && pwd -P >| /tmp/claude-9272-cwd
+93011 /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=5 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656231343 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708990997080739 --background-page deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=62
+93014 /Applications/Superhuman.app/Contents/Frameworks/Superhuman Helper (Renderer).app/Contents/MacOS/Superhuman Helper (Renderer) --type=renderer --user-data-dir=/Users/raimundoesteva/Library/Application Support/Superhuman --standard-schemes=superhuman-app --secure-schemes=superhuman-app --app-path=/Applications/Superhuman.app/Contents/Resources/app.asar --enable-sandbox --disable-background-timer-throttling --js-flags=--max-old-space-size=4096 --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=7 --time-ticks-at-unix-epoch=-1787424953090686 --launch-time-ticks=349656424581 --shared-files --field-trial-handle=1718379636,r,12831539170088172506,10365184257910333803,262144 --enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1543881376530770830,7166730873245170615,4 --trace-process-track-uuid=3190708992871164437 deviceId=native-fc5b8471-f686-404c-b8be-f9d7b35ffdbd buildArchitecture=arm64 hardwareArchitecture=arm64 --seatbelt-client=78
+---
+$ lsof -p <bd pid 23011> | grep -Ei 'beads|dolt|noms|lock'
+beads   23011 raimundoesteva  cwd    DIR   1,15      224 184256006 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks
+---
+$ repeated: lsof -w +D .beads | grep -E 'LOCK|\.lock' (5 samples, 0.4s apart) -- lock column via -F l
+--- sample 1
+--- sample 2
+beads   24087 raimundoesteva    6u   REG   1,15        0 184256711 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+beads   24087 raimundoesteva    7r   DIR   1,15      224 184256708 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+beads   24087 raimundoesteva    8u   REG   1,15  2202544 184256713 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+--- sample 3
+beads   24098 raimundoesteva    6u   REG   1,15        0 184256711 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+beads   24098 raimundoesteva    7r   DIR   1,15      224 184256708 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+beads   24098 raimundoesteva    8u   REG   1,15  2236581 184256713 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+--- sample 4
+beads   24116 raimundoesteva    6u   REG   1,15        0 184256711 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+beads   24116 raimundoesteva    7r   DIR   1,15      224 184256708 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+beads   24116 raimundoesteva    8u   REG   1,15  2253574 184256713 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+--- sample 5
+beads   24127 raimundoesteva    6u   REG   1,15        0 184256711 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+beads   24127 raimundoesteva    7r   DIR   1,15      256 184256708 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+beads   24127 raimundoesteva    8u   REG   1,15      147 184261001 /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/nbs_manifest_1780426846
+---
+$ lsof -w -F pcnl +D .beads (lock-flag field 'l'; sample during write)
+p24145
+cbeads
+f6
+l 
+n/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK
+f7
+l 
+n/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms
+f8
+l 
+n/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/temptf/dolt_embedded_metrics
+f9
+l 
+n/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+f10
+l 
+n/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/oldgen
+---

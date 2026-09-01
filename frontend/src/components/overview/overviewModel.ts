@@ -362,6 +362,7 @@ const TRACKER_PROVIDER_LABEL: Record<TrackerProvider, string> = {
   linear: 'Linear',
   plane: 'Plane',
   dart: 'Dart',
+  beads: 'Beads',
 };
 
 /** Merged-sprint-run threshold that recommends a Compound consolidation pass. */

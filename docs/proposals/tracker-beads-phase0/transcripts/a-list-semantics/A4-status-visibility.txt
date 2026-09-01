@@ -1,0 +1,8 @@
+=== default-list visibility per status ===
+  open (bp-1hd): default-visible=1 all-visible=1
+  in_progress (bp-cwa): default-visible=1 all-visible=1
+  blocked (bp-4sp): default-visible=1 all-visible=1
+  deferred (bp-tmr): default-visible=1 all-visible=1
+  closed (bp-ppn): default-visible=0 all-visible=1
+  pinned (bp-8zk): default-visible=0 all-visible=1
+  hooked (bp-5yq): default-visible=1 all-visible=1

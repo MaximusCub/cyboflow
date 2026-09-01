@@ -1,0 +1,529 @@
+=== D3a: conditional-update flag sweep ===
+$ bd update --help
+Update one or more issues.
+
+If no issue ID is provided, updates the last touched issue (from most recent
+create, update, show, or close operation).
+
+Usage:
+  bd update [id...] [flags]
+
+Flags:
+      --acceptance string            Acceptance criteria
+      --add-label strings            Add labels (repeatable)
+      --allow-empty-description      Allow empty description replacement when reading from stdin or file
+      --append-notes string          Append to existing notes (with newline separator)
+  -a, --assignee string              Assignee
+      --await-id string              Set gate await_id (e.g., GitHub run ID for gh:run gates)
+      --body-file string             Read description from file (use - for stdin)
+      --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)
+      --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then
+  -d, --description string           Issue description
+      --design string                Design notes
+      --design-file string           Read design from file (use - for stdin)
+      --due string                   Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
+      --ephemeral                    Mark issue as ephemeral (wisp) - not exported to JSONL
+  -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
+      --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
+  -h, --help                         help for update
+      --history                      Clear no-history flag (re-enable Dolt commit history)
+      --metadata string              Set custom metadata (JSON string or @file.json to read from file)
+      --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
+      --notes string                 Additional notes
+      --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
+      --persistent                   Mark issue as persistent (promote wisp to regular issue)
+  -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
+      --remove-label strings         Remove labels (repeatable)
+      --session string               Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)
+      --set-labels strings           Set labels, replacing all existing (repeatable)
+      --set-metadata stringArray     Set metadata key=value (repeatable, e.g., --set-metadata team=platform)
+      --spec-id string               Link to specification document
+  -s, --status string                New status
+      --stdin                        Read description from stdin (alias for --body-file -)
+      --title string                 New title
+  -t, --type string                  New type (bug|feature|task|epic|chore|decision); custom types require types.custom config
+      --unset-metadata stringArray   Remove metadata key (repeatable, e.g., --unset-metadata team)
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+$ bd edit --help
+Edit an issue field using your configured $EDITOR.
+
+By default, edits the description. Use flags to edit other fields.
+
+Examples:
+  bd edit bd-42                    # Edit description
+  bd edit bd-42 --title            # Edit title
+  bd edit bd-42 --design           # Edit design notes
+  bd edit bd-42 --notes            # Edit notes
+  bd edit bd-42 --acceptance       # Edit acceptance criteria
+
+Usage:
+  bd edit [id] [flags]
+
+Flags:
+      --acceptance    Edit the acceptance criteria
+      --description   Edit the description (default)
+      --design        Edit the design notes
+  -h, --help          help for edit
+      --notes         Edit the notes
+      --title         Edit the title
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+-----
+$ bd vc --help
+Version control operations for the beads database.
+
+These commands provide git-like version control for your issue data, including branching, merging, and
+viewing history.
+
+Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.
+This subcommand provides additional operations like merge and commit.
+
+Usage:
+  bd vc [command]
+
+Available Commands:
+  commit      Create a commit with all staged changes
+  merge       Merge a branch into the current branch
+  status      Show current branch and uncommitted changes
+
+Flags:
+  -h, --help   help for vc
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+
+Use "bd vc [command] --help" for more information about a command.
+exit=0
+-----
+$ bd dolt --help
+Configure and manage Dolt database settings and server lifecycle.
+
+Beads uses a dolt sql-server for all database operations. The server is
+auto-started transparently when needed. Use these commands for explicit
+control or diagnostics.
+
+Server lifecycle:
+  bd dolt start        Start the Dolt server for this project
+  bd dolt stop         Stop the Dolt server for this project
+  bd dolt status       Show Dolt server status
+
+Configuration:
+  bd dolt show         Show current Dolt configuration with connection test
+  bd dolt set <k> <v>  Set a configuration value
+  bd dolt test         Test server connection
+
+Version control:
+  bd dolt commit       Commit pending changes
+  bd dolt push         Push commits to Dolt remote
+  bd dolt pull         Pull commits from Dolt remote
+
+Remote management:
+  bd dolt remote add <name> <url>   Add a Dolt remote
+  bd dolt remote list                List configured remotes
+  bd dolt remote remove <name>       Remove a Dolt remote
+
+Configuration keys for 'bd dolt set':
+  database  Database name (default: issue prefix or "beads")
+  host      Server host (default: 127.0.0.1)
+  port      Server port (auto-detected; override with bd dolt set port <N>)
+  user      MySQL user (default: root)
+  data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
+
+Flags for 'bd dolt set':
+  --update-config  Also write to config.yaml for team-wide defaults
+
+Examples:
+  bd dolt set database myproject
+  bd dolt set host 192.168.1.100 --update-config
+  bd dolt set data-dir /home/user/.beads-dolt/myproject
+  bd dolt test
+
+Usage:
+  bd dolt [command]
+
+Available Commands:
+  clean-databases Drop stale test databases from the Dolt server
+  commit          Create a Dolt commit from pending changes
+  killall         Kill all orphan Dolt server processes
+  pull            Pull commits from Dolt remote
+  push            Push commits to Dolt remote
+  remote          Manage Dolt remotes
+  set             Set a Dolt configuration value
+  show            Show current Dolt configuration with connection status
+  start           Start the Dolt SQL server for this project
+  status          Show Dolt engine status
+  stop            Stop the Dolt SQL server for this project
+  test            Test connection to Dolt server
+
+Flags:
+  -h, --help   help for dolt
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+
+Use "bd dolt [command] --help" for more information about a command.
+exit=0
+-----
+$ bd dolt --help (subcommand list tail)
+Available Commands:
+  clean-databases Drop stale test databases from the Dolt server
+  commit          Create a Dolt commit from pending changes
+  killall         Kill all orphan Dolt server processes
+  pull            Pull commits from Dolt remote
+  push            Push commits to Dolt remote
+  remote          Manage Dolt remotes
+  set             Set a Dolt configuration value
+  show            Show current Dolt configuration with connection status
+  start           Start the Dolt SQL server for this project
+  status          Show Dolt engine status
+  stop            Stop the Dolt SQL server for this project
+  test            Test connection to Dolt server
+
+Flags:
+  -h, --help   help for dolt
+
+Global Flags:
+exit=0
+$ bd --help (top-level command inventory)
+exit=0
+$ bd help  (full top-level)
+Issues chained together like beads. A lightweight issue tracker with first-class dependency support.
+
+Usage:
+  bd [flags]
+  bd [command]
+
+Working With Issues:
+  assign            Assign an issue to someone
+  children          List child beads of a parent
+  close             Close one or more issues
+  comment           Add a comment to an issue
+  comments          View or manage comments on an issue
+  create            Create a new issue (or batch from markdown/graph JSON)
+  create-form       Create a new issue using an interactive form
+  delete            Delete one or more issues and clean up references
+  edit              Edit an issue field in $EDITOR
+  gate              Manage async coordination gates
+  label             Manage issue labels
+  link              Link two issues with a dependency
+  list              List issues
+  merge-slot        Manage merge-slot gates for serialized conflict resolution
+  note              Append a note to an issue
+  priority          Set the priority of an issue
+  promote           Promote a wisp to a permanent bead
+  q                 Quick capture: create issue and output only ID
+  query             Query issues using a simple query language
+  reopen            Reopen one or more closed issues
+  search            Search issues by text query
+  set-state         Set operational state (creates event + updates label)
+  show              Show issue details
+  state             Query the current value of a state dimension
+  tag               Add a label to an issue
+  todo              Manage TODO items (convenience wrapper for task issues)
+  update            Update one or more issues
+
+Views & Reports:
+  count             Count issues matching filters
+  diff              Show changes between two commits or branches
+  find-duplicates   Find semantically similar issues using text analysis or AI
+  history           Show version history for an issue
+  lint              Check issues for missing template sections
+  stale             Show stale issues (not updated recently)
+  status            Show issue database overview and statistics
+  statuses          List valid issue statuses
+  types             List valid issue types
+
+Dependencies & Structure:
+  dep               Manage dependencies
+  duplicate         Mark an issue as a duplicate of another
+  duplicates        Find and optionally merge duplicate issues
+  epic              Epic management commands
+  graph             Display issue dependency graph
+  supersede         Mark an issue as superseded by a newer one
+  swarm             Swarm management for structured epics
+
+Sync & Data:
+  backup            Back up your beads database
+  branch            List or create branches
+  export            Export issues to JSONL format
+  federation        Manage peer-to-peer federation with other workspaces
+  import            Import issues from a JSONL file or stdin into the database
+  restore           Restore the pre-compaction content of a compacted issue
+  vc                Version control operations
+
+Setup & Configuration:
+  bootstrap         Non-destructive database setup for fresh clones and recovery
+  config            Manage configuration settings
+  context           Show effective backend identity and repository context
+  dolt              Configure Dolt database settings
+  forget            Remove a persistent memory
+  hooks             Manage git hooks for beads integration
+  human             Show essential commands for human users
+  info              Show database information
+  init              Initialize bd in the current directory
+  kv                Key-value store commands
+  memories          List or search persistent memories
+  onboard           Display minimal snippet for agent instructions file
+  prime             Output AI-optimized workflow context
+  quickstart        Quick start guide for bd
+  recall            Retrieve a specific memory
+  remember          Store a persistent memory
+  setup             Setup integration with AI editors
+  where             Show active beads location
+
+Maintenance:
+  batch             Run multiple write operations in a single database transaction
+  compact           Squash old Dolt commits to reduce history size
+  doctor            Check and fix beads installation health (start here)
+  flatten           Squash all Dolt history into a single commit
+  gc                Garbage collect: decay old issues, compact Dolt commits, run Dolt GC
+  migrate           Database migration commands
+  ping              Check database connectivity
+  preflight         Show PR readiness checklist
+  prune             Delete old closed beads to reclaim space and shrink exports
+  purge             Delete closed ephemeral beads to reclaim space
+  recompute-blocked Recompute is_blocked for all issues (repairs stale flags after a pull)
+  rename-prefix     Rename the issue prefix for all issues in the database
+  rules             Audit and compact Claude rules
+  sql               Execute raw SQL against the beads database
+  upgrade           Check and manage bd version upgrades
+  worktree          Manage git worktrees for parallel development
+
+Integrations & Advanced:
+  admin             Administrative commands for database maintenance
+  jira              Jira integration commands
+  linear            Linear integration commands
+  repo              Manage multiple repository configuration
+
+Additional Commands:
+  ado               Azure DevOps integration commands
+  audit             Record and label agent interactions (append-only JSONL)
+  blocked           Show blocked issues
+  completion        Generate the autocompletion script for the specified shell
+  cook              Compile a formula into a proto (ephemeral by default)
+  defer             Defer one or more issues for later
+  formula           Manage workflow formulas
+  github            GitHub integration commands
+  gitlab            GitLab integration commands
+  help              Help about any command
+  init-safety       Explain bd init flag semantics and the destroy-token format
+  mail              Delegate to mail provider (e.g., gt mail)
+  metrics           Show or change anonymous usage-metrics settings
+  mol               Molecule commands (work templates)
+  notion            Notion integration commands
+  orphans           Identify orphaned issues (referenced in commits but still open)
+  ready             Show ready work (open, no active blockers)
+  rename            Rename an issue ID
+  ship              Publish a capability for cross-project dependencies
+  undefer           Undefer one or more issues (restore to open)
+  version           Print version information
+
+Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+  -h, --help                      help for bd
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+  -V, --version                   Print version information
+
+Use "bd [command] --help" for more information about a command.
+exit=0
+$ bd sql --help
+Execute a raw SQL query against the underlying database (SQLite or Dolt).
+
+Useful for debugging, maintenance, and working around bugs in higher-level commands.
+
+Examples:
+  bd sql 'SELECT COUNT(*) FROM issues'
+  bd sql 'SELECT id, title FROM issues WHERE status = "open" LIMIT 5'
+  bd sql 'DELETE FROM dirty_issues WHERE issue_id = "bd-abc123"'
+  bd sql --csv 'SELECT id, title, status FROM issues'
+
+The query is passed directly to the database. SELECT queries return results as a
+table (or JSON/CSV with --json/--csv). Non-SELECT queries (INSERT, UPDATE, DELETE)
+report the number of rows affected.
+
+WARNING: Direct database access bypasses the storage layer. Use with caution.
+
+Usage:
+  bd sql <query> [flags]
+
+Flags:
+      --csv    Output results in CSV format
+  -h, --help   help for sql
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+-----
+$ bd batch --help
+Run multiple write operations in a single database transaction.
+
+Commands are read from stdin (one per line) or from a file via -f/--file.
+All operations execute inside a single dolt transaction: on any error the
+whole batch is rolled back, otherwise it is committed with one DOLT_COMMIT.
+
+This is intended for shell scripts that currently invoke 'bd' many times in
+a loop, which causes severe write amplification on a dolt sql-server backed
+by btrfs+compression. Batching collapses N invocations into one transaction
+and one dolt commit.
+
+Grammar (one command per line):
+  close <id> [reason...]
+  update <id> <key>=<value> [<key>=<value> ...]
+  create <type> <priority> <title...>
+  dep add <from-id> <to-id> [type]
+  dep remove <from-id> <to-id>
+  #comment  (blank lines and '# ...' comments are ignored)
+
+Supported 'update' keys: status, priority, title, assignee
+Supported dependency types: see 'bd dep add --help' (default: blocks)
+
+Tokens are whitespace-separated. Double-quoted strings ("like this") may
+contain spaces; use \" to embed a quote and \\ for a backslash.
+
+Examples:
+  # From a pipe
+  bd list --status stale -q | awk '{print "close",$1," stale"}' | bd batch
+
+  # From a file
+  bd batch -f operations.txt
+
+  # Inline
+  printf 'close bd-1 done\nupdate bd-2 status=in_progress\n' | bd batch
+
+On success, exits 0 and prints a summary (or JSON with --json). On any error,
+rolls back the entire transaction and exits non-zero with the failing line.
+
+NOTE: This is a narrow subset. Commands like 'show', 'list', 'ready', 'sync',
+complex create flows, or any flag not listed above are NOT accepted. Use
+normal 'bd' subcommands for interactive/read operations.
+
+Usage:
+  bd batch [flags]
+
+Flags:
+      --dry-run          Parse input and echo commands without executing
+  -f, --file string      Read commands from file instead of stdin
+  -h, --help             help for batch
+  -m, --message string   DOLT_COMMIT message (default: 'bd: batch N ops by <actor>')
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+--- D3a: vocabulary sweep across ALL subcommand help ---
+$ for c in <all 109 cmds>; do bd $c --help; done | grep -iE 'if-match|expected-revision|expected_revision|cas|optimistic|concurren|etag|revision|--version |lost update|conflict'
+sed: 1: "s/^/[admin
+ado
+assign
+a ...": unescaped newline inside substitute pattern
+sweep-exit=1
+--- D3a: vocabulary sweep across ALL 109 subcommand help texts (retry) ---
+[doctor]     deps, test pollution, git conflicts). Use with --fix to auto-repair.
+[merge-slot] Merge-slot gates serialize conflict resolution in the merge queue.
+[merge-slot] This prevents "monkey knife fights" where multiple polecats race to resolve conflicts
+[merge-slot] and create cascading conflicts.
+[recompute-blocked] committed, or a conflicted pull resolved by hand — the flag can go stale, and a
+sweep done exit=0
+--- D3a: bd config list ---
+$ bd config list
+
+Configuration:
+  auto_compact_enabled = false
+  compact_batch_size = 50
+  compact_parallel_workers = 5
+  compact_tier1_days = 30
+  compact_tier1_dep_levels = 2
+  compact_tier2_commits = 100
+  compact_tier2_days = 90
+  compact_tier2_dep_levels = 5
+  compaction_enabled = false
+  issue_prefix = dg
+
+Also set in config.yaml (not shown above):
+  metrics.disabled = false
+  metrics.endpoint = https://gastownhall-eventsapi.com/mp/collect
+  metrics.notice_shown = true
+  no-git-ops = true
+
+Tip: Run 'bd config show' for all effective config with provenance.
+exit=0

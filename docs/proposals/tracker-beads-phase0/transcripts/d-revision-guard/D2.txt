@@ -1,0 +1,170 @@
+=== D2: field scoping + history ===
+$ bd history --help
+Show the complete version history of an issue, including all commits
+where the issue was modified.
+
+Examples:
+  bd history bd-123           # Show all history for issue bd-123
+  bd history bd-123 --limit 5 # Show last 5 changes
+
+Usage:
+  bd history <id> [flags]
+
+Flags:
+  -h, --help        help for history
+      --limit int   Limit number of history entries (0 = all)
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+--- D2a: update TITLE only, capture updated_at ---
+$ bd update dg-qip --title 'D2 title-A' --json
+[
+  {
+    "id": "dg-qip",
+    "title": "D2 title-A",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:10Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:58Z"
+  }
+]
+exit=0
+$ bd show dg-qip --json | grep updated_at
+    "updated_at": "2026-08-27T04:31:58Z",
+exit=0
+--- D2b: update PRIORITY only, capture updated_at ---
+$ bd update dg-qip --priority 3 --json
+[
+  {
+    "id": "dg-qip",
+    "title": "D2 title-A",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:10Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:32:01Z"
+  }
+]
+exit=0
+$ bd show dg-qip --json | grep updated_at
+    "updated_at": "2026-08-27T04:32:01Z",
+exit=0
+--- D2c: bd history (plain) ---
+$ bd history dg-qip
+(eval):6: command not found: timeout
+exit=127
+--- D2d: bd history --json (envelope) ---
+$ BD_JSON_ENVELOPE=1 bd history dg-qip --json
+(eval):9: command not found: timeout
+exit=127
+--- D2c: bd history (plain) [note: no coreutils timeout on macOS, ran direct] ---
+$ bd history dg-qip
+
+📜 History for dg-qip (4 entries)
+
+66k2bi2a 2026-08-26 21:32:01
+  Author: root
+  ○ dg-qip: D2 title-A [P3 - open]
+
+5v3kmpdc 2026-08-26 21:31:58
+  Author: root
+  ○ dg-qip: D2 title-A [P1 - open]
+
+0daqpdgk 2026-08-26 21:31:27
+  Author: root
+  ○ dg-qip: D1 subject EDITED [P1 - open]
+
+tc4q9kq7 2026-08-26 21:31:09
+  Author: root
+  ○ dg-qip: D1 subject [P1 - open]
+
+exit=0
+--- D2d: bd history --json (envelope) ---
+$ BD_JSON_ENVELOPE=1 bd history dg-qip --json
+{
+  "data": [
+    {
+      "CommitHash": "66k2bi2atbe7ko6i41ovgkpq2tumissu",
+      "Committer": "root",
+      "CommitDate": "2026-08-26T21:32:01.431-07:00",
+      "Issue": {
+        "id": "dg-qip",
+        "title": "D2 title-A",
+        "status": "open",
+        "priority": 3,
+        "issue_type": "task",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:31:10Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:32:01Z"
+      }
+    },
+    {
+      "CommitHash": "5v3kmpdctamh22qudcmu26291sunhotm",
+      "Committer": "root",
+      "CommitDate": "2026-08-26T21:31:58.339-07:00",
+      "Issue": {
+        "id": "dg-qip",
+        "title": "D2 title-A",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:31:10Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:31:58Z"
+      }
+    },
+    {
+      "CommitHash": "0daqpdgkegv0l7djn331755i5cjgl0sl",
+      "Committer": "root",
+      "CommitDate": "2026-08-26T21:31:27.986-07:00",
+      "Issue": {
+        "id": "dg-qip",
+        "title": "D1 subject EDITED",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:31:10Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:31:28Z"
+      }
+    },
+    {
+      "CommitHash": "tc4q9kq7qv3lb4p5t3cnvkcugnbe1j7a",
+      "Committer": "root",
+      "CommitDate": "2026-08-26T21:31:09.879-07:00",
+      "Issue": {
+        "id": "dg-qip",
+        "title": "D1 subject",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:31:10Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:31:10Z"
+      }
+    }
+  ],
+  "schema_version": 1
+}
+exit=0

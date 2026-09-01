@@ -1,0 +1,92 @@
+### create fresh B5 target issue
+{
+  "created_at": "2026-08-27T04:37:18.015872Z",
+  "created_by": "Krishna",
+  "id": "bct-dxb",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "B5 import-restamp target",
+  "updated_at": "2026-08-27T04:37:18.015872Z"
+}
+
+### export just this issue
+$ bd export --all 2>/dev/null | grep '"id":"bct-dxb"' (search by id substring first, showing raw grep)
+export exit=0
+export stderr:
+       8 /tmp/full_export.jsonl
+matched line(s):        1
+{"_type":"issue","id":"bct-dxb","title":"B5 import-restamp target","status":"open","priority":2,"issue_type":"task","owner":"13578267+kesteva@users.noreply.github.com","created_at":"2026-08-27T04:37:18Z","created_by":"Krishna","updated_at":"2026-08-27T04:37:18Z","dependency_count":0,"dependent_count":0,"comment_count":0}
+
+### DEFAULT import (no --allow-stale) of the OLDER-timestamped edited row, via stdin
+$ bd import - --json < edited.jsonl
+{
+  "data": {
+    "source": "stdin",
+    "created": 0,
+    "skipped": 1,
+    "stale_skipped_ids": [
+      "bct-dxb"
+    ]
+  },
+  "schema_version": 1
+}
+exit=0
+
+$ bd show bct-dxb --json  (after default import attempt)
+[
+  {
+    "id": "bct-dxb",
+    "title": "B5 import-restamp target",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:37:18Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:37:18Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+### now with --allow-stale
+$ date -u  (wall clock at time of this --allow-stale import, for restamp comparison)
+Thu Aug 27 04:37:46 UTC 2026
+$ bd import --allow-stale - --json < edited.jsonl
+{
+  "data": {
+    "source": "stdin",
+    "created": 1,
+    "skipped": 0,
+    "ids": [
+      "bct-dxb"
+    ]
+  },
+  "schema_version": 1
+}
+exit=0
+
+$ bd show bct-dxb --json  (after --allow-stale import)
+[
+  {
+    "id": "bct-dxb",
+    "title": "B5 RESTAMP TEST title changed",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:37:18Z",
+    "created_by": "Krishna",
+    "updated_at": "2020-01-01T00:00:00Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+$ bd list --all --json --updated-after '2026-08-27T00:00:00Z' | jq to see if bct-dxb still shows up in a NORMAL incremental-sync window after the stale-import
+[]

@@ -114,7 +114,7 @@ import {
 } from './store';
 import { resolveStageIds, stageIdToWriteBackGroup, type TrackerStageIds } from './stateMapping';
 import { carriesTrackerProvenance, normalizeDescription, splitBody } from './provenance';
-import { providerSupportsRemoteArchive } from './providerCapabilities';
+import { guardedUpdatesUnavailable, providerSupportsRemoteArchive } from './providerCapabilities';
 import {
   providerPriorityToken,
   providerTokensEqual,
@@ -238,8 +238,30 @@ export function readArchivedWrittenAt(link: EntityExternalLinkRow): string | nul
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-/** Every provider a link can point at — the lookup order for an unknown-provider entity. */
-const PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart'];
+/**
+ * Every provider a link can point at — the lookup order for an
+ * unknown-provider entity, and the set every outbound trigger iterates.
+ *
+ * KEYED OFF A `Record<TrackerProvider, …>` RATHER THAN WRITTEN AS AN ARRAY. A
+ * bare literal list is invisible to tsc when the provider union grows: a
+ * provider missing from it has no link this module can ever find, so EVERY
+ * outbound trigger — stage, content, archive, rollup — silently goes dark for
+ * it, with nothing failing to compile and no test that does not already know to
+ * look. (That is precisely what happened between the beads adapter landing and
+ * this engine wiring; the migration's own "provider-keyed sites" catalogue
+ * lists only the `Record` sites, because those are the ones tsc finds.) The
+ * `Record` makes the next addition a compile error here.
+ */
+const PROVIDER_LOOKUP_ORDER: Record<TrackerProvider, true> = {
+  linear: true,
+  plane: true,
+  dart: true,
+  beads: true,
+};
+
+const PROVIDERS: readonly TrackerProvider[] = Object.keys(
+  PROVIDER_LOOKUP_ORDER,
+) as TrackerProvider[];
 
 // ---------------------------------------------------------------------------
 // Baseline / payload helpers (shared with outboxWorker)
@@ -465,6 +487,12 @@ function enqueueStateWrite(
 ): boolean {
   const { db } = deps;
   const { connection } = linked;
+
+  // INVARIANT 5's shape again, for a capability rather than a mode: a provider
+  // whose adapter cannot guard an existing-issue write must not have one
+  // QUEUED, because the drain would refuse it and the kind-agnostic inbound
+  // blocker would then halt this issue's pass forever.
+  if (guardedUpdatesUnavailable(connection.provider)) return false;
 
   // Already the group we last wrote for this issue -> nothing to say.
   const targetLink =
@@ -892,6 +920,9 @@ export function enqueueContentWrite(
   const { db } = deps;
   const { connection, link } = linked;
 
+  // See enqueueStateWrite's note — the same gate, for the same reason.
+  if (guardedUpdatesUnavailable(connection.provider)) return false;
+
   const collapsible = listUnresolvedOutbox(db, connection.id).some(
     (row) =>
       row.kind === 'update_content' &&
@@ -1009,6 +1040,9 @@ export function enqueueArchiveWrite(
 ): boolean {
   const { db } = deps;
   const { connection, link } = linked;
+
+  // See enqueueStateWrite's note — the same gate, for the same reason.
+  if (guardedUpdatesUnavailable(connection.provider)) return false;
 
   // Any unresolved archive for this issue already says everything this row
   // would. Unlike the content dedupe there is nothing to re-compose, so an

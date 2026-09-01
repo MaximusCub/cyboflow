@@ -1,0 +1,62 @@
+$ loop: bd create "bulk NN" --silent x55
+created 01 -> bp-akt
+created 02 -> bp-tls
+created 03 -> bp-8mb
+created 04 -> bp-rvh
+created 05 -> bp-2d1
+created 06 -> bp-qlz
+created 07 -> bp-8fu
+created 08 -> bp-5ie
+created 09 -> bp-db3
+created 10 -> bp-zcx
+progress: 10/55 created
+created 11 -> bp-58a
+created 12 -> bp-njl
+created 13 -> bp-b0b
+created 14 -> bp-8cg
+created 15 -> bp-2wn
+created 16 -> bp-5kh
+created 17 -> bp-5me
+created 18 -> bp-3k3
+created 19 -> bp-y47
+created 20 -> bp-d9t
+progress: 20/55 created
+created 21 -> bp-1au
+created 22 -> bp-vrg
+created 23 -> bp-hdb
+created 24 -> bp-str
+created 25 -> bp-re8
+created 26 -> bp-2ip
+created 27 -> bp-adm
+created 28 -> bp-x2u
+created 29 -> bp-wwd
+created 30 -> bp-noo
+progress: 30/55 created
+created 31 -> bp-bzq
+created 32 -> bp-1yz
+created 33 -> bp-n84
+created 34 -> bp-jam
+created 35 -> bp-ew7
+created 36 -> bp-gti
+created 37 -> bp-txd
+created 38 -> bp-53l
+created 39 -> bp-04f
+created 40 -> bp-fgj
+progress: 40/55 created
+created 41 -> bp-9c4
+created 42 -> bp-hkh
+created 43 -> bp-5mv
+created 44 -> bp-blf
+created 45 -> bp-6wb
+created 46 -> bp-0a3
+created 47 -> bp-5ob
+created 48 -> bp-vwb
+created 49 -> bp-x4o
+created 50 -> bp-d3t
+progress: 50/55 created
+created 51 -> bp-od5
+created 52 -> bp-eel
+created 53 -> bp-w1t
+created 54 -> bp-2ep
+created 55 -> bp-u88
+exit=0

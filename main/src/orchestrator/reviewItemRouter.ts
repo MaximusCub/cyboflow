@@ -114,7 +114,8 @@ export type ReviewActor =
   | `agent:${string}`
   | 'linear'
   | 'plane'
-  | 'dart';
+  | 'dart'
+  | 'beads';
 
 /** Create a new review item. Omit `reviewItemId` (it is minted). */
 export interface ReviewItemCreate {

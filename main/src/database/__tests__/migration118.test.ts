@@ -32,13 +32,27 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 118 — i.e. the pre-118 app. */
+/**
+ * A migrations dir holding every real migration strictly BEFORE 118 — i.e.
+ * the pre-118 app. Excludes 118 itself AND everything at-or-above its prefix
+ * (not just the one named file): migration 129 recreates tracker_connections
+ * from a hardcoded column list that assumes content_sync_mode/archive_sync_mode/
+ * priority_mapping_json/category_mapping_json already exist, so a fixture
+ * that kept 123 while dropping only 118 would fabricate a pre-state no real
+ * install is ever in (129 shipped strictly after 118) and 129's own recreate
+ * would throw "no such column: content_sync_mode" — the same class of
+ * impossible-pre-state bug migration122.test.ts's header documents fixing
+ * for itself, generalized here now that a LATER migration depends on this
+ * one's columns.
+ */
 function migrationsDirWithout118(): string {
   const dir = join(tmpDir, 'migrations-pre-118');
   mkdirSync(dir);
+  const targetPrefix = parseInt(MIGRATION_118.slice(0, 3), 10);
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_118) continue;
-    if (!/^\d{3}_.*\.sql$/.test(name)) continue;
+    const match = /^(\d{3})_.*\.sql$/.exec(name);
+    if (!match) continue;
+    if (parseInt(match[1], 10) >= targetPrefix) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
   return dir;

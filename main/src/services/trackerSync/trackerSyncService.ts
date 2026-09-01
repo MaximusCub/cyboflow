@@ -97,6 +97,10 @@ import type {
   TrackerNarrowKind,
   TrackerProvider,
   TrackerReconcileItem,
+  TrackerAdoptionResult,
+  TrackerRecoveryClass,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -122,17 +126,25 @@ import {
   TrackerConnectionNotFoundError,
   TrackerConnectionPausedError,
   TrackerIdentityMismatchError,
+  TrackerRecoveryStateError,
+  TrackerRecoveryUnavailableError,
 } from './errors';
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
 import { DartAdapter } from './dartAdapter';
+import { BeadsAdapter, initializeBeadsWorkspace } from './beadsAdapter';
+import type { BdExecImpl } from './beadsAdapter';
+import { guardedUpdatesUnavailable, providerNeedsSecret } from './providerCapabilities';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
+  bumpConfigGeneration,
   cancelPendingKinds,
+  cancelUnresolvedOutbox,
   clearSecret,
   connectionMatchesIdentity,
   enqueueOutbox,
   findDisconnectedConnection,
+  findOutboxByClientKey,
   getConflict,
   getConnection,
   getLinkByEntity,
@@ -148,6 +160,8 @@ import {
   markOrphaned,
   reactivateConnection,
   readSecret,
+  repointLinkExternal,
+  repointOutboxExternal,
   requeueInFlightAsAmbiguous,
   resolveConflict,
   storeSecret,
@@ -159,11 +173,14 @@ import {
   supersedeQueuedStateWrites,
   updateBaseline,
   updateConnectionSettings,
+  upsertLedgerEntry,
   upsertLink,
   type NewConnectionRow,
 } from './store';
 import {
+  freshBaselineJson,
   joinBody,
+  parseSourceSelection,
   readConflictRemoteLocal,
   readConflictRemoteState,
   runDeletionSweep,
@@ -174,6 +191,7 @@ import {
   type InboundSyncReport,
   type ReviewFindingRouter,
 } from './inboundSync';
+import { provenanceMarker } from './provenance';
 import { isPriority, resolveEffectivePriorityMapping, seedDefaultPriorityMapping } from './priorityMapping';
 import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping } from './categoryMapping';
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
@@ -226,6 +244,14 @@ const MAX_LOG_ENTRIES = 60;
  */
 export const UNLINK_RULING_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * How many picked-workspace tokens
+ * ({@link TrackerSyncService.wizardPickWorkspace}) main holds at once. A wizard
+ * run uses one, so this is a bound on accumulation over a long-lived process,
+ * not a working-set size.
+ */
+export const MAX_PICKED_WORKSPACE_PATHS = 20;
+
 // ---------------------------------------------------------------------------
 // Direction modes
 // ---------------------------------------------------------------------------
@@ -264,6 +290,34 @@ const CONTENT_OUTBOX_KINDS = ['update_content'] as const;
  * 112).
  */
 const ARCHIVE_OUTBOX_KINDS = ['archive_issue'] as const;
+
+/**
+ * The {@link TrackerSettingsPatch} keys that change WHICH REMOTE ISSUES ARE
+ * ELIGIBLE, and therefore invalidate every "we considered this id and skipped
+ * it" verdict the reconciliation ledger holds (migration 123's
+ * `config_generation` — docs/proposals/tracker-beads-provider.md, "4. Pull
+ * reconciliation").
+ *
+ * THE THREE MAPPINGS AND THE SELECTION, and deliberately nothing else. A
+ * direction mode (`pullMode`, `statusSyncMode`, `contentSyncMode`, …) changes
+ * WHEN work happens, not what qualifies — and a held import is never ledgered
+ * in the first place, precisely so a mode flip needs no invalidation.
+ * `mirrorSubissues` and `conflictMode` are likewise about what we DO with an
+ * eligible issue, not about which ones are.
+ *
+ * `priorityMapping` / `categoryMapping` do not gate import today, but they are
+ * listed because the proposal states the rule as "any mapping/state-mapping/
+ * selection change" and the cost of an unnecessary bump is one re-evaluation
+ * pass — whereas the cost of a MISSING bump is a remote issue that stays
+ * invisible until something else happens to change.
+ */
+const ELIGIBILITY_PATCH_KEYS = [
+  'stateMapping',
+  'priorityMapping',
+  'categoryMapping',
+  'selectionMode',
+  'selectionJson',
+] as const satisfies readonly (keyof TrackerSettingsPatch)[];
 
 /**
  * True when a {@link TrackerContentSyncMode} direction may run under `trigger`.
@@ -406,6 +460,37 @@ export interface TrackerSyncServiceDeps {
   nowIso?: () => string;
   /** Injected provider-client construction. Defaults to {@link defaultAdapterFactory}. */
   adapterFactory?: TrackerAdapterFactory;
+  /**
+   * A cyboflow project's on-disk repo path, or null when it is unknown. Only
+   * the KEYLESS providers need it (beads anchors its `bd` workspace to the
+   * project's repo), which is why it is optional: a test that never connects
+   * one omits it, and the wizard probe fails with an actionable message rather
+   * than a crash if the wiring is missing.
+   *
+   * Injected — the service must not reach into SessionManager — and resolved
+   * MAIN-SIDE on purpose: the renderer sends a project id, never a path, so
+   * nothing it composes can decide which directory a CLI is spawned in.
+   */
+  resolveProjectPath?: (projectId: number) => string | null;
+  /**
+   * Run the MAIN-PROCESS native folder dialog and answer with the directory
+   * the user chose, or null when they cancelled. The other half of the same
+   * invariant `resolveProjectPath` protects: a keyless connection can be
+   * pointed somewhere other than the project's repo, but only main ever learns
+   * that path — it hands the renderer a token
+   * ({@link TrackerSyncService.wizardPickWorkspace}) and takes the token back.
+   *
+   * Optional for the same reason the resolver is: a service built without one
+   * refuses the pick with an actionable message instead of crashing.
+   */
+  pickWorkspaceDirectory?: () => Promise<string | null>;
+  /**
+   * The `bd` transport {@link TrackerSyncService.wizardInitWorkspace} spawns
+   * through. Injected for the same reason `BeadsAdapterOptions.execImpl` is —
+   * so a test never forks a process — and defaulted to the real one, since the
+   * only production caller is the wizard button.
+   */
+  beadsExec?: BdExecImpl;
   /** Optional structured logger for loop-level failures. */
   logger?: LoggerLike;
 }
@@ -415,15 +500,88 @@ export interface TrackerSyncServiceDeps {
 // ---------------------------------------------------------------------------
 
 /**
+ * The key a KEYED provider's credentials must carry, or a typed refusal.
+ *
+ * `TrackerCredentialsInput.apiKey` is optional on the wire so beads can omit
+ * it, which makes "linear with no key" expressible in the type system. The
+ * router's schema rejects it first; this is the service-side half of the same
+ * rule, so a caller that reaches `connect` another way (a test, a future IPC
+ * seam) cannot store a connection whose adapter would 401 on every pass.
+ */
+function requireApiKey(credentials: TrackerCredentialsInput): string {
+  const apiKey = credentials.apiKey ?? '';
+  if (apiKey.length === 0) {
+    throw new TrackerCredentialsError(
+      `${credentials.provider} connections require an API key, and none was supplied`,
+    );
+  }
+  return apiKey;
+}
+
+/**
+ * The `bd` workspace root a keyless (beads) connection is anchored to, read
+ * off `source_json`.
+ *
+ * It rides on the same blob as the wizard's Step-1 source choice rather than
+ * taking a column of its own, exactly like the source LABEL does: both
+ * `storedSourceScope` and `parseSourceSelection` read their keys BY NAME and
+ * ignore everything else, so the extra key changes no equality or revival
+ * semantics. Null for a row that never recorded one — a pre-Phase-3 beads row
+ * cannot exist, but a hand-edited or truncated blob can, and the callers turn
+ * that into "re-detect" rather than into a spawn in whatever directory the
+ * process happens to be in.
+ */
+export function beadsWorkspacePath(connection: TrackerConnectionRow): string | null {
+  if (connection.source_json === null) return null;
+  try {
+    const parsed = JSON.parse(connection.source_json) as { workspacePath?: unknown };
+    return typeof parsed.workspacePath === 'string' && parsed.workspacePath.length > 0
+      ? parsed.workspacePath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Was this keyless connection anchored to a folder the user PICKED, rather
+ * than to its cyboflow project's repo path?
+ *
+ * Rides on `source_json` beside {@link beadsWorkspacePath}, by the same
+ * read-by-name reasoning. ABSENT means project-anchored — which is what every
+ * row minted before the picker existed says, and the honest default: a row
+ * with no recorded provenance is one whose path came from the project.
+ *
+ * Consulted wherever an anchor is resolved from the ROW rather than from a
+ * live wizard answer — re-detect and mapping-management re-entry — and it is
+ * the whole of what makes those safe for a custom anchor: re-resolving from
+ * `project_id` would silently drag the connection back to the repo path the
+ * user deliberately pointed away from.
+ */
+function beadsWorkspaceIsCustom(connection: TrackerConnectionRow): boolean {
+  if (connection.source_json === null) return false;
+  try {
+    const parsed = JSON.parse(connection.source_json) as { workspaceSource?: unknown };
+    return parsed.workspaceSource === 'custom';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Provider client from a connection row + its decrypted key.
  *
  * PLANE'S WORKSPACE SLUG comes from `workspace_id`, not `source_json`.
  * `source_json` holds the wizard's Step-1 source choice (container/narrow ids)
- * and nothing else; the slug is workspace IDENTITY, and PlaneAdapter's own
+ * plus the two display/anchor extras {@link beadsWorkspacePath} and the source
+ * label; the slug is workspace IDENTITY, and PlaneAdapter's own
  * `validateCredentials` returns `workspaceId: <slug>` — so the connect flow
  * that persists the validated identity necessarily writes the slug into
  * `workspace_id`. A Plane connection without one cannot address any REST path,
  * hence the hard error rather than a guess.
+ *
+ * `secret` is EMPTY for a keyless provider (beads), which never reads it —
+ * see {@link providerNeedsSecret} and the guards in `buildAdapter`.
  */
 export function defaultAdapterFactory(
   connection: TrackerConnectionRow,
@@ -437,6 +595,27 @@ export function defaultAdapterFactory(
       // neither a base URL nor a workspace slug — the key alone addresses
       // everything.
       return new DartAdapter({ apiKey: secret });
+    case 'beads': {
+      // The workspace root comes off the ROW, not off the project table: it is
+      // resolved once at connect/probe time (from the project id the renderer
+      // named) and stamped into `source_json`, so a pass can never be steered
+      // somewhere else by a project whose path was edited underneath it — a
+      // moved repo re-detects rather than silently syncing a new workspace.
+      const workspacePath = beadsWorkspacePath(connection);
+      if (workspacePath === null) {
+        throw new TrackerCredentialsError(
+          `connection ${connection.id}: no beads workspace path recorded — re-detect this connection to bind it to a project repo`,
+        );
+      }
+      // A scratch wizard row has neither identity column yet (the probe is
+      // where they come FROM), so the first probe carries no expectation and
+      // every later pass carries both halves of the identity invariant.
+      return new BeadsAdapter({
+        workspacePath,
+        expectedInstanceId: connection.workspace_id ?? undefined,
+        expectedPrefix: connection.workspace_name ?? undefined,
+      });
+    }
     case 'plane': {
       const workspaceSlug = (connection.workspace_id ?? '').trim();
       if (workspaceSlug.length === 0) {
@@ -491,7 +670,34 @@ export class TrackerSyncService implements TrackerSyncFacade {
   private readonly reviewRouter?: ReviewFindingRouter;
   private readonly nowIso: () => string;
   private readonly adapterFactory: TrackerAdapterFactory;
+  /** See {@link TrackerSyncServiceDeps.resolveProjectPath} — keyless providers only. */
+  private readonly resolveProjectPath?: (projectId: number) => string | null;
+  /** See {@link TrackerSyncServiceDeps.pickWorkspaceDirectory} — keyless providers only. */
+  private readonly pickWorkspaceDirectory?: () => Promise<string | null>;
+  /** See {@link TrackerSyncServiceDeps.beadsExec} — the wizard's init button only. */
+  private readonly beadsExec?: BdExecImpl;
   private readonly logger?: LoggerLike;
+
+  /**
+   * Token → the directory the user picked in the native dialog, for the one
+   * wizard run that is holding the token.
+   *
+   * IN-MEMORY AND MAIN-ONLY BY DESIGN, not as a shortcut. This map is the
+   * entire reason a folder override does not weaken the rule that a renderer
+   * may never name a path a CLI is spawned in: the path exists only here, the
+   * renderer holds a random uuid, and a token main did not mint resolves to
+   * nothing. Persisting it would turn a per-run handle into a durable
+   * capability, and there is nothing to persist FOR — the anchor a connect
+   * settles on is stamped onto the row.
+   *
+   * Capped at {@link MAX_PICKED_WORKSPACE_PATHS} with oldest-first eviction (a
+   * plain Map iterates in insertion order): a wizard run holds one token at a
+   * time, so the cap is far above any live working set and exists only so a
+   * long-lived main process cannot accumulate them without bound. An evicted
+   * token fails closed — the wizard reports that the pick is stale and the
+   * user picks again.
+   */
+  private readonly pickedWorkspacePaths = new Map<string, string>();
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private listener: WriteBackListener | null = null;
@@ -552,6 +758,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
     this.reviewRouter = deps.reviewRouter;
     this.nowIso = deps.nowIso ?? (() => new Date().toISOString());
     this.adapterFactory = deps.adapterFactory ?? defaultAdapterFactory;
+    this.resolveProjectPath = deps.resolveProjectPath;
+    this.pickWorkspaceDirectory = deps.pickWorkspaceDirectory;
+    this.beadsExec = deps.beadsExec;
     this.logger = deps.logger;
   }
 
@@ -867,8 +1076,22 @@ export class TrackerSyncService implements TrackerSyncFacade {
         if (sweepDue) {
           if (!this.isStillActive(connectionId)) return abandonedResult(connectionId, entries);
           entries.push({ marker: '▸', line: 'GET issue ids' });
+          // THE SAME DEPS THE INBOUND PASS RAN WITH, not a narrower set: a
+          // reconciliation sweep (beads) point-fetches unseen ids through the
+          // ordinary import path, so it must honour the same direction holds
+          // and file into the same review inbox. A sweep built without them
+          // would import while 'manual' pull is holding, and its resurrection
+          // findings would go nowhere.
           const sweep = await runDeletionSweep(
-            { db: this.db, adapter, router: this.router, nowIso: this.nowIso },
+            {
+              db: this.db,
+              adapter,
+              router: this.router,
+              reviewRouter: this.reviewRouter,
+              nowIso: this.nowIso,
+              applyLinkedStage,
+              importNewIssues: pullRuns,
+            },
             connection,
           );
           swept = true;
@@ -1225,8 +1448,17 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * identifier lookup) that a per-phase rebuild would throw away, and building
    * fresh each pass keeps a re-connected key from being pinned by a stale
    * instance.
+   *
+   * A KEYLESS provider (beads) skips the cipher read and decrypt entirely and
+   * is handed an empty secret it never reads. The guard below stays FATAL for
+   * the three keyed providers rather than being loosened globally: for them a
+   * NULL ciphertext is a row that cannot authenticate, and letting it through
+   * would turn a fixable "reconnect" into a 401 on every pass forever.
    */
   private buildAdapter(connection: TrackerConnectionRow): TrackerAdapter {
+    if (!providerNeedsSecret(connection.provider)) {
+      return this.adapterFactory(connection, '');
+    }
     const cipher = readSecret(this.db, connection.id);
     if (cipher === null || cipher.length === 0) {
       throw new TrackerCredentialsError(`connection ${connection.id} has no stored API key`);
@@ -1290,7 +1522,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * persists one, and it encrypts first.
    *
    * `workspace_id` carries Plane's workspace SLUG (what defaultAdapterFactory
-   * addresses every REST path with); Linear ignores it.
+   * addresses every REST path with); Linear ignores it. For a KEYLESS provider
+   * the scratch row instead carries the resolved workspace PATH in
+   * `source_json` — the same key {@link beadsWorkspacePath} reads off a real
+   * row, so the probe spawns `bd` exactly where a later pass will.
+   *
+   * Both identity columns stay null on the scratch row, deliberately: the
+   * probe is where the instance id and prefix come FROM, so it must not carry
+   * an expectation for the adapter to compare against.
    */
   private adapterForCredentials(credentials: TrackerCredentialsInput): TrackerAdapter {
     const scratch: TrackerConnectionRow = {
@@ -1303,7 +1542,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       actor_label: null,
       base_url: credentials.baseUrl ?? null,
       secret_ciphertext: null,
-      source_json: null,
+      source_json: providerNeedsSecret(credentials.provider)
+        ? null
+        : JSON.stringify({ workspacePath: this.workspacePathForCredentials(credentials) }),
       selection_mode: 'all',
       selection_json: null,
       state_mapping_json: '{}',
@@ -1317,6 +1558,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
       archive_sync_mode: 'off',
       priority_mapping_json: '{}',
       category_mapping_json: '{}',
+      // Irrelevant to a probe (nothing reconciles through a scratch row) but
+      // the shape is the row's, same reasoning as the two modes above.
+      config_generation: 0,
       mirror_subissues: 0,
       conflict_mode: 'auto',
       cursor_updated_at: null,
@@ -1326,7 +1570,61 @@ export class TrackerSyncService implements TrackerSyncFacade {
       created_at: '',
       updated_at: '',
     };
-    return this.adapterFactory(scratch, credentials.apiKey);
+    // Empty for a keyless provider, which never reads it — the credential is
+    // the workspace itself, already stamped into the scratch row above. A
+    // KEYED one is refused here rather than probed with an empty string, which
+    // every provider answers with a 401 the wizard would report as a bad key.
+    return this.adapterFactory(
+      scratch,
+      providerNeedsSecret(credentials.provider) ? requireApiKey(credentials) : '',
+    );
+  }
+
+  /**
+   * The repo path a keyless connect/probe anchors its workspace to, resolved
+   * from the project id the renderer named.
+   *
+   * MAIN-SIDE RESOLUTION IS THE POINT. The wire carries an id; this is the
+   * only place it becomes a directory, so a renderer cannot name a path and
+   * have a CLI spawned in it. All three failures are the same class —
+   * TrackerCredentialsError, which the wizard surfaces as an actionable
+   * message — because none of them is a provider rejection: the app is
+   * mis-wired, the caller omitted the project, or the project is gone.
+   */
+  private workspacePathForCredentials(credentials: TrackerCredentialsInput): string {
+    // THE OVERRIDE, and it is checked FIRST: a token only exists because main
+    // itself put a directory behind it, so it is at least as trustworthy as the
+    // project-table lookup below and the wizard sends it precisely to mean
+    // "not the project's repo". An unknown one is refused rather than falling
+    // through to the project path — falling through would quietly probe a
+    // DIFFERENT workspace than the one the user picked, which is the single
+    // way this feature could mislead.
+    if (credentials.workspaceDirToken !== undefined) {
+      const picked = this.pickedWorkspacePaths.get(credentials.workspaceDirToken);
+      if (picked === undefined) {
+        throw new TrackerCredentialsError(
+          'the picked folder is no longer available — pick it again',
+        );
+      }
+      return picked;
+    }
+    if (this.resolveProjectPath === undefined) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections need a project repo path, and this service was built without a project-path resolver`,
+      );
+    }
+    if (credentials.projectId === undefined) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections must name the project whose repo holds the workspace`,
+      );
+    }
+    const path = this.resolveProjectPath(credentials.projectId);
+    if (path === null || path.length === 0) {
+      throw new TrackerCredentialsError(
+        `project ${credentials.projectId} has no repo path on disk, so there is no ${credentials.provider} workspace to detect`,
+      );
+    }
+    return path;
   }
 
   /**
@@ -1345,6 +1643,13 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * ciphertext, so there is no key to reuse and "not found" is the honest answer
    * rather than an auth failure the user cannot act on.
    *
+   * A KEYLESS connection has no key to resolve and must not be asked for one:
+   * it answers with its own project id, which is the whole of its credential
+   * (main re-resolves the repo path from it, exactly as the first Detect did).
+   * Reading the ciphertext for such a row and finding it NULL — as it always
+   * is — would dead-end mapping management on an auth error the user could
+   * never satisfy.
+   *
    * @throws {TrackerConnectionNotFoundError} unknown or retired connection id.
    * @throws {TrackerAuthError} the stored key is missing or undecryptable
    *   (mapped to UNAUTHORIZED — the actionable fix is pasting a fresh key).
@@ -1353,6 +1658,20 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const row = getConnection(this.db, connectionId);
     if (row === null || row.status === 'disconnected') {
       throw new TrackerConnectionNotFoundError(connectionId);
+    }
+    if (!providerNeedsSecret(row.provider)) {
+      // A CUSTOM-ANCHORED row answers with its stored folder, not with its
+      // project, for the same reason re-detect does: the project's repo is not
+      // where this connection's workspace lives, and re-resolving would point
+      // every re-entered probe — and the sibling mapping a `connect` from this
+      // source would then mint — at a different directory than the one the
+      // user picked.
+      const custom = beadsWorkspaceIsCustom(row) ? beadsWorkspacePath(row) : null;
+      return {
+        provider: row.provider,
+        projectId: row.project_id,
+        ...(custom !== null ? { workspaceDirToken: this.mintWorkspaceDirToken(custom) } : {}),
+      };
     }
     const cipher = readSecret(this.db, connectionId);
     if (cipher === null || cipher.length === 0) {
@@ -1404,6 +1723,86 @@ export class TrackerSyncService implements TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. */
   async wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
     return this.adapterForCredentials(credentials).validateCredentials();
+  }
+
+  /**
+   * Record `path` under a fresh token and hand the token back, evicting the
+   * oldest when the map is full ({@link MAX_PICKED_WORKSPACE_PATHS}).
+   */
+  private mintWorkspaceDirToken(path: string): string {
+    if (this.pickedWorkspacePaths.size >= MAX_PICKED_WORKSPACE_PATHS) {
+      const oldest = this.pickedWorkspacePaths.keys().next();
+      if (!oldest.done) this.pickedWorkspacePaths.delete(oldest.value);
+    }
+    const token = randomUUID();
+    this.pickedWorkspacePaths.set(token, path);
+    return token;
+  }
+
+  /**
+   * Ask the user for the folder a keyless connection should probe, and answer
+   * with an opaque handle to it — the wizard's "Point at a beads workspace…".
+   * Null means they cancelled, which is not a failure and changes nothing.
+   *
+   * THE DIALOG RUNS IN MAIN, and that is the whole design. The path the user
+   * chose stays in {@link TrackerSyncService.pickedWorkspacePaths}; the
+   * renderer gets a token plus the path as DISPLAY TEXT, and sends only the
+   * token back on the probe and the connect. So the renderer can say "the
+   * folder the user picked" and can say nothing else — it still cannot compose
+   * a directory for `bd` to be spawned in, which is the invariant
+   * `resolveProjectPath` exists to hold.
+   *
+   * @throws {TrackerCredentialsError} a keyed provider (no local workspace to
+   *   point at), or a service built without a picker.
+   */
+  async wizardPickWorkspace(
+    provider: TrackerProvider,
+  ): Promise<{ token: string; path: string } | null> {
+    if (providerNeedsSecret(provider)) {
+      throw new TrackerCredentialsError(
+        `${provider} connections are keyed — there is no workspace folder to pick`,
+      );
+    }
+    if (this.pickWorkspaceDirectory === undefined) {
+      throw new TrackerCredentialsError(
+        `${provider} connections need a folder picker, and this service was built without one`,
+      );
+    }
+    const picked = await this.pickWorkspaceDirectory();
+    if (picked === null) return null;
+    const path = picked.trim();
+    // An empty answer is a cancel by another name — a dialog that returned no
+    // usable directory must not mint a token that resolves to nowhere.
+    if (path.length === 0) return null;
+    return { token: this.mintWorkspaceDirToken(path), path };
+  }
+
+  /**
+   * KEYLESS ONLY — create the beads workspace Detect could not find, in the
+   * folder those same credentials would have probed: `bd init --stealth`
+   * (which commits nothing — the ignore entry goes to `.git/info/exclude`),
+   * then a best-effort `bd metrics off`.
+   *
+   * The folder is resolved by {@link workspacePathForCredentials}, the ONE
+   * place a wire value becomes a directory, so this button spawns a CLI in the
+   * picked folder or the project's repo and nowhere else. It takes no path
+   * argument for exactly that reason.
+   *
+   * `bd init` runs with the folder as CWD and no `-C`; see
+   * {@link initializeBeadsWorkspace} for why that constraint is bd's, not ours.
+   *
+   * RETURNS VOID DELIBERATELY: it reports no identity because it probes none.
+   * Re-detect is the wizard's own follow-up call, so the identity the user ends
+   * up bound to always comes from the same `wizardValidate` path as every other
+   * connection's.
+   */
+  async wizardInitWorkspace(credentials: TrackerCredentialsInput): Promise<void> {
+    if (providerNeedsSecret(credentials.provider)) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections are keyed — there is no local workspace to initialize`,
+      );
+    }
+    await initializeBeadsWorkspace(this.workspacePathForCredentials(credentials), this.beadsExec);
   }
 
   /**
@@ -1585,7 +1984,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // it and kick a pass), and the push-target choice (the wizard recomputes it
     // from the live radio, so a retry after re-picking must land the new
     // choice; the early return used to drop it, leaving two armed siblings).
-    const cipher = encryptTrackerSecret(credentials.apiKey);
+    // KEYLESS PROVIDERS STORE NOTHING. `null` here is not "encrypt it later" —
+    // it is the row's permanent state, and every store call below skips rather
+    // than writing a cipher for a key that does not exist. Encrypting `''`
+    // instead would look identical on the surface and defeat the NULL-secret
+    // guards that tell a keyless row apart from a keyed one whose key is gone.
+    const cipher = providerNeedsSecret(credentials.provider)
+      ? encryptTrackerSecret(requireApiKey(credentials))
+      : null;
     const incomingScope: StoredSourceScope = {
       containerId: payload.source.containerId,
       narrowId: payload.source.narrowId,
@@ -1602,7 +2008,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
         sourceScopeEquals(storedSourceScope(row), incomingScope),
     );
     if (existing !== undefined) {
-      storeSecret(this.db, existing.id, cipher);
+      if (cipher !== null) storeSecret(this.db, existing.id, cipher);
       if (payload.pushTarget === false) {
         updateConnectionSettings(this.db, existing.id, { push_target: 0 });
       } else {
@@ -1638,11 +2044,31 @@ export class TrackerSyncService implements TrackerSyncFacade {
       // Written by storeSecret below, never inline — the plaintext-never-touches
       // -sqlite invariant lives in exactly one call site.
       secret_ciphertext: null,
-      // The Step-1 choice PLUS its display label. The label is an extra key on
-      // the same blob rather than a column of its own: parseSourceSelection
-      // reads containerId/narrowId/narrowKind by name and ignores everything
-      // else, so the two coexist without a migration.
-      source_json: JSON.stringify({ ...payload.source, label: payload.sourceLabel }),
+      // The Step-1 choice PLUS its display label — and, for a keyless
+      // provider, the RESOLVED workspace path this connection is anchored to
+      // ({@link beadsWorkspacePath}) and, when the user picked that folder
+      // themselves, where it came from ({@link beadsWorkspaceIsCustom}). All of
+      // them are extra keys on the same blob rather than columns of their own:
+      // parseSourceSelection and storedSourceScope both read
+      // containerId/narrowId/narrowKind by name and ignore everything else, so
+      // they coexist without a migration and without touching scope equality or
+      // revival.
+      //
+      // `workspaceSource` is stamped ONLY for a picked folder: its absence is
+      // the project-anchored case, which is what every row minted before the
+      // picker existed already says.
+      source_json: JSON.stringify({
+        ...payload.source,
+        label: payload.sourceLabel,
+        ...(providerNeedsSecret(credentials.provider)
+          ? {}
+          : {
+              workspacePath: this.workspacePathForCredentials(credentials),
+              ...(credentials.workspaceDirToken !== undefined
+                ? { workspaceSource: 'custom' }
+                : {}),
+            }),
+      }),
       selection_mode: payload.selectionMode,
       selection_json:
         payload.selectionJson === null ? null : JSON.stringify(payload.selectionJson),
@@ -1662,6 +2088,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
         payload.priorityMapping !== undefined ? JSON.stringify(payload.priorityMapping) : '{}',
       category_mapping_json:
         payload.categoryMapping !== undefined ? JSON.stringify(payload.categoryMapping) : '{}',
+      // A brand-new connection starts at generation 0 — the reconciliation
+      // ledger has nothing to invalidate yet.
+      config_generation: 0,
       mirror_subissues: payload.mirrorSubissues ? 1 : 0,
       conflict_mode: payload.conflictMode,
       cursor_updated_at: null,
@@ -1707,7 +2136,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const connectionId = revivable?.id ?? `trk_${randomUUID()}`;
     if (revivable === null) insertConnection(this.db, { id: connectionId, ...row });
     else reactivateConnection(this.db, connectionId, row);
-    storeSecret(this.db, connectionId, cipher);
+    if (cipher !== null) storeSecret(this.db, connectionId, cipher);
     // Enforce the one-pusher-per-(project, provider) invariant across WIZARD
     // RUNS: a later run mapping a second group into an already-mapped project
     // arrives here with pushTarget true (its own run's cluster default) while
@@ -1847,7 +2276,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
    *      thing one layer down.)
    *   3. STORE encrypted, exactly as connect does; the plaintext never reaches
    *      sqlite and never returns to the renderer (the result is the identity,
-   *      which carries no key material).
+   *      which carries no key material). Skipped entirely when there is no key
+   *      — see the keyless note below.
    *   4. RESUME: status back to 'active', which is what un-gates the poll loop
    *      and the drain — including every row an auth failure HELD unsettled
    *      (outboxWorker.pauseConnection), which now replays in order.
@@ -1857,27 +2287,116 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * instance) — the sibling mappings a multi-project connect minted — so one
    * paste resumes all of them; see the fan-out note at the store call.
    *
+   * KEYLESS PROVIDERS TAKE THE SAME PATH WITH NOTHING TO PASTE — `apiKey` is
+   * omitted and the call means RE-DETECT. Steps 1 and 2 are unchanged and are
+   * the entire point: the workspace is probed again and its instance id
+   * checked against the row's, so a `.beads` directory that was deleted and
+   * re-initialized (a NEW database wearing the old path) is refused instead of
+   * resuming onto issue ids that no longer exist. Only step 3 differs: there
+   * is no cipher, so the row's NULL secret is left exactly as it is — and it
+   * gains a step 2b, RE-ANCHORING the stored workspace path to the one the
+   * probe just resolved (see the comment at that write for the unrecoverable
+   * loop it prevents when the repo has moved on disk).
+   *
    * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerCredentialsError} a key was supplied for a keyless
+   *   provider, or omitted for a keyed one.
    * @throws {TrackerIdentityMismatchError} the key authorizes another workspace.
    */
-  async updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity> {
+  async updateCredentials(connectionId: string, apiKey?: string): Promise<TrackerWorkspaceIdentity> {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) throw new TrackerConnectionNotFoundError(connectionId);
 
-    const identity = await this.adapterForCredentials({
-      provider: connection.provider,
-      apiKey,
-      // The connection's OWN addressing, not the renderer's: this call rotates a
-      // key, it does not re-point a connection at a different instance.
-      baseUrl: connection.base_url ?? undefined,
-      workspaceSlug: connection.workspace_id ?? undefined,
-    }).validateCredentials();
+    const needsSecret = providerNeedsSecret(connection.provider);
+    // A key offered to a keyless connection is refused rather than ignored:
+    // silently dropping it would leave the user believing a credential is
+    // stored and rotating, when nothing of the sort happened.
+    if (!needsSecret && apiKey !== undefined) {
+      throw new TrackerCredentialsError(
+        `${connection.provider} connections store no API key — reconnect by re-detecting the workspace`,
+      );
+    }
+    // The keyed half of the same rule. Resolved ONCE, up front, so the probe
+    // and the cipher below cannot disagree about what is being stored.
+    const key = needsSecret ? requireApiKey({ provider: connection.provider, apiKey }) : null;
 
-    if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
-      throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
+    // WHERE A KEYLESS RE-DETECT PROBES, and the one question this method has to
+    // get right for a custom-anchored connection.
+    //
+    // The default is to re-resolve from `project_id`, which is what makes the
+    // moved-repo re-anchor below work. But a connection the user pointed at a
+    // folder of their own has nothing to do with the project's repo path —
+    // re-resolving would silently drag it back there, and the identity check
+    // would then either refuse a workspace that is perfectly healthy or, worse,
+    // succeed against a DIFFERENT beads database that happens to sit in the
+    // repo. So a custom anchor re-probes its STORED path.
+    //
+    // It travels as a token rather than as a path for no security reason —
+    // nothing here crosses IPC — but so that both uses below go through the one
+    // resolution path `workspacePathForCredentials` owns, instead of growing a
+    // second way to name a workspace directory. It is retired in the `finally`:
+    // it is an internal handle for the length of this call, and leaving it in
+    // the map would spend a slot the user's own picks need.
+    const customAnchor = !needsSecret && beadsWorkspaceIsCustom(connection)
+      ? beadsWorkspacePath(connection)
+      : null;
+    const anchorToken = customAnchor === null ? null : this.mintWorkspaceDirToken(customAnchor);
+    let identity: TrackerWorkspaceIdentity;
+    try {
+      identity = await this.adapterForCredentials({
+        provider: connection.provider,
+        ...(key !== null
+          ? { apiKey: key }
+          : {
+              projectId: connection.project_id,
+              ...(anchorToken !== null ? { workspaceDirToken: anchorToken } : {}),
+            }),
+        // The connection's OWN addressing, not the renderer's: this call rotates a
+        // key, it does not re-point a connection at a different instance.
+        baseUrl: connection.base_url ?? undefined,
+        workspaceSlug: connection.workspace_id ?? undefined,
+      }).validateCredentials();
+
+      if (!connectionMatchesIdentity(connection, identity.workspaceId, connection.base_url)) {
+        throw new TrackerIdentityMismatchError(connection.workspace_id, identity.workspaceId);
+      }
+
+      // RE-ANCHOR A MOVED WORKSPACE. A keyless connection stores the RESOLVED
+      // path it spawns its CLI in, and the project's repo can move on disk
+      // (renamed, relocated, re-cloned). Re-detect then succeeds — the probe
+      // above resolved the CURRENT path and proved the SAME database instance is
+      // there — while `source_json` still names the old one, so the very next
+      // pass spawns in a directory that no longer holds the workspace and pauses
+      // again. Re-detect would keep succeeding and the connection would keep
+      // pausing, with no way out. Stamping the proven path closes that loop.
+      //
+      // A CUSTOM ANCHOR re-stamps the same stored path it just proved rather
+      // than a new one — there is nothing to re-anchor TO, since no project
+      // moved — and `workspaceSource` rides through on the spread, so the row
+      // stays custom-anchored for the next re-detect.
+      //
+      // THE NAMED ROW ONLY, never the siblings fanned out below: this path is the
+      // one whose project the probe actually resolved. A sibling lives in a
+      // DIFFERENT cyboflow project with its own repo path, which nothing here has
+      // probed — writing this path onto it would point it at a workspace we never
+      // proved it shares. Each sibling re-anchors through its own re-detect.
+      if (!needsSecret) {
+        updateConnectionSettings(this.db, connection.id, {
+          source_json: JSON.stringify({
+            ...parseJsonObject(connection.source_json),
+            workspacePath: this.workspacePathForCredentials({
+              provider: connection.provider,
+              projectId: connection.project_id,
+              ...(anchorToken !== null ? { workspaceDirToken: anchorToken } : {}),
+            }),
+          }),
+        });
+      }
+    } finally {
+      if (anchorToken !== null) this.pickedWorkspacePaths.delete(anchorToken);
     }
 
-    const cipher = encryptTrackerSecret(apiKey);
+    const cipher = key === null ? null : encryptTrackerSecret(key);
     // FAN OUT ACROSS THE SIBLING MAPPINGS. Multi-project mapping mints one row
     // per (tracker group -> cyboflow project) pair, each holding its OWN copy of
     // the same encrypted key — so a rotation applied to the named row alone
@@ -1899,7 +2418,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     );
     const rotating = [connection, ...siblings.filter((row) => row.id !== connection.id)];
     for (const sibling of rotating) {
-      storeSecret(this.db, sibling.id, cipher);
+      if (cipher !== null) storeSecret(this.db, sibling.id, cipher);
       updateConnectionSettings(this.db, sibling.id, {
         status: 'active',
         // The authorizing user can legitimately change with the key; the
@@ -1918,6 +2437,632 @@ export class TrackerSyncService implements TrackerSyncFacade {
     }
 
     return identity;
+  }
+
+  // -------------------------------------------------------------------------
+  // Keyless workspace recovery
+  //
+  // docs/proposals/tracker-beads-provider.md, "Replacement recovery is an
+  // explicit state machine, not a resume" (rounds 17/18) + the prefix-rename
+  // remap under "1. Keyless connect".
+  //
+  // A paused KEYED connection has one story — the key is bad, paste another. A
+  // paused keyless one has FOUR, and they need opposite repairs: a workspace
+  // that moved wants re-detect, a renamed prefix wants a deterministic link
+  // rewrite, a REPLACED database wants a retire-and-adopt, and a transient lock
+  // wants nothing but a resume. Guessing between them is not possible from the
+  // pause alone; {@link TrackerSyncService.probeRecovery} decides by comparing
+  // ids, and the two actions below re-probe before touching anything.
+  // -------------------------------------------------------------------------
+
+  /**
+   * WHICH recovery this paused keyless connection needs — the classification the
+   * connected view's banner branches on.
+   *
+   * DECIDED BY IDS, NEVER BY MESSAGES. The pause that brings a user here arrives
+   * as a `TrackerAuthError` whose text depends on which sandwich checkpoint
+   * caught it, and the three failure modes read almost alike; parsing that text
+   * to pick a repair would make the wording of an error message load-bearing.
+   * So this re-probes with an EXPECTATION-FREE adapter — one built from the row
+   * with both identity columns nulled, so `assertIdentity` compares nothing and
+   * REPORTS the workspace as it actually is now — and compares the two halves
+   * itself:
+   *
+   *   the probe throws            -> 'redetect' (nothing readable at the stored
+   *                                  path; the message is carried through)
+   *   instance same, prefix moved -> 'renamed'
+   *   instance moved              -> 'replaced'
+   *   both match                  -> 'healthy'
+   *
+   * THE STORED PATH, NOT THE PROJECT'S. The scratch row keeps the connection's
+   * own `source_json`, so the probe spawns `bd` exactly where a PASS would —
+   * which is what makes 'redetect' mean "the thing that pauses this connection
+   * is still true" rather than "the project directory happens to be fine".
+   *
+   * Read-only: it persists nothing and resumes nothing, so the banner can ask on
+   * every render.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   */
+  async probeRecovery(connectionId: string): Promise<TrackerRecoveryProbe> {
+    const connection = this.requireKeylessConnection(connectionId);
+    const bound = {
+      connectionId,
+      boundWorkspaceId: connection.workspace_id,
+      boundWorkspaceName: connection.workspace_name,
+    };
+
+    let identity: TrackerWorkspaceIdentity;
+    try {
+      identity = await this.probeAdapter(connection).validateCredentials();
+    } catch (err) {
+      return {
+        ...bound,
+        recovery: 'redetect',
+        currentWorkspaceId: null,
+        currentWorkspaceName: null,
+        // Verbatim: "`bd` is not installed", "this project has no resolvable
+        // beads workspace" and "the workspace now resolves to <other path>" are
+        // three different fixes, and a generic line would erase all three.
+        probeError: describeError(err),
+      };
+    }
+
+    const current = {
+      currentWorkspaceId: identity.workspaceId,
+      currentWorkspaceName: identity.workspaceName,
+      probeError: null,
+    };
+
+    // A ROW WITH NO RECORDED IDENTITY IS NOT A CHANGED ONE. Every keyless
+    // connect stamps both columns, so a NULL here is a corrupt or hand-edited
+    // row — and store.ts's own doctrine applies: an identity we never learned
+    // cannot be claimed BY identity. Reading a NULL instance id as a mismatch
+    // would offer to RETIRE the connection and cancel its writes over missing
+    // metadata, which is the most destructive possible answer to the least
+    // informative input.
+    if (connection.workspace_id === null) {
+      return {
+        ...bound,
+        ...current,
+        recovery: 'redetect',
+        probeError:
+          'this connection has no recorded workspace identity, so there is nothing to compare ' +
+          'the workspace against.',
+      };
+    }
+    // The instance id is checked FIRST because it dominates: a replaced database
+    // usually carries the same committed prefix, so a prefix-first test would
+    // read a replacement as healthy and a re-detect would resume onto ids that
+    // no longer exist.
+    if (connection.workspace_id !== identity.workspaceId) {
+      return { ...bound, ...current, recovery: 'replaced' };
+    }
+    // Same reasoning one column down, and the consequence is concrete: with no
+    // old prefix there is nothing for the remap to rewrite FROM, so it would
+    // report every link as un-remappable. Re-detect stamps the prefix, which is
+    // the whole repair a row missing only its display metadata needs.
+    if (connection.workspace_name !== null && connection.workspace_name !== identity.workspaceName) {
+      return { ...bound, ...current, recovery: 'renamed' };
+    }
+    return { ...bound, ...current, recovery: 'healthy' };
+  }
+
+  /**
+   * Rewrite every link (and every unresolved outbox row) of a connection whose
+   * workspace prefix was renamed, then resume it.
+   *
+   * WHY A REWRITE IS SOUND AND A RESUME IS NOT. `bd rename-prefix` rewrites the
+   * ids of existing issues SUFFIX-PRESERVED (`chk-2lz` -> `newpfx-2lz`, proven
+   * in Phase 2) inside the SAME database, and the old id stops resolving
+   * entirely. So the mapping from old link to new issue is not a guess, it is
+   * arithmetic — while the two alternatives are both destructive: a silent
+   * continue would address every write to an id bd no longer knows, and letting
+   * the sweep run would read the whole workspace as deleted and archive every
+   * linked entity.
+   *
+   * ONE TRANSACTION over the links, the outbox and the connection's
+   * `workspace_name`, because a half-applied remap is the one state nothing can
+   * recover from: the identity invariant would pass on the new prefix while some
+   * links still named the old one, so the sweep WOULD run, and it would archive
+   * exactly the links that had not been rewritten yet.
+   *
+   * IDS THAT DO NOT CARRY THE OLD PREFIX ARE LEFT ALONE and reported as a
+   * finding. A rename covers the whole workspace, so there should be none;
+   * whatever produced one is something this remap cannot explain, and rewriting
+   * it on a guess would point a link at an unrelated issue.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   * @throws {TrackerRecoveryStateError} re-probing no longer reports 'renamed'.
+   */
+  async remapRenamedPrefix(connectionId: string): Promise<TrackerRemapResult> {
+    const connection = this.requireKeylessConnection(connectionId);
+    const probe = await this.requireRecoveryClass(connectionId, 'renamed');
+    // Both are non-null by construction — 'renamed' is only reachable when the
+    // row HAS a prefix and the probe reported a different one — but the columns
+    // are nullable, so the narrowing is spelled out rather than asserted.
+    const oldPrefix = connection.workspace_name ?? '';
+    const newPrefix = probe.currentWorkspaceName ?? '';
+
+    const result: TrackerRemapResult = {
+      remappedLinks: 0,
+      remappedOutboxRows: 0,
+      workspaceName: newPrefix,
+      unmatchedExternalIds: [],
+    };
+
+    this.db.transaction(() => {
+      // ALL links, orphaned ones included: an orphaned link's id has to stay
+      // addressable or the sweep's resurrection rule could never recognize the
+      // issue coming back under its new name.
+      for (const link of listLinks(this.db, connectionId)) {
+        const rewritten = renamePrefix(link.external_id, oldPrefix, newPrefix);
+        if (rewritten === null) {
+          result.unmatchedExternalIds.push(link.external_id);
+          continue;
+        }
+        repointLinkExternal(
+          this.db,
+          link.id,
+          rewritten,
+          // beads mints no second human ref — the id IS the identifier — but the
+          // column is provider-general, so only a value that actually carries
+          // the old prefix is rewritten.
+          renamePrefix(link.external_identifier, oldPrefix, newPrefix) ?? link.external_identifier,
+        );
+        result.remappedLinks++;
+      }
+
+      // THE OUTBOX TOO, because the database is the same one: these writes are
+      // still wanted, they just name ids that no longer resolve. Only the
+      // UNRESOLVED rows — a settled row records what was written at the time,
+      // under the name it had.
+      for (const row of listUnresolvedOutbox(this.db, connectionId)) {
+        const externalId = renamePrefix(row.external_id, oldPrefix, newPrefix);
+        const payloadJson = renameParentInPayload(row, oldPrefix, newPrefix);
+        if (externalId === null && payloadJson === null) continue;
+        repointOutboxExternal(this.db, row.id, externalId ?? row.external_id, payloadJson);
+        result.remappedOutboxRows++;
+      }
+
+      updateConnectionSettings(this.db, connectionId, {
+        workspace_name: newPrefix,
+        status: 'active',
+      });
+    })();
+
+    if (result.unmatchedExternalIds.length > 0) {
+      await this.fileRecoveryFinding(connection.project_id, {
+        title: `Tracker sync left ${plural(result.unmatchedExternalIds.length, 'link')} un-remapped`,
+        body: [
+          `This beads workspace's issue prefix was renamed from \`${oldPrefix}\` to`,
+          `\`${newPrefix}\`, and cyboflow rewrote every link that carried the old prefix. These`,
+          'did not carry it, so they were left exactly as they are rather than guessed at:',
+          '',
+          ...result.unmatchedExternalIds.map((id) => `- \`${id}\``),
+          '',
+          'They will not resolve against the workspace. Unlink them, or re-run the wizard to',
+          'reconcile them against the issues they belong to.',
+        ].join('\n'),
+        severity: 'warning',
+        provider: connection.provider,
+      });
+    }
+
+    this.emitTrackerChange(connection.project_id, connectionId, 'connection');
+    void this.syncNow(connectionId).catch((err: unknown) => {
+      this.logger?.error('[trackerSync] sync after a prefix remap failed', {
+        connectionId,
+        error: describeError(err),
+      });
+    });
+    return result;
+  }
+
+  /**
+   * Retire a connection whose workspace was REPLACED and bind a fresh one to the
+   * database that is there now — the proposal's "Adopt new workspace", in its
+   * exact order.
+   *
+   * WHY THIS CANNOT BE A RESUME (round 17). Re-detect on a replaced workspace
+   * necessarily reports a NEW instance id. Resuming the old connection onto it
+   * would keep every retained link while the ids they name now address unrelated
+   * issues in an unrelated database; refusing forever instead strands the paused
+   * connection and any ambiguous outbox row. So the recovery is a state machine
+   * with a hard boundary between the two identities:
+   *
+   *   1. RETIRE + ORPHAN. The old row goes `disconnected` (the ordinary
+   *      disconnect path, so the drain timer, the cleared secret and the
+   *      push-target promotion all behave identically) and its ACTIVE links are
+   *      orphaned. Entities are NEVER archived — their remote halves are simply
+   *      gone, which is not the user deciding the work is done.
+   *   2. CANCEL EVERY UNRESOLVED WRITE, each as its own review finding. Nothing
+   *      may replay against the new instance — including the `ambiguous` create,
+   *      whose issue may exist in the database that was deleted. It is surfaced
+   *      for manual adoption, never auto-recovered across identities.
+   *   3. MINT A FRESH CONNECTION on the new instance id, same project, same
+   *      source scope and settings, same workspace path, generation 0, NULL
+   *      secret, NULL cursor.
+   *   4. PRE-IMPORT RECONCILIATION (round 18) — see
+   *      {@link TrackerSyncService.reconcileAdoptedWorkspace}. It runs BEFORE
+   *      the first ordinary import because the ordinary import path structurally
+   *      cannot re-link a retained entity: `findAdoptableIdea` rejects an idea
+   *      that already has a provider link, so a plain fresh import would mint
+   *      duplicates while the originals sat orphaned.
+   *   5. Kick the first pass.
+   *
+   * DECLINING IS SIMPLY NOT CALLING THIS. A paused pair stays paused
+   * indefinitely, which is safe — and no timer may ever adopt on the user's
+   * behalf, because adoption retires a connection and cancels queued writes.
+   *
+   * @throws {TrackerConnectionNotFoundError} unknown connection id.
+   * @throws {TrackerRecoveryUnavailableError} a keyed provider.
+   * @throws {TrackerRecoveryStateError} re-probing no longer reports 'replaced'.
+   */
+  async adoptNewWorkspace(connectionId: string): Promise<TrackerAdoptionResult> {
+    const old = this.requireKeylessConnection(connectionId);
+    const probe = await this.requireRecoveryClass(connectionId, 'replaced');
+    const projectId = old.project_id;
+
+    // ── 1 · retire + orphan ────────────────────────────────────────────────
+    // Captured BEFORE the disconnect, which zeroes the column and promotes a
+    // surviving sibling; the new row re-claims the role below if the old one
+    // held it, so the pair never sits without a pusher and never gets two.
+    const wasPushTarget = old.push_target === 1;
+    // The links this adoption is responsible for. PREVIOUSLY-orphaned links are
+    // deliberately excluded from the re-link pass below: they were orphaned by
+    // the sweep or by the user's own removal ruling, and re-linking one would
+    // resurrect something that was already decided about.
+    const orphaning = listLinks(this.db, connectionId, { activeOnly: true });
+    await this.disconnect(connectionId);
+    for (const link of orphaning) markOrphaned(this.db, link.id);
+
+    // ── 2 · cancel every unresolved write ──────────────────────────────────
+    const cancelled = cancelUnresolvedOutbox(
+      this.db,
+      connectionId,
+      'cancelled — the beads workspace this write was composed against was replaced',
+    );
+    for (const row of cancelled) {
+      await this.fileCancelledWriteFinding(projectId, old, row);
+    }
+
+    // ── 3 · mint the fresh connection ──────────────────────────────────────
+    // COMPOSED DIRECTLY rather than through connect(): connect() re-runs the
+    // live probe, applies reconcile decisions, and consults the idempotent
+    // re-submit matcher — none of which has anything to answer here (the probe
+    // just ran, there are no wizard decisions, and the matcher would be looking
+    // for a row that by definition does not exist yet at the NEW instance id).
+    const newConnectionId = `trk_${randomUUID()}`;
+    const created = insertConnection(this.db, {
+      ...adoptedConnectionRow(old, probe),
+      id: newConnectionId,
+      push_target: wasPushTarget ? 1 : 0,
+    });
+    if (wasPushTarget) claimPushTarget(this.db, projectId, old.provider, newConnectionId);
+
+    // ── 4 · pre-import reconciliation ──────────────────────────────────────
+    const reconciled = await this.reconcileAdoptedWorkspace(created, old, orphaning);
+
+    // ── 5 · first pass ─────────────────────────────────────────────────────
+    this.emitTrackerChange(projectId, connectionId, 'connection');
+    this.emitTrackerChange(projectId, newConnectionId, 'connection');
+    void this.syncNow(newConnectionId).catch((err: unknown) => {
+      this.logger?.error('[trackerSync] first pass after adopting a new workspace failed', {
+        connectionId: newConnectionId,
+        error: describeError(err),
+      });
+    });
+
+    return {
+      newConnectionId,
+      orphanedLinks: orphaning.length,
+      cancelledWrites: cancelled.length,
+      ...reconciled,
+    };
+  }
+
+  /**
+   * Match the ADOPTED workspace's issues against the entities the replacement
+   * orphaned, and re-point the links that can be proven — before any ordinary
+   * import runs (round 18).
+   *
+   * ONLY CONCLUSIVE EVIDENCE RE-LINKS, and there are exactly two kinds:
+   *
+   *   CLIENT KEY (pushed-origin). Every create this app makes stamps a UUID into
+   *     the issue's `cyboflow_client_key` metadata, and the outbox row that
+   *     minted it names the entity. An issue in the new workspace carrying a key
+   *     the OLD connection's outbox recorded is that entity's issue — a UUID
+   *     match cannot be a coincidence.
+   *   PROVENANCE MARKER (imported-origin). An imported entity's body carries
+   *     `<!-- cyboflow:tracker beads:<id> -->`. An issue whose id is exactly the
+   *     one an orphaned link named AND whose entity's body names that same id
+   *     was imported from an issue with that id — which a re-init from an export
+   *     (the ordinary way a replacement ends up holding the same content)
+   *     reproduces id-for-id.
+   *
+   * EVERYTHING ELSE IS AMBIGUOUS, and ambiguity is a question, not a default. An
+   * issue whose id merely coincides with an orphaned link's, with no marker and
+   * no key to back it, gets a review finding and — critically — a ledger row at
+   * reason `'awaiting-adoption'`, so the reconciliation sweep does not import it
+   * as a new idea minutes later while the user is still deciding. An issue that
+   * matches nothing at all is left entirely alone: the ordinary import path owns
+   * it, and it will arrive as a new idea on the first pass, which is correct.
+   */
+  private async reconcileAdoptedWorkspace(
+    created: TrackerConnectionRow,
+    old: TrackerConnectionRow,
+    orphaned: readonly EntityExternalLinkRow[],
+  ): Promise<{ relinked: number; ambiguous: number }> {
+    const byExternalId = new Map(orphaned.map((link) => [link.external_id, link]));
+    const byEntity = new Map(orphaned.map((link) => [`${link.entity_type}:${link.entity_id}`, link]));
+
+    let issues: TrackerIssue[];
+    try {
+      issues = await this.buildAdapter(created).listIssues(parseSourceSelection(created));
+    } catch (err) {
+      // The adoption itself has already landed — the old row is retired, the new
+      // one exists — so a listing failure is a DELAYED reconciliation, not a
+      // failed adoption. The first pass would import the whole workspace as new
+      // ideas, which is exactly what the re-link exists to prevent, so the
+      // connection is left PAUSED for the user to re-detect rather than allowed
+      // to run blind.
+      updateConnectionSettings(this.db, created.id, { status: 'paused' });
+      this.logger?.error('[trackerSync] adopted workspace could not be listed for re-linking', {
+        connectionId: created.id,
+        error: describeError(err),
+      });
+      return { relinked: 0, ambiguous: 0 };
+    }
+
+    let relinked = 0;
+    let ambiguous = 0;
+    for (const issue of issues) {
+      const match = this.matchAdoptedIssue(issue, old, byExternalId, byEntity);
+      if (match === null) continue;
+
+      if (match.conclusive) {
+        // upsertLink's conflict target is (entity_type, entity_id, provider), so
+        // this rewrites the SAME row onto the new connection and clears
+        // `orphaned_at` in one statement — the link never exists twice and is
+        // never absent.
+        upsertLink(this.db, {
+          connection_id: created.id,
+          entity_type: match.link.entity_type,
+          entity_id: match.link.entity_id,
+          provider: created.provider,
+          external_id: issue.externalId,
+          external_identifier: issue.identifier,
+          external_url: issue.url || null,
+          external_parent_id: issue.parentExternalId,
+          baseline_json: freshBaselineJson(issue),
+        });
+        relinked++;
+        await this.fileAdoptionRelinkFinding(created, issue, match.link);
+        continue;
+      }
+
+      upsertLedgerEntry(this.db, {
+        connection_id: created.id,
+        external_id: issue.externalId,
+        reason: 'awaiting-adoption',
+        last_seen_revision: issue.revision ?? null,
+        config_generation: created.config_generation,
+      });
+      ambiguous++;
+      await this.fileAdoptionAmbiguityFinding(created, issue, match.link);
+    }
+    return { relinked, ambiguous };
+  }
+
+  /**
+   * One adopted issue's verdict: the orphaned link it belongs to and whether the
+   * evidence is conclusive, or null when nothing points at it.
+   *
+   * The two conclusive channels are tried in order of strength — a UUID the app
+   * itself minted beats an id coincidence backed by a body marker — and the
+   * fallback is deliberately NOT a third channel: it is the same id coincidence
+   * with the corroboration missing, which is exactly what "ambiguous" means.
+   */
+  private matchAdoptedIssue(
+    issue: TrackerIssue,
+    old: TrackerConnectionRow,
+    byExternalId: ReadonlyMap<string, EntityExternalLinkRow>,
+    byEntity: ReadonlyMap<string, EntityExternalLinkRow>,
+  ): { link: EntityExternalLinkRow; conclusive: boolean } | null {
+    if (issue.recoveryClientKey !== null) {
+      const row = findOutboxByClientKey(this.db, old.id, issue.recoveryClientKey);
+      const link =
+        row === null || row.entity_type === null || row.entity_id === null
+          ? undefined
+          : byEntity.get(`${row.entity_type}:${row.entity_id}`);
+      if (link !== undefined) return { link, conclusive: true };
+    }
+
+    const byId = byExternalId.get(issue.externalId);
+    if (byId === undefined) return null;
+    const body = readEntityIdentity(this.db, byId.entity_type, byId.entity_id)?.body ?? null;
+    const conclusive = body !== null && body.includes(provenanceMarker(old.provider, issue.externalId));
+    return { link: byId, conclusive };
+  }
+
+  /**
+   * The connection, or the typed refusal. Recovery classification is
+   * KEYLESS-ONLY: a keyed provider's reconnect is a pasted key, and none of the
+   * three shapes this machinery distinguishes has an HTTP-provider analogue.
+   */
+  private requireKeylessConnection(connectionId: string): TrackerConnectionRow {
+    const connection = getConnection(this.db, connectionId);
+    if (connection === null) throw new TrackerConnectionNotFoundError(connectionId);
+    if (providerNeedsSecret(connection.provider)) {
+      throw new TrackerRecoveryUnavailableError(connection.provider);
+    }
+    return connection;
+  }
+
+  /**
+   * Re-probe and insist on one classification — the guard every recovery ACTION
+   * opens with. The UI's verdict can be minutes old, and both actions are
+   * destructive enough that acting on a stale one is worse than refusing.
+   */
+  private async requireRecoveryClass(
+    connectionId: string,
+    expected: TrackerRecoveryClass,
+  ): Promise<TrackerRecoveryProbe> {
+    const probe = await this.probeRecovery(connectionId);
+    if (probe.recovery !== expected) {
+      throw new TrackerRecoveryStateError(expected, probe.recovery, describeRecovery(probe));
+    }
+    return probe;
+  }
+
+  /**
+   * An EXPECTATION-FREE adapter for a keyless connection: the row's own
+   * `source_json` (and therefore its stored workspace path), with both identity
+   * columns nulled so `assertIdentity` compares nothing and the probe REPORTS
+   * the workspace rather than refusing it.
+   *
+   * That nulling is the whole method. Every other construction path deliberately
+   * carries the expectation — it is the identity invariant — and would answer a
+   * replaced or renamed workspace with the same `TrackerAuthError` the pause
+   * already produced, which is precisely the answer this cannot use.
+   */
+  private probeAdapter(connection: TrackerConnectionRow): TrackerAdapter {
+    return this.adapterFactory({ ...connection, workspace_id: null, workspace_name: null }, '');
+  }
+
+  /**
+   * File one recovery audit record into the review inbox.
+   *
+   * FAIL-SOFT, like {@link runDeletionSweep}'s own findings: every caller has
+   * ALREADY applied the repair it is describing, so a review-inbox failure must
+   * not turn a completed adoption into a thrown error the UI reports as "nothing
+   * happened". An unwired `reviewRouter` is the same case — the repair stands,
+   * only the audit trail is thinner.
+   */
+  private async fileRecoveryFinding(
+    projectId: number,
+    finding: {
+      title: string;
+      body: string;
+      severity: 'info' | 'warning';
+      provider: TrackerProvider;
+      entityType?: TrackerEntityType;
+      entityId?: string;
+    },
+  ): Promise<void> {
+    if (this.reviewRouter === undefined) return;
+    try {
+      await this.reviewRouter.applyReviewItem(projectId, {
+        op: 'create',
+        actor: finding.provider,
+        kind: 'finding',
+        title: finding.title,
+        body: finding.body,
+        blocking: false,
+        severity: finding.severity,
+        source: `tracker:${finding.provider}`,
+        ...(finding.entityType !== undefined && finding.entityId !== undefined
+          ? { entityType: finding.entityType, entityId: finding.entityId }
+          : {}),
+        payload: { kind: 'finding', category: 'tracker-sync' },
+      });
+    } catch (err) {
+      this.logger?.error('[trackerSync] recovery finding could not be filed', {
+        projectId,
+        title: finding.title,
+        error: describeError(err),
+      });
+    }
+  }
+
+  /**
+   * One cancelled outbox row, surfaced for manual verification.
+   *
+   * A WARNING, not info: an `in_flight` or `ambiguous` row's write may well have
+   * LANDED in the database that was replaced, and cyboflow can no longer tell —
+   * the only honest thing to do is say so and name the issue, so the user can
+   * look. Even a plain `pending` row is a change they asked for that will now
+   * never be sent.
+   */
+  private async fileCancelledWriteFinding(
+    projectId: number,
+    connection: TrackerConnectionRow,
+    row: TrackerOutboxRow,
+  ): Promise<void> {
+    const target = row.external_id ?? '(a new issue)';
+    await this.fileRecoveryFinding(projectId, {
+      title: `Tracker write cancelled — ${row.kind} on ${target}`,
+      body: [
+        `The ${connection.provider} workspace this write was queued against was REPLACED (a new`,
+        'database at the same path), so it was cancelled rather than replayed: replaying it would',
+        'have addressed an unrelated issue in the new database.',
+        '',
+        `- kind: \`${row.kind}\``,
+        `- issue: \`${target}\``,
+        `- state when cancelled: \`${row.state}\``,
+        '',
+        row.state === 'pending'
+          ? 'It was still queued, so nothing was sent. Re-do the change if you still want it.'
+          : 'It was already in flight, so it MAY exist in the workspace that was replaced. Verify manually.',
+      ].join('\n'),
+      severity: 'warning',
+      provider: connection.provider,
+      ...(row.entity_type !== null && isTrackerEntityType(row.entity_type) && row.entity_id !== null
+        ? { entityType: row.entity_type, entityId: row.entity_id }
+        : {}),
+    });
+  }
+
+  /** A conclusive re-link, recorded so an adoption is never silent about what it moved. */
+  private async fileAdoptionRelinkFinding(
+    created: TrackerConnectionRow,
+    issue: TrackerIssue,
+    link: EntityExternalLinkRow,
+  ): Promise<void> {
+    await this.fileRecoveryFinding(created.project_id, {
+      title: `Tracker sync re-linked ${issue.identifier} in the adopted workspace`,
+      body: [
+        `This item's ${created.provider} workspace was replaced, and the new one contains an issue`,
+        'that is provably the same one — matched on the client key cyboflow stamped when it created',
+        'the issue, or on the import marker in the local body. Its link now points at the new',
+        'workspace and the entity was never duplicated.',
+        '',
+        `- was: \`${link.external_id}\``,
+        `- now: \`${issue.externalId}\``,
+      ].join('\n'),
+      severity: 'info',
+      provider: created.provider,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+    });
+  }
+
+  /** A plausible-but-unproven match — the one case that needs a human. */
+  private async fileAdoptionAmbiguityFinding(
+    created: TrackerConnectionRow,
+    issue: TrackerIssue,
+    link: EntityExternalLinkRow,
+  ): Promise<void> {
+    await this.fileRecoveryFinding(created.project_id, {
+      title: `Confirm whether ${issue.identifier} is still this item's issue`,
+      body: [
+        `This item's ${created.provider} workspace was replaced, and the new one holds an issue with`,
+        `the SAME id (\`${issue.externalId}\`) the item was linked to. That is suggestive, but it is`,
+        'not proof: the id carries no client key cyboflow minted and the local body carries no import',
+        'marker naming it, so the two could be unrelated issues that happen to share an id.',
+        '',
+        'Nothing was linked and nothing was imported — the issue is held back from the import path',
+        'until you decide. Re-run the tracker wizard to link them, or unlink the item to let the',
+        'issue import as new.',
+      ].join('\n'),
+      severity: 'warning',
+      provider: created.provider,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+    });
   }
 
   /** The project's connected-view cards (disconnected connections are not listed). */
@@ -2056,6 +3201,9 @@ export class TrackerSyncService implements TrackerSyncFacade {
    * inbound blocker would halt the pass at those issues forever. The sweep runs
    * after the write so it can never settle rows for a mode the write then
    * failed to apply, and only for the direction the user actually turned off.
+   *
+   * A CHANGE TO WHAT IS ELIGIBLE ALSO BUMPS `config_generation` — see
+   * {@link ELIGIBILITY_PATCH_KEYS}.
    */
   async updateSettings(connectionId: string, patch: TrackerSettingsPatch): Promise<void> {
     const connection = getConnection(this.db, connectionId);
@@ -2087,6 +3235,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
           }
         : {}),
     });
+
+    // AFTER the settings write, so a generation can never advance past a patch
+    // that failed to land. One bump per call however many eligibility keys the
+    // patch carried: the ledger's rule is "re-consider every skipped id ONCE
+    // per change", and the change is the patch, not each of its keys.
+    if (ELIGIBILITY_PATCH_KEYS.some((key) => patch[key] !== undefined)) {
+      bumpConfigGeneration(this.db, connectionId);
+    }
 
     if (patch.contentSyncMode === 'off') {
       cancelPendingKinds(
@@ -2504,6 +3660,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
     link: EntityExternalLinkRow,
     group: WriteBackGroup,
   ): boolean {
+    // The same guarded-update gate writeBack.ts's own enqueue applies, and this
+    // is the second door into the state outbox — a ruling that queued here
+    // would strand a row the drain refuses. See guardedUpdatesUnavailable.
+    if (guardedUpdatesUnavailable(connection.provider)) return false;
     const duplicate = listUnresolvedOutbox(this.db, connection.id).some(
       (row) =>
         row.external_id === link.external_id &&
@@ -2941,6 +4101,135 @@ function abandonedResult(
 }
 
 // ---------------------------------------------------------------------------
+// Keyless workspace recovery — pure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * `<old>-<suffix>` rewritten to `<new>-<suffix>`, or null when `value` does not
+ * carry the old prefix (including a null value).
+ *
+ * NULL IS THE "LEAVE IT ALONE" ANSWER, not a failure. Every caller has to be
+ * able to tell "rewritten" from "not ours to rewrite": the link loop reports the
+ * latter as a finding, and the outbox loop skips the row entirely. Returning the
+ * input unchanged would collapse those two into one.
+ *
+ * The separator is part of the match so a prefix `chk` cannot claim an id
+ * belonging to a prefix `chkout`.
+ */
+function renamePrefix(value: string | null, oldPrefix: string, newPrefix: string): string | null {
+  if (value === null) return null;
+  const head = `${oldPrefix}-`;
+  return value.startsWith(head) ? `${newPrefix}-${value.slice(head.length)}` : null;
+}
+
+/**
+ * A `create_sub_issue` row's payload with its `parentExternalId` re-prefixed, or
+ * null when there is nothing to rewrite.
+ *
+ * THE ONLY PAYLOAD KEY THAT HOLDS AN EXTERNAL ID — `create_issue`,
+ * `update_content` and `archive_issue` carry empty payloads, and
+ * `update_state`/`close_parent` carry a group name. Rewriting BY KEY rather than
+ * by scanning the blob for id-shaped strings is deliberate: a create row also
+ * carries the entity's title and description, and a title that happens to begin
+ * with the old prefix would otherwise be mangled into the tracker.
+ */
+function renameParentInPayload(
+  row: TrackerOutboxRow,
+  oldPrefix: string,
+  newPrefix: string,
+): string | null {
+  if (row.kind !== 'create_sub_issue') return null;
+  const payload = parseJsonObject(row.payload_json);
+  const parent = payload.parentExternalId;
+  if (typeof parent !== 'string') return null;
+  const rewritten = renamePrefix(parent, oldPrefix, newPrefix);
+  if (rewritten === null) return null;
+  return JSON.stringify({ ...payload, parentExternalId: rewritten });
+}
+
+/**
+ * The fresh connection an adoption mints: the retired row's whole configuration,
+ * re-bound to the new database instance.
+ *
+ * SPELLED OUT COLUMN BY COLUMN rather than spread from `old`, for the same
+ * reason `connect` composes its row once: the three columns that MUST change
+ * (both identity halves, and the generation/cursor reset) are invisible in a
+ * spread-plus-overrides, and a column added to the table later would be carried
+ * over silently by one and caught by the other.
+ *
+ * `source_json` IS carried verbatim, and that is the point: it holds the wizard
+ * scope, the display label and the resolved workspace PATH — and the path is
+ * unchanged, since a replacement is a new database at the same location.
+ */
+function adoptedConnectionRow(
+  old: TrackerConnectionRow,
+  probe: TrackerRecoveryProbe,
+): Omit<NewConnectionRow, 'id'> {
+  return {
+    project_id: old.project_id,
+    provider: old.provider,
+    status: 'active',
+    workspace_id: probe.currentWorkspaceId,
+    workspace_name: probe.currentWorkspaceName,
+    actor_label: old.actor_label,
+    base_url: old.base_url,
+    // Keyless, permanently — the same NULL the row it replaces carried.
+    secret_ciphertext: null,
+    source_json: old.source_json,
+    selection_mode: old.selection_mode,
+    selection_json: old.selection_json,
+    state_mapping_json: old.state_mapping_json,
+    status_sync_mode: old.status_sync_mode,
+    pull_mode: old.pull_mode,
+    push_mode: old.push_mode,
+    // Set by the caller, which knows whether the retired row held the role.
+    push_target: 0,
+    content_sync_mode: old.content_sync_mode,
+    archive_sync_mode: old.archive_sync_mode,
+    priority_mapping_json: old.priority_mapping_json,
+    category_mapping_json: old.category_mapping_json,
+    // A NEW connection starts at generation 0: it has no ledger to invalidate,
+    // and inheriting the old row's counter would make the pre-import
+    // reconciliation's own 'awaiting-adoption' rows read as stale on sight.
+    config_generation: 0,
+    mirror_subissues: old.mirror_subissues,
+    conflict_mode: old.conflict_mode,
+    // NULL so the first pass fetches from the beginning — the new workspace has
+    // never been read, and the old row's cursor describes a different database.
+    cursor_updated_at: null,
+    cursor_external_id: null,
+    last_sync_at: null,
+    last_sync_log_json: null,
+  };
+}
+
+/**
+ * Narrow an outbox row's `entity_type` — a bare `string | null` column, since a
+ * row can name no entity at all — to the union a review-item entity link needs.
+ */
+function isTrackerEntityType(value: string): value is TrackerEntityType {
+  return value === 'idea' || value === 'epic' || value === 'task';
+}
+
+/** One line of prose for a recovery verdict — the detail a refusal carries. */
+function describeRecovery(probe: TrackerRecoveryProbe): string {
+  switch (probe.recovery) {
+    case 'healthy':
+      return 'the workspace matches what this connection is bound to.';
+    case 'redetect':
+      return `the workspace could not be read (${probe.probeError ?? 'no detail'}).`;
+    case 'renamed':
+      return `the issue prefix is now ${probe.currentWorkspaceName ?? 'unknown'}, not ${
+        probe.boundWorkspaceName ?? 'unknown'
+      }.`;
+    case 'replaced':
+      return `the database instance id is now ${probe.currentWorkspaceId ?? 'unknown'}, not ${
+        probe.boundWorkspaceId ?? 'unknown'
+      }.`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Log composition
 // ---------------------------------------------------------------------------
 
@@ -3184,6 +4473,38 @@ function appendSweepLines(entries: TrackerSyncLogEntry[], sweep: InboundSweepRep
       line: `${plural(sweep.entityLocked, 'deleted issue')} waiting on an active run`,
     });
   }
+  if (sweep.reconcileImported > 0) {
+    entries.push({
+      marker: '·',
+      line: `reconciled ${plural(sweep.reconcileImported, 'issue')} the cursor never saw`,
+    });
+  }
+  if (sweep.resurrected > 0) {
+    entries.push({
+      marker: '·',
+      line: `${plural(sweep.resurrected, 'issue')} came back · un-archived`,
+    });
+  }
+  if (sweep.archivalDeferred > 0) {
+    // The HEAD guard held the destructive subset back. Imports and merges in
+    // the same sweep still applied, so this is a partial deferral rather than a
+    // failed pass — and it self-clears on the next sweep over a quiet workspace.
+    entries.push({
+      marker: '·',
+      line: `${plural(sweep.archivalDeferred, 'deletion')} deferred — workspace changed mid-sweep`,
+    });
+  }
+  // The cost line, and only when a reconciliation actually spent lookups: it is
+  // how a user (and a bug report) tells "the ledger is working" from "every
+  // sweep re-fetches the workspace".
+  if (sweep.reconcileFetched > 0) {
+    entries.push({
+      marker: '·',
+      line:
+        `${plural(sweep.reconcileFetched, 'point lookup')} · ` +
+        `${sweep.reconcileSkipped} known, ${sweep.reconcileLedgered} recorded as skipped`,
+    });
+  }
   if (sweep.conflictsOpened > 0) {
     entries.push({ marker: '✎', line: `conflicts ${sweep.conflictsOpened}` });
   }
@@ -3228,7 +4549,7 @@ function isLogEntry(value: unknown): value is TrackerSyncLogEntry {
 // ---------------------------------------------------------------------------
 
 /** Link lookup order for an entity whose provider we do not know up front. */
-const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart'];
+const LINK_PROVIDERS: readonly TrackerProvider[] = ['linear', 'plane', 'dart', 'beads'];
 
 /** The connected view's source label, read back off `source_json`. */
 function readSourceLabel(connection: TrackerConnectionRow): string {

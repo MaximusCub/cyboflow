@@ -1,0 +1,207 @@
+=== D5: --format template sweep ===
+$ bd list --help
+List issues
+
+Usage:
+  bd list [flags]
+
+Flags:
+      --all                          Show all issues including closed (overrides default filter)
+  -a, --assignee string              Filter by assignee
+      --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
+      --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
+      --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
+      --created-before string        Filter issues created before date (YYYY-MM-DD or RFC3339)
+      --defer-after string           Filter issues deferred after date (supports relative: +6h, tomorrow)
+      --defer-before string          Filter issues deferred before date (supports relative: +6h, tomorrow)
+      --deferred                     Show only issues with defer_until set
+      --desc-contains string         Filter by description substring (case-insensitive)
+      --due-after string             Filter issues due after date (supports relative: +6h, tomorrow)
+      --due-before string            Filter issues due before date (supports relative: +6h, tomorrow)
+      --empty-description            Filter issues with empty or missing description
+      --exclude-label strings        Exclude issues that have ANY of these labels
+      --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
+      --flat                         Disable tree format and use legacy flat list output
+      --format string                Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template
+      --has-metadata-key string      Filter issues that have this metadata key set
+  -h, --help                         help for list
+      --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
+      --include-gates                Include gate issues in output (normally hidden)
+      --include-infra                Include infrastructure beads (agent/role/message) in output
+      --include-templates            Include template molecules in output
+  -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
+      --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
+      --label-pattern string         Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)
+      --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
+  -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
+      --long                         Show detailed multi-line output for each issue
+      --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
+      --mol-type string              Filter by molecule type: swarm, patrol, or work
+      --no-assignee                  Filter issues with no assignee
+      --no-labels                    Filter issues with no labels
+      --no-pager                     Disable pager output
+      --no-parent                    Exclude child issues (show only top-level issues)
+      --no-pinned                    Exclude pinned issues
+      --notes-contains string        Filter by notes substring (case-insensitive)
+      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
+      --overdue                      Show only issues with due_at in the past (not closed)
+      --parent string                Filter by parent issue ID (shows children of specified issue)
+      --pinned                       Show only pinned issues
+      --pretty                       Display issues in a tree format with status/priority symbols
+  -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
+      --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
+      --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
+      --ready                        Show only ready issues (no active blockers, same semantics as bd ready)
+  -r, --reverse                      Reverse sort order
+      --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
+      --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
+      --spec string                  Filter by spec_id prefix
+  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.
+      --title string                 Filter by title text (case-insensitive substring match)
+      --title-contains string        Filter by title substring (case-insensitive)
+      --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
+  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
+      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
+      --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
+  -w, --watch                        Watch for changes and auto-update display (implies --pretty)
+      --wisp-type string             Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation
+
+Global Flags:
+      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 Database path (default: auto-discover .beads/*.db)
+  -C, --directory string          Change to this directory before running the command (like git -C)
+      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
+      --global                    Use the global shared-server database (beads_global)
+      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
+      --json                      Output in JSON format
+      --profile                   Generate CPU profile for performance analysis
+  -q, --quiet                     Suppress non-essential output (errors only)
+      --readonly                  Read-only mode: block write operations (for worker sandboxes)
+      --sandbox                   Sandbox mode: disables Dolt auto-push
+  -v, --verbose                   Enable verbose/debug output
+exit=0
+--- D5a: issue inventory (need >=3) ---
+$ bd list --all --limit 0 --json | python3 -c count
+count= 6
+  dg-ayz ENGINE TITLE
+  dg-38u AGENT A WROTE ANYWAY
+  dg-4dp ENGINE RETITLED
+  dg-v42 ENGINE-CLOBBER-3
+  dg-sa7 GUARD-ARM-B-LANDED
+  dg-qip HASH-TEST title-B
+exit=0
+--- D5b: Go template emitting (id, updated_at) ---
+$ bd list --all --limit 0 --format '{{.ID}},{{.UpdatedAt}}'
+exit=0
+--- D5c: --format variants (probing for silent failure) ---
+$ bd list --all --limit 0 --format '{{.ID}}'
+exit=0 [end]
+$ bd list --all --limit 0 --format '{{.Id}}'
+exit=0 [end]
+$ bd list --all --limit 0 --format '{{.id}}'
+exit=0 [end]
+$ bd list --all --limit 0 --format 'STATIC-TEXT-NO-FIELDS'
+exit=0 [end]
+$ bd list --all --limit 0 --format '{{.TOTALLY_BOGUS_FIELD}}'
+exit=0 [end]
+$ bd list --all --limit 0 --format '{{.ID}} {{.Title}}'
+exit=0 [end]
+--- D5d: control - does --format work at all? try documented 'dot'/'digraph' ---
+$ bd list --all --limit 0 --format dot
+digraph dependencies {
+  rankdir=TB;
+  node [shape=box, style=rounded];
+
+  "dg-ayz" [label="dg-ayz\n[task P0]\nENGINE TITLE\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+  "dg-38u" [label="dg-38u\n[task P2]\nAGENT A WROTE ANYWAY\n(in_progress)", style="rounded,filled", fillcolor="lightyellow", fontcolor="black"];
+  "dg-4dp" [label="dg-4dp\n[task P2]\nENGINE RETITLED\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+  "dg-v42" [label="dg-v42\n[task P2]\nENGINE-CLOBBER-3\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+  "dg-sa7" [label="dg-sa7\n[task P2]\nGUARD-ARM-B-LANDED\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+  "dg-qip" [label="dg-qip\n[task P4]\nHASH-TEST title-B\n(open)", style="rounded,filled", fillcolor="white", fontcolor="black"];
+
+}
+exit=0
+$ bd list --all --limit 0 --format digraph
+exit=0
+--- D5e: isolate. Add a dependency, retest digraph (dep-graph formats may need edges) ---
+$ bd dep add dg-v42 dg-sa7
+✓ Added dependency: dg-v42 (ENGINE-CLOBBER-3) depends on dg-sa7 (GUARD-ARM-B-LANDED) (blocks)
+exit=0
+$ bd list --all --limit 0 --format digraph
+dg-v42 dg-sa7
+exit=0
+--- D5f: template with --flat / --pretty / without --all ---
+$ bd list --flat --format '{{.ID}}'
+<no value>
+exit=0
+$ bd list --format 'LITERAL'
+LITERAL
+exit=0
+--- D5g: does --format template work on OTHER commands? ---
+$ bd ready --help | grep -i format
+      --pretty                       Display issues in a tree format with status/priority symbols (default true)
+      --json                      Output in JSON format
+exit=0
+$ bd query --help | grep -i format
+      --json                      Output in JSON format
+exit=0
+$ bd show --help | grep -i format
+      --json                      Output in JSON format
+exit=0
+--- D5h: pin the --all / --limit interaction with a LITERAL template ---
+$ bd list  --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --all --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --limit 0 --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --all --limit 0 --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --flat --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --flat --all --limit 0 --format LITERAL  ->  [LITERAL] exit=0
+$ bd list --limit 3 --format LITERAL  ->  [] exit=0
+--- D5i: can a template reach the issue slice at all? ---
+$ bd list --flat --format '{{range .}}{{.ID}} {{end}}'  ->  [Error: template execution error: template: format:1:13: executing "format" at <.ID>: can't evaluate field ID in type interface {}] exit=0
+$ bd list --flat --format '{{range .Issues}}{{.ID}} {{end}}'  ->  [] exit=0
+$ bd list --flat --format '{{.}}'  ->  [map[Dependency:0x584c9c36a080 DependsOnID:dg-sa7 Issue:0x584c9c391188 IssueID:dg-v42 Type:blocks]] exit=0
+$ bd list --flat --format '{{len .}}'  ->  [5] exit=0
+--- D5j: is .Issue reachable? can it yield (id, revision)? ---
+$ bd list --flat --all --limit 0 --format '{{.IssueID}},{{.DependsOnID}},{{.Type}}'
+  -> [dg-v42,dg-sa7,blocks] exit=0
+$ bd list --flat --all --limit 0 --format '{{.Issue.ID}},{{.Issue.UpdatedAt}}'
+  -> [dg-v42,2026-08-26 21:38:00 +0000 UTC] exit=0
+$ bd list --flat --all --limit 0 --format '{{.Issue.ID}},{{.Issue.Title}},{{.Issue.UpdatedAt}}'
+  -> [dg-v42,ENGINE-CLOBBER-3,2026-08-26 21:38:00 +0000 UTC] exit=0
+$ bd list --flat --all --limit 0 --format '{{.Dependency}}'
+  -> [{dg-v42 dg-sa7 blocks 2026-08-26 21:40:09 +0000 UTC Krishna {} }] exit=0
+
+PROOF that non-dependency issues are INVISIBLE to --format templates:
+  total issues: 6
+  template rows: 1
+--- D5k: the WORKING (id,revision) sweep = bd list --json ---
+$ bd list --all --limit 0 --json | python3 (id,updated_at) for all
+  dg-ayz 2026-08-27T04:38:27Z
+  dg-38u 2026-08-27T04:39:14Z
+  dg-4dp 2026-08-27T04:38:48Z
+  dg-v42 2026-08-26T21:38:00Z
+  dg-sa7 2026-08-26T21:36:00Z
+  dg-qip 2026-08-27T04:34:40Z
+exit=0
+
+--- D5l: envelope vs no-envelope for bd list (representative) ---
+$ BD_JSON_ENVELOPE=1 bd list --limit 1 --json | head -5
+{
+  "data": [
+    {
+      "id": "dg-ayz",
+      "title": "ENGINE TITLE",
+exit=0
+$ bd list --limit 1 --json | head -5
+[
+  {
+    "id": "dg-ayz",
+    "title": "ENGINE TITLE",
+    "status": "open",
+exit=0
+$ bd history dg-ayz --json | head -4   (NO envelope)
+[
+  {
+    "CommitHash": "2nfokdri2tsa7vo70k4h4grjmlte91rd",
+    "Committer": "root",
+exit=0
