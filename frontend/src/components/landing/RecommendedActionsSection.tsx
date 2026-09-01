@@ -55,7 +55,7 @@ const KIND_TINT: Record<RecommendedActionKind, string> = {
 /**
  * Which kinds carry the accent-filled CTA. The split follows the artboards:
  * a card that moves work FORWARD (answer, merge, launch, resolve) gets the
- * accent; a card that asks you to tidy up (rebase, wrap up, jot an idea) gets
+ * accent; a card that asks you to tidy up (rebase, wrap up) gets
  * the bordered secondary so the page never shows six competing accent buttons.
  */
 const ACCENT_CTA_KINDS: ReadonlySet<RecommendedActionKind> = new Set<RecommendedActionKind>([
@@ -64,6 +64,7 @@ const ACCENT_CTA_KINDS: ReadonlySet<RecommendedActionKind> = new Set<Recommended
   'blocking-finding',
   'launch-sprint',
   'launch-planner',
+  'capture-first-idea',
   'run-launch-flow',
 ]);
 

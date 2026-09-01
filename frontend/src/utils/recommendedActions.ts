@@ -186,7 +186,7 @@ const CTA_LABELS: Record<RecommendedActionKind, string> = {
   'blocking-finding': 'Resolve finding',
   'launch-sprint': 'Launch sprint',
   'launch-planner': 'Continue planning',
-  'capture-first-idea': 'Capture an idea',
+  'capture-first-idea': 'Add an idea',
   'run-launch-flow': 'Run Launch',
 };
 
@@ -464,7 +464,7 @@ function buildCaptureFirstIdea(input: RecommendedActionsInput): RecommendedActio
       kind: 'capture-first-idea',
       id: 'capture-first-idea',
       title: 'Capture your first idea',
-      description: 'You have no ideas yet — write one down to get started.',
+      description: 'Already know what to build? Add it to the backlog by hand and take it straight into a planner.',
       ctaLabel: CTA_LABELS['capture-first-idea'],
       dismissible: true,
       signature: 'no-ideas',
@@ -483,7 +483,7 @@ function buildRunLaunchFlow(input: RecommendedActionsInput): RecommendedAction[]
       kind: 'run-launch-flow',
       id: `run-launch-flow:${project.id}`,
       title: namedProjects ? `Run the Launch flow for ${project.name}` : 'Run the Launch flow',
-      description: `${project.name}'s backlog is empty — Launch will interview you and seed a starter backlog.`,
+      description: 'Starting a project from scratch? Run the launch flow and get a full roadmap to get it built.',
       ctaLabel: CTA_LABELS['run-launch-flow'],
       dismissible: true,
       signature: `${project.id}`,
