@@ -288,7 +288,7 @@ export function EmptyWell({
   return (
     <div
       data-testid={testId}
-      className={`flex flex-col items-center gap-1.5 border border-dashed border-border-primary px-[18px] py-[30px] text-center ${className}`}
+      className={`flex flex-col items-center gap-1.5 border border-dashed border-border-primary bg-surface-raised px-[18px] py-[30px] text-center ${className}`}
     >
       {icon}
       <div
@@ -309,7 +309,7 @@ export function EmptyStrip({ children, testId }: { children: React.ReactNode; te
   return (
     <div
       data-testid={testId}
-      className="border border-dashed border-border-primary px-[18px] py-3.5 text-center text-[11px] text-text-tertiary"
+      className="border border-dashed border-border-primary bg-surface-raised px-[18px] py-3.5 text-center text-[11px] text-text-tertiary"
     >
       {children}
     </div>

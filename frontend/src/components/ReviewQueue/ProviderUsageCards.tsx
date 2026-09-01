@@ -247,7 +247,7 @@ function ProviderCard({
 
   return (
     <div
-      className="border border-border-primary bg-bg-secondary px-4 py-3"
+      className="border border-border-primary bg-surface-raised px-4 py-3"
       data-testid={`usage-card-${snapshot.provider}`}
     >
       <div className="flex items-baseline justify-between gap-3">

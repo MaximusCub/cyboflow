@@ -58,7 +58,7 @@ function ConnectCard({
   onConnect: () => void;
 }): React.JSX.Element {
   return (
-    <div className="flex flex-col gap-2 border border-border-primary bg-surface-tertiary px-4 py-3">
+    <div className="flex flex-col gap-2 border border-border-primary bg-surface-raised px-4 py-3">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-bold text-text-primary">{name}</span>
         <span className="eyebrow ml-auto text-text-tertiary">Not connected</span>
