@@ -35,6 +35,7 @@ import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
+import { installApplicationMenu } from './menu';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -4601,6 +4602,12 @@ app.whenReady().then(async () => {
   // another instance of this kind owns the data dir. The dedicated whenReady
   // handler there shows the dialog and exits — do no boot work here.
   if (!gotSingleInstanceLock) return;
+
+  // Replace Electron's stock default menu before any window exists — the menu
+  // is process-global, and the stock menu's View > Reload binds plain Cmd+R
+  // (Ctrl+R elsewhere), which would otherwise swallow that keydown before it
+  // ever reaches the renderer's keyboard-shortcut handler. See menu.ts.
+  installApplicationMenu();
 
   console.log('[Main] App is ready, initializing services...');
   // The schema-version gate now runs INSIDE initializeServices, immediately
