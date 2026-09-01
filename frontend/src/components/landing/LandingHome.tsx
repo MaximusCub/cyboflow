@@ -72,6 +72,7 @@ import { useTaskRunLauncher } from '../Backlog/useTaskRunLauncher';
 import { ProviderUsageCards } from '../ReviewQueue/ProviderUsageCards';
 import { SessionMergeDialog } from '../cyboflow/SessionMergeDialog';
 import { SessionDismissDialog } from '../cyboflow/SessionDismissDialog';
+import { AddIdeaModal } from './AddIdeaModal';
 import { QueueHeader } from './QueueHeader';
 import { RecommendedActionsSection } from './RecommendedActionsSection';
 import { NeedsInputSection } from './NeedsInputSection';
@@ -414,6 +415,10 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   const [mergeTargetId, setMergeTargetId] = React.useState<string | null>(null);
   const [dismissTargetId, setDismissTargetId] = React.useState<string | null>(null);
 
+  // The simplified "Add an idea" capture — opened by the capture-first-idea
+  // card and the empty-backlog well, both of which only exist with no ideas.
+  const [addIdeaOpen, setAddIdeaOpen] = React.useState(false);
+
   /**
    * Open the merge dialog only once nothing is actively driving the session's
    * worktree. Mirrors SessionLifecycleActionBar's `runSettleGatedAction`: the
@@ -495,7 +500,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         void launch(action.ideaId, action.projectId, 'idea');
         return;
       case 'capture-first-idea':
-        useNavigationStore.getState().openBacklog();
+        setAddIdeaOpen(true);
         return;
       case 'run-launch-flow':
         useNavigationStore
@@ -512,6 +517,18 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
 
   const startSession = (): void => useNavigationStore.getState().goToWizard({ allowQuick: true });
   const openBacklog = (): void => useNavigationStore.getState().openBacklog();
+  const openAddIdea = (): void => setAddIdeaOpen(true);
+
+  // Rendered by every branch that offers an "Add an idea" affordance (the main
+  // page and the no-accounts one, which still shows the backlog).
+  const addIdeaModal = (
+    <AddIdeaModal
+      isOpen={addIdeaOpen}
+      onClose={() => setAddIdeaOpen(false)}
+      projects={projects}
+      onLaunchPlanner={(ideaId, projectId) => launch(ideaId, projectId, 'idea')}
+    />
+  );
 
   // The launcher reports ONE in-flight id. The backlog columns claim synthetic
   // ids; the recommended cards mostly pass their own action id, except
@@ -566,9 +583,11 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           variant="full"
           launchingColumn={launchingColumn}
           onOpenBacklog={openBacklog}
+          onAddIdea={openAddIdea}
           onLaunchPlanner={(ideaIds, projectId) => void launchPlannerBatch('rq-ideas', ideaIds, projectId)}
           onLaunchSprint={(taskIds, projectId) => void launchSprintBatch('rq-tasks', taskIds, projectId)}
         />
+        {addIdeaModal}
       </>,
     );
   }
@@ -665,6 +684,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         variant={state === 'caught-up' ? 'funnel-only' : 'full'}
         launchingColumn={launchingColumn}
         onOpenBacklog={openBacklog}
+        onAddIdea={openAddIdea}
         onLaunchPlanner={(ideaIds, projectId) => void launchPlannerBatch('rq-ideas', ideaIds, projectId)}
         onLaunchSprint={(taskIds, projectId) => void launchSprintBatch('rq-tasks', taskIds, projectId)}
       />
@@ -685,6 +705,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           onSuccess={afterLifecycleAction}
         />
       )}
+      {addIdeaModal}
     </>,
   );
 }

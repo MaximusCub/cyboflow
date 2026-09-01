@@ -245,6 +245,12 @@ export interface BacklogSectionProps {
   /** Non-null while a launch from this section is in flight. */
   launchingColumn: 'ideas' | 'tasks' | null;
   onOpenBacklog: () => void;
+  /**
+   * Opens the simplified AddIdeaModal — the empty-backlog well's "Add an idea"
+   * CTA (that well only renders when there are no ideas, which is exactly the
+   * simplified modal's territory). Falls back to onOpenBacklog when absent.
+   */
+  onAddIdea?: () => void;
   onLaunchPlanner: (ideaIds: string[], projectId: number) => void;
   onLaunchSprint: (taskIds: string[], projectId: number) => void;
 }
@@ -258,6 +264,7 @@ export function BacklogSection({
   variant,
   launchingColumn,
   onOpenBacklog,
+  onAddIdea,
   onLaunchPlanner,
   onLaunchSprint,
 }: BacklogSectionProps): React.JSX.Element {
@@ -340,7 +347,7 @@ export function BacklogSection({
           icon={<Inbox className="h-[18px] w-[18px] text-text-tertiary" strokeWidth={1.8} />}
           title="Backlog is empty"
           body="Run the Launch flow to seed ideas from a project interview, or add your first idea by hand."
-          action={<ProminentButton onClick={onOpenBacklog}>Add an idea</ProminentButton>}
+          action={<ProminentButton onClick={onAddIdea ?? onOpenBacklog}>Add an idea</ProminentButton>}
         />
       </section>
     );
