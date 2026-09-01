@@ -536,8 +536,10 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
 
   const page = (children: React.ReactNode): React.JSX.Element => (
     <div className="h-full w-full overflow-y-auto" style={GRAPH_PAPER_STYLE}>
-      <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-7 px-11 py-9 font-mono">
-        {children}
+      <div className="mx-auto w-full max-w-[1120px] px-6 py-8">
+        <div className="flex flex-col gap-7 border border-border-primary bg-surface-primary px-11 py-9 font-mono shadow-[0_1px_3px_rgba(0,0,0,0.06)]">
+          {children}
+        </div>
       </div>
     </div>
   );
