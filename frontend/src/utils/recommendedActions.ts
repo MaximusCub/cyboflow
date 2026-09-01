@@ -170,6 +170,12 @@ export type RecommendedAction =
 export interface RecommendedActionsResult {
   visible: RecommendedAction[];
   overflow: number;
+  /**
+   * The ranked cards past {@link MAX_VISIBLE} — exactly the `overflow` count, in
+   * rank order. The section's "+N more" affordance expands to show these, so it
+   * needs the cards themselves and not only their number.
+   */
+  hidden: RecommendedAction[];
 }
 
 const CTA_LABELS: Record<RecommendedActionKind, string> = {
@@ -521,8 +527,10 @@ export function deriveRecommendedActions(input: RecommendedActionsInput): Recomm
 
   const filtered = ranked.filter((action) => !isFilteredByDismissal(action, input.dismissedSignatures));
 
+  const hidden = filtered.slice(MAX_VISIBLE);
   return {
     visible: filtered.slice(0, MAX_VISIBLE),
-    overflow: Math.max(0, filtered.length - MAX_VISIBLE),
+    overflow: hidden.length,
+    hidden,
   };
 }
