@@ -323,15 +323,17 @@ function App() {
           {leftRailCollapsed && (
             <aside
               data-testid="sidebar-collapsed"
-              className="w-[28px] shrink-0 flex flex-col items-center border-r border-border-primary bg-bg-secondary"
+              className="relative w-[28px] shrink-0 border-r border-border-primary bg-bg-secondary"
             >
+              {/* Vertically centered on the strip, mirroring the expanded rail's
+                  divider-centered collapse handle. */}
               <button
                 type="button"
                 data-testid="sidebar-expand"
                 aria-label="Expand left rail"
                 title="Expand left rail"
                 onClick={toggleLeftRail}
-                className="flex h-8 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+                className="absolute top-1/2 -translate-y-1/2 flex h-9 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
               >
                 <ChevronRight size={14} />
               </button>
