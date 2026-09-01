@@ -47,7 +47,7 @@
 -- The `_new` names are free at the start of every pass because the previous pass
 -- renamed them away.
 --
--- 2026-08 ADDENDUM (migration 123, beads): both provider CHECKs below were
+-- 2026-08 ADDENDUM (migration 129, beads): both provider CHECKs below were
 -- widened a second time, in place, to also admit 'beads' — the one exception
 -- to "an already-shipped migration's SQL is fixed history" this repo's own
 -- migrations otherwise hold to (093's header states that discipline; it is
@@ -55,14 +55,14 @@
 -- install, which this cannot do anyway — the ledger marks 105 applied and
 -- skips its file content for every user who already ran it). The one path
 -- where 105's file content still executes is a ledger-wiped REPLAY on a DB
--- that, by then, may already hold a 'beads' row (from migration 123, which
+-- that, by then, may already hold a 'beads' row (from migration 129, which
 -- ships in the same build as this edit) — this file's own INSERT..SELECT
 -- copies that row verbatim into a `_new` table whose CHECK this recreate
 -- controls, and an un-widened CHECK here would reject it outright,
 -- SqliteError-aborting this entire migration file and, per the runner's
 -- fail-closed policy, boot itself. Narrowing to exactly the providers valid
 -- AT the time 105 originally shipped is not worth a boot crash on replay;
--- 123's own CHECK (the final widening) is unaffected and remains the
+-- 129's own CHECK (the final widening) is unaffected and remains the
 -- authoritative source of truth for what this table currently accepts.
 
 PRAGMA foreign_keys=OFF;

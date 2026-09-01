@@ -1660,10 +1660,10 @@ describe('TrackerWizardModal — beads workspace rows', () => {
     // No workspace, so no sync choice yet — an offer to create one instead.
     expect(screen.queryByTestId('tracker-row-sync-9')).not.toBeInTheDocument();
     expect(screen.getByTestId('tracker-row-init-9')).toBeEnabled();
-    // The disclosure is the caption for that offer: what it does to a repo the
-    // user may be sharing.
-    expect(screen.getByText(/\.git\/info\/exclude/)).toBeInTheDocument();
-    expect(screen.getByText(/commits 18 files/)).toBeInTheDocument();
+    // The disclosure is the caption for that offer: local --stealth is what
+    // the button runs, shared tracking is routed to the terminal.
+    expect(screen.getByText(/initializes Beads locally/)).toBeInTheDocument();
+    expect(screen.getByText(/shared, git-enabled tracking/)).toBeInTheDocument();
 
     mockInitWorkspace.mockResolvedValue(undefined);
     repoAnswers[9] = 'web';
@@ -1686,7 +1686,7 @@ describe('TrackerWizardModal — beads workspace rows', () => {
     // about what `bd init` does, which is the same fact for every repository.
     expect(screen.getByTestId('tracker-row-init-7')).toBeInTheDocument();
     expect(screen.getByTestId('tracker-row-init-9')).toBeInTheDocument();
-    expect(screen.getAllByText(/commits 18 files/)).toHaveLength(1);
+    expect(screen.getAllByText(/initializes Beads locally/)).toHaveLength(1);
   });
 
   it('reports a refused init on the row and does not re-probe', async () => {
@@ -1797,7 +1797,7 @@ describe('TrackerWizardModal — beads workspace rows', () => {
       expect(screen.queryByTestId(`tracker-row-detect-${pid}`)).not.toBeInTheDocument();
     }
     // Nothing to initialize with, so the init disclosure is not shown either.
-    expect(screen.queryByText(/bd init --stealth/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/initializes Beads locally/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   });
 

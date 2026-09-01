@@ -87,17 +87,14 @@ describe('classifyKeylessDetectFailure', () => {
 });
 
 describe('BEADS_INIT_DISCLOSURE', () => {
-  it('names what the init button runs and both probed side effects it avoids', () => {
+  it('names the local variant the button runs and routes the shared one to the terminal', () => {
     const copy = BEADS_INIT_DISCLOSURE.join(' ');
-    // The variant the button runs, and the local-only place its ignore entry
-    // lands — the whole of "nothing is committed".
-    expect(copy).toContain('bd init --stealth');
-    expect(copy).toContain('.git/info/exclude');
-    // The repo write the button does NOT make, named so the user can tell the
-    // two apart if they reach for the terminal instead.
-    expect(copy).toContain('18 files');
-    expect(copy).toContain('.claude/settings.json');
-    // The telemetry default, which the button turns off along the way.
-    expect(copy).toContain('telemetry');
+    // The two halves of the choice: --stealth is what cyboflow runs, and it is
+    // local; plain `bd init` is the shared, repo-committing variant, offered
+    // only as a terminal command the user runs themselves.
+    expect(copy).toContain('--stealth');
+    expect(copy).toContain('locally');
+    expect(copy).toContain('shared');
+    expect(copy).toContain('terminal');
   });
 });

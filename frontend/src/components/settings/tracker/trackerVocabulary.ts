@@ -210,31 +210,18 @@ export function classifyKeylessDetectFailure(message: string): KeylessDetectFail
 }
 
 /**
- * What the "Initialize beads here" button does to a repo the user shares, and
- * why it runs the variant it runs. Both facts are probed behaviors of beads
- * 1.2.2, not speculation (docs/proposals/tracker-beads-provider.md,
- * "Keyless connect" / Phase 0):
- *
- *   - a vanilla non-interactive `bd init` COMMITS 18 files to the repo without
- *     asking, among them a `.claude/settings.json` that registers a
- *     SessionStart hook firing for every collaborator who checks the branch
- *     out. `--skip-agents --skip-hooks` still commits; only `--stealth` does
- *     not;
- *   - beads telemetry is ON by default and posts to an external endpoint from
- *     a detached process.
- *
- * The disclosure sits beside the button that runs it, so it describes exactly
- * what that button does: `bd init --stealth` then `bd metrics off`, and nothing
- * else. Plain `bd init` is named only to explain why the button does not run
- * it — cyboflow never does.
+ * The caption under the Map step's Initialize buttons. "Locally" is load-bearing
+ * and probed (beads 1.2.2, docs/proposals/tracker-beads-provider.md "Keyless
+ * connect" / Phase 0): the button runs `bd init --stealth` + `bd metrics off`
+ * and NOTHING is committed — the ignore entry lands in the local-only
+ * `.git/info/exclude`. Plain `bd init` is the shared variant: it commits 18
+ * files (including a `.claude/settings.json` SessionStart hook that fires for
+ * every collaborator), which is exactly why cyboflow never runs it and the copy
+ * routes it to the terminal.
  */
 export const BEADS_INIT_DISCLOSURE: readonly string[] = [
-  '“Initialize beads here” runs `bd init --stealth` in the folder above and turns bd\'s usage ' +
-    'telemetry off. Nothing is committed — the ignore entry lands in `.git/info/exclude`, and a ' +
-    'folder that is not yet a git repository becomes one.',
-  'Prefer the terminal? Run `bd init --stealth` yourself, then re-detect. Avoid plain ' +
-    '`bd init` — it commits 18 files to the repository without asking, including a ' +
-    '`.claude/settings.json` hook that runs for everyone who checks the branch out.',
+  'Cyboflow initializes Beads locally using the --stealth config. If you want to set up ' +
+    'shared, git-enabled tracking then run `bd init` for the project directory in a terminal.',
 ];
 
 // ---------------------------------------------------------------------------
