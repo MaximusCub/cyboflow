@@ -78,7 +78,7 @@ export function NoAccountsPanel(): React.JSX.Element {
   const openIntegrations = (): void => useNavigationStore.getState().openSettings('integrations');
   return (
     <>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-3">
         <ConnectCard
           name="Claude"
           blurb="Sign in with your Anthropic account to run Claude sessions."

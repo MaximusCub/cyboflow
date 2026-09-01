@@ -380,7 +380,7 @@ export function BacklogSection({
       </div>
 
       {variant === 'full' && (
-        <div className="grid grid-cols-1 items-start gap-3.5 lg:grid-cols-2">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(400px,1fr))] items-start gap-3.5">
           <PickColumn
             kicker="Top ideas"
             items={topIdeas}
