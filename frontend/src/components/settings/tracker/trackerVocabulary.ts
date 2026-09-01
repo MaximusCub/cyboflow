@@ -61,6 +61,15 @@ export interface TrackerProviderMeta {
    * a caller reads this flag instead of checking `provider === 'dart'`.
    */
   supportsCategorySync: boolean;
+  /**
+   * Does this provider have exactly one workspace, anchored to the folder
+   * Detect probed (the project's repo, or a folder the user explicitly
+   * picked) rather than to an account the user authenticated into? Mapping
+   * such a workspace onto a DIFFERENT cyboflow project is meaningless, so the
+   * Map step offers sync/don't-sync into the wizard's own project instead of
+   * a project picker. True only for beads.
+   */
+  workspaceBound: boolean;
 }
 
 export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
@@ -81,6 +90,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
     supportsCategorySync: false,
+    workspaceBound: false,
   },
   {
     provider: 'plane',
@@ -99,6 +109,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
     supportsCategorySync: false,
+    workspaceBound: false,
   },
   {
     provider: 'dart',
@@ -118,6 +129,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to docs, comments, attachments, or billing.',
     supportsCategorySync: true,
+    workspaceBound: false,
   },
   {
     provider: 'beads',
@@ -140,6 +152,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'Runs the `bd` CLI locally — no network access, no billing.',
     supportsCategorySync: true,
+    workspaceBound: true,
   },
 ];
 

@@ -839,6 +839,42 @@ export function TrackerWizardModal({
     setMaxStep(0);
   };
 
+  /**
+   * beads-only: pre-select "Sync into <project>" for every group a fresh tree
+   * hands back, since a workspace-bound provider's Map row is sync/don't-sync
+   * against the wizard's OWN project rather than a project picker (see
+   * `workspaceBound` in trackerVocabulary.ts) — without this Next would stay
+   * disabled until the user touched a control that only has one real choice.
+   * Only fills a group with no mapping yet, so it never overwrites a user's
+   * "Don't sync"; called right where the tree lands (both `ensureGroups` and
+   * the add-mapping mount probe), never from render.
+   *
+   * `workspaceBound`/`boundProjectId` are passed in rather than closed over:
+   * this keeps the function's own closure limited to the stable `setMappings`
+   * setter, which is what lets it be omitted from an effect's dependency array
+   * without re-firing the effect on every render.
+   */
+  const seedWorkspaceBoundMappings = (
+    tree: TrackerGroupTree,
+    workspaceBound: boolean,
+    boundProjectId: number,
+  ): void => {
+    if (!workspaceBound) return;
+    const groups = tree.sections.flatMap((s) => s.groups);
+    if (groups.length === 0) return;
+    setMappings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const g of groups) {
+        if (next[g.id] === undefined) {
+          next[g.id] = boundProjectId;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  };
+
   // Editing a credential FIELD is the other way that happens.
   //
   // Inert in add-mapping mode: no credential input renders there, so the only
@@ -913,11 +949,17 @@ export function TrackerWizardModal({
     void trpc.cyboflow.tracker.wizardGroups
       .mutate({ connectionId: sourceConnection.id })
       .then((tree) => {
-        if (probeVersionRef.current === version) setGroupTree(tree);
+        if (probeVersionRef.current === version) {
+          setGroupTree(tree);
+          seedWorkspaceBoundMappings(tree, meta.workspaceBound, projectId);
+        }
       })
       .catch((err: unknown) => setStepError(errorMessage(err)))
       .finally(() => setLoading(false));
-  }, [isOpen, sourceConnection]);
+    // meta.workspaceBound and projectId feed seedWorkspaceBoundMappings; both
+    // are invariant for the life of one mounted wizard, so listing them here
+    // never causes a spurious re-fetch.
+  }, [isOpen, sourceConnection, meta.workspaceBound, projectId]);
 
   // The connection's live siblings, for the Map step's "already mapped" chips.
   // A local read of rows the catalog already owns — a failure costs a hint, not
@@ -948,6 +990,7 @@ export function TrackerWizardModal({
     const tree = await trpc.cyboflow.tracker.wizardGroups.mutate({ ...probeSource });
     if (probeVersionRef.current !== version) return;
     setGroupTree(tree);
+    seedWorkspaceBoundMappings(tree, meta.workspaceBound, projectId);
   };
 
   // Issues are fetched one mapping at a time: each call is a live provider
@@ -1572,8 +1615,17 @@ export function TrackerWizardModal({
           Map {meta.name} onto cyboflow projects
         </h3>
         <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-secondary">
-          Every mapped group becomes its own connection. Several groups can feed the same cyboflow
-          project; anything left on “Don&apos;t import” is ignored entirely.
+          {meta.workspaceBound ? (
+            <>
+              This workspace is bound to the folder it was detected in. Choose whether to sync it
+              into this project.
+            </>
+          ) : (
+            <>
+              Every mapped group becomes its own connection. Several groups can feed the same
+              cyboflow project; anything left on “Don&apos;t import” is ignored entirely.
+            </>
+          )}
         </p>
         {sourceConnection !== undefined && (
           <p className="mt-1.5 max-w-[560px] text-xs leading-relaxed text-text-tertiary">
@@ -1661,19 +1713,33 @@ export function TrackerWizardModal({
                   <span className="min-w-0 truncate text-xs font-bold text-text-primary">
                     {group.name}
                   </span>
-                  <select
-                    aria-label={`Cyboflow project for ${group.name}`}
-                    value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
-                    onChange={(e) => handleMap(group.id, e.target.value)}
-                    className={cn(trackerSelectClass, 'ml-auto max-w-[240px]')}
-                  >
-                    <option value="">— Don&apos;t import</option>
-                    {projects.map((p) => (
-                      <option key={p.id} value={String(p.id)}>
-                        {p.id === projectId ? `${p.name} (Active)` : p.name}
-                      </option>
-                    ))}
-                  </select>
+                  {meta.workspaceBound ? (
+                    // One workspace, anchored to the probed folder — the only
+                    // real choice is whether it feeds the wizard's own project.
+                    <select
+                      aria-label={`Sync ${group.name} into this project`}
+                      value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
+                      onChange={(e) => handleMap(group.id, e.target.value)}
+                      className={cn(trackerSelectClass, 'ml-auto max-w-[240px]')}
+                    >
+                      <option value={String(projectId)}>Sync into {projectName(projectId)}</option>
+                      <option value="">Don&apos;t sync</option>
+                    </select>
+                  ) : (
+                    <select
+                      aria-label={`Cyboflow project for ${group.name}`}
+                      value={mappings[group.id] === undefined ? '' : String(mappings[group.id])}
+                      onChange={(e) => handleMap(group.id, e.target.value)}
+                      className={cn(trackerSelectClass, 'ml-auto max-w-[240px]')}
+                    >
+                      <option value="">— Don&apos;t import</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.id === projectId ? `${p.name} (Active)` : p.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               ))}
               {section.groups.length === 0 && (

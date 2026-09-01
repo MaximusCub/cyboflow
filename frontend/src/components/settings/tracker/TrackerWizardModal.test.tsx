@@ -535,6 +535,17 @@ describe('TrackerWizardModal — Map step', () => {
     expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
   });
 
+  it('renders the full project dropdown for a non-workspace-bound provider', async () => {
+    renderWizard();
+    await authorize();
+
+    const select = screen.getByLabelText('Cyboflow project for Alpha');
+    expect(
+      within(select).getByRole('option', { name: "— Don't import" }),
+    ).toBeInTheDocument();
+    expect(within(select).getAllByRole('option')).toHaveLength(1 + PROJECTS.length);
+  });
+
   it('offers a push-target radio only where two groups share one project', async () => {
     renderWizard();
     await authorize();
@@ -1679,5 +1690,84 @@ describe('TrackerWizardModal — keyless workspace picker', () => {
 
     await waitFor(() => expect(pickerButton()).toBeEnabled());
     expect(screen.queryByTestId('tracker-probed-path')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// beads Map step — workspace-bound sync/don't-sync (not a project picker)
+// ---------------------------------------------------------------------------
+
+/**
+ * beads has exactly one workspace, anchored to the folder Detect probed — the
+ * Map step's per-group select degenerates to sync/don't-sync into THIS
+ * wizard's own project rather than the full cyboflow project dropdown every
+ * other provider offers (see `workspaceBound` in trackerVocabulary.ts).
+ */
+describe('TrackerWizardModal — beads workspace-bound Map step', () => {
+  const BEADS_GROUPS: TrackerGroupTree = {
+    sections: [
+      {
+        label: 'Workspace',
+        groups: [
+          {
+            id: 'ws-1',
+            name: 'Local workspace',
+            key: null,
+            sourceLabel: 'Local workspace (bd)',
+            selection: { containerId: 'bd', narrowId: 'all', narrowKind: 'all' },
+            stateScopeKey: 'bd',
+          },
+        ],
+      },
+    ],
+  };
+
+  function renderBeads(): void {
+    render(
+      <TrackerWizardModal
+        isOpen
+        provider="beads"
+        projectId={7}
+        projectPath="/dev/cyboflow"
+        onClose={onClose}
+        onConnected={onConnected}
+      />,
+    );
+  }
+
+  /** Detect, then land on Map with the single-group beads tree installed. */
+  async function detectToMap(): Promise<void> {
+    mockGroups.mockResolvedValue(BEADS_GROUPS);
+    renderBeads();
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
+    await screen.findByTestId('tracker-authorized-card');
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByText('Map Beads onto cyboflow projects');
+    await screen.findByLabelText('Sync Local workspace into this project');
+  }
+
+  it('renders exactly two options — Sync into <project> and Don’t sync', async () => {
+    await detectToMap();
+
+    const select = screen.getByLabelText('Sync Local workspace into this project');
+    const options = within(select).getAllByRole('option');
+    expect(options.map((o) => o.textContent)).toEqual(['Sync into Cyboflow', "Don't sync"]);
+  });
+
+  it('defaults to Sync into the wizard’s own project, so Continue is enabled untouched', async () => {
+    await detectToMap();
+
+    const select = screen.getByLabelText('Sync Local workspace into this project');
+    expect(select).toHaveValue('7');
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
+  });
+
+  it('disables Continue once the user picks Don’t sync', async () => {
+    await detectToMap();
+
+    fireEvent.change(screen.getByLabelText('Sync Local workspace into this project'), {
+      target: { value: '' },
+    });
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   });
 });

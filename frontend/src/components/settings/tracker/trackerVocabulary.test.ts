@@ -37,6 +37,12 @@ describe('trackerVocabulary — needsApiKey parity', () => {
       'beads',
     ]);
   });
+
+  it('has exactly one workspace-bound provider today — beads', () => {
+    expect(TRACKER_PROVIDERS.filter((meta) => meta.workspaceBound).map((m) => m.provider)).toEqual([
+      'beads',
+    ]);
+  });
 });
 
 describe('classifyKeylessDetectFailure', () => {
