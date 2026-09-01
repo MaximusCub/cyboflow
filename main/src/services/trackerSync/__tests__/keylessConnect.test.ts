@@ -55,6 +55,15 @@ vi.mock('electron', () => ({
   },
 }));
 
+// `wizardInitWorkspace` spawns through `buildCommandEnv`, which otherwise execs
+// a login shell to resolve PATH on first call. Only that probe is replaced —
+// same treatment beadsAdapter.test.ts gives it.
+vi.mock('../../../utils/shellPath', () => ({
+  getShellPath: () => '/usr/bin:/bin',
+  clearShellPathCache: () => undefined,
+  findExecutableInPath: () => null,
+}));
+
 import { DatabaseService } from '../../../database/database';
 import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
 import { dbAdapter } from '../../../orchestrator/__test_fixtures__/dbAdapter';
@@ -280,6 +289,8 @@ let projectPaths: Map<number, string>;
 let resolvedProjectIds: number[];
 /** What the injected native folder dialog answers with; null = the user cancelled. */
 let pickedDirectory: string | null;
+/** Every `bd` spawn the injected transport saw, for the init-button cases. */
+let bdSpawns: Array<{ args: string[]; cwd: string }>;
 
 /** A service over the SAME db — the "app restarted" shape. */
 function buildService(): TrackerSyncService {
@@ -292,6 +303,10 @@ function buildService(): TrackerSyncService {
       return projectPaths.get(id) ?? null;
     },
     pickWorkspaceDirectory: async () => pickedDirectory,
+    beadsExec: async (_bin, args, options) => {
+      bdSpawns.push({ args: [...args], cwd: options.cwd });
+      return { stdout: '', stderr: '' };
+    },
     adapterFactory: (connection, secret) => {
       factoryCalls.push({ connection, secret });
       return adapter;
@@ -314,6 +329,7 @@ beforeEach(() => {
   projectPaths = new Map([[PROJECT_ID, PROJECT_PATH]]);
   resolvedProjectIds = [];
   pickedDirectory = null;
+  bdSpawns = [];
   service = buildService();
 });
 
@@ -788,6 +804,66 @@ describe('keyless connect — a picked workspace folder', () => {
     // The anchor is untouched by a failed probe: re-pointing it is the user's
     // call, made with the picker, not something a failure does on its own.
     expect(beadsWorkspacePath(row(connectionId))).toBe(CUSTOM_PATH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4c · initializing the workspace Detect could not find
+//
+// The wizard's "Initialize beads here" button. It resolves its folder through
+// exactly the same private path the Detect probe does, so the cases here are
+// about WHERE the CLI is spawned — the one thing the renderer must never get to
+// decide — rather than about what `bd init` writes.
+// ---------------------------------------------------------------------------
+
+describe('keyless connect — initializing a workspace', () => {
+  it('refuses a keyed provider, which has no local workspace to create', async () => {
+    await expect(
+      service.wizardInitWorkspace({ provider: 'linear', apiKey: 'lin_1' }),
+    ).rejects.toThrow(TrackerCredentialsError);
+    expect(bdSpawns).toEqual([]);
+  });
+
+  it('initializes in the PICKED folder, never re-resolving the project', async () => {
+    const { token } = await pickWorkspace(CUSTOM_PATH);
+    resolvedProjectIds.length = 0;
+
+    await service.wizardInitWorkspace({
+      provider: 'beads',
+      projectId: PROJECT_ID,
+      workspaceDirToken: token,
+    });
+
+    // Both halves matter: init runs with the folder as CWD and NO `-C` (bd
+    // refuses `-C` on init), and the resolver was never asked — a project-path
+    // fallback here would create a workspace in a repo the user did not point at.
+    expect(bdSpawns.map((spawn) => spawn.args)).toEqual([
+      ['init', '--stealth'],
+      ['metrics', 'off'],
+    ]);
+    expect(bdSpawns.every((spawn) => spawn.cwd === CUSTOM_PATH)).toBe(true);
+    expect(resolvedProjectIds).toEqual([]);
+  });
+
+  it('initializes in the project repo when no folder was picked', async () => {
+    await service.wizardInitWorkspace({ provider: 'beads', projectId: PROJECT_ID });
+
+    expect(bdSpawns[0].cwd).toBe(PROJECT_PATH);
+    expect(resolvedProjectIds).toContain(PROJECT_ID);
+  });
+
+  it('fails closed on a token main never minted, spawning nothing', async () => {
+    // Same refusal the connect path makes, and for the stronger reason: falling
+    // through to the project repo would `bd init` a directory the user never
+    // named.
+    await expect(
+      service.wizardInitWorkspace({
+        provider: 'beads',
+        projectId: PROJECT_ID,
+        workspaceDirToken: 'not-a-token-main-minted',
+      }),
+    ).rejects.toThrow(/pick it again/);
+    expect(bdSpawns).toEqual([]);
   });
 });
 

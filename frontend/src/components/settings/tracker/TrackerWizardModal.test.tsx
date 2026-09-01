@@ -49,6 +49,7 @@ vi.mock('../../../trpc/client', () => ({
       tracker: {
         wizardValidate: { mutate: vi.fn() },
         wizardPickWorkspace: { mutate: vi.fn() },
+        wizardInitWorkspace: { mutate: vi.fn() },
         wizardGroups: { mutate: vi.fn() },
         wizardIssues: { mutate: vi.fn() },
         wizardStates: { mutate: vi.fn() },
@@ -74,6 +75,7 @@ import { API } from '../../../utils/api';
 
 const mockValidate = vi.mocked(trpc.cyboflow.tracker.wizardValidate.mutate);
 const mockPickWorkspace = vi.mocked(trpc.cyboflow.tracker.wizardPickWorkspace.mutate);
+const mockInitWorkspace = vi.mocked(trpc.cyboflow.tracker.wizardInitWorkspace.mutate);
 const mockGroups = vi.mocked(trpc.cyboflow.tracker.wizardGroups.mutate);
 const mockIssues = vi.mocked(trpc.cyboflow.tracker.wizardIssues.mutate);
 const mockStates = vi.mocked(trpc.cyboflow.tracker.wizardStates.mutate);
@@ -1540,7 +1542,7 @@ describe('TrackerWizardModal — keyless connect', () => {
     });
   });
 
-  it('offers the init disclosure when the repo has no workspace, and not when `bd` is missing', async () => {
+  it('offers the init button and disclosure when the repo has no workspace, and neither when `bd` is missing', async () => {
     mockValidate.mockRejectedValue(
       new Error('[beads] no beads database found — run `bd init` in this repo'),
     );
@@ -1549,14 +1551,16 @@ describe('TrackerWizardModal — keyless connect', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('no beads database found');
-    // The disclosure is load-bearing, not decoration: plain `bd init` commits
-    // to the user's repo without asking, and telemetry is on by default.
+    expect(within(alert).getByTestId('tracker-init-workspace')).toBeEnabled();
+    // The disclosure is load-bearing, not decoration: it says what the button
+    // above it does to a repo the user may be sharing, and why it is not the
+    // plain `bd init` that commits to it.
     expect(alert).toHaveTextContent('bd init --stealth');
+    expect(alert).toHaveTextContent('.git/info/exclude');
     expect(alert).toHaveTextContent('commits 18 files');
-    expect(alert).toHaveTextContent('bd metrics off');
 
-    // A MISSING BINARY is a different fix, and telling the user what `bd init`
-    // commits does not help them install `bd`.
+    // A MISSING BINARY is a different fix: there is nothing to initialize with,
+    // and telling the user what `bd init` commits does not help them install it.
     mockValidate.mockRejectedValue(
       new Error('[beads] `bd` was not found on PATH — install beads and re-detect this connection.'),
     );
@@ -1565,6 +1569,72 @@ describe('TrackerWizardModal — keyless connect', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('was not found on PATH'),
     );
     expect(screen.getByRole('alert')).not.toHaveTextContent('bd init --stealth');
+    expect(screen.queryByTestId('tracker-init-workspace')).not.toBeInTheDocument();
+  });
+
+  /** Fail Detect with the missing-workspace error and wait for the init offer. */
+  async function detectMissingWorkspace(): Promise<HTMLElement> {
+    mockValidate.mockRejectedValueOnce(
+      new Error('[beads] no beads database found — run `bd init` in this repo'),
+    );
+    renderKeyless();
+    fireEvent.click(screen.getByRole('button', { name: 'Detect' }));
+    return screen.findByTestId('tracker-init-workspace');
+  }
+
+  it('initializes with the credentials the failed probe used, then re-detects', async () => {
+    const init = await detectMissingWorkspace();
+    mockInitWorkspace.mockResolvedValue(undefined);
+    mockValidate.mockResolvedValue({
+      workspaceId: 'inst-1',
+      workspaceName: 'cyboflow',
+      actorLabel: 'J. Kesteva',
+    });
+
+    fireEvent.click(init);
+    await screen.findByTestId('tracker-authorized-card');
+
+    // Same credentials as the probe — main resolves the folder from them, so
+    // the workspace is created exactly where Detect just looked.
+    expect(mockInitWorkspace).toHaveBeenCalledWith({
+      credentials: { provider: 'beads', projectId: 7 },
+    });
+    // The re-detect is what produces the identity; init reports none.
+    expect(mockValidate).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries a picked folder into the init, so it lands there and not in the repo', async () => {
+    mockPickWorkspace.mockResolvedValue({ token: 'tok-1', path: '/dev/monorepo/packages/api' });
+    mockValidate.mockRejectedValue(
+      new Error('[beads] no beads database found — run `bd init` in this repo'),
+    );
+    renderKeyless();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Point at a beads workspace…' }));
+    const init = await screen.findByTestId('tracker-init-workspace');
+    mockInitWorkspace.mockResolvedValue(undefined);
+    fireEvent.click(init);
+
+    await waitFor(() =>
+      expect(mockInitWorkspace).toHaveBeenCalledWith({
+        credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
+      }),
+    );
+  });
+
+  it('reports a failed init in the error slot and does NOT re-detect', async () => {
+    const init = await detectMissingWorkspace();
+    mockInitWorkspace.mockRejectedValue(
+      new Error('[beads] Error: This workspace is already initialized'),
+    );
+
+    fireEvent.click(init);
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('already initialized'),
+    );
+    // One probe, the original failed one: a refused init has nothing to detect.
+    expect(mockValidate).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('tracker-authorized-card')).not.toBeInTheDocument();
   });
 });
 

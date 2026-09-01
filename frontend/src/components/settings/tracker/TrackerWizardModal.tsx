@@ -251,6 +251,8 @@ export function TrackerWizardModal({
    */
   const [workspaceDir, setWorkspaceDir] = useState<{ token: string; path: string } | null>(null);
   const [picking, setPicking] = useState(false);
+  /** KEYLESS ONLY — `bd init --stealth` is running in the probed folder. */
+  const [initializing, setInitializing] = useState(false);
 
   // ── Step 1 · map ──────────────────────────────────────────────────────────
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1155,6 +1157,30 @@ export function TrackerWizardModal({
     }
   };
 
+  /**
+   * KEYLESS ONLY — create the workspace Detect just failed to find, then
+   * re-detect it.
+   *
+   * The SAME credentials the failed probe used, so the workspace is created
+   * exactly where that probe looked: main resolves the folder from the memo's
+   * project id and folder token, and this renderer never learns which
+   * directory that was. On success the error is cleared and `handleAuthorize`
+   * runs, which is what turns a fresh workspace into the identity card — this
+   * call reports no identity of its own.
+   */
+  const handleInitWorkspace = async (): Promise<void> => {
+    setInitializing(true);
+    try {
+      await trpc.cyboflow.tracker.wizardInitWorkspace.mutate({ credentials });
+      setAuthError(null);
+      await handleAuthorize();
+    } catch (err) {
+      setAuthError(errorMessage(err));
+    } finally {
+      setInitializing(false);
+    }
+  };
+
   const goToStep = async (target: number): Promise<void> => {
     if (target < firstStep || target > LAST_STEP) return;
     // Step 0 is the gate: nothing downstream exists without a validated key.
@@ -1531,9 +1557,14 @@ export function TrackerWizardModal({
             size="sm"
             className="rounded-none"
             // Nothing to type for a keyless provider, so the only things that
-            // can disable Detect are a probe already in flight and the folder
-            // dialog it would race.
-            disabled={(meta.needsApiKey && apiKey.trim().length === 0) || validating || picking}
+            // can disable Detect are a probe already in flight and the two
+            // folder-scoped actions it would race — the dialog and the init.
+            disabled={
+              (meta.needsApiKey && apiKey.trim().length === 0) ||
+              validating ||
+              picking ||
+              initializing
+            }
             loading={validating}
             loadingText={
               meta.needsApiKey ? `Checking with ${meta.name}…` : 'Looking for a workspace…'
@@ -1549,12 +1580,31 @@ export function TrackerWizardModal({
                   them warrants the init disclosure — a missing CLI is not
                   helped by being told what `bd init` commits. */}
               {!meta.needsApiKey &&
-                classifyKeylessDetectFailure(authError) === 'missing-workspace' &&
-                BEADS_INIT_DISCLOSURE.map((line) => (
-                  <p key={line} className="text-[11px] leading-relaxed text-text-tertiary">
-                    {line}
-                  </p>
-                ))}
+                classifyKeylessDetectFailure(authError) === 'missing-workspace' && (
+                  <>
+                    {/* Above the disclosure, which reads as the caption for
+                        it: the button is the offer, the lines say what it
+                        does to a repo the user may be sharing. */}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="rounded-none"
+                      data-testid="tracker-init-workspace"
+                      disabled={initializing || validating || picking}
+                      loading={initializing}
+                      loadingText="Initializing…"
+                      onClick={() => void handleInitWorkspace()}
+                    >
+                      Initialize beads here
+                    </Button>
+                    {BEADS_INIT_DISCLOSURE.map((line) => (
+                      <p key={line} className="text-[11px] leading-relaxed text-text-tertiary">
+                        {line}
+                      </p>
+                    ))}
+                  </>
+                )}
             </div>
           )}
         </div>

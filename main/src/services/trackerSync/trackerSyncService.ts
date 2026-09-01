@@ -132,7 +132,8 @@ import {
 import { LinearAdapter } from './linearAdapter';
 import { PlaneAdapter } from './planeAdapter';
 import { DartAdapter } from './dartAdapter';
-import { BeadsAdapter } from './beadsAdapter';
+import { BeadsAdapter, initializeBeadsWorkspace } from './beadsAdapter';
+import type { BdExecImpl } from './beadsAdapter';
 import { guardedUpdatesUnavailable, providerNeedsSecret } from './providerCapabilities';
 import { decryptTrackerSecret, encryptTrackerSecret } from './secrets';
 import {
@@ -483,6 +484,13 @@ export interface TrackerSyncServiceDeps {
    * refuses the pick with an actionable message instead of crashing.
    */
   pickWorkspaceDirectory?: () => Promise<string | null>;
+  /**
+   * The `bd` transport {@link TrackerSyncService.wizardInitWorkspace} spawns
+   * through. Injected for the same reason `BeadsAdapterOptions.execImpl` is —
+   * so a test never forks a process — and defaulted to the real one, since the
+   * only production caller is the wizard button.
+   */
+  beadsExec?: BdExecImpl;
   /** Optional structured logger for loop-level failures. */
   logger?: LoggerLike;
 }
@@ -666,6 +674,8 @@ export class TrackerSyncService implements TrackerSyncFacade {
   private readonly resolveProjectPath?: (projectId: number) => string | null;
   /** See {@link TrackerSyncServiceDeps.pickWorkspaceDirectory} — keyless providers only. */
   private readonly pickWorkspaceDirectory?: () => Promise<string | null>;
+  /** See {@link TrackerSyncServiceDeps.beadsExec} — the wizard's init button only. */
+  private readonly beadsExec?: BdExecImpl;
   private readonly logger?: LoggerLike;
 
   /**
@@ -750,6 +760,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     this.adapterFactory = deps.adapterFactory ?? defaultAdapterFactory;
     this.resolveProjectPath = deps.resolveProjectPath;
     this.pickWorkspaceDirectory = deps.pickWorkspaceDirectory;
+    this.beadsExec = deps.beadsExec;
     this.logger = deps.logger;
   }
 
@@ -1764,6 +1775,34 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // usable directory must not mint a token that resolves to nowhere.
     if (path.length === 0) return null;
     return { token: this.mintWorkspaceDirToken(path), path };
+  }
+
+  /**
+   * KEYLESS ONLY — create the beads workspace Detect could not find, in the
+   * folder those same credentials would have probed: `bd init --stealth`
+   * (which commits nothing — the ignore entry goes to `.git/info/exclude`),
+   * then a best-effort `bd metrics off`.
+   *
+   * The folder is resolved by {@link workspacePathForCredentials}, the ONE
+   * place a wire value becomes a directory, so this button spawns a CLI in the
+   * picked folder or the project's repo and nowhere else. It takes no path
+   * argument for exactly that reason.
+   *
+   * `bd init` runs with the folder as CWD and no `-C`; see
+   * {@link initializeBeadsWorkspace} for why that constraint is bd's, not ours.
+   *
+   * RETURNS VOID DELIBERATELY: it reports no identity because it probes none.
+   * Re-detect is the wizard's own follow-up call, so the identity the user ends
+   * up bound to always comes from the same `wizardValidate` path as every other
+   * connection's.
+   */
+  async wizardInitWorkspace(credentials: TrackerCredentialsInput): Promise<void> {
+    if (providerNeedsSecret(credentials.provider)) {
+      throw new TrackerCredentialsError(
+        `${credentials.provider} connections are keyed — there is no local workspace to initialize`,
+      );
+    }
+    await initializeBeadsWorkspace(this.workspacePathForCredentials(credentials), this.beadsExec);
   }
 
   /**

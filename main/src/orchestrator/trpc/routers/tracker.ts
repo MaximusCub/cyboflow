@@ -454,6 +454,22 @@ export const trackerRouter = router({
     }),
 
   /**
+   * Step 0, KEYLESS ONLY — create the workspace Detect just failed to find, in
+   * the folder these credentials already name (main resolves it; the input
+   * carries no path). A mutation on top of the section note above because it
+   * WRITES to the user's disk, which nothing may re-issue on its own.
+   */
+  wizardInitWorkspace: protectedProcedure
+    .input(z.object({ credentials: credentialsSchema }))
+    .mutation(async ({ input }): Promise<void> => {
+      try {
+        await getTrackerSyncFacade().wizardInitWorkspace(input.credentials);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
    * Map step — the mappable tracker groups (Linear projects × teams + whole
    * teams, Plane projects, Dart spaces), each carrying its ready-made source
    * selection. A mutation for the same reason its siblings are: it makes a live

@@ -66,6 +66,9 @@ class UnusedFacade implements TrackerSyncFacade {
   wizardPickWorkspace(_p: TrackerProvider): Promise<{ token: string; path: string } | null> {
     throw new Error('not used');
   }
+  wizardInitWorkspace(_c: TrackerCredentialsInput): Promise<void> {
+    throw new Error('not used');
+  }
   wizardGroups(_s: TrackerWizardSourceInput): Promise<TrackerGroupTree> {
     throw new Error('not used');
   }
@@ -185,6 +188,46 @@ async function codeOf(call: Promise<unknown>): Promise<string> {
   }
   throw new Error('expected the call to reject');
 }
+
+describe('cyboflow.tracker.wizardInitWorkspace', () => {
+  /** What the wizard sends after a missing-workspace Detect on a picked folder. */
+  const KEYLESS: TrackerCredentialsInput = {
+    provider: 'beads',
+    projectId: 1,
+    workspaceDirToken: 'tok-1',
+  };
+
+  it('forwards the credentials verbatim — the folder is main\'s to resolve', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardInitWorkspace = async (credentials) => {
+      seen.push(credentials);
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardInitWorkspace({ credentials: KEYLESS });
+
+    // The token and the project id ride through untouched; nothing path-shaped
+    // is in the input at all, which is what keeps the spawn directory main's.
+    expect(seen).toEqual([KEYLESS]);
+  });
+
+  it('maps a keyed-provider refusal to PRECONDITION_FAILED, like every credentials error', async () => {
+    const credentialsError = new Error('linear connections are keyed');
+    credentialsError.name = 'TrackerCredentialsError';
+    const facade = new UnusedFacade();
+    facade.wizardInitWorkspace = async () => {
+      throw credentialsError;
+    };
+    const caller = await callerWith(facade);
+
+    expect(
+      await codeOf(
+        caller.wizardInitWorkspace({ credentials: { provider: 'linear', apiKey: 'lin_1' } }),
+      ),
+    ).toBe('PRECONDITION_FAILED');
+  });
+});
 
 describe('cyboflow.tracker.wizardFieldOptions', () => {
   const OPTIONS: TrackerFieldOptions = {

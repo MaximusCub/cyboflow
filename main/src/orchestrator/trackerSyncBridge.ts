@@ -74,6 +74,13 @@ export interface TrackerSyncFacade {
    * directory main would spawn a CLI in.
    */
   wizardPickWorkspace(provider: TrackerProvider): Promise<{ token: string; path: string } | null>;
+  /**
+   * KEYLESS ONLY — create the workspace Detect could not find, in the folder
+   * these same credentials point at (`bd init --stealth`, which commits
+   * nothing). Persists no connection and probes no identity: the wizard
+   * re-detects afterwards, which is where the identity still comes from.
+   */
+  wizardInitWorkspace(credentials: TrackerCredentialsInput): Promise<void>;
   /** The Map step's mappable tracker groups (Linear projects/teams, Plane projects, Dart spaces). */
   wizardGroups(source: TrackerWizardSourceInput): Promise<TrackerGroupTree>;
   /** Wizard Step 1, top level (Linear teams / Plane projects). */

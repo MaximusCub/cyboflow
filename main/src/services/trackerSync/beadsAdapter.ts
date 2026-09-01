@@ -526,6 +526,123 @@ function readEnvelopeErrorText(stdout: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Shared transport
+// ---------------------------------------------------------------------------
+
+/**
+ * The child environment every `bd` spawn here runs with: the login-shell PATH
+ * (macOS GUI apps inherit a minimal one), the envelope opt-in, and `BEADS_DIR`
+ * REMOVED.
+ *
+ * The removal is defense-in-depth rather than the primary lever — `-C` beats
+ * `BEADS_DIR` by bd's own proven precedence — but it is cheap, and the failure
+ * it guards is silent and total: an app launched with `BEADS_DIR` set (a
+ * documented beads usage pattern) would otherwise probe, import, close and
+ * update issues in that ONE workspace for every project, with each connection
+ * still looking valid. It matters MORE for {@link initializeBeadsWorkspace},
+ * which has no `-C` to be beaten by.
+ */
+function beadsChildEnv(): NodeJS.ProcessEnv {
+  const env = buildCommandEnv({ BD_JSON_ENVELOPE: '1' });
+  delete env.BEADS_DIR;
+  return env;
+}
+
+/**
+ * One `bd` (or `git`) spawn with everything that must wrap it: the
+ * per-workspace mutex, the timeout plus SIGKILL escalation, the `maxBuffer`
+ * orphan reap, and the failure classification.
+ *
+ * Module-level rather than a method because {@link initializeBeadsWorkspace}
+ * runs BEFORE any adapter can exist for the workspace and must still queue on
+ * the same flock chain as an adapter's spawns.
+ */
+function spawnBd(
+  execImpl: BdExecImpl,
+  workspacePath: string,
+  bin: string,
+  args: readonly string[],
+  maxBuffer: number,
+): Promise<BdExecResult> {
+  return withWorkspaceLock(workspacePath, async () => {
+    let child: ChildProcess | undefined;
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await execImpl(bin, args, {
+        cwd: workspacePath,
+        env: beadsChildEnv(),
+        timeout: BEADS_REQUEST_TIMEOUT_MS,
+        maxBuffer,
+        onSpawn: (spawned) => {
+          child = spawned;
+          escalation = setTimeout(() => {
+            try {
+              spawned.kill('SIGKILL');
+            } catch {
+              // Already reaped between the timer firing and this call.
+            }
+          }, BEADS_REQUEST_TIMEOUT_MS + SIGKILL_ESCALATION_MS);
+          escalation.unref?.();
+        },
+      });
+    } catch (err) {
+      // Node does NOT kill the child on a maxBuffer overflow — it just stops
+      // reading and rejects — so the orphan is reaped here or not at all.
+      if (readExecFailure(err).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        try {
+          child?.kill('SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }
+      throw classifyBdFailure(err);
+    } finally {
+      if (escalation !== undefined) clearTimeout(escalation);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Workspace initialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a beads workspace in `workspacePath` — what the wizard's
+ * "Initialize beads here" button runs when Detect finds none.
+ *
+ * `bd init` MUST run with the target folder as CWD and WITHOUT `-C`: bd 1.2.2
+ * answers `bd -C <dir> init` with "no beads project found", because `-C`
+ * resolves an EXISTING workspace, which is the one thing init does not have.
+ * That is why this cannot go through {@link BeadsAdapter.bd}, whose whole job
+ * is pinning `-C`.
+ *
+ * `--stealth` is the only variant that commits NOTHING: the ignore entry lands
+ * in `.git/info/exclude` (local-only), so `git status` stays empty and no
+ * collaborator inherits a `.claude/settings.json` hook. A folder that is not a
+ * git repository becomes one (`.git`, branch `main`) — bd's own behavior, not
+ * something this adds. No `--prefix`: bd derives the issue prefix from the
+ * folder name, which is what the user sees in the wizard afterwards.
+ *
+ * Re-running on an initialized workspace exits 1 with "This workspace is
+ * already initialized", which reaches the caller verbatim through
+ * {@link classifyBdFailure} — it is self-explanatory and needs no rewording.
+ */
+export async function initializeBeadsWorkspace(
+  workspacePath: string,
+  exec: BdExecImpl = defaultBdExec,
+): Promise<void> {
+  await spawnBd(exec, workspacePath, BD_BIN, ['init', '--stealth'], DEFAULT_MAX_BUFFER);
+  try {
+    await spawnBd(exec, workspacePath, BD_BIN, ['metrics', 'off'], DEFAULT_MAX_BUFFER);
+  } catch {
+    // Best-effort by design: `bd metrics off` is a GLOBAL setting, not part of
+    // the workspace this call created. The workspace exists either way, and
+    // failing the init over a telemetry toggle would leave the user with a
+    // usable workspace and an error saying otherwise.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Envelope + row parsing
 // ---------------------------------------------------------------------------
 
@@ -1299,59 +1416,7 @@ export class BeadsAdapter implements TrackerAdapter {
     args: readonly string[],
     maxBuffer: number,
   ): Promise<BdExecResult> {
-    return withWorkspaceLock(this.workspacePath, async () => {
-      let child: ChildProcess | undefined;
-      let escalation: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await this.execImpl(bin, args, {
-          cwd: this.workspacePath,
-          env: this.childEnv(),
-          timeout: BEADS_REQUEST_TIMEOUT_MS,
-          maxBuffer,
-          onSpawn: (spawned) => {
-            child = spawned;
-            escalation = setTimeout(() => {
-              try {
-                spawned.kill('SIGKILL');
-              } catch {
-                // Already reaped between the timer firing and this call.
-              }
-            }, BEADS_REQUEST_TIMEOUT_MS + SIGKILL_ESCALATION_MS);
-            escalation.unref?.();
-          },
-        });
-      } catch (err) {
-        // Node does NOT kill the child on a maxBuffer overflow — it just stops
-        // reading and rejects — so the orphan is reaped here or not at all.
-        if (readExecFailure(err).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
-          try {
-            child?.kill('SIGKILL');
-          } catch {
-            // Already gone.
-          }
-        }
-        throw classifyBdFailure(err);
-      } finally {
-        if (escalation !== undefined) clearTimeout(escalation);
-      }
-    });
-  }
-
-  /**
-   * The child environment: the login-shell PATH (macOS GUI apps inherit a
-   * minimal one), the envelope opt-in, and `BEADS_DIR` REMOVED.
-   *
-   * The removal is defense-in-depth rather than the primary lever — `-C` beats
-   * `BEADS_DIR` by bd's own proven precedence — but it is cheap, and the
-   * failure it guards is silent and total: an app launched with `BEADS_DIR`
-   * set (a documented beads usage pattern) would otherwise probe, import,
-   * close and update issues in that ONE workspace for every project, with each
-   * connection still looking valid.
-   */
-  private childEnv(): NodeJS.ProcessEnv {
-    const env = buildCommandEnv({ BD_JSON_ENVELOPE: '1' });
-    delete env.BEADS_DIR;
-    return env;
+    return spawnBd(this.execImpl, this.workspacePath, bin, args, maxBuffer);
   }
 
   // -------------------------------------------------------------------------

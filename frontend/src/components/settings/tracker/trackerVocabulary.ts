@@ -210,9 +210,9 @@ export function classifyKeylessDetectFailure(message: string): KeylessDetectFail
 }
 
 /**
- * What a user must know BEFORE running `bd init` on a repo they share, and the
- * reason Detect never runs it for them. Both facts are probed behaviors of
- * beads 1.2.2, not speculation (docs/proposals/tracker-beads-provider.md,
+ * What the "Initialize beads here" button does to a repo the user shares, and
+ * why it runs the variant it runs. Both facts are probed behaviors of beads
+ * 1.2.2, not speculation (docs/proposals/tracker-beads-provider.md,
  * "Keyless connect" / Phase 0):
  *
  *   - a vanilla non-interactive `bd init` COMMITS 18 files to the repo without
@@ -223,13 +223,18 @@ export function classifyKeylessDetectFailure(message: string): KeylessDetectFail
  *   - beads telemetry is ON by default and posts to an external endpoint from
  *     a detached process.
  *
- * Copy, not behavior: cyboflow runs neither command.
+ * The disclosure sits beside the button that runs it, so it describes exactly
+ * what that button does: `bd init --stealth` then `bd metrics off`, and nothing
+ * else. Plain `bd init` is named only to explain why the button does not run
+ * it — cyboflow never does.
  */
 export const BEADS_INIT_DISCLOSURE: readonly string[] = [
-  'Run `bd init --stealth` in this repo, then detect again. Plain `bd init` commits 18 files ' +
-    'to the repository without asking — including a `.claude/settings.json` hook that runs for ' +
-    'everyone who checks the branch out.',
-  'beads also sends usage telemetry by default; `bd metrics off` turns it off.',
+  '“Initialize beads here” runs `bd init --stealth` in the folder above and turns bd\'s usage ' +
+    'telemetry off. Nothing is committed — the ignore entry lands in `.git/info/exclude`, and a ' +
+    'folder that is not yet a git repository becomes one.',
+  'Prefer the terminal? Run `bd init --stealth` yourself, then re-detect. Avoid plain ' +
+    '`bd init` — it commits 18 files to the repository without asking, including a ' +
+    '`.claude/settings.json` hook that runs for everyone who checks the branch out.',
 ];
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ import {
   BeadsAdapter,
   beadsIssueFingerprint,
   classifyBdFailure,
+  initializeBeadsWorkspace,
   normalizeCursor,
 } from './beadsAdapter';
 import type { BdExecImpl, BdExecOptions, BdExecResult } from './beadsAdapter';
@@ -1247,5 +1248,125 @@ describe('BeadsAdapter — updateIssueContent', () => {
     });
     expect(calls.filter((call) => bdVerb(call) === 'update')).toHaveLength(0);
     expect(issue?.priority).toBe('2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// initializeBeadsWorkspace
+// ---------------------------------------------------------------------------
+
+describe('initializeBeadsWorkspace', () => {
+  /** A spawn of `bd <verb>` with NO `-C` prefix — what init and metrics are. */
+  function bareVerb(verb: string, respond: Route['respond']): Route {
+    return { match: (spawn) => spawn.bin === 'bd' && spawn.args[0] === verb, respond };
+  }
+
+  it('runs `init --stealth` with the workspace as CWD and no `-C` at all', async () => {
+    // The whole reason this cannot go through BeadsAdapter.bd: bd 1.2.2 answers
+    // `bd -C <dir> init` with "no beads project found", because `-C` resolves an
+    // EXISTING workspace, which is the one thing init does not have.
+    const { execImpl, calls } = scriptedExec([
+      bareVerb('init', () => ok('Initialized beads workspace\n')),
+      bareVerb('metrics', () => ok('')),
+    ]);
+
+    await initializeBeadsWorkspace(WORKSPACE, execImpl);
+
+    expect(calls.map((call) => call.args)).toEqual([
+      ['init', '--stealth'],
+      ['metrics', 'off'],
+    ]);
+    expect(calls.every((call) => call.options.cwd === WORKSPACE)).toBe(true);
+    expect(calls.some((call) => call.args.includes('-C'))).toBe(false);
+    // No `--prefix`: bd derives the issue prefix from the folder name, which is
+    // the name the wizard shows once the follow-up Detect succeeds.
+    expect(calls[0].args).not.toContain('--prefix');
+  });
+
+  it('scrubs an inherited BEADS_DIR, which no `-C` is here to override', async () => {
+    const previous = process.env.BEADS_DIR;
+    process.env.BEADS_DIR = '/somewhere/else';
+    try {
+      const { execImpl, calls } = scriptedExec([
+        bareVerb('init', () => ok('')),
+        bareVerb('metrics', () => ok('')),
+      ]);
+
+      await initializeBeadsWorkspace(WORKSPACE, execImpl);
+
+      expect(calls[0].env.BEADS_DIR).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env.BEADS_DIR;
+      else process.env.BEADS_DIR = previous;
+    }
+  });
+
+  it('swallows a metrics-off failure — the workspace already exists', async () => {
+    // `bd metrics off` is a GLOBAL setting, not part of the workspace init just
+    // created; failing the call over it would leave the user with a working
+    // workspace and an error saying otherwise.
+    const { execImpl, calls } = scriptedExec([
+      bareVerb('init', () => ok('')),
+      bareVerb('metrics', () => {
+        throw execFailure({ code: 1, stderr: 'metrics: config write failed' });
+      }),
+    ]);
+
+    await expect(initializeBeadsWorkspace(WORKSPACE, execImpl)).resolves.toBeUndefined();
+    expect(calls).toHaveLength(2);
+  });
+
+  it('surfaces the already-initialized refusal verbatim, and never runs metrics', async () => {
+    const { execImpl, calls } = scriptedExec([
+      bareVerb('init', () => {
+        throw execFailure({
+          code: 1,
+          stderr: 'Error: This workspace is already initialized\n',
+        });
+      }),
+    ]);
+
+    await expect(initializeBeadsWorkspace(WORKSPACE, execImpl)).rejects.toThrow(
+      /already initialized/,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it('classifies a missing `bd` as the same auth failure every other spawn does', async () => {
+    const { execImpl } = scriptedExec([
+      bareVerb('init', () => {
+        throw execFailure({ code: 'ENOENT' });
+      }),
+    ]);
+
+    await expect(initializeBeadsWorkspace(WORKSPACE, execImpl)).rejects.toThrow(TrackerAuthError);
+    await expect(initializeBeadsWorkspace(WORKSPACE, execImpl)).rejects.toThrow(
+      /was not found on PATH/,
+    );
+  });
+
+  it('queues on the same per-workspace lock an adapter spawn takes', async () => {
+    // init contends on the flock like anything else, so a second one must wait
+    // rather than race the first inside the same `.beads`.
+    let openGate: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const { execImpl, calls } = scriptedExec([
+      bareVerb('init', async () => {
+        await gate;
+        return ok('');
+      }),
+      bareVerb('metrics', () => ok('')),
+    ]);
+
+    const first = initializeBeadsWorkspace(WORKSPACE, execImpl);
+    const second = initializeBeadsWorkspace(WORKSPACE, execImpl);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(1);
+
+    openGate?.();
+    await Promise.all([first, second]);
+    expect(calls).toHaveLength(4);
   });
 });

@@ -87,13 +87,17 @@ describe('classifyKeylessDetectFailure', () => {
 });
 
 describe('BEADS_INIT_DISCLOSURE', () => {
-  it('names both probed side effects a user has to decide about before running `bd init`', () => {
+  it('names what the init button runs and both probed side effects it avoids', () => {
     const copy = BEADS_INIT_DISCLOSURE.join(' ');
-    // The repo write, and the flag that avoids it.
+    // The variant the button runs, and the local-only place its ignore entry
+    // lands — the whole of "nothing is committed".
     expect(copy).toContain('bd init --stealth');
+    expect(copy).toContain('.git/info/exclude');
+    // The repo write the button does NOT make, named so the user can tell the
+    // two apart if they reach for the terminal instead.
     expect(copy).toContain('18 files');
     expect(copy).toContain('.claude/settings.json');
-    // The telemetry default, and the command that turns it off.
-    expect(copy).toContain('bd metrics off');
+    // The telemetry default, which the button turns off along the way.
+    expect(copy).toContain('telemetry');
   });
 });
