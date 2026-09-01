@@ -29,7 +29,8 @@ const { mockAutoUpdater } = vi.hoisted(() => ({
     quitAndInstall: vi.fn(),
     // electron-updater assigns this in its constructor; AppUpdater stashes it
     // and writes its own executor over the top.
-    httpExecutor: { kind: 'electron' } as unknown,
+    // ElectronHttpExecutor memoises its Session here; rebinding writes to it.
+    httpExecutor: { kind: 'electron', cachedSession: { partition: 'electron-updater' } } as unknown,
   },
 }));
 
@@ -43,6 +44,28 @@ function transportError(code: string): Error {
 vi.mock('electron-updater', () => ({
   autoUpdater: mockAutoUpdater,
 }));
+
+// The global setup mock provides no `session`; AppUpdater needs fromPartition
+// to rebind the fallback after a network-service crash. `app` and BrowserWindow
+// are injected fakes here, so this replacement need only cover `session`.
+vi.mock('electron', () => ({
+  session: { fromPartition: vi.fn((partition: string) => ({ partition })) },
+  app: {},
+  BrowserWindow: vi.fn(),
+}));
+
+import { session } from 'electron';
+const fromPartition = vi.mocked(session.fromPartition);
+
+/** The partition names the fallback has been rebound onto, oldest first. */
+function reboundPartitions(): string[] {
+  return fromPartition.mock.calls.map((c) => c[0]);
+}
+
+/** The session the Electron executor would use for its next request. */
+function electronCachedSession(): unknown {
+  return (ELECTRON_EXECUTOR as { cachedSession?: unknown }).cachedSession;
+}
 
 import { AppUpdater, isNewerVersion } from '../appUpdater';
 import { NodeHttpExecutor, isProxyOrCertTransportFailure } from '../nodeHttpExecutor';
@@ -64,6 +87,9 @@ function makeApp(currentVersion = '0.1.28') {
 
 function makeHarness(currentVersion = '0.1.28') {
   mockAutoUpdater.httpExecutor = ELECTRON_EXECUTOR;
+  (ELECTRON_EXECUTOR as { cachedSession?: unknown }).cachedSession = {
+    partition: 'electron-updater',
+  };
   const app = makeApp(currentVersion);
 
   const send = vi.fn();
@@ -254,17 +280,97 @@ describe('AppUpdater HTTP transport selection', () => {
     });
   });
 
-  it('does not fall back into a network stack it knows is dead', async () => {
+  it('rebinds onto a post-crash session when falling back after a crash', async () => {
+    // A proxy-dependent machine that ALSO lost its network service: switching to
+    // electron.net is right, but its stock session is poisoned, so the switch has
+    // to carry a partition minted after the crash.
     const { app, updater } = makeHarness();
     app.emit('child-process-gone', {}, NETWORK_GONE);
-    mockAutoUpdater.checkForUpdates.mockRejectedValueOnce(transportError('ECONNREFUSED'));
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
 
     await updater.check();
 
-    // Retrying over the crashed network service would trade a real error for
-    // an opaque net::ERR_FAILED.
-    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
-    expect(mockAutoUpdater.httpExecutor).toBeInstanceOf(NodeHttpExecutor);
+    expect(mockAutoUpdater.httpExecutor).toBe(ELECTRON_EXECUTOR);
+    expect(reboundPartitions()).toEqual(['electron-updater-r1']);
+    expect(electronCachedSession()).toEqual({ partition: 'electron-updater-r1' });
+  });
+
+  it('recovers a crash that lands while already on electron.net', async () => {
+    const { app, updater } = makeHarness();
+    // Fall back first (pre-crash), so the executor holds the stock session...
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+    await updater.check();
+    expect(reboundPartitions()).toEqual([]);
+
+    // ...then lose the network service underneath it.
+    app.emit('child-process-gone', {}, NETWORK_GONE);
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(new Error('net::ERR_FAILED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.2.11' } });
+
+    const result = await updater.check();
+
+    expect(reboundPartitions()).toEqual(['electron-updater-r1']);
+    expect(result).toMatchObject({ updateAvailable: true, latestVersion: '0.2.11' });
+  });
+
+  it('mints a distinct partition per crash', async () => {
+    // A partition is poisoned by USE, so the one that rescued the first crash is
+    // itself dead after the second; reusing its name would return that object.
+    const { app, updater } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+    await updater.check();
+
+    for (const expected of ['electron-updater-r1', 'electron-updater-r2']) {
+      app.emit('child-process-gone', {}, NETWORK_GONE);
+      mockAutoUpdater.checkForUpdates
+        .mockRejectedValueOnce(new Error('net::ERR_FAILED'))
+        .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+      await updater.check();
+      expect(reboundPartitions().at(-1)).toBe(expected);
+    }
+    expect(reboundPartitions()).toEqual(['electron-updater-r1', 'electron-updater-r2']);
+  });
+
+  it('gives up — and says relaunch — when rebinding does not help', async () => {
+    // Reachable only from electron.net: Node never emits a net:: error, so a
+    // rebind can only ever be attempted for a session already on that stack.
+    const { app, updater, lastEvent } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+    await updater.check();
+    mockAutoUpdater.checkForUpdates.mockReset();
+
+    app.emit('child-process-gone', {}, NETWORK_GONE);
+    mockAutoUpdater.checkForUpdates.mockRejectedValue(new Error('net::ERR_FAILED'));
+
+    await updater.check();
+
+    // One attempt, one rebound attempt, then stop — a rebound session that
+    // still fails is reporting a real error, not a stale binding.
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(reboundPartitions()).toEqual(['electron-updater-r1']);
+    expect(lastEvent().message).toContain('relaunch Cyboflow');
+  });
+
+  it('does not rebind when the network service never died', async () => {
+    const { updater } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+
+    await updater.check();
+
+    expect(mockAutoUpdater.httpExecutor).toBe(ELECTRON_EXECUTOR);
+    expect(reboundPartitions()).toEqual([]);
+    expect(electronCachedSession()).toEqual({ partition: 'electron-updater' });
   });
 
   it('classifies only proxy/cert transport failures as fallback-worthy', () => {

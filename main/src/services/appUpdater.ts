@@ -1,3 +1,4 @@
+import { session } from 'electron';
 import type { App, BrowserWindow } from 'electron';
 import { autoUpdater, type UpdateInfo, type ProgressInfo } from 'electron-updater';
 import type { Logger } from '../utils/logger';
@@ -8,6 +9,10 @@ const EVENT_CHANNEL = 'updater:event';
 // Let the window finish loading before the first automatic check so the
 // 'available' event isn't dropped against a not-yet-ready webContents.
 const INITIAL_CHECK_DELAY_MS = 8_000;
+// One transport switch (Node -> electron.net) plus one session rebind is the
+// most any single operation can usefully recover from; past that the failure is
+// not about which stack carries the request.
+const MAX_TRANSPORT_RECOVERIES = 2;
 
 /** Parse the leading MAJOR.MINOR.PATCH of a version string; null if absent. */
 function releaseTriple(version: string): [number, number, number] | null {
@@ -63,22 +68,30 @@ export class AppUpdater {
   // every subsequent request fails with a bare net::ERR_FAILED until the app
   // relaunches.
   //
-  // Since the updater now runs on Node's transport this no longer breaks
-  // update checks on its own, but it stays load-bearing twice over: it blocks
-  // the electron.net fallback from retrying into a stack we know is dead, and
-  // it still explains the failure for a session that had already fallen back
-  // before the crash.
+  // Since the updater runs on Node's transport this no longer breaks update
+  // checks on its own, and the electron.net fallback recovers by rebinding onto
+  // a fresh session (see rebindElectronSession). The flag survives only to
+  // explain a failure that outlives even that — at which point relaunching
+  // really is the remaining advice.
   private networkStackLost = false;
   // electron-updater's own ElectronHttpExecutor, captured before we replace it.
   // Kept as the fallback for managed networks where Node's stack cannot reach
   // the feed (OS proxy config, keychain-installed root certs) — see
-  // runWithElectronFallback. Untyped because electron-updater assigns
+  // runWithRecovery. Untyped because electron-updater assigns
   // `httpExecutor` in its constructor without declaring it on the public type.
   private electronExecutor: unknown = null;
   // Sticky once the fallback wins: a machine that needs Chromium's stack needs
   // it for every subsequent request too, so don't pay the failed Node attempt
   // again on each check.
   private usingElectronExecutor = false;
+  // Bumped on every network-service death. An Electron Session is poisoned by
+  // USE, not by creation: one that issued a request before the crash fails
+  // forever after it, while a partition minted afterwards binds to the
+  // respawned service and works. Comparing the two counters is therefore how we
+  // know whether the fallback's session predates the current crash and must be
+  // replaced before it is worth trying.
+  private crashGeneration = 0;
+  private electronSessionGeneration = 0;
 
   constructor(
     private readonly app: App,
@@ -115,7 +128,7 @@ export class AppUpdater {
       return { supported: false, currentVersion, updateAvailable: false };
     }
     try {
-      const result = await this.runWithElectronFallback('check', () =>
+      const result = await this.runWithRecovery('check', () =>
         autoUpdater.checkForUpdates(),
       );
       const latestVersion = result?.updateInfo?.version;
@@ -132,7 +145,7 @@ export class AppUpdater {
   async download(): Promise<void> {
     if (!this.app.isPackaged) return;
     try {
-      await this.runWithElectronFallback('download', () => autoUpdater.downloadUpdate());
+      await this.runWithRecovery('download', () => autoUpdater.downloadUpdate());
     } catch (error) {
       this.logger?.error('[AppUpdater] download failed', error instanceof Error ? error : undefined);
       this.emit(this.errorEventOf(error));
@@ -179,40 +192,82 @@ export class AppUpdater {
   }
 
   /**
-   * Run an updater operation on the Node transport, retrying once over
-   * electron.net when the failure is the signature of a managed network Node
-   * cannot navigate (OS proxy config, keychain-only root certificates).
+   * Run an updater operation, recovering from the two transport failures that
+   * a retry can actually fix:
    *
-   * The retry re-runs the whole operation, so a download that failed part-way
+   *  - Node cannot see the OS proxy configuration or the macOS keychain, so a
+   *    managed corporate network fails there and may succeed over electron.net.
+   *  - electron.net's session is dead after a network-service crash, but a
+   *    partition minted after that crash binds to the respawned service.
+   *
+   * Anything else — an HTTP status, a checksum mismatch — propagates, since no
+   * change of transport addresses it.
+   *
+   * A retry re-runs the whole operation, so a download that failed part-way
    * restarts from zero and the renderer's progress bar rewinds. That is worth
-   * the simplicity: the alternative is resuming a byte range across a
-   * transport we have just decided is broken.
+   * the simplicity: the alternative is resuming a byte range across a transport
+   * we have just decided is broken.
    */
-  private async runWithElectronFallback<T>(label: string, run: () => Promise<T>): Promise<T> {
-    try {
-      return await run();
-    } catch (error) {
-      if (!this.shouldRetryOnElectronNet(error)) throw error;
-      this.logger?.warn(
-        `[AppUpdater] ${label} failed on the Node transport (${this.messageOf(error)}) — retrying over electron.net`,
-      );
-      this.switchToElectronExecutor();
-      return await run();
+  private async runWithRecovery<T>(label: string, run: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        const recovery = attempt < MAX_TRANSPORT_RECOVERIES ? this.planRecovery(error) : null;
+        if (recovery == null) throw error;
+        const from = this.usingElectronExecutor ? 'electron.net' : 'the Node transport';
+        this.logger?.warn(
+          `[AppUpdater] ${label} failed on ${from} (${this.messageOf(error)}) — ${
+            recovery === 'switch'
+              ? 'retrying over electron.net'
+              : 'rebinding electron.net onto a post-crash session'
+          }`,
+        );
+        if (recovery === 'switch') this.switchToElectronExecutor();
+        else this.rebindElectronSession();
+      }
     }
   }
 
-  private shouldRetryOnElectronNet(error: unknown): boolean {
-    // Already switched, or nothing to switch to.
-    if (this.usingElectronExecutor || this.electronExecutor == null) return false;
-    // The network service is gone, so electron.net is known-dead: retrying
-    // there would trade a real error for an opaque net::ERR_FAILED.
-    if (this.networkStackLost) return false;
-    return isProxyOrCertTransportFailure(error);
+  private planRecovery(error: unknown): 'switch' | 'rebind' | null {
+    if (this.electronExecutor == null) return null;
+    if (!this.usingElectronExecutor) {
+      return isProxyOrCertTransportFailure(error) ? 'switch' : null;
+    }
+    // Already on electron.net. The only recoverable failure there is a network
+    // context killed by a crash, and only when our session predates it — once
+    // rebound, a repeat net:: error is a real one.
+    if (this.electronSessionGeneration === this.crashGeneration) return null;
+    return this.messageOf(error).includes('net::ERR') ? 'rebind' : null;
   }
 
   private switchToElectronExecutor(): void {
+    // Cover the case where the crash landed before we ever switched: handing
+    // the operation to a session minted pre-crash would fail on principle.
+    this.rebindElectronSession();
     (autoUpdater as unknown as { httpExecutor?: unknown }).httpExecutor = this.electronExecutor;
     this.usingElectronExecutor = true;
+  }
+
+  /**
+   * Point the Electron executor at a partition minted after the latest crash.
+   *
+   * `session.fromPartition` is identity-mapped by name — asking for the
+   * "electron-updater" partition again returns the same poisoned object, and
+   * `Session` has no destroy() — so recovery has to go through a NEW name.
+   * ElectronHttpExecutor memoises its session in `cachedSession`, which is the
+   * single place that decides which one every subsequent request rides.
+   */
+  private rebindElectronSession(): void {
+    if (this.electronExecutor == null) return;
+    if (this.electronSessionGeneration === this.crashGeneration) return;
+    const partition = `electron-updater-r${this.crashGeneration}`;
+    (this.electronExecutor as { cachedSession?: unknown }).cachedSession = session.fromPartition(
+      partition,
+      { cache: false },
+    );
+    this.electronSessionGeneration = this.crashGeneration;
+    this.logger?.warn(`[AppUpdater] electron.net rebound to a fresh session "${partition}"`);
   }
 
   private wireEvents(): void {
@@ -261,6 +316,7 @@ export class AppUpdater {
         details.reason !== 'clean-exit'
       ) {
         this.networkStackLost = true;
+        this.crashGeneration += 1;
         this.logger?.error(
           `[AppUpdater] Chromium network service gone (reason=${details.reason}, exitCode=${details.exitCode}) — in-app network requests will fail until the app is relaunched`,
         );
@@ -285,9 +341,9 @@ export class AppUpdater {
    * of the update feed — swap in an actionable restart message. Non-net errors
    * (HTTP statuses, checksum mismatches, …) keep their original text.
    *
-   * Only reachable now for a session already running on the electron.net
-   * fallback: Node's transport is unaffected by the crash and never produces a
-   * net:: error in the first place.
+   * Reachable only when the electron.net fallback is in play AND rebinding it
+   * onto a post-crash session did not help: Node's transport is unaffected by
+   * the crash and never produces a net:: error in the first place.
    */
   private errorEventOf(error: unknown): UpdaterEvent {
     const message = this.messageOf(error);
