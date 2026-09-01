@@ -21,7 +21,9 @@ import {
 } from '../../../shared/types/sprintBatch';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
+import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import { useConfigStore } from '../stores/configStore';
+import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore';
 import {
   Sun,
   Moon,
@@ -47,6 +49,7 @@ import { useOnboardingStore } from '../stores/onboardingStore';
 import { IntegrationsSettings } from './settings/IntegrationsSettings';
 import { FeatureControlsSettings } from './settings/FeatureControlsSettings';
 import { SessionSettings } from './settings/SessionSettings';
+import { KeyboardShortcutsSettings } from './settings/KeyboardShortcutsSettings';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -177,6 +180,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [sprintMaxTasksInteractive, setSprintMaxTasksInteractive] = useState<number | ''>(
     SPRINT_BATCH_MAX_TASKS_DEFAULTS.interactive,
   );
+  // User-remapped keyboard shortcuts (shared/types/keyboardShortcuts.ts). SPARSE
+  // — only non-default entries are stored, mirroring the sprintMaxTasks pattern
+  // above. Pushed into keyboardShortcutsStore (the live global key-handler's
+  // source of truth) after a successful save, not on every keystroke here.
+  const [keyboardShortcuts, setKeyboardShortcuts] = useState<KeyboardShortcutOverrides>({});
   const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
   // number | '' so clearing the field shows empty (never value={NaN}); the save
   // path floors a non-finite/empty value back to 5.
@@ -255,6 +263,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       // default, which is exactly what a launch would use.
       setSprintMaxTasksSdk(resolveSprintMaxTasks(data.sprintMaxTasks, 'sdk'));
       setSprintMaxTasksInteractive(resolveSprintMaxTasks(data.sprintMaxTasks, 'interactive'));
+      setKeyboardShortcuts(data.keyboardShortcuts ?? {});
       setComputeCostFromRates(data.computeCostFromRates ?? false);
       setAutoGradeVariantRuns(data.autoGradeVariantRuns ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
@@ -352,6 +361,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         },
         computeCostFromRates,
         autoGradeVariantRuns,
+        // Explicit map (possibly empty), never undefined — updateConfig merges
+        // partials, so undefined would fail to clear a previously-set override.
+        keyboardShortcuts,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
         artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
@@ -388,6 +400,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       if (!response.success) {
         throw new Error(response.error || 'Failed to update configuration');
       }
+
+      // Push the saved overrides into the live global key-handler's store so a
+      // remap takes effect immediately, with no reload/relaunch required.
+      useKeyboardShortcutsStore.getState().setOverrides(keyboardShortcuts);
 
       // Diff the saved telemetry flags against the pre-save baseline (captured
       // from `_config`, still holding the value loaded at fetch time — fetchConfig()
@@ -765,6 +781,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 </p>
               </SettingsSection>
             </CollapsibleCard>
+
+            <KeyboardShortcutsSettings
+              shortcuts={keyboardShortcuts}
+              onShortcutsChange={setKeyboardShortcuts}
+            />
 
             {error && (
               <div className="text-status-error text-sm bg-status-error/10 border border-status-error/30 rounded-lg p-4">
