@@ -55,7 +55,7 @@ interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
   /** Tab to show when the dialog opens (defaults to 'general'). */
-  initialTab?: 'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates';
+  initialTab?: 'general' | 'shortcuts' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates';
 }
 
 export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
@@ -198,7 +198,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
+  const [activeTab, setActiveTab] = useState<'general' | 'shortcuts' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
   const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
@@ -468,6 +468,16 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             }`}
           >
             General
+          </button>
+          <button
+            onClick={() => setActiveTab('shortcuts')}
+            className={`px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'shortcuts'
+                ? 'text-interactive border-b-2 border-interactive bg-interactive/5'
+                : 'text-text-tertiary hover:text-text-primary hover:bg-surface-hover'
+            }`}
+          >
+            Shortcuts
           </button>
           <button
             onClick={() => setActiveTab('ai')}
@@ -782,6 +792,16 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               </SettingsSection>
             </CollapsibleCard>
 
+            {error && (
+              <div className="text-status-error text-sm bg-status-error/10 border border-status-error/30 rounded-lg p-4">
+                {error}
+              </div>
+            )}
+          </form>
+        )}
+
+        {activeTab === 'shortcuts' && (
+          <form id="settings-form" onSubmit={handleSubmit} className="space-y-6">
             <KeyboardShortcutsSettings
               shortcuts={keyboardShortcuts}
               onShortcutsChange={setKeyboardShortcuts}
@@ -1038,7 +1058,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       </ModalBody>
 
       {/* Footer */}
-      {(activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' || activeTab === 'notifications') && (
+      {(activeTab === 'general' || activeTab === 'shortcuts' || activeTab === 'ai' || activeTab === 'assistant' || activeTab === 'notifications') && (
         <ModalFooter>
           <Button
             type="button"
@@ -1049,8 +1069,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             Cancel
           </Button>
           <Button
-            type={activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' ? 'submit' : 'button'}
-            form={activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' ? 'settings-form' : undefined}
+            type={activeTab === 'general' || activeTab === 'shortcuts' || activeTab === 'ai' || activeTab === 'assistant' ? 'submit' : 'button'}
+            form={activeTab === 'general' || activeTab === 'shortcuts' || activeTab === 'ai' || activeTab === 'assistant' ? 'settings-form' : undefined}
             onClick={activeTab === 'notifications' ? (e) => handleSubmit(e as React.FormEvent) : undefined}
             disabled={isSubmitting}
             loading={isSubmitting}

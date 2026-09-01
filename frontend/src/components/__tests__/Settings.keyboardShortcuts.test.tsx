@@ -1,5 +1,5 @@
 /**
- * Settings — General tab "Keyboard shortcuts" section round-trip. Bound to
+ * Settings — "Shortcuts" tab round-trip. Bound to
  * config.keyboardShortcuts (sparse override map; shared/types/keyboardShortcuts.ts).
  * Verifies a loaded override renders its formatted binding, that recording a
  * new chord updates the row in place, and that Save carries the resulting map
@@ -70,7 +70,7 @@ beforeEach(() => {
 
 describe('Settings — Keyboard shortcuts section', () => {
   it('renders every default binding, formatted, when no overrides are stored', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
     expect(row).toHaveTextContent(formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS.newSession, platform));
   });
@@ -80,7 +80,7 @@ describe('Settings — Keyboard shortcuts section', () => {
       success: true,
       data: baseConfig({ keyboardShortcuts: { toggleBacklog: 'mod+shift+l' } }),
     });
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
 
     const row = await screen.findByTestId('shortcut-record-toggleBacklog');
     expect(row).toHaveTextContent(formatKeybinding('mod+shift+l', platform));
@@ -88,7 +88,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('recording a new chord updates the row to the newly captured binding', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
     expect(row).toHaveTextContent(formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS.newSession, platform));
 
@@ -108,7 +108,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('a bare modifier keypress does not commit a binding; Escape cancels recording', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
 
     fireEvent.click(row);
@@ -122,7 +122,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('a keydown on a Record button that is NOT recording changes nothing', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
     const original = formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS.newSession, platform);
     expect(row).toHaveTextContent(original);
@@ -143,7 +143,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('a keystroke after an Escape-cancel is not captured as the new binding', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
     const original = formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS.newSession, platform);
 
@@ -169,7 +169,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('a chord with no Cmd/Ctrl is refused: nothing commits and recording continues', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
 
     fireEvent.click(row);
@@ -202,7 +202,7 @@ describe('Settings — Keyboard shortcuts section', () => {
   });
 
   it('saving carries the recorded overrides into API.config.update and pushes them into the live store', async () => {
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
 
     fireEvent.click(row);
@@ -229,7 +229,7 @@ describe('Settings — Keyboard shortcuts section', () => {
       success: true,
       data: baseConfig({ keyboardShortcuts: { newSession: 'mod+shift+n' } }),
     });
-    render(<Settings isOpen onClose={vi.fn()} initialTab="general" />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="shortcuts" />);
     const row = await screen.findByTestId('shortcut-record-newSession');
     expect(row).toHaveTextContent(formatKeybinding('mod+shift+n', platform));
 
