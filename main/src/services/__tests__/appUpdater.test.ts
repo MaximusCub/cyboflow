@@ -1,11 +1,16 @@
 /**
- * Unit tests for AppUpdater's network-service-crash detection.
+ * Unit tests for AppUpdater's HTTP transport selection and its
+ * network-service-crash detection.
  *
  * When Chromium's network service process dies mid-run, Electron's
  * main-process net sessions (including electron-updater's cached partition)
  * stay bound to the dead network context and every request fails with a bare
  * net::ERR_FAILED until relaunch. AppUpdater watches 'child-process-gone' and
  * swaps that opaque error for an actionable "relaunch Cyboflow" message.
+ *
+ * AppUpdater also swaps electron-updater's Chromium-backed HTTP executor for a
+ * Node-backed one, keeping the original as a fallback for managed networks
+ * where Node cannot reach the feed (OS proxy config, keychain-only roots).
  *
  * The real electron-updater module is mocked; `app` and the main window are
  * injected fakes, so no electron override is needed beyond the global setup.
@@ -22,14 +27,25 @@ const { mockAutoUpdater } = vi.hoisted(() => ({
     checkForUpdates: vi.fn(),
     downloadUpdate: vi.fn(),
     quitAndInstall: vi.fn(),
+    // electron-updater assigns this in its constructor; AppUpdater stashes it
+    // and writes its own executor over the top.
+    httpExecutor: { kind: 'electron' } as unknown,
   },
 }));
+
+const ELECTRON_EXECUTOR = mockAutoUpdater.httpExecutor;
+
+/** A Node transport failure of the kind that should fall back to electron.net. */
+function transportError(code: string): Error {
+  return Object.assign(new Error(`request to updates.cyboflow.com failed: ${code}`), { code });
+}
 
 vi.mock('electron-updater', () => ({
   autoUpdater: mockAutoUpdater,
 }));
 
 import { AppUpdater, isNewerVersion } from '../appUpdater';
+import { NodeHttpExecutor, isProxyOrCertTransportFailure } from '../nodeHttpExecutor';
 
 const NETWORK_GONE = {
   type: 'Utility',
@@ -39,10 +55,16 @@ const NETWORK_GONE = {
   name: 'Network Service',
 };
 
-function makeHarness(currentVersion = '0.1.28') {
+function makeApp(currentVersion = '0.1.28') {
   const app = new EventEmitter() as EventEmitter & { isPackaged: boolean; getVersion: () => string };
   app.isPackaged = true;
   app.getVersion = () => currentVersion;
+  return app;
+}
+
+function makeHarness(currentVersion = '0.1.28') {
+  mockAutoUpdater.httpExecutor = ELECTRON_EXECUTOR;
+  const app = makeApp(currentVersion);
 
   const send = vi.fn();
   const win = {
@@ -127,6 +149,131 @@ describe('AppUpdater network-stack-lost handling', () => {
     await updater.check();
 
     expect(lastEvent()).toEqual({ kind: 'error', message: 'net::ERR_FAILED' });
+  });
+});
+
+/**
+ * The updater runs on Node's http/https by default so that a Chromium
+ * network-service crash cannot take update checks down with it. Node, however,
+ * reads neither the OS proxy configuration nor the macOS keychain, so a managed
+ * corporate machine can fail there and still succeed over electron.net — hence
+ * the one-shot fallback these tests pin.
+ */
+describe('AppUpdater HTTP transport selection', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+
+  it('installs the Node transport, keeping electron.net on standby', () => {
+    makeHarness();
+    expect(mockAutoUpdater.httpExecutor).toBeInstanceOf(NodeHttpExecutor);
+  });
+
+  it('leaves the stock transport alone when electron-updater exposes no slot', () => {
+    // `httpExecutor` is undeclared on electron-updater's public type, so a
+    // future version could rename it. Failing soft keeps updates working over
+    // Chromium rather than throwing at boot.
+    const slot = mockAutoUpdater as unknown as { httpExecutor?: unknown };
+    delete slot.httpExecutor;
+    try {
+      new AppUpdater(makeApp() as unknown as App, () => null).init();
+      expect('httpExecutor' in slot).toBe(false);
+    } finally {
+      mockAutoUpdater.httpExecutor = ELECTRON_EXECUTOR;
+    }
+  });
+
+  it('retries over electron.net when Node hits a keychain-only root cert', async () => {
+    const { updater } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('UNABLE_TO_VERIFY_LEAF_SIGNATURE'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.2.11' } });
+
+    const result = await updater.check();
+
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(mockAutoUpdater.httpExecutor).toBe(ELECTRON_EXECUTOR);
+    expect(result).toMatchObject({ updateAvailable: true, latestVersion: '0.2.11' });
+  });
+
+  it('retries over electron.net when Node cannot reach a proxy-only network', async () => {
+    const { updater } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+
+    await updater.check();
+
+    expect(mockAutoUpdater.httpExecutor).toBe(ELECTRON_EXECUTOR);
+  });
+
+  it('falls back on download failures too', async () => {
+    const { updater } = makeHarness();
+    mockAutoUpdater.downloadUpdate
+      .mockRejectedValueOnce(transportError('ETIMEDOUT'))
+      .mockResolvedValueOnce(undefined);
+
+    await updater.download();
+
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+    expect(mockAutoUpdater.httpExecutor).toBe(ELECTRON_EXECUTOR);
+  });
+
+  it('is sticky: a machine that needs electron.net does not retry Node again', async () => {
+    const { updater } = makeHarness();
+    mockAutoUpdater.checkForUpdates
+      .mockRejectedValueOnce(transportError('ECONNREFUSED'))
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } })
+      .mockResolvedValueOnce({ updateInfo: { version: '0.1.28' } });
+
+    await updater.check();
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+
+    await updater.check();
+    // One more call, not two: the second check went straight to electron.net.
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not fall back for an HTTP status — the transport was fine', async () => {
+    const { updater, lastEvent } = makeHarness();
+    const httpError = Object.assign(new Error('404 latest-mac.yml not found'), {
+      statusCode: 404,
+      // A status error can still carry a code; the status must win.
+      code: 'ECONNRESET',
+    });
+    mockAutoUpdater.checkForUpdates.mockRejectedValueOnce(httpError);
+
+    await updater.check();
+
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockAutoUpdater.httpExecutor).toBeInstanceOf(NodeHttpExecutor);
+    expect(lastEvent()).toEqual({
+      kind: 'error',
+      message: '404 latest-mac.yml not found',
+    });
+  });
+
+  it('does not fall back into a network stack it knows is dead', async () => {
+    const { app, updater } = makeHarness();
+    app.emit('child-process-gone', {}, NETWORK_GONE);
+    mockAutoUpdater.checkForUpdates.mockRejectedValueOnce(transportError('ECONNREFUSED'));
+
+    await updater.check();
+
+    // Retrying over the crashed network service would trade a real error for
+    // an opaque net::ERR_FAILED.
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockAutoUpdater.httpExecutor).toBeInstanceOf(NodeHttpExecutor);
+  });
+
+  it('classifies only proxy/cert transport failures as fallback-worthy', () => {
+    expect(isProxyOrCertTransportFailure(transportError('SELF_SIGNED_CERT_IN_CHAIN'))).toBe(true);
+    expect(isProxyOrCertTransportFailure(transportError('ENOTFOUND'))).toBe(true);
+    // A checksum mismatch is not a transport problem.
+    expect(isProxyOrCertTransportFailure(new Error('sha512 mismatch'))).toBe(false);
+    expect(isProxyOrCertTransportFailure(transportError('EACCES'))).toBe(false);
+    expect(isProxyOrCertTransportFailure('not an error')).toBe(false);
   });
 });
 

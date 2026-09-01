@@ -1,6 +1,7 @@
 import type { App, BrowserWindow } from 'electron';
 import { autoUpdater, type UpdateInfo, type ProgressInfo } from 'electron-updater';
 import type { Logger } from '../utils/logger';
+import { NodeHttpExecutor, isProxyOrCertTransportFailure } from './nodeHttpExecutor';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 
 const EVENT_CHANNEL = 'updater:event';
@@ -60,9 +61,24 @@ export class AppUpdater {
   // main-process `net` sessions (including electron-updater's cached
   // "electron-updater" partition) stay bound to the dead network context, so
   // every subsequent request fails with a bare net::ERR_FAILED until the app
-  // relaunches. Track the crash so we can surface an actionable message
-  // instead of that opaque error.
+  // relaunches.
+  //
+  // Since the updater now runs on Node's transport this no longer breaks
+  // update checks on its own, but it stays load-bearing twice over: it blocks
+  // the electron.net fallback from retrying into a stack we know is dead, and
+  // it still explains the failure for a session that had already fallen back
+  // before the crash.
   private networkStackLost = false;
+  // electron-updater's own ElectronHttpExecutor, captured before we replace it.
+  // Kept as the fallback for managed networks where Node's stack cannot reach
+  // the feed (OS proxy config, keychain-installed root certs) — see
+  // runWithElectronFallback. Untyped because electron-updater assigns
+  // `httpExecutor` in its constructor without declaring it on the public type.
+  private electronExecutor: unknown = null;
+  // Sticky once the fallback wins: a machine that needs Chromium's stack needs
+  // it for every subsequent request too, so don't pay the failed Node attempt
+  // again on each check.
+  private usingElectronExecutor = false;
 
   constructor(
     private readonly app: App,
@@ -78,6 +94,7 @@ export class AppUpdater {
     }
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
+    this.installNodeHttpExecutor();
     this.wireEvents();
     this.watchNetworkService();
 
@@ -98,7 +115,9 @@ export class AppUpdater {
       return { supported: false, currentVersion, updateAvailable: false };
     }
     try {
-      const result = await autoUpdater.checkForUpdates();
+      const result = await this.runWithElectronFallback('check', () =>
+        autoUpdater.checkForUpdates(),
+      );
       const latestVersion = result?.updateInfo?.version;
       const updateAvailable = !!latestVersion && isNewerVersion(latestVersion, currentVersion);
       return { supported: true, currentVersion, updateAvailable, latestVersion };
@@ -113,7 +132,7 @@ export class AppUpdater {
   async download(): Promise<void> {
     if (!this.app.isPackaged) return;
     try {
-      await autoUpdater.downloadUpdate();
+      await this.runWithElectronFallback('download', () => autoUpdater.downloadUpdate());
     } catch (error) {
       this.logger?.error('[AppUpdater] download failed', error instanceof Error ? error : undefined);
       this.emit(this.errorEventOf(error));
@@ -125,6 +144,75 @@ export class AppUpdater {
     if (!this.app.isPackaged) return;
     // isSilent=false (show the installer), isForceRunAfter=true (relaunch).
     autoUpdater.quitAndInstall(false, true);
+  }
+
+  /**
+   * Replace electron-updater's Chromium-backed HTTP executor with a Node-backed
+   * one, stashing the original as a fallback.
+   *
+   * `httpExecutor` is assigned in electron-updater's constructor but is not on
+   * its public type, so both the read and the write go through a structural
+   * cast. If a future version drops or renames the field the swap is skipped
+   * and the updater simply keeps its stock Chromium behaviour, so this fails
+   * soft rather than throwing at boot.
+   *
+   * The original instance is stashed rather than reconstructed on demand: it
+   * was built with a `login` callback wired to the updater's proxy-auth event,
+   * and rebuilding one here would silently drop authenticated-proxy support.
+   */
+  private installNodeHttpExecutor(): void {
+    const slot = autoUpdater as unknown as { httpExecutor?: unknown };
+    if (!('httpExecutor' in slot)) {
+      this.logger?.warn(
+        '[AppUpdater] electron-updater exposes no httpExecutor slot — keeping its stock Chromium transport',
+      );
+      return;
+    }
+    this.electronExecutor = slot.httpExecutor ?? null;
+    if (this.electronExecutor == null) {
+      this.logger?.warn(
+        '[AppUpdater] no ElectronHttpExecutor to fall back to — proceeding on Node transport only',
+      );
+    }
+    slot.httpExecutor = new NodeHttpExecutor();
+    this.logger?.verbose('[AppUpdater] update transport: Node http/https (electron.net on standby)');
+  }
+
+  /**
+   * Run an updater operation on the Node transport, retrying once over
+   * electron.net when the failure is the signature of a managed network Node
+   * cannot navigate (OS proxy config, keychain-only root certificates).
+   *
+   * The retry re-runs the whole operation, so a download that failed part-way
+   * restarts from zero and the renderer's progress bar rewinds. That is worth
+   * the simplicity: the alternative is resuming a byte range across a
+   * transport we have just decided is broken.
+   */
+  private async runWithElectronFallback<T>(label: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (!this.shouldRetryOnElectronNet(error)) throw error;
+      this.logger?.warn(
+        `[AppUpdater] ${label} failed on the Node transport (${this.messageOf(error)}) — retrying over electron.net`,
+      );
+      this.switchToElectronExecutor();
+      return await run();
+    }
+  }
+
+  private shouldRetryOnElectronNet(error: unknown): boolean {
+    // Already switched, or nothing to switch to.
+    if (this.usingElectronExecutor || this.electronExecutor == null) return false;
+    // The network service is gone, so electron.net is known-dead: retrying
+    // there would trade a real error for an opaque net::ERR_FAILED.
+    if (this.networkStackLost) return false;
+    return isProxyOrCertTransportFailure(error);
+  }
+
+  private switchToElectronExecutor(): void {
+    (autoUpdater as unknown as { httpExecutor?: unknown }).httpExecutor = this.electronExecutor;
+    this.usingElectronExecutor = true;
   }
 
   private wireEvents(): void {
@@ -160,9 +248,9 @@ export class AppUpdater {
 
   /**
    * Detect the Chromium network service dying mid-run. Once it's gone, every
-   * main-process net request (the updater included) fails with net::ERR_FAILED
-   * until relaunch — Chromium respawns the service but existing sessions stay
-   * bound to the dead network context. 'clean-exit' is excluded: that's normal
+   * main-process `electron.net` request fails with net::ERR_FAILED until
+   * relaunch — Chromium respawns the service but existing sessions stay bound
+   * to the dead network context. 'clean-exit' is excluded: that's normal
    * shutdown, not a crash.
    */
   private watchNetworkService(): void {
@@ -196,6 +284,10 @@ export class AppUpdater {
    * Chromium-level net:: failure is a symptom of the dead network stack, not
    * of the update feed — swap in an actionable restart message. Non-net errors
    * (HTTP statuses, checksum mismatches, …) keep their original text.
+   *
+   * Only reachable now for a session already running on the electron.net
+   * fallback: Node's transport is unaffected by the crash and never produces a
+   * net:: error in the first place.
    */
   private errorEventOf(error: unknown): UpdaterEvent {
     const message = this.messageOf(error);
