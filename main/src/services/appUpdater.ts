@@ -318,7 +318,7 @@ export class AppUpdater {
         this.networkStackLost = true;
         this.crashGeneration += 1;
         this.logger?.error(
-          `[AppUpdater] Chromium network service gone (reason=${details.reason}, exitCode=${details.exitCode}) — in-app network requests will fail until the app is relaunched`,
+          `[AppUpdater] Chromium network service gone (reason=${details.reason}, exitCode=${details.exitCode}) — electron.net requests on already-used sessions fail until relaunch; the updater rides Node's transport and is unaffected`,
         );
       }
     });
