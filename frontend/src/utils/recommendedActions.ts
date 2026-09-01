@@ -464,7 +464,7 @@ function buildCaptureFirstIdea(input: RecommendedActionsInput): RecommendedActio
       kind: 'capture-first-idea',
       id: 'capture-first-idea',
       title: 'Capture your first idea',
-      description: 'Already know what to build? Add it to the backlog by hand and take it straight into a planner.',
+      description: 'Have something you want to build? Add it to the backlog and launch a planner to break it down into tasks.',
       ctaLabel: CTA_LABELS['capture-first-idea'],
       dismissible: true,
       signature: 'no-ideas',
