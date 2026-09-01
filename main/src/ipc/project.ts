@@ -99,6 +99,39 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
   }
 }
 
+/**
+ * A repo with at least this many commits is treated as an established codebase
+ * rather than a fresh project, which hides new-project bootstrap prompts (the
+ * landing page's "Run the Launch flow" card). Established repos have hundreds;
+ * a genuinely new project has a handful at most.
+ */
+const ESTABLISHED_REPO_COMMIT_THRESHOLD = 10;
+
+/**
+ * Repo maturity only ever flips new → established, so a `true` verdict is
+ * cached forever per path. `false` (new repo, not a git repo, or git failed)
+ * is re-checked after a short TTL since `projects:get-all` is a hot call.
+ */
+const repoMaturityCache = new Map<string, { established: boolean; checkedAt: number }>();
+const REPO_MATURITY_RECHECK_MS = 60_000;
+
+async function isEstablishedRepo(projectPath: string): Promise<boolean> {
+  const cached = repoMaturityCache.get(projectPath);
+  if (cached !== undefined && (cached.established || Date.now() - cached.checkedAt < REPO_MATURITY_RECHECK_MS)) {
+    return cached.established;
+  }
+  let established = false;
+  try {
+    const { runGitCapture } = await import('../utils/runGit');
+    const { stdout } = await runGitCapture(projectPath, ['rev-list', '--count', 'HEAD']);
+    established = parseInt(stdout.trim(), 10) >= ESTABLISHED_REPO_COMMIT_THRESHOLD;
+  } catch {
+    // Not a git repo, no commits yet, or git failed — treat as a new project.
+  }
+  repoMaturityCache.set(projectPath, { established, checkedAt: Date.now() });
+  return established;
+}
+
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow, getMainWindow } = services;
   // (demo seeding below reads services.configManager directly)
@@ -106,7 +139,10 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
   ipcMain.handle('projects:get-all', async () => {
     try {
       const projects = databaseService.getAllProjects();
-      return { success: true, data: projects };
+      const enriched = await Promise.all(
+        projects.map(async (p) => ({ ...p, established_repo: await isEstablishedRepo(p.path) })),
+      );
+      return { success: true, data: enriched };
     } catch (error) {
       console.error('Failed to get projects:', error);
       return { success: false, error: 'Failed to get projects' };

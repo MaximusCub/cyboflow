@@ -65,6 +65,13 @@ export type RecommendedActionsRunRef = Pick<ActiveRunRow, 'project_id' | 'status
 export interface RecommendedActionsProjectRef {
   id: number;
   name: string;
+  /**
+   * True when the project's repo already has real commit history (computed by
+   * `projects:get-all`). The Launch-flow card is a new-project bootstrap, so
+   * it never fires for an established codebase. Absent/undefined = unknown,
+   * treated as new so a fresh non-git folder still gets the prompt.
+   */
+  established_repo?: boolean;
 }
 
 /**
@@ -477,6 +484,7 @@ function buildRunLaunchFlow(input: RecommendedActionsInput): RecommendedAction[]
   const namedProjects = input.projects.length > 1;
   const actions: RecommendedAction[] = [];
   for (const project of input.projects) {
+    if (project.established_repo === true) continue;
     const hasAnyEntity = flat.some((t) => t.project_id === project.id);
     if (hasAnyEntity) continue;
     actions.push({

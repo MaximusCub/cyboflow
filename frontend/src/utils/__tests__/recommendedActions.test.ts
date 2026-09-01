@@ -615,6 +615,20 @@ describe('run-launch-flow', () => {
     expect(visible.some((a) => a.kind === 'capture-first-idea')).toBe(true);
     expect(visible.some((a) => a.kind === 'run-launch-flow')).toBe(true);
   });
+
+  it('does not fire for an established codebase, even with an empty backlog', () => {
+    const projects = [{ id: 1, name: 'Alpha', established_repo: true }];
+    const { visible } = deriveRecommendedActions(baseInput({ tasks: [], projects }));
+    expect(visible.some((a) => a.kind === 'run-launch-flow')).toBe(false);
+    // capture-first-idea is unaffected — an established repo can still have no ideas.
+    expect(visible.some((a) => a.kind === 'capture-first-idea')).toBe(true);
+  });
+
+  it('still fires when repo maturity is unknown (established_repo absent)', () => {
+    const projects = [{ id: 1, name: 'Alpha' }];
+    const { visible } = deriveRecommendedActions(baseInput({ tasks: [], projects }));
+    expect(visible.some((a) => a.kind === 'run-launch-flow')).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
