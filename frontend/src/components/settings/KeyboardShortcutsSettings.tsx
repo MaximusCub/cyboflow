@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { Keyboard, RotateCcw } from 'lucide-react';
-import { CollapsibleCard } from '../ui/CollapsibleCard';
 import { SettingsSection } from '../ui/SettingsSection';
 import { getShortcutPlatform } from '../../utils/shortcutPlatform';
 import {
@@ -27,9 +26,9 @@ const ACTION_LABELS: Readonly<Record<ShortcutAction, string>> = {
 const MODIFIER_KEY_NAMES = new Set(['Meta', 'Control', 'Shift', 'Alt', 'AltGraph', 'OS']);
 
 /**
- * The General tab's "Keyboard shortcuts" section — one row per {@link
- * ShortcutAction} showing its effective binding (override, else the built-in
- * default) with a Record affordance to remap it and a per-row reset.
+ * The "Shortcuts" tab's content — one row per {@link ShortcutAction} showing
+ * its effective binding (override, else the built-in default) with a Record
+ * affordance to remap it and a per-row reset.
  *
  * Props-in / callback-out only, mirroring `FeatureControlsSettings`: the map
  * lives as lifted state in `Settings.tsx` and is persisted by its shared
@@ -139,79 +138,71 @@ export function KeyboardShortcutsSettings({
   };
 
   return (
-    <CollapsibleCard
+    <SettingsSection
       title="Keyboard shortcuts"
-      subtitle="Remap the global shortcuts used throughout Cyboflow"
-      icon={<Keyboard className="w-5 h-5" />}
-      defaultExpanded={true}
-      variant="subtle"
+      description={`Remap the global shortcuts used throughout Cyboflow. Click a binding, then press the new key combination — it must include ${
+        platform === 'mac' ? '⌘' : 'Ctrl'
+      }. Escape cancels.`}
+      icon={<Keyboard className="w-4 h-4" />}
     >
-      <SettingsSection
-        title="Global shortcuts"
-        description={`Click Record, then press the new key combination — it must include ${
-          platform === 'mac' ? '⌘' : 'Ctrl'
-        }. Escape cancels.`}
-        icon={<Keyboard className="w-4 h-4" />}
-      >
-        <div className="flex flex-col divide-y divide-border-secondary rounded-button border border-border-secondary">
-          {SHORTCUT_ACTIONS.map((action) => {
-            const binding = effective[action];
-            const recording = recordingAction === action;
-            const overridden = shortcuts[action] !== undefined;
-            const duplicate = isDuplicate(action);
-            return (
-              <div key={action} className="flex items-center justify-between gap-3 px-3 py-2">
-                <div className="min-w-0">
-                  <div className="text-sm text-text-primary font-medium truncate">
-                    {ACTION_LABELS[action]}
-                  </div>
-                  {duplicate && (
-                    <div className="text-xs text-status-error mt-0.5">
-                      Conflicts with another shortcut below
-                    </div>
-                  )}
+      <div className="flex flex-col divide-y divide-border-secondary rounded-button border border-border-secondary">
+        {SHORTCUT_ACTIONS.map((action) => {
+          const binding = effective[action];
+          const recording = recordingAction === action;
+          const overridden = shortcuts[action] !== undefined;
+          const duplicate = isDuplicate(action);
+          return (
+            <div key={action} className="flex items-center justify-between gap-3 px-3 py-2">
+              <div className="min-w-0">
+                <div className="text-sm text-text-primary font-medium truncate">
+                  {ACTION_LABELS[action]}
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
+                {duplicate && (
+                  <div className="text-xs text-status-error mt-0.5">
+                    Conflicts with another shortcut below
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  data-testid={`shortcut-record-${action}`}
+                  onClick={() => startRecording(action)}
+                  onKeyDown={(e) => handleRecordKeyDown(action, e)}
+                  onBlur={() => {
+                    if (recordingAction === action) stopRecording();
+                  }}
+                  aria-label={`Record shortcut for ${ACTION_LABELS[action]}`}
+                  className={`min-w-[110px] px-3 py-1.5 rounded-button border text-sm font-mono text-center transition-colors ${
+                    recording
+                      ? 'border-interactive bg-interactive-surface text-interactive'
+                      : duplicate
+                        ? 'border-status-error/50 bg-surface-secondary text-text-primary hover:bg-surface-hover'
+                        : 'border-border-secondary bg-surface-secondary text-text-primary hover:bg-surface-hover'
+                  }`}
+                >
+                  {recording
+                    ? needsModHint
+                      ? `Needs ${platform === 'mac' ? '⌘' : 'Ctrl'}…`
+                      : 'Press a key…'
+                    : formatKeybinding(binding, platform)}
+                </button>
+                {overridden && (
                   <button
                     type="button"
-                    data-testid={`shortcut-record-${action}`}
-                    onClick={() => startRecording(action)}
-                    onKeyDown={(e) => handleRecordKeyDown(action, e)}
-                    onBlur={() => {
-                      if (recordingAction === action) stopRecording();
-                    }}
-                    aria-label={`Record shortcut for ${ACTION_LABELS[action]}`}
-                    className={`min-w-[110px] px-3 py-1.5 rounded-button border text-sm font-mono text-center transition-colors ${
-                      recording
-                        ? 'border-interactive bg-interactive-surface text-interactive'
-                        : duplicate
-                          ? 'border-status-error/50 bg-surface-secondary text-text-primary hover:bg-surface-hover'
-                          : 'border-border-secondary bg-surface-secondary text-text-primary hover:bg-surface-hover'
-                    }`}
+                    onClick={() => resetToDefault(action)}
+                    className="p-1.5 rounded-button text-text-tertiary hover:text-text-secondary hover:bg-surface-hover transition-colors"
+                    aria-label={`Reset ${ACTION_LABELS[action]} to default`}
+                    title={`Reset to default (${formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS[action], platform)})`}
                   >
-                    {recording
-                      ? needsModHint
-                        ? `Needs ${platform === 'mac' ? '⌘' : 'Ctrl'}…`
-                        : 'Press a key…'
-                      : formatKeybinding(binding, platform)}
+                    <RotateCcw className="w-3.5 h-3.5" />
                   </button>
-                  {overridden && (
-                    <button
-                      type="button"
-                      onClick={() => resetToDefault(action)}
-                      className="p-1.5 rounded-button text-text-tertiary hover:text-text-secondary hover:bg-surface-hover transition-colors"
-                      aria-label={`Reset ${ACTION_LABELS[action]} to default`}
-                      title={`Reset to default (${formatKeybinding(KEYBOARD_SHORTCUT_DEFAULTS[action], platform)})`}
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
+                )}
               </div>
-            );
-          })}
-        </div>
-      </SettingsSection>
-    </CollapsibleCard>
+            </div>
+          );
+        })}
+      </div>
+    </SettingsSection>
   );
 }
