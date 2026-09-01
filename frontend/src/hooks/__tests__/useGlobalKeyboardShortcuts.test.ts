@@ -15,6 +15,8 @@ import { fireEvent } from '@testing-library/dom';
 import { useGlobalKeyboardShortcuts } from '../useGlobalKeyboardShortcuts';
 import { useKeyboardShortcutsStore } from '../../stores/keyboardShortcutsStore';
 import { useLayoutStore } from '../../stores/layoutStore';
+import { useConfigStore } from '../../stores/configStore';
+import type { AppConfig } from '../../types/config';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
@@ -76,7 +78,12 @@ function focusedComposer(key: string): HTMLTextAreaElement {
 beforeEach(() => {
   setPlatform('other');
   useKeyboardShortcutsStore.setState({ overrides: {}, hydrated: true });
-  useLayoutStore.setState({ leftRailCollapsed: false, rightRailCollapsed: false });
+  useLayoutStore.setState({
+    leftRailCollapsed: false,
+    rightRailCollapsed: false,
+    agentRailCollapsed: false,
+  });
+  useConfigStore.setState({ config: null });
   useNavigationStore.setState({
     view: 'home',
     wizardOpts: null,
@@ -116,11 +123,38 @@ describe('useGlobalKeyboardShortcuts — dispatch', () => {
     expect(useLayoutStore.getState().leftRailCollapsed).toBe(false);
   });
 
-  it('mod+] toggles the right rail', () => {
+  it('mod+] toggles the run right rail in the session workspace', () => {
+    useNavigationStore.setState({ view: 'session' });
     renderHook(() => useGlobalKeyboardShortcuts());
     pressCtrl(']');
     expect(useLayoutStore.getState().rightRailCollapsed).toBe(true);
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(false);
     expect(useLayoutStore.getState().leftRailCollapsed).toBe(false);
+  });
+
+  it('mod+] toggles the global-assistant rail on landing surfaces', () => {
+    renderHook(() => useGlobalKeyboardShortcuts());
+    pressCtrl(']');
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(true);
+    expect(useLayoutStore.getState().rightRailCollapsed).toBe(false);
+    pressCtrl(']');
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(false);
+  });
+
+  it('mod+] does nothing in the wizard (no right-side rail there)', () => {
+    useNavigationStore.setState({ view: 'wizard' });
+    renderHook(() => useGlobalKeyboardShortcuts());
+    pressCtrl(']');
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(false);
+    expect(useLayoutStore.getState().rightRailCollapsed).toBe(false);
+  });
+
+  it('mod+] does nothing on landing surfaces when the assistant is disabled', () => {
+    useConfigStore.setState({ config: { assistantEnabled: false } as AppConfig });
+    renderHook(() => useGlobalKeyboardShortcuts());
+    pressCtrl(']');
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(false);
+    expect(useLayoutStore.getState().rightRailCollapsed).toBe(false);
   });
 
   it('mod+r toggles the human-review queue', () => {

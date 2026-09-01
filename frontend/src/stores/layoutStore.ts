@@ -24,6 +24,9 @@ import { create } from 'zustand';
 export const RIGHT_RAIL_COLLAPSED_KEY = 'cyboflow.runRightRail.collapsed';
 /** Left rail (app sidebar) — brand-new key, so no migrateLocalStorageKey. */
 export const LEFT_RAIL_COLLAPSED_KEY = 'cyboflow-sidebar-collapsed';
+/** Agent rail (global assistant) — the EXISTING key AgentRail wrote, preserved
+ *  verbatim when its collapse state was lifted here (so ⌘] can reach it). */
+export const AGENT_RAIL_COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
 
 /**
  * Read one persisted flag. Only the literal 'true' collapses — anything else
@@ -54,8 +57,11 @@ interface LayoutState {
   leftRailCollapsed: boolean;
   /** Whether the session workspace's right rail is collapsed to its thin strip. */
   rightRailCollapsed: boolean;
+  /** Whether the global-assistant rail (landing surfaces) is collapsed. */
+  agentRailCollapsed: boolean;
   toggleLeftRail: () => void;
   toggleRightRail: () => void;
+  toggleAgentRail: () => void;
   setLeftRailCollapsed: (collapsed: boolean) => void;
   setRightRailCollapsed: (collapsed: boolean) => void;
 }
@@ -63,6 +69,7 @@ interface LayoutState {
 export const useLayoutStore = create<LayoutState>((set) => ({
   leftRailCollapsed: readFlag(LEFT_RAIL_COLLAPSED_KEY),
   rightRailCollapsed: readFlag(RIGHT_RAIL_COLLAPSED_KEY),
+  agentRailCollapsed: readFlag(AGENT_RAIL_COLLAPSED_KEY),
 
   toggleLeftRail: () =>
     set((s) => {
@@ -76,6 +83,13 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       const next = !s.rightRailCollapsed;
       writeFlag(RIGHT_RAIL_COLLAPSED_KEY, next);
       return { rightRailCollapsed: next };
+    }),
+
+  toggleAgentRail: () =>
+    set((s) => {
+      const next = !s.agentRailCollapsed;
+      writeFlag(AGENT_RAIL_COLLAPSED_KEY, next);
+      return { agentRailCollapsed: next };
     }),
 
   setLeftRailCollapsed: (collapsed) => {

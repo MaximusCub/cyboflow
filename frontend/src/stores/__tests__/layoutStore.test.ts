@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
+  AGENT_RAIL_COLLAPSED_KEY,
   LEFT_RAIL_COLLAPSED_KEY,
   RIGHT_RAIL_COLLAPSED_KEY,
   useLayoutStore,
@@ -25,7 +26,11 @@ async function freshStore(): Promise<typeof useLayoutStore> {
 
 beforeEach(() => {
   localStorage.clear();
-  useLayoutStore.setState({ leftRailCollapsed: false, rightRailCollapsed: false });
+  useLayoutStore.setState({
+    leftRailCollapsed: false,
+    rightRailCollapsed: false,
+    agentRailCollapsed: false,
+  });
 });
 
 describe('layoutStore — keys', () => {
@@ -37,6 +42,11 @@ describe('layoutStore — keys', () => {
 
   it('uses a brand-new key for the left rail (no migration needed)', () => {
     expect(LEFT_RAIL_COLLAPSED_KEY).toBe('cyboflow-sidebar-collapsed');
+  });
+
+  it('reuses the pre-existing agent-rail key so installs keep their state', () => {
+    // Load-bearing: AgentRail wrote this exact key before the state was lifted.
+    expect(AGENT_RAIL_COLLAPSED_KEY).toBe('cyboflow.agentRail.collapsed');
   });
 });
 
@@ -59,6 +69,16 @@ describe('layoutStore — toggles persist', () => {
     useLayoutStore.getState().toggleRightRail();
     expect(useLayoutStore.getState().rightRailCollapsed).toBe(false);
     expect(localStorage.getItem(RIGHT_RAIL_COLLAPSED_KEY)).toBe('false');
+  });
+
+  it('toggleAgentRail flips the flag and writes "true"/"false"', () => {
+    useLayoutStore.getState().toggleAgentRail();
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(true);
+    expect(localStorage.getItem(AGENT_RAIL_COLLAPSED_KEY)).toBe('true');
+
+    useLayoutStore.getState().toggleAgentRail();
+    expect(useLayoutStore.getState().agentRailCollapsed).toBe(false);
+    expect(localStorage.getItem(AGENT_RAIL_COLLAPSED_KEY)).toBe('false');
   });
 
   it('the two rails are independent', () => {

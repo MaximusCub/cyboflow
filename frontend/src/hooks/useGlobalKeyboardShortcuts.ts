@@ -38,6 +38,7 @@ import { getShortcutPlatform } from '../utils/shortcutPlatform';
 import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore';
 import { useLayoutStore } from '../stores/layoutStore';
 import { useNavigationStore } from '../stores/navigationStore';
+import { useConfigStore } from '../stores/configStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
 import { useCenterPaneStore, FALLBACK_SESSION } from '../stores/centerPaneStore';
@@ -139,9 +140,22 @@ function dispatchShortcut(action: ShortcutAction): void {
     case 'toggleLeftRail':
       useLayoutStore.getState().toggleLeftRail();
       return;
-    case 'toggleRightRail':
-      useLayoutStore.getState().toggleRightRail();
+    case 'toggleRightRail': {
+      // ⌘] toggles whichever right-side rail is actually on screen: the run
+      // right rail in the session workspace, else the global-assistant rail on
+      // the landing surfaces (mirrors App.tsx's mount gate — shouldShowAgentRail
+      // excludes 'session'/'wizard', and the rail is absent entirely when the
+      // assistant is disabled in Settings, where toggling would be invisible).
+      const view = useNavigationStore.getState().view;
+      if (view === 'session') {
+        useLayoutStore.getState().toggleRightRail();
+        return;
+      }
+      if (view === 'wizard') return;
+      if (useConfigStore.getState().config?.assistantEnabled === false) return;
+      useLayoutStore.getState().toggleAgentRail();
       return;
+    }
     case 'toggleChat':
       toggleChat();
       return;

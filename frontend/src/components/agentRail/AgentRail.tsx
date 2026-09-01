@@ -17,13 +17,14 @@
  * Collapse + resize mirror `RunRightRail` (components/cyboflow/RunRightRail.tsx):
  * a left-edge drag handle using delta-from-drag-start math — the rail is
  * right-anchored, so dragging the handle LEFT (smaller clientX) widens it —
- * and the same absolute/viewport width clamp shape. Unlike RunRightRail,
- * collapse/width state is NOT lifted to a parent: AgentRail owns and persists
- * it itself, so the App.tsx mount stays a single conditional sibling element.
+ * and the same absolute/viewport width clamp shape. Collapse state lives in
+ * layoutStore (same key it always persisted under) so the global ⌘] shortcut
+ * can toggle it; width stays local — nothing else needs it.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { AgentThreadView } from './AgentThreadView';
+import { useLayoutStore } from '../../stores/layoutStore';
 
 /** Default expanded rail width. */
 const RAIL_DEFAULT_WIDTH = 320;
@@ -33,8 +34,6 @@ const RAIL_MIN_WIDTH = 260;
 const RAIL_MAX_ABS_WIDTH = 560;
 /** localStorage key for the persisted rail width. Brand-new key — no migration. */
 const WIDTH_KEY = 'cyboflow.agentRail.width';
-/** localStorage key for the persisted collapsed state. Brand-new key — no migration. */
-const COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
 
 /** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
 function maxAgentRailWidth(): number {
@@ -62,10 +61,10 @@ export function shouldShowAgentRail(view: string): boolean {
 }
 
 export function AgentRail() {
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(COLLAPSED_KEY) === 'true';
-  });
+  // Collapse state lives in layoutStore (persisted under the same
+  // 'cyboflow.agentRail.collapsed' key as before) so ⌘] can reach it.
+  const collapsed = useLayoutStore((s) => s.agentRailCollapsed);
+  const handleToggleCollapse = useLayoutStore((s) => s.toggleAgentRail);
   const [width, setWidth] = useState<number>(() => {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(WIDTH_KEY) : null;
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
@@ -74,16 +73,6 @@ export function AgentRail() {
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
-
-  const handleToggleCollapse = useCallback(() => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(COLLAPSED_KEY, next ? 'true' : 'false');
-      }
-      return next;
-    });
-  }, []);
 
   // Persist the chosen width. (Brand-new key — no migrateLocalStorageKey needed.)
   useEffect(() => {
