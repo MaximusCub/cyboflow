@@ -81,6 +81,7 @@ export async function detectClaudeBinary(
         for (const plan of planWindowsShimVersionProbes(
           resolvedPath,
           dependencies.fileExists ?? ((p: string) => fs.existsSync(p)),
+          dependencies.platform ?? process.platform,
         )) {
           try {
             version = (await probeOnce(plan.command, plan.args, plan.windowsVerbatimArguments)).trim() || null;

@@ -135,11 +135,12 @@ describe('runGit routes through the gitExeFinder-resolved command (all platforms
   it('spawns resolveGitCommand() output, not a PATH-lookup of the bare name', async () => {
     await withTempDir('rungit-finder-route-', async (dir) => {
       // Force the finder down its last-ditch branch: nothing on PATH, the
-      // candidate table missing, and `where git`/`which git` reporting the
-      // host's own Node binary (an .exe on Windows, the bare name on POSIX —
-      // the one cross-platform binary a test can actually spawn).
+      // candidate table missing, and `where git` reporting the host's own
+      // Node binary — the one binary a test can actually spawn. The win32
+      // platform is what reaches the whereGit branch; on POSIX the finder
+      // legitimately stops at the bare-name fallback before it.
       setGitFinderDependenciesForTest({
-        platform: process.platform,
+        platform: 'win32',
         existsSync: (p) => p === process.execPath,
         accessSync: (p) => {
           if (p !== process.execPath) throw new Error(`EACCES: ${p}`);
@@ -162,7 +163,7 @@ describe('runGit routes through the gitExeFinder-resolved command (all platforms
   it('runGitCapture routes through the resolver too', async () => {
     await withTempDir('rungit-finder-route-capture-', async (dir) => {
       setGitFinderDependenciesForTest({
-        platform: process.platform,
+        platform: 'win32',
         existsSync: (p) => p === process.execPath,
         accessSync: () => undefined,
         shellPath: () => null,

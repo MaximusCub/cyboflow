@@ -53,14 +53,14 @@ describe('planWindowsShimVersionProbes', () => {
   });
 
   it('prefers the sibling native .exe when it exists', () => {
-    const plans = planWindowsShimVersionProbes('C:\\npm\\claude.cmd', (p) => p === 'C:\\npm\\claude.exe');
+    const plans = planWindowsShimVersionProbes('C:\\npm\\claude.cmd', (p) => p === 'C:\\npm\\claude.exe', 'win32');
     expect(plans[0]).toEqual({ command: 'C:\\npm\\claude.exe', args: ['--version'] });
     // The cmd.exe wrapper is still the second plan.
     expect(plans).toHaveLength(2);
   });
 
   it('wraps the shim in cmd.exe /d /s /c when no sibling exists', () => {
-    const plans = planWindowsShimVersionProbes('C:\\Users\\dev\\npm\\claude.cmd', () => false);
+    const plans = planWindowsShimVersionProbes('C:\\Users\\dev\\npm\\claude.cmd', () => false, 'win32');
     expect(plans).toHaveLength(1);
     const plan = plans[0];
     expect(plan.command).toBe(COMSPEC);
@@ -76,11 +76,11 @@ describe('planWindowsShimVersionProbes', () => {
   });
 
   it('inner-quotes paths with spaces or cmd metacharacters', () => {
-    const spaced = planWindowsShimVersionProbes('C:\\Program Files\\npm\\claude.cmd', () => false);
+    const spaced = planWindowsShimVersionProbes('C:\\Program Files\\npm\\claude.cmd', () => false, 'win32');
     expect(spaced[0].args[3]).toBe('""C:\\Program Files\\npm\\claude.cmd" --version"');
-    const meta = planWindowsShimVersionProbes('C:\\npm (x86)\\claude.cmd', () => false);
+    const meta = planWindowsShimVersionProbes('C:\\npm (x86)\\claude.cmd', () => false, 'win32');
     expect(meta[0].args[3]).toBe('""C:\\npm (x86)\\claude.cmd" --version"');
-    const plain = planWindowsShimVersionProbes('C:\\npm\\claude.cmd', () => false);
+    const plain = planWindowsShimVersionProbes('C:\\npm\\claude.cmd', () => false, 'win32');
     expect(plain[0].args[3]).toBe('"C:\\npm\\claude.cmd --version"');
   });
 
@@ -91,7 +91,7 @@ describe('planWindowsShimVersionProbes', () => {
       // Echoes its args so the test proves the /c line survives cmd's quote
       // stripping intact.
       fs.writeFileSync(shim, '@echo off\r\necho SHIM:%*\r\n', 'utf8');
-      const plan = planWindowsShimVersionProbes(shim, () => false)[0];
+      const plan = planWindowsShimVersionProbes(shim, () => false, 'win32')[0];
       const out = execFileSync(plan.command, plan.args, {
         encoding: 'utf8',
         // Conditional spread (not a literal property): ExecFileSyncOptions'
@@ -112,7 +112,7 @@ describe('planWindowsShimVersionProbes', () => {
       fs.mkdirSync(spacedDir);
       const shim = path.join(spacedDir, 'echo-args.cmd');
       fs.writeFileSync(shim, '@echo off\r\necho SHIM:%*\r\n', 'utf8');
-      const plan = planWindowsShimVersionProbes(shim, () => false)[0];
+      const plan = planWindowsShimVersionProbes(shim, () => false, 'win32')[0];
       const out = execFileSync(plan.command, plan.args, {
         encoding: 'utf8',
         ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
