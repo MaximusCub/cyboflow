@@ -233,7 +233,7 @@ export function isModelUnavailableError(message: string): boolean {
   // invokes this when a guarded model was the one pinned, so the signal list can be
   // fairly permissive — a false positive just degrades gracefully to Opus.
   return (
-    /not[\s_-]*found|does not exist|not available|unavailable|invalid[\s_-]*model|model[\s\S]*invalid|not_found_error|unsupported|access|permission|forbidden|deprecated|retired/.test(
+    /not[\s_-]*found|does not exist|not available|unavailable|invalid[\s_-]*model|model[\s\S]*invalid|not_found_error|unsupported|does not support|not supported|or newer is required|access|permission|forbidden|deprecated|retired/.test(
       m,
     ) ||
     /\b404\b/.test(m) ||

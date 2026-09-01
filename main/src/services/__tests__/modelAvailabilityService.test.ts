@@ -180,6 +180,13 @@ describe('isModelUnavailableError', () => {
     expect(isModelUnavailableError('invalid model id')).toBe(true);
     expect(isModelUnavailableError('You do not have access to model claude-fable-5-1')).toBe(true);
     expect(isModelUnavailableError('this model has been retired')).toBe(true);
+    // A CLI too old for the pinned model — the shape that hard-failed a Fable 5.1
+    // session before this arm existed (bundled SDK 0.3.224 vs. a model needing 2.1.251).
+    expect(
+      isModelUnavailableError(
+        'API Error: 400 Claude Code 2.1.224 does not support this model; version 2.1.251 or newer is required.',
+      ),
+    ).toBe(true);
   });
 
   it('does NOT match unrelated runtime errors', () => {
