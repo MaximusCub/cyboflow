@@ -72,7 +72,7 @@ export interface QuickSessionComposerProps {
   onPermissionApplied?: (message: string) => void;
   /**
    * Surface a notice when this session's turn fell back off a pulled model (e.g.
-   * Fable 5 → Opus) mid-call. The host shows it in the same toast slot.
+   * Fable 5.1 → Opus) mid-call. The host shows it in the same toast slot.
    */
   onModelFallback?: (message: string) => void;
   /**
@@ -256,7 +256,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     [fastMode, panelId],
   );
 
-  // A turn that discovered its pinned model was pulled mid-call (e.g. Fable 5)
+  // A turn that discovered its pinned model was pulled mid-call (e.g. Fable 5.1)
   // retries transparently on the fallback family (Opus). Reflect that swap in the
   // pill — persist the fallback alias so it sticks past a remount, update the
   // local display, and raise a one-off toast. Filtered to THIS panel's runs.
