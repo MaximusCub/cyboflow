@@ -544,7 +544,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke(PROVIDERS_DETECT_CHANNEL, provider),
   },
 
-  // Model availability (guarded models, e.g. Fable 5)
+  // Model availability (guarded models, e.g. Fable 5.1)
   models: {
     getAvailability: (): Promise<IPCResponse<ModelAvailabilityMap>> =>
       ipcRenderer.invoke('models:get-availability'),

@@ -412,7 +412,7 @@ interface ElectronAPI {
   providers: {
     detect: <P extends AgentProvider>(provider: P) => Promise<IPCResponse<ProviderDetectionResult<P>>>;
   };
-  // Model availability (guarded models, e.g. Fable 5)
+  // Model availability (guarded models, e.g. Fable 5.1)
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
     getCatalog: <P extends AgentProvider>(provider: P) => Promise<IPCResponse<ProviderModelCatalogs[P]>>;
