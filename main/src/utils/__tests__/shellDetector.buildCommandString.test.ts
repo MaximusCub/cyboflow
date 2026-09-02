@@ -33,14 +33,17 @@ describe('ShellDetector.buildCommandString — POSIX dialect', () => {
 });
 
 describe('ShellDetector.buildCommandString — win32 (PowerShell) dialect', () => {
-  it('assigns env vars via $env: and joins statements with ;', () => {
+  // PS 5.1 has no `&&`, so each line is followed by an explicit failure check.
+  const GUARD = 'if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }';
+
+  it('assigns env vars via $env: and guards the command line', () => {
     expect(
       ShellDetector.buildCommandString(
         { WORKTREE_PATH: 'C:\\Dev\\repo dir' },
         ['npm run build'],
         'win32'
       )
-    ).toBe("$env:WORKTREE_PATH = 'C:\\Dev\\repo dir'; npm run build");
+    ).toBe(`$env:WORKTREE_PATH = 'C:\\Dev\\repo dir'\nnpm run build\n${GUARD}`);
   });
 
   it('doubles embedded single quotes (PowerShell escaping)', () => {
@@ -50,12 +53,21 @@ describe('ShellDetector.buildCommandString — win32 (PowerShell) dialect', () =
         ['npm run build'],
         'win32'
       )
-    ).toBe("$env:WORKTREE_PATH = 'C:\\repo''x'; npm run build");
+    ).toBe(`$env:WORKTREE_PATH = 'C:\\repo''x'\nnpm run build\n${GUARD}`);
   });
 
-  it('joins multiple command lines with ; when there are no env vars', () => {
-    expect(
-      ShellDetector.buildCommandString({}, ['npm install', 'npm test'], 'win32')
-    ).toBe('npm install; npm test');
+  it('stops at the first failing line instead of running the rest', () => {
+    expect(ShellDetector.buildCommandString({}, ['npm install', 'npm test'], 'win32')).toBe(
+      `npm install\n${GUARD}\nnpm test\n${GUARD}`
+    );
+  });
+
+  it('guards the last line too, so the script exits with the failing code', () => {
+    const built = ShellDetector.buildCommandString({}, ['npm test'], 'win32');
+    expect(built.endsWith(GUARD)).toBe(true);
+  });
+
+  it('emits env assignments alone when there are no command lines', () => {
+    expect(ShellDetector.buildCommandString({ A: 'b' }, [], 'win32')).toBe("$env:A = 'b'");
   });
 });

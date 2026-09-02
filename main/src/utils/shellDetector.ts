@@ -11,6 +11,18 @@ interface ShellInfo {
 }
 
 /**
+ * The PowerShell stand-in for POSIX `&&`. PS 5.1, which every Windows host
+ * ships, cannot parse `&&` at all, so a failing step has to be checked
+ * explicitly or the steps after it run anyway.
+ *
+ * `$?` covers both a cmdlet error and a non-zero native exit. $LASTEXITCODE is
+ * unset until a native command has run, so a cmdlet-only failure falls back to
+ * 1 rather than exiting 0 and reporting success.
+ */
+const PS_STOP_ON_ERROR =
+  'if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }';
+
+/**
  * Detects the user's default shell in a robust, cross-platform way
  */
 export class ShellDetector {
@@ -209,26 +221,31 @@ export class ShellDetector {
    * POSIX: `export K='v' && line1 && line2`. PowerShell has no `export` and
    * the PS 5.1 every Windows host ships cannot parse `&&`, so the win32 form
    * assigns via the env provider (embedded single quotes doubled —
-   * PowerShell's own escaping) and joins with `;`. `platform` is injectable
-   * so tests pin either dialect anywhere.
+   * PowerShell's own escaping) and puts {@link PS_STOP_ON_ERROR} between the
+   * command lines to get the same stop-on-first-failure behaviour `&&` gives.
+   * `platform` is injectable so tests pin either dialect anywhere.
    */
   static buildCommandString(
     envVars: Record<string, string>,
     commandLines: string[],
     platform: NodeJS.Platform = process.platform
   ): string {
-    const parts: string[] = [];
     if (platform === 'win32') {
-      for (const [key, value] of Object.entries(envVars)) {
-        parts.push(`$env:${key} = '${value.replace(/'/g, "''")}'`);
+      const parts = Object.entries(envVars).map(
+        ([key, value]) => `$env:${key} = '${value.replace(/'/g, "''")}'`
+      );
+      // The guard follows the LAST line too, so the script's own exit code is
+      // the failing step's — matching what `&&` reports on POSIX.
+      for (const line of commandLines) {
+        parts.push(line, PS_STOP_ON_ERROR);
       }
-    } else {
-      for (const [key, value] of Object.entries(envVars)) {
-        parts.push(`export ${key}=${escapeShellArg(value)}`);
-      }
+      return parts.join('\n');
     }
+    const parts = Object.entries(envVars).map(
+      ([key, value]) => `export ${key}=${escapeShellArg(value)}`
+    );
     parts.push(...commandLines);
-    return parts.join(platform === 'win32' ? '; ' : ' && ');
+    return parts.join(' && ');
   }
 
   /**
