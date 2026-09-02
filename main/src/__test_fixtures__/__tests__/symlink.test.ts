@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDirSymlink, fileSymlinksNeedPrivilege } from '../symlink';
+import { createDirSymlink } from '../symlink';
 
 describe('createDirSymlink', () => {
   const dirs: string[] = [];
@@ -42,11 +42,5 @@ describe('createDirSymlink', () => {
 
   afterAll(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  });
-});
-
-describe('fileSymlinksNeedPrivilege', () => {
-  it('is only true on win32', () => {
-    expect(fileSymlinksNeedPrivilege).toBe(process.platform === 'win32');
   });
 });

@@ -28,7 +28,10 @@ describe('ShellDetector.getShellCommandArgs — win32 EncodedCommand shape', () 
 
     const { shell, args } = ShellDetector.getShellCommandArgs(command);
 
-    expect(shell).toBeTruthy();
+    // A PowerShell, never the cmd.exe interactive fallback: these flags and
+    // this payload mean nothing to cmd. Holds on any host, because the win32
+    // detection falls through to the fixed System32 path off Windows.
+    expect(shell.toLowerCase()).toMatch(/(powershell|pwsh)\.exe$/);
     expect(args.slice(0, 4)).toEqual(['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand']);
     expect(Buffer.from(args[4], 'base64').toString('utf16le')).toBe(command);
     // The raw command string never appears as a bare argv element — that is

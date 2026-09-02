@@ -31,13 +31,15 @@ import * as os from 'os';
 
 export function orchSocketEndpoint(
   posixPath: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  // Injected by tests: a real account name is usually already sanitary, so
+  // reading the host's would leave the sanitize step below unexercised.
+  username: string = os.userInfo().username
 ): string {
   if (platform !== 'win32') {
     return posixPath;
   }
-  const rawUser = os.userInfo().username || 'default';
-  const user = rawUser.replace(/[^A-Za-z0-9_-]+/g, '-');
+  const user = (username || 'default').replace(/[^A-Za-z0-9_-]+/g, '-');
   // First 8 hex of a digest over the per-kind socket path — enough to keep the
   // handful of app kinds apart without approaching the pipe-name length
   // budget. Not a secret; it only has to be stable per path and differ across

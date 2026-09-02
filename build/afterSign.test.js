@@ -1268,17 +1268,23 @@ async function caseAA() {
       `SKIP: cases F-V are darwin-only (host is ${process.platform}); codesign/lipo/Mach-O probes cannot run here.`,
     );
   }
+  // W and X need no Windows host: W parses crafted PE buffers (its one real-
+  // binary assertion is guarded inside), and X lists a temp directory. Running
+  // them everywhere is what gives the macOS CI a signal on the Windows arm of
+  // afterSign, which is the script that decides whether an artifact ships.
+  await caseW();
+  await caseX();
+
   if (process.platform === 'win32') {
-    // W-AA exercise the Windows arm: PE-header parsing, the win-unpacked
-    // collection rules, and hook-level runs against win-unpacked fixtures.
-    await caseW();
-    await caseX();
+    // Y-AA drive the hook against win-unpacked fixtures: Y needs a
+    // host-loadable better_sqlite3.node, and Z and AA spawn the packaged
+    // executable for the ABI probe.
     await caseY();
     await caseZ();
     await caseAA();
   } else {
     console.log(
-      `SKIP: cases W-AA are win32-only (host is ${process.platform}); the win-unpacked fixtures cannot run here.`,
+      `SKIP: cases Y-AA are win32-only (host is ${process.platform}); the win-unpacked fixtures cannot run here.`,
     );
   }
 

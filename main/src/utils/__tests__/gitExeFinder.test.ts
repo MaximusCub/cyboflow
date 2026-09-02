@@ -223,14 +223,20 @@ describe('resolveGitCommand — memoization', () => {
     expect(deps.existsCalls.length).toBeGreaterThan(probesAfterFirst);
   });
 
-  it('production dependencies are restored by setGitFinderDependenciesForTest(null)', () => {
-    setGitFinderDependenciesForTest(makeDeps({ platform: 'win32', shellPath: null }));
+  it('setGitFinderDependenciesForTest(null) stops consulting the injected deps', () => {
+    // The previous version of this asserted only that the result was a
+    // non-empty string, which the bare 'git' fallback guarantees — it could
+    // not fail. What matters is that the injected seam is really detached.
+    const deps = makeDeps({ platform: 'win32', shellPath: null, existing: [WIN] });
+    setGitFinderDependenciesForTest(deps);
+    expect(resolveGitCommand()).toBe(WIN);
+
     setGitFinderDependenciesForTest(null);
-    // Real resolution must yield SOMETHING spawnable (an absolute path or the
-    // bare fallback) without throwing, whatever the host has installed.
-    const resolved = resolveGitCommand();
-    expect(typeof resolved).toBe('string');
-    expect(resolved.length).toBeGreaterThan(0);
+    clearGitExecutableCache();
+    const probesBefore = deps.existsCalls.length;
+    resolveGitCommand();
+
+    expect(deps.existsCalls.length).toBe(probesBefore);
   });
 });
 
