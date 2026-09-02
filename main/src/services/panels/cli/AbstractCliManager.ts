@@ -15,7 +15,7 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
-import { collectDescendantPids, killTree, listProcessTable } from '../../../utils/platformProcess';
+import { collectDescendantPidsAsync, killTree, listProcessTable } from '../../../utils/platformProcess';
 
 interface CliProcess {
   process: pty.IPty;
@@ -366,7 +366,7 @@ export abstract class AbstractCliManager extends EventEmitter {
     // Get all child processes before killing
     let killedProcesses: { pid: number; name?: string }[] = [];
     if (pid) {
-      const descendantPids = this.getAllDescendantPids(pid);
+      const descendantPids = await this.getAllDescendantPids(pid);
       if (descendantPids.length > 0) {
         killedProcesses = await this.getProcessInfo(descendantPids);
         this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} child processes started by ${this.getCliToolName()} for session ${sessionId}`);
@@ -937,7 +937,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       // Check for and kill any child processes
       const pid = ptyProcess.pid;
       if (pid) {
-        const descendantPids = this.getAllDescendantPids(pid);
+        const descendantPids = await this.getAllDescendantPids(pid);
         if (descendantPids.length > 0) {
           const killedProcesses = await this.getProcessInfo(descendantPids);
           this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} orphaned child processes after ${this.getCliToolName()} exit for session ${sessionId}`);
@@ -1092,14 +1092,11 @@ export abstract class AbstractCliManager extends EventEmitter {
    * portable across macOS/BSD and Linux, while GNU `ps --ppid` is Linux-only
    * and silently returned no descendants on macOS (the primary ship platform).
    */
-  protected getAllDescendantPids(parentPid: number): number[] {
-    return collectDescendantPids(parentPid, {
-      posixChildPids: (ppid) => {
-        const result = execSync(
-          `pgrep -P ${ppid} 2>/dev/null || true`,
-          { encoding: 'utf8', windowsHide: true }
-        );
-        return result.split('\n')
+  protected getAllDescendantPids(parentPid: number): Promise<number[]> {
+    return collectDescendantPidsAsync(parentPid, {
+      posixChildPids: async (ppid) => {
+        const { stdout } = await this.execAsync(`pgrep -P ${ppid} 2>/dev/null || true`);
+        return String(stdout).split('\n')
           .map((line: string) => parseInt(line.trim(), 10))
           .filter((pid: number) => Number.isInteger(pid) && pid !== ppid);
       },
@@ -1161,7 +1158,7 @@ export abstract class AbstractCliManager extends EventEmitter {
    * pty-kill fallback.
    */
   protected async killProcessTree(pid: number, panelId: string, sessionId: string): Promise<boolean> {
-    const descendantPids = this.getAllDescendantPids(pid);
+    const descendantPids = await this.getAllDescendantPids(pid);
     this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} descendant processes for PID ${pid} in session ${sessionId}`);
 
     const success = await killTree(pid, {

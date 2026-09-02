@@ -26,10 +26,13 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
+    if (await predicate()) return true;
     await new Promise((r) => setTimeout(r, 50));
   }
   return predicate();
@@ -37,7 +40,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<b
 
 /** Expose the private process-ops primitives, as sibling tests in this repo do. */
 interface RunCommandManagerPrivate {
-  getAllDescendantPids(parentPid: number): number[];
+  getAllDescendantPids(parentPid: number): Promise<number[]>;
   killEscapedProcesses(sessionId: string, knownPids: number[]): Promise<void>;
   on(event: string, cb: (payload: { pids: number[] }) => void): void;
 }
@@ -61,8 +64,8 @@ describe('RunCommandManager — win32 process ops', () => {
 
       // The grandchild takes a beat to appear under the child.
       let found: number[] = [];
-      const ok = await waitUntil(() => {
-        found = mgr.getAllDescendantPids(pid as number);
+      const ok = await waitUntil(async () => {
+        found = await mgr.getAllDescendantPids(pid as number);
         return found.length >= 1;
       }, 10000);
       expect(ok).toBe(true);

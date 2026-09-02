@@ -105,7 +105,7 @@ class TestCliManager extends AbstractCliManager {
   public killTree(pid: number): Promise<boolean> {
     return this.killProcessTree(pid, 'panel-under-test', 'session-under-test');
   }
-  public descendants(pid: number): number[] {
+  public descendants(pid: number): Promise<number[]> {
     return this.getAllDescendantPids(pid);
   }
   public spawnPty(
@@ -143,10 +143,13 @@ function childPidsOf(pid: number): number[] {
   }
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
+    if (await predicate()) return true;
     await new Promise((r) => setTimeout(r, 25));
   }
   return predicate();
@@ -335,8 +338,8 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
 
     // Poll: the two backgrounded sleeps take a beat to appear under the shell.
     let found: number[] = [];
-    const ok = await waitUntil(() => {
-      found = mgr.descendants(pid);
+    const ok = await waitUntil(async () => {
+      found = await mgr.descendants(pid);
       return found.length >= 2;
     }, 5000);
 
@@ -375,7 +378,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
       expect(ok).toBe(true);
 
       // The primitive must find those processes, and they must be alive.
-      const found = mgr.descendants(pid);
+      const found = await mgr.descendants(pid);
       for (const g of grandkids) {
         expect(found).toContain(g);
       }
@@ -396,7 +399,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
     await new Promise((r) => setTimeout(r, 150));
 
     // The interval process genuinely has no children.
-    expect(mgr.descendants(pid)).toEqual([]);
+    expect(await mgr.descendants(pid)).toEqual([]);
   }, 10000);
 });
 

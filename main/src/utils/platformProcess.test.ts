@@ -15,7 +15,7 @@
  *    members the tree walk missed swept into the per-descendant kills.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { killTree, killTreeImmediate } from './platformProcess';
+import { collectDescendantPidsAsync, killTree, killTreeImmediate } from './platformProcess';
 
 type ExecSpy = ReturnType<typeof vi.fn<(command: string) => Promise<{ stdout: string }>>>;
 
@@ -267,6 +267,63 @@ describe('killTree win32 — the taskkill ladder', () => {
     expect(onSurvivors).not.toHaveBeenCalled();
     expect(stopped).toBe(true);
     expect(verificationCalls).toBe(2);
+  });
+});
+
+describe('collectDescendantPidsAsync', () => {
+  // The POSIX arm is exercised through the injected one-level lister; the win32
+  // arm reads the shared (pid, ppid) table, which has its own suite.
+  it('walks the tree depth-first without blocking, and never includes the root', async () => {
+    const children = new Map<number, number[]>([
+      [100, [200, 300]],
+      [200, [400]],
+      [400, []],
+      [300, []],
+    ]);
+    const listed: number[] = [];
+
+    const found = await collectDescendantPidsAsync(100, {
+      platform: 'linux',
+      posixChildPids: async (ppid) => {
+        listed.push(ppid);
+        return children.get(ppid) ?? [];
+      },
+    });
+
+    expect(found).toEqual([200, 400, 300]);
+    expect(found).not.toContain(100);
+    expect(listed).toEqual([100, 200, 400, 300]);
+  });
+
+  it('terminates on a cycle and never traverses pid <= 1', async () => {
+    const found = await collectDescendantPidsAsync(100, {
+      platform: 'linux',
+      posixChildPids: async (ppid) => (ppid === 100 ? [200, 1] : [100, 200]),
+    });
+
+    expect(found).toEqual([200]);
+  });
+
+  it('reports a failed level and degrades to a partial list rather than throwing', async () => {
+    const onWalkError = vi.fn();
+
+    const found = await collectDescendantPidsAsync(100, {
+      platform: 'linux',
+      onWalkError,
+      posixChildPids: async (ppid) => {
+        if (ppid === 200) throw new Error('ps raced away');
+        return ppid === 100 ? [200, 300] : [];
+      },
+    });
+
+    expect(found).toEqual([200, 300]);
+    expect(onWalkError).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns [] for a non-positive or non-integer root', async () => {
+    await expect(collectDescendantPidsAsync(0, { platform: 'linux' })).resolves.toEqual([]);
+    await expect(collectDescendantPidsAsync(-5, { platform: 'linux' })).resolves.toEqual([]);
+    await expect(collectDescendantPidsAsync(1.5, { platform: 'linux' })).resolves.toEqual([]);
   });
 });
 

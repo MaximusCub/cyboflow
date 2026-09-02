@@ -7,7 +7,7 @@ import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { collectDescendantPids, killTree } from '../utils/platformProcess';
+import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
 
 interface RunProcess {
   process: pty.IPty;
@@ -254,8 +254,8 @@ export class RunCommandManager extends EventEmitter {
    * win32, per-level `ps --ppid` recursion on POSIX) lives in
    * utils/platformProcess.ts; this site contributes only its warning logging.
    */
-  private getAllDescendantPids(parentPid: number): number[] {
-    return collectDescendantPids(parentPid, {
+  private getAllDescendantPids(parentPid: number): Promise<number[]> {
+    return collectDescendantPidsAsync(parentPid, {
       onWalkError: (error) => this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error),
     });
   }
@@ -273,7 +273,7 @@ export class RunCommandManager extends EventEmitter {
    */
   private async killProcessTree(pid: number, commandName: string): Promise<boolean> {
     // First, get all descendant PIDs before we start killing
-    const descendantPids = this.getAllDescendantPids(pid);
+    const descendantPids = await this.getAllDescendantPids(pid);
     this.logger?.info(`Found ${descendantPids.length} descendant processes for PID ${pid}: ${descendantPids.join(', ')}`);
 
     return killTree(pid, {
@@ -316,7 +316,7 @@ export class RunCommandManager extends EventEmitter {
         // there. Enumerate via the shared (pid, ppid) table and force-kill
         // every escapee with taskkill.
         for (const pid of knownPids) {
-          allDescendants.push(...this.getAllDescendantPids(pid));
+          allDescendants.push(...(await this.getAllDescendantPids(pid)));
         }
         const escapees = [...new Set(allDescendants)];
         if (escapees.length > 0) {
@@ -340,7 +340,7 @@ export class RunCommandManager extends EventEmitter {
 
       for (const pid of knownPids) {
         // Get all descendants, including orphaned ones
-        const descendants = this.getAllDescendantPids(pid);
+        const descendants = await this.getAllDescendantPids(pid);
         allDescendants.push(...descendants);
         
         // Also check for processes that might have been reparented to init (PID 1)

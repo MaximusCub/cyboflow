@@ -155,7 +155,11 @@ function defaultPosixChildPids(parentPid: number): number[] {
 }
 
 /**
- * Collect every descendant of `rootPid` on this platform.
+ * Collect every descendant of `rootPid` on this platform, synchronously.
+ *
+ * Production kill paths use {@link collectDescendantPidsAsync} instead — this
+ * blocks the calling thread on the process-table query. Kept for callers that
+ * genuinely cannot await, and as an independent enumeration in tests.
  *
  * win32: one synchronous PowerShell (pid, ppid) table fetch
  * ({@link listPidPpidTableSync}) walked by the shared BFS in
@@ -201,6 +205,73 @@ export function collectDescendantPids(rootPid: number, opts: CollectDescendantPi
     }
   };
   walk(rootPid);
+  return descendants;
+}
+
+/**
+ * Async POSIX one-level lister. Same command and the same fail-soft
+ * `2>/dev/null || true` suffix as the synchronous default.
+ */
+async function defaultPosixChildPidsAsync(parentPid: number): Promise<number[]> {
+  const { stdout } = await promisify(exec)(`ps -o pid= --ppid ${parentPid} 2>/dev/null || true`, {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return String(stdout)
+    .split('\n')
+    .map(line => Number.parseInt(line.trim(), 10))
+    .filter(pid => Number.isInteger(pid) && pid !== parentPid);
+}
+
+export interface CollectDescendantPidsAsyncOptions extends PlatformProcessOptions {
+  /** As {@link CollectDescendantPidsOptions.posixChildPids}, async allowed. */
+  posixChildPids?: (parentPid: number) => number[] | Promise<number[]>;
+  /** As {@link CollectDescendantPidsOptions.onWalkError}. */
+  onWalkError?: (error: unknown) => void;
+}
+
+/**
+ * {@link collectDescendantPids} without blocking the calling thread.
+ *
+ * Prefer this everywhere a caller can await. The synchronous twin runs the
+ * win32 (pid, ppid) query through execSync, which stalls the Electron main
+ * thread — and with it the renderer bridge — for as long as PowerShell takes
+ * to start, or for the whole 15s timeout if the query itself hangs.
+ */
+export async function collectDescendantPidsAsync(
+  rootPid: number,
+  opts: CollectDescendantPidsAsyncOptions = {},
+): Promise<number[]> {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+
+  if ((opts.platform ?? process.platform) === 'win32') {
+    try {
+      return walkPidPpidTable(rootPid, await listPidPpidTable({ platform: 'win32' }));
+    } catch (error) {
+      opts.onWalkError?.(error);
+      return [];
+    }
+  }
+
+  const listChildren = opts.posixChildPids ?? defaultPosixChildPidsAsync;
+  const seen = new Set<number>([rootPid]);
+  const descendants: number[] = [];
+  const walk = async (pid: number): Promise<void> => {
+    let children: number[];
+    try {
+      children = await listChildren(pid);
+    } catch (error) {
+      opts.onWalkError?.(error);
+      return;
+    }
+    for (const child of children) {
+      if (child <= 1 || seen.has(child)) continue;
+      seen.add(child);
+      descendants.push(child);
+      await walk(child);
+    }
+  };
+  await walk(rootPid);
   return descendants;
 }
 
@@ -362,15 +433,16 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
     }
   };
   const listDescendants = async (): Promise<number[]> =>
-    (opts.listDescendants ? await opts.listDescendants() : collectDescendantPids(pid, { platform })) ??
-    [];
-  // Copied: the POSIX 'enumerate' group mode appends group members the tree
-  // walk missed — the caller's array must not be mutated as a side effect.
-  const descendantPids = [
-    ...(opts.descendantPids ?? collectDescendantPids(pid, { platform })),
-  ];
+    (opts.listDescendants
+      ? await opts.listDescendants()
+      : await collectDescendantPidsAsync(pid, { platform })) ?? [];
 
   try {
+    // Copied: the POSIX 'enumerate' group mode appends group members the tree
+    // walk missed — the caller's array must not be mutated as a side effect.
+    const descendantPids = [
+      ...(opts.descendantPids ?? (await collectDescendantPidsAsync(pid, { platform }))),
+    ];
     if (platform === 'win32') {
       // Graceful attempt first (without /F, GUI apps may close cleanly).
       try {
@@ -588,7 +660,7 @@ export async function killTreeImmediate(
   opts: KillTreeImmediateOptions = {}
 ): Promise<void> {
   try {
-    const allPids = [pid, ...(opts.descendantPids ?? collectDescendantPids(pid, opts))];
+    const allPids = [pid, ...(opts.descendantPids ?? (await collectDescendantPidsAsync(pid, opts)))];
     const sendSignal =
       opts.sendSignal ??
       ((signalPid: number, signal: NodeJS.Signals) => {
