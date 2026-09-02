@@ -11,13 +11,9 @@ interface ShellInfo {
 }
 
 /**
- * The PowerShell stand-in for POSIX `&&`. PS 5.1, which every Windows host
- * ships, cannot parse `&&` at all, so a failing step has to be checked
- * explicitly or the steps after it run anyway.
- *
- * `$?` covers both a cmdlet error and a non-zero native exit. $LASTEXITCODE is
- * unset until a native command has run, so a cmdlet-only failure falls back to
- * 1 rather than exiting 0 and reporting success.
+ * The PowerShell stand-in for POSIX `&&`: PS 5.1 cannot parse `&&` at all, so
+ * a failing step is checked explicitly. $LASTEXITCODE is unset until a native
+ * command runs, so a cmdlet-only failure falls back to 1 rather than 0.
  */
 const PS_STOP_ON_ERROR =
   'if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }';
@@ -51,12 +47,8 @@ export class ShellDetector {
   }
 
   /**
-   * Windows shell detection. Windows PowerShell 5.1 (`powershell.exe`) ships
-   * with every supported Windows host at a fixed location, so it is the
-   * guaranteed fallback; PowerShell 7 (`pwsh.exe`) is preferred when the user
-   * installed it. cmd.exe is deliberately not used as the default interactive
-   * substrate: no `-c`-style command execution and a much weaker scripting
-   * surface for the flow agents.
+   * PowerShell 7 when installed, else the 5.1 that every Windows host ships at
+   * a fixed path. cmd.exe is the last resort only: no `-c`-style execution.
    */
   private static detectWindowsShell(): ShellInfo {
     const systemRoot = process.env.SystemRoot || 'C:\\Windows';
@@ -74,13 +66,9 @@ export class ShellDetector {
       return { path: pwsh7, name: 'pwsh', args: this.getShellArgs('pwsh') };
     }
 
-    // pwsh.exe: probe PATH the cheap way (no subprocess) and fall through to
-    // the always-present system PowerShell. Skip 0-byte candidates: on Windows
-    // fs.accessSync(X_OK) is effectively existence-only, so a Store
-    // execution-alias stub (`...\Microsoft\WindowsApps\pwsh.exe`, 0 bytes
-    // until first launch) passes the probe but fails on every spawn — without
-    // this skip such a stub would win the scan and no PowerShell fallback
-    // would ever be reached.
+    // Skip 0-byte candidates. accessSync(X_OK) is existence-only on Windows,
+    // so a Store execution-alias stub (0 bytes until first launch) passes the
+    // probe, fails every spawn, and would win this scan without the check.
     const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
     for (const dir of pathDirs) {
       const candidate = path.join(dir, 'pwsh.exe');
@@ -110,13 +98,9 @@ export class ShellDetector {
   }
 
   /**
-   * Which binary actually runs a built command on Windows.
-   *
-   * detectWindowsShell can end at cmd.exe, which is a fine interactive target
-   * but understands none of the PowerShell flags below, and cannot run the
-   * PowerShell dialect buildCommandString emits either. Command execution
-   * therefore falls back to the system PowerShell rather than the interactive
-   * last resort. Exported for unit testing on any host.
+   * Which binary runs a built command. The cmd.exe last resort understands
+   * neither the flags below nor the dialect buildCommandString emits, so
+   * command execution uses the system PowerShell instead. Exported for tests.
    */
   static commandShellPath(detected: { name: string; path: string }): string {
     return detected.name === 'cmd' ? this.systemPowerShellPath() : detected.path;
@@ -234,16 +218,11 @@ export class ShellDetector {
   }
 
   /**
-   * Build the command string for a multi-statement script — an optional set of
-   * environment variables assigned first, then the command lines run in
-   * order — in the dialect {@link getShellCommandArgs} routes to.
-   *
-   * POSIX: `export K='v' && line1 && line2`. PowerShell has no `export` and
-   * the PS 5.1 every Windows host ships cannot parse `&&`, so the win32 form
-   * assigns via the env provider (embedded single quotes doubled —
-   * PowerShell's own escaping) and puts {@link PS_STOP_ON_ERROR} between the
-   * command lines to get the same stop-on-first-failure behaviour `&&` gives.
-   * `platform` is injectable so tests pin either dialect anywhere.
+   * Env assignments, then the command lines, in the dialect
+   * {@link getShellCommandArgs} routes to. POSIX joins with `&&`; PowerShell
+   * has no `export` and no `&&`, so it assigns via `$env:` (single quotes
+   * doubled, its own escaping) and separates lines with
+   * {@link PS_STOP_ON_ERROR}. `platform` is injectable for tests.
    */
   static buildCommandString(
     envVars: Record<string, string>,

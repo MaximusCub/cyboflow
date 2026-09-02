@@ -1,26 +1,15 @@
 /**
  * Windows shell-shim spawn planning.
  *
- * Node ≥ 18.20 — and therefore every Electron build this app ships on — REFUSES
- * to spawn `.cmd`/`.bat` files without a shell: spawn/execFile of a batch shim
- * throws EINVAL (CVE-2024-27980 command-injection hardening). npm-shim installs
- * of the CLIs this app probes (`claude`, `codex`, `omp`, `pi`, …) leave exactly
- * such `.cmd` shims, so every shell-less `--version` probe of one dies with
- * EINVAL — which callers misread as a broken install. Two escape hatches,
- * tried best-first:
+ * Node >= 18.20 refuses to spawn `.cmd`/`.bat` without a shell — execFile of a
+ * batch shim throws EINVAL (CVE-2024-27980 hardening). npm-shim installs of the
+ * CLIs this app probes leave exactly such shims, so a shell-less `--version`
+ * probe dies with EINVAL and callers misread it as a broken install. Two escape
+ * hatches, best first: a sibling native `<name>.exe`, then the shim through
+ * cmd.exe (see utils/win32CmdLine for the quoting that requires).
  *
- *   1. a sibling native `<name>.exe` (the Claude agent SDK and native
- *      installers bundle one) — a plain `.exe` spawns shell-less;
- *
- *   2. the shim itself, through `cmd.exe /d /s /c` — the interpreter npm shims
- *      are written for. The whole command line is passed as ONE argument and
- *      spawned with `windowsVerbatimArguments`, so Node's argv quoting (which
- *      backslash-escapes inner quotes — cmd.exe does not understand those)
- *      never touches it, and `/s` makes cmd strip our outer quote pair. Same
- *      quoting shape cross-spawn uses; survives paths with spaces.
- *
- * Everything here is inert on POSIX: helpers either branch on an injected
- * `platform` or are only called from win32 branches.
+ * Inert on POSIX: every helper branches on an injected platform or is reached
+ * only from a win32 arm.
  */
 import * as fs from 'fs';
 
@@ -31,11 +20,7 @@ export interface ShellShimProbeInvocation {
   command: string;
   /** argv for the spawn, including the version flag. */
   args: string[];
-  /**
-   * Pass through to the spawn's `windowsVerbatimArguments`. Set only on the
-   * cmd.exe plan (see module header); direct/`.exe` plans want Node's normal
-   * argv quoting.
-   */
+  /** Set only on the cmd.exe plan; a plain `.exe` wants Node's own quoting. */
   windowsVerbatimArguments?: boolean;
 }
 

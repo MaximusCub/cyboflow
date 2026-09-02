@@ -1,33 +1,15 @@
 /**
- * platformProcess — the ONE place that answers "how do I list / enumerate /
+ * platformProcess — the ONE place that answers "how do I list, enumerate or
  * kill processes on this platform".
  *
- * The platform branches for the ladders live here, and only here — duplicated
- * win32 kill logic is not acceptable at a call site. Call sites may consult
- * the host platform to choose their {@link KillTreeOptions} timings, modes and
- * log wording; the kill and enumeration commands themselves may not branch.
+ * Call sites may read the host platform to choose their {@link KillTreeOptions}
+ * timings, modes and log wording. The kill and enumeration commands themselves
+ * may not branch. The single exception is runCommandManager's escapee sweep,
+ * where POSIX has a process-group lookup Windows has no equivalent for.
  *
- * The one place a call site still reads the platform for behaviour is
- * runCommandManager's escapee sweep, where POSIX has an extra step with no
- * Windows equivalent: a process-group lookup that finds processes reparented
- * out of the tree. Windows has no process groups.
- *
- *   - {@link listProcessTable} / {@link listPidPpidTable} /
- *     {@link listPidPpidTableSync} — process-table listings (`ps -axo …` on
- *     POSIX, the winProcessTable.ts stand-in on win32).
- *   - {@link collectDescendantPidsAsync} / {@link collectDescendantPids} —
- *     descendant-tree enumeration (table fetch + walk).
- *   - {@link describeProcesses} — pid → a short name, for survivor reports.
- *   - {@link killWindowsTree}, {@link killPidSync}, {@link signalTree},
- *     {@link forceKillPids}, {@link killTree}, {@link killTreeImmediate} — the
- *     fire-and-forget, synchronous, group/tree-signalling, flat force-kill,
- *     ladder-shaped, and immediate-hard kills.
- *
- * Per-site zombie emission, log wording and grace timings stay at the call
- * sites via {@link KillTreeOptions} hooks — this module owns the platform
- * choice and the ladder shape, the sites own their reporting. Every primitive
- * takes a `platform` option (the `TerminalSessionManagerOptions.platform`
- * DI-seam template) so tests pin a platform regardless of the host.
+ * Every primitive takes a `platform` option so tests pin a platform regardless
+ * of the host, and the per-site reporting — zombie events, log lines — stays at
+ * the call sites through the option hooks.
  */
 import { exec, execFile, execSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -52,9 +34,8 @@ export interface PlatformProcessOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Default process lister: `ps -axo pid=,ppid=,command=` on POSIX (no header,
- * all processes); the PowerShell stand-in on win32, which emits the same line
- * shape so the parser is shared unchanged.
+ * Default process lister. The win32 PowerShell stand-in emits the same line
+ * shape as `ps`, so one parser serves both.
  */
 export function listProcessTable(opts: PlatformProcessOptions = {}): Promise<ProcessRow[]> {
   if ((opts.platform ?? process.platform) === 'win32') {
@@ -65,7 +46,7 @@ export function listProcessTable(opts: PlatformProcessOptions = {}): Promise<Pro
       'ps',
       ['-axo', 'pid=,ppid=,command='],
       // Command lines can be long; 16 MiB is comfortably above any realistic
-      // full process table.
+      // full process table. The other listings below use the same budget.
       { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
@@ -81,15 +62,12 @@ export function listProcessTable(opts: PlatformProcessOptions = {}): Promise<Pro
 /** Default two-column lister: `ps -axo pid=,ppid=` (no header, all processes). */
 export function listPidPpidTable(opts: PlatformProcessOptions = {}): Promise<ProcessTableRow[]> {
   if ((opts.platform ?? process.platform) === 'win32') {
-    // Windows has no `ps`; the PowerShell stand-in emits the same line shape,
-    // so the parser above is used unchanged.
     return execWindowsProcessTable('pid-ppid').then(parseProcessTable);
   }
   return new Promise<ProcessTableRow[]>((resolve, reject) => {
     execFile(
       'ps',
       ['-axo', 'pid=,ppid='],
-      // The full process table can be large; 16 MiB comfortably covers it.
       { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
@@ -102,18 +80,11 @@ export function listPidPpidTable(opts: PlatformProcessOptions = {}): Promise<Pro
   });
 }
 
-/**
- * Synchronous two-column lister for the kill ladders whose enumeration happens
- * inside `execSync`-shaped code that cannot await. Windows runs the exact same
- * PowerShell query {@link execWindowsProcessTable} runs (via `execSync`); POSIX
- * makes one full-table `ps` call.
- */
+/** {@link listPidPpidTable} for callers that cannot await. */
 export function listPidPpidTableSync(opts: PlatformProcessOptions = {}): ProcessTableRow[] {
   if ((opts.platform ?? process.platform) === 'win32') {
     const output = execSync(
       `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-      // Full tables can total multiple MB; 64 MiB is comfortably above any
-      // realistic one, matching execWindowsProcessTable's budget.
       { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
     );
     return parseProcessTable(output);
@@ -127,26 +98,18 @@ export function listPidPpidTableSync(opts: PlatformProcessOptions = {}): Process
 
 export interface CollectDescendantPidsOptions extends PlatformProcessOptions {
   /**
-   * POSIX one-level child lister. Call sites differ here
-   * (`ps -o pid= --ppid N` for the session/log/run ladders, `pgrep -P N` for
-   * the CLI manager — pgrep is the portable form across macOS/BSD/Linux), so a
-   * site whose POSIX walk must stay byte-identical injects its own. The win32
-   * arm (the shared PowerShell-table walk) is always this
-   * module's and cannot be overridden.
+   * POSIX one-level child lister. Sites differ — `pgrep -P N` is portable
+   * across macOS/BSD/Linux where GNU `ps --ppid` is not — so a site whose walk
+   * must stay byte-identical injects its own. The win32 arm never varies.
    */
   posixChildPids?: (parentPid: number) => number[];
-  /**
-   * Failure reporter for a failed table fetch / walk step. Call sites
-   * either stay silent or log a warning — pass the logger call here;
-   * a failed walk degrades to a partial kill list, never an error.
-   */
+  /** Reporter for a failed fetch or walk step; the walk degrades, never throws. */
   onWalkError?: (error: unknown) => void;
 }
 
 /**
- * Default POSIX one-level lister: `ps -o pid= --ppid N`. The `2>/dev/null || true`
- * suffix keeps a "no such process" race from throwing — callers see an empty
- * child list and the recursion simply ends, never a throw.
+ * Default POSIX one-level lister. The `2>/dev/null || true` suffix keeps a
+ * "no such process" race from throwing; the recursion just ends.
  */
 function defaultPosixChildPids(parentPid: number): number[] {
   const output = execSync(`ps -o pid= --ppid ${parentPid} 2>/dev/null || true`, {
@@ -160,22 +123,11 @@ function defaultPosixChildPids(parentPid: number): number[] {
 }
 
 /**
- * Collect every descendant of `rootPid` on this platform, synchronously.
- *
- * Production kill paths use {@link collectDescendantPidsAsync} instead — this
- * blocks the calling thread on the process-table query. Kept for callers that
- * genuinely cannot await, and as an independent enumeration in tests.
- *
- * win32: one synchronous PowerShell (pid, ppid) table fetch
- * ({@link listPidPpidTableSync}) walked by the shared BFS in
- * services/processTable.ts. POSIX: per-level DFS recursion over the injected
- * or default one-level lister (order is DFS; children-before-parents is not
- * required).
- *
- * Both arms are cycle-safe, never traverse or include pid ≤ 1, and never
- * include the root; a non-positive or non-integer root returns []. Fail-soft
- * by contract — a failed fetch or walk step reports through `onWalkError` and
- * degrades to a partial list, never a throw.
+ * {@link collectDescendantPidsAsync}, synchronously. Production kill paths use
+ * the async one: this blocks the calling thread on the process-table query.
+ * Kept for callers that cannot await, and as an independent enumeration in
+ * tests. Same contracts — cycle-safe, never includes the root or pid <= 1, and
+ * fail-soft through `onWalkError`.
  */
 export function collectDescendantPids(rootPid: number, opts: CollectDescendantPidsOptions = {}): number[] {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
@@ -285,12 +237,9 @@ export async function collectDescendantPidsAsync(
 // ---------------------------------------------------------------------------
 
 /**
- * Forcefully kill a Windows process tree, fire-and-forget:
- * `taskkill /PID <pid> /T /F`. Windows has no process-group semantics through
- * `process.kill` (a negative pid fails EINVAL, orphaning spawned bridges/
- * servers); `taskkill /T` walks the PPID chain at call time instead. Fail-soft:
- * an already-dead or access-denied pid is ignored, like the POSIX `kill -9`
- * fallbacks it stands in for.
+ * Fire-and-forget `taskkill /PID <pid> /T /F`. Windows has no process-group
+ * semantics through `process.kill` — a negative pid fails EINVAL — so taskkill
+ * walks the PPID chain instead. An already-dead or denied pid is ignored.
  */
 export function killWindowsTree(pid: number): void {
   execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {
@@ -299,16 +248,9 @@ export function killWindowsTree(pid: number): void {
 }
 
 /**
- * Synchronous forceful Windows tree kill: `taskkill /pid <pid> /T /F` via
- * `spawnSync` (stdio ignored, 10s cap). The execSync-shaped twin of
- * {@link killWindowsTree} — for callers that must block until the kill was
- * ISSUED before proceeding (driverCore's `defaultKillPid`, whose stop path
- * continues straight into replacement-spawn bookkeeping).
- *
- * win32-only by contract: POSIX callers signal directly through
- * `process.kill` (group kills by negative pid), which is precisely why the
- * only production caller reaches this on win32 exclusively — on every other
- * platform the call is a no-op.
+ * {@link killWindowsTree}, blocking until the kill was ISSUED — for a caller
+ * that continues straight into bookkeeping assuming the tree is going away.
+ * A no-op off win32, where callers signal process groups directly.
  */
 export function killPidSync(pid: number, opts: PlatformProcessOptions = {}): void {
   if ((opts.platform ?? process.platform) !== 'win32') return;
@@ -357,12 +299,9 @@ export async function forceKillPids(
 }
 
 /**
- * A short name per pid, for a user-facing "these processes survived" report.
- *
- * POSIX asks `ps` for the comm name one pid at a time. Windows has no `ps`:
- * the shared process table supplies the command line, and its first token's
- * basename stands in for the comm name. Never throws — an unresolvable pid
- * reports 'unknown'.
+ * A short name per pid, for a survivor report. Windows has no `ps`, so the
+ * shared process table supplies the command line and its first token's
+ * basename stands in. An unresolvable pid reports 'unknown'; never throws.
  */
 export async function describeProcesses(
   pids: number[],
@@ -402,25 +341,15 @@ export async function describeProcesses(
 }
 
 /**
- * Signal a process TREE, one call instead of a win32 branch at every site.
- *
- * POSIX: the process GROUP, via a negative pid, so a spawn's own children are
- * reaped rather than orphaned. win32: `taskkill /T /F`, because there are no
- * process-group semantics through `process.kill` there — a negative pid fails
- * with EINVAL — and taskkill walks the PPID chain instead.
- *
- * The win32 arm always force-kills: taskkill has no signal to deliver, so the
- * `signal` argument only applies to POSIX.
+ * Signal a process TREE: the POSIX process group by negative pid, or
+ * `taskkill /T /F` on Windows, which has no group semantics through
+ * `process.kill`. taskkill delivers no signal, so `signal` is POSIX-only.
  */
 export function signalTree(
   pid: number,
   signal: NodeJS.Signals,
   opts: PlatformProcessOptions & {
-    /**
-     * 'async' (default) fires taskkill and returns; 'sync' blocks until the
-     * kill was ISSUED, for a caller that continues straight into bookkeeping
-     * that assumes the tree is going away.
-     */
+    /** 'sync' blocks until the kill was ISSUED; 'async' (default) does not. */
     windowsKill?: 'async' | 'sync';
     /**
      * win32 tree killer. Defaults to the taskkill primitives above; injected
@@ -450,13 +379,9 @@ export function signalTree(
 }
 
 /**
- * Where the ladder's own progress and failures go.
- *
- * Each call site has an identity the shared code cannot know: a `[toolName]`
- * prefix in the CLI managers, a session log line the user reads in the app.
- * The ladder emits plain sentences and the site formats and routes them.
- * Without one, failures fall back to the console, as they did before the
- * ladders were shared.
+ * Where the ladder's progress and failures go. It emits plain sentences; the
+ * site adds its own identity — a `[toolName]` prefix, a session log line.
+ * Without one, failures fall back to the console.
  */
 export interface KillTreeLogger {
   /** A step worth showing: grace started, escalation, a signal delivered. */
@@ -467,23 +392,15 @@ export interface KillTreeLogger {
 
 export interface KillTreeOptions extends PlatformProcessOptions {
   /**
-   * Up-front enumerated descendants to force-kill individually after the tree
-   * kill. Call sites enumerate before the ladder starts (so the count is
-   * logged and children orphaned mid-ladder are still reached); defaults to
-   * enumerating here via {@link collectDescendantPids}.
+   * Descendants enumerated BEFORE the ladder starts, so children orphaned
+   * mid-ladder are still reached. Defaults to enumerating here.
    */
   descendantPids?: number[];
-  /**
-   * Shell-command runner for the taskkill/kill/pkill invocations. Defaults to
-   * `child_process.exec` wrapped with `windowsHide: true` — a packaged Windows
-   * app must never flash a conhost.
-   */
+  /** Shell runner. Defaults to `exec` with `windowsHide`: no conhost flash. */
   execCommand?: (command: string) => Promise<{ stdout: string }>;
   /**
-   * Liveness probe. Defaults to the signal-0 probe (ESRCH = dead, EPERM =
-   * alive). A probe that throws is treated as "still alive" so a grace poll
-   * waits out safely instead of short-circuiting to the forceful kill; a throw
-   * inside a per-descendant probe likewise only skips that one kill.
+   * Liveness probe; defaults to signal 0 (ESRCH dead, EPERM alive). A probe
+   * that throws counts as alive, so a grace poll waits rather than escalating.
    */
   isPidAlive?: (pid: number) => boolean;
   /**
@@ -495,11 +412,7 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   graceMs?: number;
   /** Poll interval while waiting out the grace window. Default 100ms. */
   pollIntervalMs?: number;
-  /**
-   * How the grace window is spent: 'poll' (default) returns as soon as the
-   * root pid is dead; 'fixed' sleeps the whole window unconditionally.
-   * Honored on both arms.
-   */
+  /** 'poll' (default) returns once the root is dead; 'fixed' sleeps it out. */
   graceMode?: 'poll' | 'fixed';
   /**
    * POSIX process-group resolution (win32 ignores this — no groups there):
@@ -513,18 +426,11 @@ export interface KillTreeOptions extends PlatformProcessOptions {
    *    per-descendant kill list.
    */
   posixGroupMode?: 'lookup' | 'root' | 'enumerate';
-  /**
-   * Re-enumeration for the verification passes. Defaults to
-   * {@link collectDescendantPids} on this platform; sites with an injected
-   * process-table seam pass their own (async allowed).
-   */
+  /** Re-enumeration for the verification passes; async allowed. */
   listDescendants?: () => number[] | Promise<number[]>;
   /**
-   * Survivor report: called (and awaited) with the pids that remain after the
-   * whole ladder ran, right before `killTree` resolves false. Call sites
-   * differ in what they emit here (an EventEmitter event, a CLI output
-   * line, a session log) — that reporting stays at the call site. Defaults to
-   * a plain console.error.
+   * Awaited with the pids left after the whole ladder ran, just before
+   * killTree resolves false. What that emits is the site's choice.
    */
   onSurvivors?: (remainingPids: number[]) => void | Promise<void>;
   /** Called when the graceful `taskkill /T` attempt fails (expected for console apps). */
@@ -639,7 +545,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
             await execCommand(`taskkill /PID ${childPid} /F`);
           }
         } catch (error) {
-          // Already dead / no permission — the verification pass below decides.
+          // Already dead or denied; the verification pass below decides.
         }
       }
     } else {
@@ -649,10 +555,8 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       let pgid = pid;
 
       if (posixGroupMode === 'enumerate') {
-        // 'enumerate': resolve the real pgid BEFORE any signal flies and sweep
-        // in group members the up-front tree walk could not see (workers
-        // re-parented into the group). The bare lookup (no `|| echo ""`
-        // suffix) fails soft to the root pid.
+        // Resolve the real pgid BEFORE any signal flies, and sweep in group
+        // members the tree walk could not see (workers re-parented into it).
         try {
           const result = await execCommand(`ps -o pgid= -p ${pid}`);
           const foundPgid = parseInt(result.stdout.trim());
@@ -672,7 +576,6 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
         }
       }
 
-      // First, try SIGTERM for graceful shutdown
       try {
         sendSignal(pid, 'SIGTERM');
       } catch (error) {
@@ -680,9 +583,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       }
 
       if (posixGroupMode === 'lookup') {
-        // terminalSessionManager's shape: after the SIGTERM, find the actual
-        // process group id — the root's pid is only a stand-in when the
-        // lookup fails.
+        // The root pid is only a stand-in until this lookup answers.
         try {
           const pgidResult = await execCommand(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
           const foundPgid = parseInt(pgidResult.stdout.trim());
@@ -690,7 +591,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
             pgid = foundPgid;
           }
         } catch (error) {
-          // Use the original PID as fallback
+          // Keep the root pid as the group id.
         }
       }
 
@@ -794,18 +695,9 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
 // ---------------------------------------------------------------------------
 
 export interface KillTreeImmediateOptions extends PlatformProcessOptions {
-  /**
-   * Up-front enumerated descendants to SIGKILL alongside the root. Defaults
-   * to enumerating here via {@link collectDescendantPids} (silent on walk
-   * errors — the stop path this serves never reported walk failures).
-   */
+  /** Descendants to SIGKILL alongside the root. Defaults to enumerating here. */
   descendantPids?: number[];
-  /**
-   * Shell-command runner for the final sweep. Defaults to `exec` wrapped with
-   * `windowsHide: true`. Failures are ignored by contract — the sweep is the
-   * best-effort backstop behind the direct SIGKILLs (and silently no-ops
-   * through cmd.exe on win32, by contract).
-   */
+  /** Runner for the final sweep. Failures ignored: it is only a backstop. */
   execCommand?: (command: string) => Promise<{ stdout: string }>;
   /** Signal sender. Defaults to `process.kill`. */
   sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
@@ -814,14 +706,9 @@ export interface KillTreeImmediateOptions extends PlatformProcessOptions {
 }
 
 /**
- * Immediate hard kill of a pid and its enumerated descendants — the
- * logs-panel stop shape (services/panels/logPanel/logsManager.ts): no
- * graceful phase, no grace window, no probe. SIGKILLs the root and every
- * enumerated descendant directly, then runs a best-effort shell sweep
- * (`kill -9 <all>; pkill -9 -P <pid>`, errors ignored) as the backstop.
- *
- * Deliberately unbranched: `process.kill` SIGKILL is cross-platform in Node,
- * and the sweep silently no-ops through cmd.exe on win32.
+ * Hard kill with no graceful phase, grace window or probe — the logs-panel
+ * stop shape. Unbranched on purpose: Node's SIGKILL is cross-platform, and
+ * the shell sweep behind it silently no-ops through cmd.exe on win32.
  */
 export async function killTreeImmediate(
   pid: number,

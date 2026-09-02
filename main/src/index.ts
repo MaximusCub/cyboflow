@@ -4584,11 +4584,8 @@ app.whenReady().then(async () => {
   // handler there shows the dialog and exits — do no boot work here.
   if (!gotSingleInstanceLock) return;
 
-  // Windows/Linux: an explicit application menu. The Electron default menu's
-  // File → Exit item was observed doing nothing on Windows (the X button and
-  // window-all-closed both quit correctly, so the quit path itself is fine —
-  // the default item simply never fired it). Wiring the roles explicitly also
-  // gives the standard edit/zoom accelerators. macOS keeps the system menu.
+  // Windows/Linux: an explicit application menu, because the default menu's
+  // File > Exit never fires the quit path there. macOS keeps the system menu.
   if (process.platform !== 'darwin') {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       {

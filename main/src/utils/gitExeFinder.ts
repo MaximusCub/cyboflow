@@ -1,23 +1,14 @@
 /**
  * Git discovery for GUI launches — the git twin of {@link ./nodeFinder}.
  *
- * A Start-Menu / .app launch does not always carry a PATH that reaches git, so
- * every bare `execFile('git')` fails with ENOENT even though git works in the
- * user's terminal. {@link resolveGitCommand} resolves once, best-first:
- *
- *   1. the resolved shell PATH (`getShellPath()`, degrading to the inherited
- *      PATH) — `git.exe` on Windows (a suffix-less `git` there is a sh script,
- *      and a `.cmd` shim would hit Node's shell-less EINVAL hardening), the
- *      bare name on POSIX;
- *   2. the standard Windows install locations (MSI, per-user, scoop);
- *   3. a last-ditch `where git` / `which git`;
- *   4. the bare `'git'` fallback.
- *
- * Returning the resolved ABSOLUTE path is the fix: the spawn no longer depends
- * on the child env's PATH. Successful resolutions are memoized (call sites run
- * on dashboard refreshes); a genuine failure is deliberately NOT cached, so a
- * later call can retry after the user installs git. All IO goes through
- * {@link GitFinderDependencies}, the test seam.
+ * A Start-Menu or .app launch does not always carry a PATH that reaches git, so
+ * a bare `execFile('git')` fails with ENOENT even though git works in the user's
+ * terminal. Returning an ABSOLUTE path is the fix. {@link resolveGitCommand}
+ * resolves once, best-first: the shell PATH (`git.exe` on Windows — a
+ * suffix-less `git` there is a sh script and a `.cmd` shim hits Node's EINVAL
+ * hardening), the standard Windows install locations, `where`/`which`, then the
+ * bare name. A success is memoized; a failure is not, so a later call retries
+ * after the user installs git. All IO goes through {@link GitFinderDependencies}.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -98,11 +89,7 @@ function currentDependencies(): GitFinderDependencies {
   return { ...defaultDependencies(platform), ...testDependencies };
 }
 
-/**
- * Resolve the command to spawn for git: an absolute path when one is found,
- * the bare `'git'` fallback otherwise. Memoized for successful resolutions
- * (see module header).
- */
+/** An absolute git path when one is found, the bare `'git'` fallback otherwise. */
 export function resolveGitCommand(): string {
   if (cachedGitCommand) {
     return cachedGitCommand;
@@ -143,11 +130,7 @@ function resolveGitCommandUncached(deps: GitFinderDependencies): string {
   return GIT_FALLBACK;
 }
 
-/**
- * Walk the resolved PATH looking for a spawnable git. Windows: `git.exe` only
- * (a suffix-less `git` is a sh script Node cannot exec; a `.cmd` shim is
- * refused shell-less); POSIX: the bare name.
- */
+/** Rung 1 of the ladder in the module header: walk the resolved PATH. */
 function probePathForGit(deps: GitFinderDependencies): string | null {
   const searchPath = deps.shellPath() ?? deps.env('PATH') ?? '';
   const directories = searchPath.split(path.delimiter).filter((dir) => dir.length > 0);
@@ -187,10 +170,9 @@ function windowsGitCandidates(deps: GitFinderDependencies): string[] {
 }
 
 /**
- * Quote a resolved command for interpolation into a SHELL command string
- * (execSync/exec — argv is not available there). Double quotes are understood
- * by both POSIX sh and cmd.exe; quotes only when needed, so the bare `'git'`
- * fallback interpolates byte-identically to a literal `git`.
+ * Quote a resolved command for a SHELL command string, where argv is not
+ * available. Double quotes work in both POSIX sh and cmd.exe; only quoted when
+ * needed, so the bare `'git'` fallback interpolates unchanged.
  */
 export function quoteForShellString(command: string): string {
   return /\s/.test(command) ? `"${command}"` : command;

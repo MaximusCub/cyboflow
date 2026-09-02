@@ -1210,32 +1210,16 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Recursively gets all descendant PIDs of a parent process.
-   * This handles deeply nested process trees where processes spawn children
-   * that spawn their own children, etc.
-   *
-   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
-   * win32, per-level `ps --ppid` recursion on POSIX) lives in
-   * utils/platformProcess.ts; a failed walk stays silent here, degrading to a
-   * partial kill list exactly as before.
-   *
-   * @param parentPid The parent process ID
-   * @returns Array of all descendant PIDs
+   * Every descendant of `parentPid`. The per-platform enumeration lives in
+   * utils/platformProcess.ts; a failed walk degrades to a partial list.
    */
   private getAllDescendantPids(parentPid: number): Promise<number[]> {
     return collectDescendantPidsAsync(parentPid);
   }
 
   /**
-   * Stops the currently running script and ensures all child processes are terminated.
-   * This method uses multiple approaches to ensure complete cleanup:
-   * 1. Gets all descendant PIDs recursively before killing
-   * 2. Kills the process group via `kill -TERM -<pgid>` then `-9`
-   * 3. Kills individual descendant processes as a fallback
-   * 4. Uses graceful SIGTERM first, then forceful SIGKILL
-   *
-   * Both platform ladders live in utils/platformProcess.ts (killTree).
-   * @returns Promise that resolves when the script has been stopped
+   * Stop the running script and everything it spawned. The ladder is in
+   * {@link terminateScriptTree}; this method owns the bookkeeping around it.
    */
   stopRunningScript(): Promise<void> {
     const isWin32 = process.platform === 'win32';
@@ -1274,16 +1258,8 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Run the stop ladder for one script tree, reporting through the session log.
-   *
-   * Both platform ladders live in utils/platformProcess.ts (killTree). POSIX:
-   * SIGTERM -> group TERM (the spawned script is its own group leader, so the
-   * root pid IS the group id; no pgid lookup) -> the historical fixed 2s grace
-   * -> SIGKILL escalation -> per-descendant kills -> pkill sweep ->
-   * verification. win32: taskkill /T -> /T /F -> per-descendant /F ->
-   * verification.
-   *
-   * Never throws: a failed enumeration or log write degrades to a partial kill
-   * list, exactly as before.
+   * Both platform ladders live in utils/platformProcess.ts (killTree); this
+   * site picks the timings and the wording. Never throws.
    */
   private async terminateScriptTree(sessionId: string, pid: number, isWin32: boolean): Promise<void> {
     try {

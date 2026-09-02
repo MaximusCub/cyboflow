@@ -44,10 +44,8 @@ if (typeof electronBinary !== 'string' || !electronBinary) {
 }
 
 /**
- * Poll the Vite server; any HTTP response means it is up. The STATUS is
- * deliberately not checked (2xx-5xx all count): a 5xx can only come from a
- * non-Vite squatter that grabbed the port — dev-only noise not worth failing
- * over. Connection errors are the real "not up yet" signal.
+ * Poll the Vite server; any HTTP response means it is up. The status is not
+ * checked — a connection error is the real "not up yet" signal.
  */
 async function waitOnVite() {
   const deadline = Date.now() + 120_000;
@@ -87,13 +85,10 @@ child.on('exit', (code, signal) => {
   if (!signal) {
     process.exit(code ?? 0);
   }
-  // The child died FROM a signal (e.g. Ctrl+C delivering SIGINT to the whole
-  // foreground process group). Re-raise the SAME signal onto this process so
-  // it dies the shell-conventional way (128+n). Drop our own SIGINT/SIGTERM
-  // handlers first: they exist to forward signals to the child, and leaving
-  // them installed would SWALLOW the re-raised signal (a handled signal kills
-  // nothing) — this wrapper and `concurrently` would hang forever.
-  // The signal is forwarded as received, never defaulted.
+  // The child died FROM a signal, so re-raise the same one here to exit the
+  // shell-conventional way. Our own handlers come off first: a handled signal
+  // kills nothing, so leaving them installed would hang this wrapper and the
+  // `concurrently` that waits on it.
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
   process.kill(process.pid, signal);
