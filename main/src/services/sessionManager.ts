@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess, exec } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
@@ -1234,8 +1234,7 @@ export class SessionManager extends EventEmitter {
    * 3. Kills individual descendant processes as a fallback
    * 4. Uses graceful SIGTERM first, then forceful SIGKILL
    *
-   * The POSIX ladder lives in utils/platformProcess.ts (killTree); win32 keeps
-   * its own counted-verify shape ({@link stopRunningScriptWindows}).
+   * Both platform ladders live in utils/platformProcess.ts (killTree).
    * @returns Promise that resolves when the script has been stopped
    */
   stopRunningScript(): Promise<void> {
@@ -1273,34 +1272,40 @@ export class SessionManager extends EventEmitter {
         // Add a simple log entry for stopping the script
         addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
 
-        if (isWin32) {
-          // Windows has no process groups and no POSIX signals — every
-          // `kill`/`pkill` call in the POSIX ladder is a silent no-op there.
-          // Delegate to the taskkill ladder instead.
-          this.stopRunningScriptWindows(sessionId, scriptProcess, descendantPids, () => {
-            this.finishStopScript(sessionId);
-            resolve();
-          });
-          return;
-        }
-
-        // POSIX: the ladder lives in utils/platformProcess.ts (killTree) —
-        // SIGTERM → group TERM (the spawned script is its own group leader, so
-        // the root pid IS the group id; no pgid lookup) → the historical fixed
-        // 2s grace → SIGKILL escalation → per-descendant kills → pkill sweep →
-        // verification. This site keeps its session-log reporting: the stop
-        // acknowledgement above and the outcome report below.
-        addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${pid} and its group]`, 'System');
+        // Both platforms run the ladder in utils/platformProcess.ts (killTree).
+        // POSIX: SIGTERM → group TERM (the spawned script is its own group
+        // leader, so the root pid IS the group id; no pgid lookup) → the
+        // historical fixed 2s grace → SIGKILL escalation → per-descendant kills
+        // → pkill sweep → verification. win32: taskkill /T → /T /F →
+        // per-descendant /F → verification. This site keeps its session-log
+        // reporting: the stop acknowledgement above and the outcome below.
+        addSessionLog(
+          sessionId,
+          'info',
+          isWin32
+            ? `[Forcefully terminating process ${pid} and its tree (taskkill)]`
+            : `[Sending SIGTERM to process ${pid} and its group]`,
+          'System'
+        );
 
         void killTree(pid, {
           descendantPids,
           graceMode: 'fixed',
-          graceMs: 2000,
+          // Windows has no catchable signals, so there is nothing for a grace
+          // window to wait for — the ladder is taskkill either way.
+          graceMs: isWin32 ? 0 : 2000,
           posixGroupMode: 'root',
           listDescendants: () => this.getAllDescendantPids(pid),
           onSurvivors: (remainingPids) => {
             addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-            addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
+            addSessionLog(
+              sessionId,
+              'error',
+              isWin32
+                ? `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`
+                : `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`,
+              'System'
+            );
           },
           onError: (error) => console.warn('Error killing script process:', error),
         }).then((stopped) => {
@@ -1316,94 +1321,6 @@ export class SessionManager extends EventEmitter {
         resolve();
       }
     });
-  }
-
-  /**
-   * Windows arm of {@link stopRunningScript}. Windows has no process groups and
-   * no POSIX signals, so the `kill`/`pkill` ladder in the POSIX path is a
-   * silent no-op there; `taskkill /PID <pid> /T /F` is the platform's
-   * whole-tree contract — but its /T walk happens at call time, so each
-   * descendant enumerated up-front is probed and force-killed individually,
-   * reaping children the tree walk can no longer see.
-   *
-   * The "terminated" count reflects only processes a liveness probe caught
-   * still alive after the tree kill whose forced kill then succeeded —
-   * taskkill's exit code alone cannot distinguish "already dead" from "no
-   * permission", so the POSIX path's "already terminated gracefully" counter
-   * is deliberately not replicated here.
-   */
-  private stopRunningScriptWindows(
-    sessionId: string,
-    scriptProcess: ChildProcess,
-    descendantPids: number[],
-    done: () => void
-  ): void {
-    const pid = scriptProcess.pid;
-    if (!pid) {
-      done();
-      return;
-    }
-
-    addSessionLog(sessionId, 'info', `[Forcefully terminating process ${pid} and its tree (taskkill)]`, 'System');
-
-    exec(`taskkill /PID ${pid} /T /F`, { windowsHide: true }, (error) => {
-      if (error) {
-        console.warn(`Error killing process tree ${pid}: ${error.message}`);
-      }
-    });
-
-    let killedCount = 0;
-    let pending = descendantPids.length;
-
-    const verifyAndFinish = (): void => {
-      if (killedCount > 0) {
-        addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
-      }
-      // Check for zombie processes after a short delay
-      setTimeout(() => {
-        const remainingPids = this.getAllDescendantPids(pid);
-        if (remainingPids.length > 0) {
-          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-          addSessionLog(sessionId, 'error', `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`, 'System');
-        } else {
-          addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-        }
-        done();
-      }, 500);
-    };
-
-    if (descendantPids.length === 0) {
-      verifyAndFinish();
-      return;
-    }
-
-    descendantPids.forEach((childPid) => {
-      // Only a process a liveness probe still catches after the tree kill is
-      // counted — and only if the forced kill then succeeded.
-      if (!this.isPidAlive(childPid)) {
-        pending -= 1;
-        if (pending === 0) verifyAndFinish();
-        return;
-      }
-      exec(`taskkill /PID ${childPid} /F`, { windowsHide: true }, (error) => {
-        if (!error) killedCount += 1;
-        pending -= 1;
-        if (pending === 0) verifyAndFinish();
-      });
-    });
-  }
-
-  /**
-   * Signal-0 liveness probe. ESRCH ("no such process") means dead; EPERM
-   * ("exists, no permission to signal") still counts as alive.
-   */
-  private isPidAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
   }
 
   private finishStopScript(sessionId: string): void {
