@@ -92,6 +92,7 @@
  */
 import { spawn } from 'node:child_process';
 import { killPidSync } from '../../../utils/platformProcess';
+import { cmdExeInvocation } from '../../../utils/win32CmdLine';
 import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -1475,10 +1476,12 @@ async function defaultSpawnDetachedShell(args: {
     // defaultKillPid above, so detaching buys nothing there and costs a visible
     // console: DETACHED_PROCESS overrides CREATE_NO_WINDOW for a console child.
     const isWindows = process.platform === 'win32';
-    const child = isWindows
-      ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', args.command], {
+    const cmd = isWindows ? cmdExeInvocation(args.command) : null;
+    const child = cmd
+      ? spawn(cmd.command, cmd.args, {
           stdio: ['ignore', fd, fd],
           windowsHide: true,
+          windowsVerbatimArguments: cmd.windowsVerbatimArguments,
         })
       : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
     child.unref();

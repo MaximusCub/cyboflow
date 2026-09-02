@@ -24,6 +24,8 @@
  */
 import * as fs from 'fs';
 
+import { cmdExeInvocation, quoteForCmd } from './win32CmdLine';
+
 export interface ShellShimProbeInvocation {
   /** Executable to spawn (argv[0]). */
   command: string;
@@ -36,13 +38,6 @@ export interface ShellShimProbeInvocation {
    */
   windowsVerbatimArguments?: boolean;
 }
-
-/**
- * cmd.exe metacharacters that make a token unsafe to interpolate unquoted into
- * a `/c` command line. (`%` is absent: double-quoting does not suppress cmd's
- * %VAR% expansion, so quoting it would add nothing.)
- */
-const CMD_METACHARS = /[ \t&()^<>|"]/;
 
 const SHELL_SHIM_SUFFIX = /\.(cmd|bat)$/i;
 
@@ -86,16 +81,7 @@ export function planWindowsShimVersionProbes(
     plans.push({ command: sibling, args: ['--version'] });
   }
 
-  // Wrap the whole line in one extra quote pair: with /s, cmd strips the FIRST
-  // and LAST quote of the /c string, leaving a correctly quoted executable plus
-  // argv — even when the path has spaces.
-  const needsQuotes = CMD_METACHARS.test(executablePath);
-  const quoted = needsQuotes ? `"${executablePath}"` : executablePath;
-  plans.push({
-    command: process.env.comspec || 'cmd.exe',
-    args: ['/d', '/s', '/c', `"${quoted} --version"`],
-    windowsVerbatimArguments: true,
-  });
+  plans.push(cmdExeInvocation(`${quoteForCmd(executablePath)} --version`));
 
   return plans;
 }

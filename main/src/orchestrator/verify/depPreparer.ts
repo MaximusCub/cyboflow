@@ -86,6 +86,7 @@ import { promisify } from 'node:util';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
+import { cmdCommandLine, cmdExeInvocation } from '../../utils/win32CmdLine';
 
 const execFileAsync = promisify(execFile);
 
@@ -233,13 +234,14 @@ export const defaultDepExec: DepExec = async (cmd, args, opts) => {
   // (EINVAL hardening). cmd.exe resolves the shim and `windowsHide` (set on
   // every exec below) keeps it invisible.
   if (process.platform === 'win32' && cmd === 'npx') {
-    const comspec = process.env.comspec || 'cmd.exe';
-    const result = await execFileAsync(comspec, ['/d', '/s', '/c', 'npx', ...args], {
+    const cmd = cmdExeInvocation(cmdCommandLine(['npx', ...args]));
+    const result = await execFileAsync(cmd.command, cmd.args, {
       cwd: opts.cwd,
       encoding: 'utf8',
       timeout: opts.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      windowsVerbatimArguments: cmd.windowsVerbatimArguments,
     });
     return { code: 0, out: `${result.stdout}${result.stderr}` };
   }

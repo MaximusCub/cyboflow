@@ -42,6 +42,7 @@ import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
 import { resolveGitCommand } from '../../utils/gitExeFinder';
+import { cmdCommandLine, cmdExeInvocation } from '../../utils/win32CmdLine';
 import {
   type VerificationTaskV1,
   type VerificationReportV1,
@@ -1684,10 +1685,16 @@ const defaultStopDriver = async (
     // Node on Windows refuses to spawn .cmd/.bat files directly (EINVAL), so
     // the wrapper is executed through cmd.exe there — the same interpreter the
     // agent's own shell uses for $VERIFY_DRIVER.
-    const [file, args] = process.platform === 'win32'
-      ? [process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', driverScriptPath, 'stop']]
-      : [driverScriptPath, ['stop']];
-    await execFileAsync(file, args, { env: { ...process.env, ...env }, timeout: 20_000, windowsHide: true });
+    const cmd = process.platform === 'win32'
+      ? cmdExeInvocation(cmdCommandLine([driverScriptPath, 'stop']))
+      : null;
+    const [file, args] = cmd ? [cmd.command, cmd.args] : [driverScriptPath, ['stop']];
+    await execFileAsync(file, args, {
+      env: { ...process.env, ...env },
+      timeout: 20_000,
+      windowsHide: true,
+      windowsVerbatimArguments: cmd?.windowsVerbatimArguments,
+    });
   } catch {
     // best-effort — the reaper + port probe are the real backstop.
   }
