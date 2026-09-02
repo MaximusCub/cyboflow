@@ -17,7 +17,12 @@
  */
 import { Menu, type MenuItemConstructorOptions } from 'electron';
 
-/** The hand-built View submenu — the one deliberate deviation from stock. */
+/** The hand-built View submenu — the one deliberate deviation from stock.
+ * NOTE: the two overridden accelerators below are RESERVED chords — a user
+ * shortcut remap onto them would be swallowed by the menu before the renderer
+ * ever sees the keydown, so `isReservedKeybinding`
+ * (shared/types/keyboardShortcuts.ts) rejects them at bind time. Keep the two
+ * in sync. */
 function buildViewSubmenu(): MenuItemConstructorOptions[] {
   return [
     // Stock default accelerator is 'CmdOrCtrl+R' — overridden so plain Cmd+R

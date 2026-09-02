@@ -169,9 +169,26 @@ export function isValidKeybinding(v: unknown): v is string {
 }
 
 /**
+ * True for a binding the custom application menu reserves for itself
+ * (main/src/menu.ts): reload lives on Shift+Cmd+R ('mod+shift+r') and
+ * forceReload on Alt+Cmd+R ('mod+alt+r'). Electron delivers a menu
+ * accelerator's keydown to the MENU, never the renderer, so a remap onto
+ * either chord would be silently swallowed — it must be rejected at bind
+ * time, not discovered by a dead shortcut. Compared on the PARSED shape so
+ * token order ('mod+shift+r' vs a hand-edited 'shift+mod+r') can't dodge it.
+ * If menu.ts's accelerators ever change, change this predicate with them.
+ */
+export function isReservedKeybinding(v: string): boolean {
+  const parsed = parseKeybinding(v);
+  if (parsed === null) return false;
+  return parsed.mod && parsed.key === 'r' && parsed.shift !== parsed.alt;
+}
+
+/**
  * Runtime guard: true only for a binding that is BOTH well-formed AND safe to
  * bind globally — i.e. it carries the 'mod' token (Cmd on mac, Ctrl
- * elsewhere).
+ * elsewhere) and is not {@link isReservedKeybinding reserved} by the
+ * application menu.
  *
  * THE guard every writer must use ({@link resolveShortcut}, the config:update
  * boundary, the Settings recorder); {@link isValidKeybinding} answers only
@@ -187,7 +204,7 @@ export function isValidKeybinding(v: unknown): v is string {
 export function isBindableKeybinding(v: unknown): v is string {
   if (typeof v !== 'string') return false;
   const parsed = parseKeybinding(v);
-  return parsed !== null && parsed.mod;
+  return parsed !== null && parsed.mod && !isReservedKeybinding(v);
 }
 
 /**

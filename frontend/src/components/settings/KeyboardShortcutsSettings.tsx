@@ -7,6 +7,7 @@ import {
   SHORTCUT_ACTIONS,
   formatKeybinding,
   isBindableKeybinding,
+  isReservedKeybinding,
   resolveShortcut,
   type KeyboardShortcutOverrides,
   type ShortcutAction,
@@ -47,19 +48,20 @@ export function KeyboardShortcutsSettings({
 }: KeyboardShortcutsSettingsProps): React.JSX.Element {
   // Which action's row is currently capturing a keystroke, if any.
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);
-  // Set when the recorder rejected a chord for lacking 'mod' — drives the
-  // inline "needs ⌘/Ctrl" hint while recording continues.
-  const [needsModHint, setNeedsModHint] = useState(false);
+  // Set when the recorder rejected a chord — 'mod' (lacks ⌘/Ctrl) or
+  // 'reserved' (an application-menu accelerator, see menu.ts) — drives the
+  // inline hint while recording continues.
+  const [rejectHint, setRejectHint] = useState<'mod' | 'reserved' | null>(null);
   const platform = getShortcutPlatform();
 
   const startRecording = (action: ShortcutAction) => {
     setRecordingAction(action);
-    setNeedsModHint(false);
+    setRejectHint(null);
   };
 
   const stopRecording = () => {
     setRecordingAction(null);
-    setNeedsModHint(false);
+    setRejectHint(null);
   };
 
   const effective = {} as Record<ShortcutAction, string>;
@@ -126,12 +128,14 @@ export function KeyboardShortcutsSettings({
     tokens.push(e.key.toLowerCase());
     const binding = tokens.join('+');
 
-    // Reject anything not safe to bind globally — in practice a chord with no
-    // Cmd/Ctrl (a bare letter, Shift+letter, Alt+letter), which the engine would
-    // happily swallow app-wide and make that character untypeable. Stay in
-    // recording mode and show the hint rather than committing or cancelling.
+    // Reject anything not safe to bind globally: a chord with no Cmd/Ctrl (the
+    // engine would swallow it app-wide and make that character untypeable), or
+    // one of the application menu's reserved reload accelerators (⇧⌘R / ⌥⌘R —
+    // Electron delivers those to the MENU, so the remap would silently never
+    // fire). Stay in recording mode and show the specific hint rather than
+    // committing or cancelling.
     if (!isBindableKeybinding(binding)) {
-      setNeedsModHint(true);
+      setRejectHint(isReservedKeybinding(binding) ? 'reserved' : 'mod');
       return;
     }
 
@@ -184,9 +188,11 @@ export function KeyboardShortcutsSettings({
                   }`}
                 >
                   {recording
-                    ? needsModHint
+                    ? rejectHint === 'mod'
                       ? `Needs ${platform === 'mac' ? '⌘' : 'Ctrl'}…`
-                      : 'Press a key…'
+                      : rejectHint === 'reserved'
+                        ? 'Reserved (reload)…'
+                        : 'Press a key…'
                     : formatKeybinding(binding, platform)}
                 </button>
                 {overridden && (

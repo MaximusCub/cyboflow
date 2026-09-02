@@ -105,7 +105,7 @@ export function createConfigOps(
             if (!isBindableKeybinding(value)) {
               return {
                 success: false,
-                error: `Invalid keyboardShortcuts.${action}: expected a keybinding including the 'mod' modifier`,
+                error: `Invalid keyboardShortcuts.${action}: expected a keybinding including the 'mod' modifier and not reserved by the application menu`,
               };
             }
             clean[action] = value;

@@ -23,6 +23,7 @@ import {
   parseKeybinding,
   isValidKeybinding,
   isBindableKeybinding,
+  isReservedKeybinding,
   eventMatchesBinding,
   formatKeybinding,
   resolveShortcut,
@@ -192,6 +193,24 @@ describe('isBindableKeybinding', () => {
     expect(isBindableKeybinding('mod+')).toBe(false);
     expect(isBindableKeybinding('Mod+N')).toBe(false);
     expect(isBindableKeybinding('')).toBe(false);
+  });
+
+  it('REJECTS the application menu\'s reserved reload accelerators (menu.ts)', () => {
+    // ⇧⌘R = reload, ⌥⌘R = forceReload — Electron delivers those keydowns to
+    // the menu, so a remap onto them would silently never fire.
+    expect(isBindableKeybinding('mod+shift+r')).toBe(false);
+    expect(isBindableKeybinding('mod+alt+r')).toBe(false);
+    expect(isReservedKeybinding('mod+shift+r')).toBe(true);
+    expect(isReservedKeybinding('mod+alt+r')).toBe(true);
+  });
+
+  it('reserved detection is on the parsed shape, not the token order or nearby chords', () => {
+    expect(isReservedKeybinding('shift+mod+r')).toBe(true); // hand-edited order
+    expect(isReservedKeybinding('mod+r')).toBe(false); // the review-queue default
+    expect(isReservedKeybinding('mod+shift+alt+r')).toBe(false); // both extras ≠ either accelerator
+    expect(isReservedKeybinding('mod+shift+t')).toBe(false);
+    expect(isBindableKeybinding('mod+r')).toBe(true);
+    expect(isBindableKeybinding('mod+shift+alt+r')).toBe(true);
   });
 
   it('rejects non-string values without throwing', () => {
