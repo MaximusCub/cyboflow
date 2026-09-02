@@ -1302,6 +1302,12 @@ export class SessionManager extends EventEmitter {
 
       const stopped = await killTree(pid, {
         descendantPids,
+        // The ladder's own progress, in the bracketed form the session log
+        // uses. These lines are what the user watches while a stop runs.
+        logger: {
+          info: (message) => addSessionLog(sessionId, 'info', `[${message}]`, 'System'),
+          warn: (message) => addSessionLog(sessionId, 'warn', `[${message}]`, 'System'),
+        },
         graceMode: 'fixed',
         // Windows has no catchable signals, so there is nothing for a grace
         // window to wait for — the ladder is taskkill either way.

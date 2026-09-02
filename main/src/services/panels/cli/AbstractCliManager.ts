@@ -1139,6 +1139,11 @@ export abstract class AbstractCliManager extends EventEmitter {
     this.logger?.info(`[${this.getCliToolName()}] Found ${descendantPids.length} descendant processes for PID ${pid} in session ${sessionId}`);
 
     const success = await killTree(pid, {
+      logger: {
+        info: (message) => this.logger?.info(`[${this.getCliToolName()}] ${message}`),
+        warn: (message, error) =>
+          this.logger?.warn(`[${this.getCliToolName()}] ${message}`, error as Error),
+      },
       descendantPids,
       execCommand: (command) => this.execAsync(command),
       // Grace: win32 keeps the bounded-poll defaults (return the moment the

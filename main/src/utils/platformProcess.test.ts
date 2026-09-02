@@ -204,7 +204,7 @@ describe('killTree POSIX — group resolution shapes', () => {
 
     // The lookup failure warned (fail-soft) and the ladder proceeded with the
     // root pid standing in for the group id — no group-member sweep ran.
-    expect(warnSpy).toHaveBeenCalledWith('Error getting process group:', expect.any(Error));
+    expect(warnSpy).toHaveBeenCalledWith('Could not resolve the process group', expect.any(Error));
     expect(execCommand).toHaveBeenCalledWith('kill -TERM -4242');
     expect(execCommand).toHaveBeenCalledWith('kill -9 -4242');
     const sweepCalls = execCommand.mock.calls.filter(([cmd]) => cmd.startsWith('ps -o pid= -g'));
@@ -274,6 +274,78 @@ describe('killTree win32 — the taskkill ladder', () => {
     expect(onSurvivors).not.toHaveBeenCalled();
     expect(stopped).toBe(true);
     expect(verificationCalls).toBe(2);
+  });
+});
+
+describe('killTree — the injected logger', () => {
+  it('reports each ladder step to the site, so a session log can show it', async () => {
+    const info: string[] = [];
+    const warn: string[] = [];
+
+    await killTree(4242, {
+      ...baseOpts(),
+      graceMode: 'fixed',
+      graceMs: 1,
+      posixGroupMode: 'root',
+      logger: { info: (m) => info.push(m), warn: (m) => warn.push(m) },
+      execCommand: () => Promise.resolve({ stdout: '' }),
+    });
+
+    expect(info).toEqual([
+      'Waiting 1ms for graceful shutdown',
+      'Grace period expired, using forceful termination',
+      'Sent SIGKILL to process 4242',
+      'Sent SIGKILL to process group 4242',
+    ]);
+    expect(warn).toEqual([]);
+  });
+
+  it('sends a failed group signal to the site rather than the console', async () => {
+    const warn = vi.fn<(message: string, error?: unknown) => void>();
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await killTree(4242, {
+        ...baseOpts(),
+        graceMode: 'fixed',
+        graceMs: 1,
+        posixGroupMode: 'root',
+        logger: { warn },
+        execCommand: (command) =>
+          command.startsWith('kill -9 -')
+            ? Promise.reject(new Error('no such process group'))
+            : Promise.resolve({ stdout: '' }),
+      });
+
+      expect(warn).toHaveBeenCalledWith(
+        'Could not send SIGKILL to process group 4242',
+        expect.any(Error),
+      );
+      expect(consoleWarn).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it('falls back to the console when no logger is injected', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      await killTree(4242, {
+        ...baseOpts(),
+        graceMode: 'fixed',
+        graceMs: 1,
+        posixGroupMode: 'root',
+        execCommand: (command) =>
+          command.startsWith('kill -9 -')
+            ? Promise.reject(new Error('no such process group'))
+            : Promise.resolve({ stdout: '' }),
+      });
+
+      expect(consoleWarn).toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
   });
 });
 

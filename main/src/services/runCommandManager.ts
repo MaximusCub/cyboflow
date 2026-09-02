@@ -278,6 +278,10 @@ export class RunCommandManager extends EventEmitter {
 
     return killTree(pid, {
       descendantPids,
+      logger: {
+        info: (message) => this.logger?.info(`[${commandName}] ${message}`),
+        warn: (message, error) => this.logger?.warn(`[${commandName}] ${message}`, error as Error),
+      },
       execCommand: (command) => this.execAsync(command),
       // This ladder historically slept the grace window unconditionally (no
       // probe) on both platforms — preserved exactly via the fixed grace mode.

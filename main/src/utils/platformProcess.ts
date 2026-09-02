@@ -449,6 +449,22 @@ export function signalTree(
   }
 }
 
+/**
+ * Where the ladder's own progress and failures go.
+ *
+ * Each call site has an identity the shared code cannot know: a `[toolName]`
+ * prefix in the CLI managers, a session log line the user reads in the app.
+ * The ladder emits plain sentences and the site formats and routes them.
+ * Without one, failures fall back to the console, as they did before the
+ * ladders were shared.
+ */
+export interface KillTreeLogger {
+  /** A step worth showing: grace started, escalation, a signal delivered. */
+  info?(message: string): void;
+  /** A step that did not work. The ladder continues regardless. */
+  warn?(message: string, error?: unknown): void;
+}
+
 export interface KillTreeOptions extends PlatformProcessOptions {
   /**
    * Up-front enumerated descendants to force-kill individually after the tree
@@ -513,6 +529,11 @@ export interface KillTreeOptions extends PlatformProcessOptions {
   onSurvivors?: (remainingPids: number[]) => void | Promise<void>;
   /** Called when the graceful `taskkill /T` attempt fails (expected for console apps). */
   onGracefulError?: (error: unknown) => void;
+  /**
+   * Progress and failure reporting for the ladder itself. See
+   * {@link KillTreeLogger}; defaults to the console.
+   */
+  logger?: KillTreeLogger;
   /** Called when the ladder itself throws unexpectedly. Defaults to console.error. */
   onError?: (error: unknown) => void;
 }
@@ -558,6 +579,11 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
   const fixedGrace = (opts.graceMode ?? 'poll') === 'fixed';
   const posixGroupMode = opts.posixGroupMode ?? 'lookup';
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive;
+  const log = {
+    info: (message: string) => opts.logger?.info?.(message),
+    warn: (message: string, error?: unknown) =>
+      opts.logger?.warn ? opts.logger.warn(message, error) : console.warn(message, error),
+  };
   // Probe contract: a throw means "could not tell" — count as alive so a poll
   // waits out its window instead of short-circuiting to the forceful kill.
   const probeAlive = (probePid: number): boolean => {
@@ -599,8 +625,9 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       // Forceful: /F kills the tree immediately.
       try {
         await execCommand(`taskkill /PID ${pid} /T /F`);
+        log.info(`Force-killed the tree under process ${pid}`);
       } catch (error) {
-        // Process might already be dead
+        log.info(`Process ${pid} had already terminated`);
       }
       // taskkill /T walks the PPID chain at call time, so a shell that died
       // between the graceful and /F calls — or a pid that was reused in that
@@ -641,7 +668,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
             }
           }
         } catch (error) {
-          console.warn('Error getting process group:', error);
+          log.warn('Could not resolve the process group', error);
         }
       }
 
@@ -649,7 +676,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       try {
         sendSignal(pid, 'SIGTERM');
       } catch (error) {
-        console.warn('SIGTERM failed:', error);
+        log.warn('SIGTERM failed', error);
       }
 
       if (posixGroupMode === 'lookup') {
@@ -670,9 +697,12 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       try {
         await execCommand(`kill -TERM -${pgid}`);
       } catch (error) {
-        console.warn(`Error sending SIGTERM to process group: ${error}`);
+        log.warn(`Could not send SIGTERM to process group ${pgid}`, error);
       }
 
+      if (graceMs > 0) {
+        log.info(`Waiting ${graceMs}ms for graceful shutdown`);
+      }
       if (fixedGrace) {
         await sleep(graceMs);
       } else {
@@ -689,17 +719,20 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       }
 
       // Now forcefully kill the main process
+      log.info('Grace period expired, using forceful termination');
       try {
         sendSignal(pid, 'SIGKILL');
+        log.info(`Sent SIGKILL to process ${pid}`);
       } catch (error) {
-        // Process might already be dead
+        log.info(`Process ${pid} had already terminated`);
       }
 
       // Kill the process group with SIGKILL
       try {
         await execCommand(`kill -9 -${pgid}`);
+        log.info(`Sent SIGKILL to process group ${pgid}`);
       } catch (error) {
-        console.warn(`Error sending SIGKILL to process group: ${error}`);
+        log.warn(`Could not send SIGKILL to process group ${pgid}`, error);
       }
 
       // Kill all known descendants individually to be sure
@@ -741,7 +774,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
       if (opts.onSurvivors) {
         await opts.onSurvivors(remainingPids);
       } else {
-        console.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
+        log.warn(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
       }
       return false;
     }
@@ -750,7 +783,7 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
     if (opts.onError) {
       opts.onError(error);
     } else {
-      console.error('Error in killProcessTree:', error);
+      log.warn('Error in killTree', error);
     }
     return false;
   }
