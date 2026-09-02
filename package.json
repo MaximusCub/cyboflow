@@ -97,7 +97,7 @@
     "test:headed": "playwright test --headed",
     "test:build": "node build/afterSign.test.js && node build/verifyArtifact.test.js && node scripts/configure-build.test.js",
     "verify:schema": "node scripts/verify-schema-parity.js",
-    "test:unit": "node scripts/ensure-sqlite-abi.mjs host && pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && node scripts/__tests__/ensure-sqlite-abi.test.js && pnpm run test:build",
+    "test:unit": "node scripts/ensure-sqlite-abi.mjs host && pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && node scripts/__tests__/ensure-sqlite-abi.test.js && node scripts/__tests__/apply-pty-napi-prebuilds.test.js && pnpm run test:build",
     "test:gate": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.gate.ts",
     "test:integration": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.integration.ts"
   },

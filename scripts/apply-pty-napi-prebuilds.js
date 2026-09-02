@@ -15,14 +15,16 @@
  *     cleans build/Release on POSIX, leaving nothing under Electron.
  *
  * This hook copies the installed binary to both names. Runs from the root
- * postinstall before `electron-builder install-app-deps`. Fail-soft: if
- * anything here cannot run, electron-rebuild behaves exactly as it would
- * without this script.
+ * postinstall before `electron-builder install-app-deps`. A missing binary is
+ * skipped quietly, but a binary that cannot be placed exits non-zero: leaving
+ * it unplaced sends electron-rebuild down a node-gyp source build that this
+ * package cannot satisfy, and the error it prints there names neither this
+ * script nor the real cause.
  */
 const fs = require('fs');
 const path = require('path');
 
-const STORE = path.join(__dirname, '..', 'node_modules', '.pnpm');
+const STORE = process.env.PTY_NAPI_STORE_DIR || path.join(__dirname, '..', 'node_modules', '.pnpm');
 const PKG_PREFIX = '@homebridge+node-pty-prebuilt-multiarch@';
 
 function storePackageDirs() {
@@ -58,23 +60,32 @@ function findSourceBinary(pkgDir, prebuildsDir) {
   return fs.existsSync(buildRelease) ? buildRelease : null;
 }
 
-try {
-  for (const pkgDir of storePackageDirs()) {
-    const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-    // The prebuildify detector only consults modules that declare the tool.
-    if (!pkg.devDependencies || !pkg.devDependencies.prebuildify) continue;
-    const archDir = process.arch === 'armv7l' ? 'arm' : process.arch;
-    const prebuildsDir = path.join(pkgDir, 'prebuilds', `${process.platform}-${archDir}`);
-    const source = findSourceBinary(pkgDir, prebuildsDir);
-    if (!source) {
-      console.warn('[apply-pty-napi-prebuilds] no prebuilt pty binary found — skipping');
-      continue;
-    }
-    fs.mkdirSync(path.dirname(prebuildsDir), { recursive: true });
-    // arm64 prebuilds use the `armv8` filename suffix, matching
-    // @electron/rebuild's prebuildify extension rule.
-    const napiName = process.arch === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node';
-    const napiDest = path.join(prebuildsDir, napiName);
+let failed = false;
+
+for (const pkgDir of storePackageDirs()) {
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+  } catch {
+    continue;
+  }
+  // The prebuildify detector only consults modules that declare the tool.
+  if (!pkg.devDependencies || !pkg.devDependencies.prebuildify) continue;
+  const archDir = process.arch === 'armv7l' ? 'arm' : process.arch;
+  const prebuildsDir = path.join(pkgDir, 'prebuilds', `${process.platform}-${archDir}`);
+  const source = findSourceBinary(pkgDir, prebuildsDir);
+  if (!source) {
+    console.warn('[apply-pty-napi-prebuilds] no prebuilt pty binary found — skipping');
+    continue;
+  }
+  // arm64 prebuilds use the `armv8` filename suffix, matching
+  // @electron/rebuild's prebuildify extension rule.
+  const napiName = process.arch === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node';
+  const napiDest = path.join(prebuildsDir, napiName);
+  try {
+    // Platforms the package ships no prebuild for — darwin is one — have no
+    // `<platform>-<arch>` directory at all, so create the leaf, not its parent.
+    fs.mkdirSync(prebuildsDir, { recursive: true });
     fs.copyFileSync(source, napiDest);
     // The runtime loader's POSIX fallback: build/Release/pty.node.
     const buildRelease = path.join(pkgDir, 'build', 'Release', 'pty.node');
@@ -82,9 +93,15 @@ try {
       fs.mkdirSync(path.dirname(buildRelease), { recursive: true });
       fs.copyFileSync(source, buildRelease);
     }
-    console.log(`[apply-pty-napi-prebuilds] exposed ${path.relative(pkgDir, napiDest)}`);
+  } catch (error) {
+    console.error(
+      `[apply-pty-napi-prebuilds] could not write ${napiDest}:`,
+      error && error.message,
+    );
+    failed = true;
+    continue;
   }
-} catch (error) {
-  console.warn('[apply-pty-napi-prebuilds] skipped:', error && error.message);
+  console.log(`[apply-pty-napi-prebuilds] exposed ${path.relative(pkgDir, napiDest)}`);
 }
-process.exit(0);
+
+process.exit(failed ? 1 : 0);
