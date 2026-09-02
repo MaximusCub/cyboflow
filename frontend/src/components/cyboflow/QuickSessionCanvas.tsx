@@ -34,7 +34,11 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../utils/onboarding';
+import {
+  ONBOARDING_ANCHOR_ATTR,
+  ONBOARDING_ANCHORS,
+  ONBOARDING_SHIP_CHIP_STEP,
+} from '../../utils/onboarding';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import {
   useDynamicWorkflowStore,
@@ -268,12 +272,17 @@ export function QuickSessionCanvas({
     forceNew: isRawCheckout,
   });
   // The /ship chip's accent fires only while its tour coachmark points at it.
-  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 10);
+  const onboardingShipStep = useOnboardingStore(
+    (s) => s.status === 'active' && s.step === ONBOARDING_SHIP_CHIP_STEP,
+  );
   // The idea-picker opened DURING the tour's /ship step (clicking the chip parks
   // 'pending', so accept either). First-run users have no backlog, so the picker
   // opens on "New idea" with the what's-an-idea explainer.
   const onboardingIdeaGate = useOnboardingStore(
-    (s) => s.hydrated && (s.status === 'active' || s.status === 'pending') && s.step === 10,
+    (s) =>
+      s.hydrated &&
+      (s.status === 'active' || s.status === 'pending') &&
+      s.step === ONBOARDING_SHIP_CHIP_STEP,
   );
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
