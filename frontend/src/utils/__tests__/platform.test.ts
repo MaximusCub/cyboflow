@@ -7,7 +7,7 @@
  * then userAgent (last-resort fallback), plus the SSR "no navigator" guard.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { isApplePlatform, kbdHint } from '../platform';
+import { isApplePlatform, isWindowsPlatform, kbdHint } from '../platform';
 
 type NavStub = {
   userAgentData?: { platform?: string };
@@ -21,6 +21,37 @@ function stubNavigator(nav: NavStub | undefined): void {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('isWindowsPlatform', () => {
+  it('returns false when navigator is absent (SSR-safe)', () => {
+    stubNavigator(undefined);
+    expect(isWindowsPlatform()).toBe(false);
+  });
+
+  it('recognises Windows through each navigator surface', () => {
+    stubNavigator({ userAgentData: { platform: 'Windows' } });
+    expect(isWindowsPlatform()).toBe(true);
+
+    stubNavigator({ platform: 'Win32' });
+    expect(isWindowsPlatform()).toBe(true);
+
+    stubNavigator({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' });
+    expect(isWindowsPlatform()).toBe(true);
+  });
+
+  it('is false on macOS and Linux', () => {
+    stubNavigator({ userAgentData: { platform: 'macOS' }, platform: 'MacIntel' });
+    expect(isWindowsPlatform()).toBe(false);
+
+    stubNavigator({ platform: 'Linux x86_64', userAgent: 'Mozilla/5.0 (X11; Linux x86_64)' });
+    expect(isWindowsPlatform()).toBe(false);
+  });
+
+  it('is not fooled by "Darwin", which contains "win"', () => {
+    stubNavigator({ platform: 'Darwin', userAgent: 'node/Darwin' });
+    expect(isWindowsPlatform()).toBe(false);
+  });
 });
 
 describe('isApplePlatform', () => {

@@ -26,6 +26,21 @@ export function isApplePlatform(): boolean {
   );
 }
 
+/**
+ * True on Windows. Used where the platform changes behaviour rather than copy:
+ * a backslash separates path segments here and is a legal filename character
+ * everywhere else. Never matches "Darwin": the platform probes are anchored.
+ */
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const nav = navigator as Navigator & { userAgentData?: NavigatorUAData };
+  return (
+    /^windows$/i.test(nav.userAgentData?.platform ?? '') ||
+    /^win/i.test(nav.platform ?? '') ||
+    /windows/i.test(nav.userAgent ?? '')
+  );
+}
+
 /** Which modifiers a hinted shortcut carries, beyond the platform mod key. */
 export type KbdCombo = 'mod' | 'modShift';
 
