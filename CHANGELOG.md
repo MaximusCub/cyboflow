@@ -23,6 +23,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Boot opens the landing page again.** The rail's auto-select pass navigated to the first project, which since the project-overview feature also opened the full Project page — and because the navigation store is not persisted, this ran at every launch, making it impossible to boot to LandingHome whenever any project existed. Selection no longer implies navigation.
 - **The updater runs over Node's HTTP stack**, with `electron.net` as a fallback that now recovers by rebinding its poisoned session.
 - Systemic environment conditions are no longer reported as app errors, and minidumps are dropped for deliberately terminated child processes.
 - A too-old-CLI model rejection is treated as model-unavailable rather than a hard failure.
