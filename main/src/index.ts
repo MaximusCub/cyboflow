@@ -6841,20 +6841,13 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Session cleanup complete');
   }
 
-  // Stop orchestrator (drains run queues). A queue held by a session-lifetime
-  // execute() task (a live panel awaiting user input, or a restored run
-  // awaiting a human gate) gets one chance to settle through its own
-  // lifecycle: cancelRun aborts the run's spawner and transitions the run to
-  // 'canceled', which settles the queued task and lets the drain complete.
+  // Stop orchestrator (drains run queues). The drain is bounded: a queue held
+  // by a session-lifetime execute() task is abandoned rather than waited out,
+  // so the teardown steps below still run. The run keeps its status and boot
+  // recovery picks it up on the next launch.
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');
-    await orchestrator.stop((busyRunId) => {
-      if (runExecutor?.hasActiveExecution(busyRunId)) {
-        console.log(`[Main] Quit drain: canceling busy run ${busyRunId} to settle its queue`);
-        return runExecutor.cancelRun(busyRunId);
-      }
-      return undefined;
-    });
+    await orchestrator.stop();
     console.log('[Main] Orchestrator stopped');
   }
 

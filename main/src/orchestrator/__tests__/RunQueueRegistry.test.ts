@@ -211,4 +211,30 @@ describe('RunQueueRegistry', () => {
     // Registry is cleared after drainAll
     expect(registry.stats().runs).toBe(0);
   });
+
+  // (e) a queue that never settles is abandoned, not waited out
+  it('drainAll() gives up on a busy queue at the cap and leaves the task running', async () => {
+    const registry = new RunQueueRegistry();
+
+    const neverSettles = deferred();
+    let taskFinished = false;
+
+    const q = registry.getOrCreate('run-R');
+    void q.add(async () => {
+      await neverSettles.promise;
+      taskFinished = true;
+    });
+
+    // The real cap is seconds; the behaviour under test is the same at 10ms.
+    await registry.drainAll({ capMs: 10 });
+
+    expect(taskFinished).toBe(false);
+    expect(registry.stats().runs).toBe(0);
+
+    // Nothing cancelled the task — the run keeps whatever status it holds, so
+    // boot recovery still sees it as resumable.
+    neverSettles.resolve();
+    await q.onIdle();
+    expect(taskFinished).toBe(true);
+  });
 });

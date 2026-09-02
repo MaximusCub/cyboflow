@@ -15,6 +15,14 @@
  */
 import PQueue from 'p-queue';
 
+/**
+ * How long drainAll waits for one busy queue. Ordinary state mutations are
+ * sub-second database writes, so this only ever expires on a task that would
+ * not have settled at all. It sits inside the quit-drain ceiling in
+ * services/quitDrain.ts, leaving room for the teardown steps that follow.
+ */
+const DRAIN_CAP_MS = 5_000;
+
 export class RunQueueRegistry {
   private queues = new Map<string, PQueue>();
 
@@ -63,37 +71,37 @@ export class RunQueueRegistry {
    * Waits for every tracked queue to become idle, then clears the registry.
    * Intended for clean shutdown.
    *
-   * `settleBusy` (optional, from app shutdown): called once per queue that is
-   * still busy after the grace window — the app's chance to settle the task
-   * through its own lifecycle (at quit: cancel the run). Queues that stay
-   * busy after the settle attempt get a final bounded wait and are then
-   * dropped with an attributed log line.
+   * The wait is bounded. A queue can be held by a task that spans a whole
+   * session — a live panel awaiting input, or a run parked at a human gate —
+   * and that task never settles on its own. An unbounded wait on one of those
+   * burned the whole quit budget, so the steps after the drain (database
+   * close, MCP stop) never ran.
+   *
+   * A queue still busy at the cap is logged and abandoned. Its run row keeps
+   * whatever non-terminal status it holds, which is what boot recovery looks
+   * for, so the run resumes on the next launch.
    */
-  async drainAll(settleBusy?: (runId: string) => Promise<void> | void): Promise<void> {
-    const GRACE_MS = 1_500;
-    const FINAL_CAP_MS = 5_000;
+  async drainAll(opts?: { capMs?: number }): Promise<void> {
+    const capMs = opts?.capMs ?? DRAIN_CAP_MS;
     const entries = [...this.queues.entries()];
     await Promise.allSettled(
       entries.map(async ([runId, q]) => {
-        const settledInGrace = await Promise.race([
-          q.onIdle().then(() => true).catch(() => false),
-          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), GRACE_MS)),
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settled = await Promise.race([
+          q
+            .onIdle()
+            .then(() => true)
+            .catch(() => false),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), capMs);
+          }),
         ]);
-        if (settledInGrace) return;
-
-        // Grace expired with a task still running. Give the app one chance to
-        // settle it through its lifecycle (at quit: cancel the run), then wait
-        // a final bounded cap — a task that still refuses to settle is
-        // attributed and abandoned rather than hanging shutdown.
-        try {
-          await settleBusy?.(runId);
-        } catch (err) {
-          console.error(`[RunQueueRegistry] settle for ${runId} threw:`, err);
+        if (timer) clearTimeout(timer);
+        if (!settled) {
+          console.warn(
+            `[RunQueueRegistry] run ${runId} was still busy at shutdown — abandoning its queue`,
+          );
         }
-        await Promise.race([
-          q.onIdle().catch(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, FINAL_CAP_MS)),
-        ]);
       }),
     );
     this.queues.clear();
