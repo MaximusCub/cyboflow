@@ -388,26 +388,34 @@ export function clearShellPathCache(): void {
 }
 
 /**
- * Find an executable in the shell PATH
+ * Find an executable in the shell PATH.
+ *
+ * `platform` and `searchPath` are injectable so the Windows candidate order
+ * can be tested from any host. The separator stays the host's: the PATH string
+ * is produced by the machine this runs on, whatever platform is injected.
  */
-export function findExecutableInPath(executable: string): string | null {
+export function findExecutableInPath(
+  executable: string,
+  platform: NodeJS.Platform = process.platform,
+  searchPath: string = getShellPath(),
+): string | null {
   console.log(`[ShellPath] Finding executable: ${executable}`);
-  const shellPath = getShellPath();
   const pathSep = getPathSeparator();
-  const paths = shellPath.split(pathSep);
+  const paths = searchPath.split(pathSep);
 
   console.log(`[ShellPath] Searching in ${paths.length} PATH directories`);
 
   let searchedPaths = 0;
   for (const dir of paths) {
     searchedPaths++;
-    // On Windows, executables carry suffixes (`node` means node.exe, and npm
-    // installs .cmd shims) — probe the bare name plus those suffixes; POSIX
-    // probes the bare name only.
-    const candidates = [executable];
-    if (process.platform === 'win32') {
-      candidates.push(`${executable}.exe`, `${executable}.cmd`);
-    }
+    // Windows order matters. npm's cmd-shim writes an extensionless `#!/bin/sh`
+    // script beside `<name>.cmd`, and fs.accessSync(X_OK) on Windows only
+    // checks that a file exists — so a bare-name probe returns that sh script,
+    // which Windows cannot run. Runnable suffixes first, bare name last.
+    const candidates =
+      platform === 'win32'
+        ? [`${executable}.exe`, `${executable}.cmd`, `${executable}.bat`, executable]
+        : [executable];
     for (const candidate of candidates) {
       const fullPath = path.join(dir, candidate);
       try {
