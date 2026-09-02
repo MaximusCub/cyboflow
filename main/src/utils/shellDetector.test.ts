@@ -118,4 +118,44 @@ describe('ShellDetector.detectWindowsShell (win32)', () => {
     expect(shell.name).toBe('cmd');
     expect(shell.args).toEqual([]);
   });
+
+  it('does not hand PowerShell flags to the cmd.exe last resort', () => {
+    process.env.PATH = STUB_DIR;
+    const { shell, args } = ShellDetector.getShellCommandArgs('echo hi');
+    expect(shell).toBe(
+      path.join('/SystemRoot', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    );
+    expect(args).toContain('-EncodedCommand');
+  });
+});
+
+describe('ShellDetector.commandShellPath', () => {
+  // Runs on any host: the interactive fallback can be cmd.exe, which
+  // understands none of the -EncodedCommand flags and cannot run the
+  // PowerShell dialect buildCommandString emits.
+  const savedRoot = process.env.SystemRoot;
+
+  beforeEach(() => {
+    process.env.SystemRoot = '/SystemRoot';
+  });
+
+  afterEach(() => {
+    if (savedRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = savedRoot;
+  });
+
+  it('redirects the cmd.exe fallback to the system PowerShell', () => {
+    expect(
+      ShellDetector.commandShellPath({ name: 'cmd', path: 'C:\\Windows\\System32\\cmd.exe' })
+    ).toBe(path.join('/SystemRoot', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
+  });
+
+  it('leaves a detected PowerShell alone', () => {
+    expect(ShellDetector.commandShellPath({ name: 'pwsh', path: '/tools/pwsh7/pwsh.exe' })).toBe(
+      '/tools/pwsh7/pwsh.exe'
+    );
+    expect(
+      ShellDetector.commandShellPath({ name: 'powershell', path: '/ps/powershell.exe' })
+    ).toBe('/ps/powershell.exe');
+  });
 });

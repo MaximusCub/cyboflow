@@ -60,7 +60,7 @@ export class ShellDetector {
    */
   private static detectWindowsShell(): ShellInfo {
     const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-    const systemPowerShell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const systemPowerShell = this.systemPowerShellPath();
 
     // PowerShell 7's fixed MSI install location — probe it FIRST, before the
     // PATH loop. The PATH probe cannot tell a real pwsh.exe from a 0-byte
@@ -97,9 +97,29 @@ export class ShellDetector {
       return { path: systemPowerShell, name: 'powershell', args: this.getShellArgs('powershell') };
     }
 
-    // cmd.exe is always present — last-resort so a spawn always has a target.
+    // cmd.exe is always present — last-resort so an INTERACTIVE spawn always
+    // has a target. Command execution never lands here: see commandShellPath.
     const cmd = path.join(systemRoot, 'System32', 'cmd.exe');
     return { path: cmd, name: 'cmd', args: [] };
+  }
+
+  /** Windows PowerShell, at the fixed location every supported host ships it. */
+  private static systemPowerShellPath(): string {
+    const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+    return path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  }
+
+  /**
+   * Which binary actually runs a built command on Windows.
+   *
+   * detectWindowsShell can end at cmd.exe, which is a fine interactive target
+   * but understands none of the PowerShell flags below, and cannot run the
+   * PowerShell dialect buildCommandString emits either. Command execution
+   * therefore falls back to the system PowerShell rather than the interactive
+   * last resort. Exported for unit testing on any host.
+   */
+  static commandShellPath(detected: { name: string; path: string }): string {
+    return detected.name === 'cmd' ? this.systemPowerShellPath() : detected.path;
   }
 
   private static detectUnixShell(): ShellInfo {
@@ -200,7 +220,7 @@ export class ShellDetector {
       // the encoded form reaches PowerShell byte-exact. -NonInteractive keeps
       // a script awaiting input from dropping into a REPL.
       return {
-        shell: shellInfo.path,
+        shell: this.commandShellPath(shellInfo),
         args: [
           '-NoLogo',
           '-NoProfile',
