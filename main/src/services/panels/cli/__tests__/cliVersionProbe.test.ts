@@ -153,9 +153,12 @@ describe('probeCliVersion — Windows .cmd shims', () => {
     const [command, args, env, options] = runCommand.mock.calls[0] as [
       string, string[], NodeJS.ProcessEnv, { windowsVerbatimArguments?: boolean },
     ];
+    // What this site owns is that the plan reaches the runCommand seam intact,
+    // verbatim flag and all, and that it targets the shim it was given. The
+    // exact /c string is pinned once, in win32ShimProbe's suite.
     expect(command).toBe(process.env.comspec || 'cmd.exe');
     expect(args.slice(0, 3)).toEqual(['/d', '/s', '/c']);
-    expect(args[3]).toBe('"C:\\Users\\dev\\npm\\claude.cmd --version"');
+    expect(args[3]).toContain('claude.cmd');
     expect(options).toEqual({ windowsVerbatimArguments: true });
     expect(env).toEqual({ PATH: 'C:\\npm' });
   });

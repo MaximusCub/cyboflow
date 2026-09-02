@@ -13,6 +13,11 @@ import {
 import { collectDescendantPids } from '../../../../processTable';
 import { listPidPpidTableSync } from '../../../../../utils/platformProcess';
 import { OMP_RPC_MODE_ARGS, OMP_RPC_UI_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
+import {
+  DETACHED_GRANDCHILD_SCRIPT,
+  isAlive,
+  waitUntil,
+} from '../../../../../__test_fixtures__/processTree';
 
 class FakeOmpProcess extends EventEmitter implements OmpRpcProcess {
   readonly stdin = new PassThrough();
@@ -584,24 +589,6 @@ describe('OmpRpcClient — teardown', () => {
 // negative-pid group kill is a no-op and the taskkill arm is load-bearing)
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return predicate();
-}
-
 describe('OmpRpcClient — win32 tree teardown', () => {
   it.skipIf(process.platform !== 'win32')(
     'reaps a real omp tree via taskkill (grandchild not orphaned)',
@@ -618,9 +605,8 @@ describe('OmpRpcClient — win32 tree teardown', () => {
             '-e',
             // Emit the ready frame OMP would, spawn a long-lived detached
             // grandchild (its MCP-server stand-in), then stay alive.
-            `console.log(JSON.stringify(${JSON.stringify(READY_FRAME)}));`
-            + "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref();"
-            + 'setInterval(()=>{},1000);',
+            `console.log(JSON.stringify(${JSON.stringify(READY_FRAME)}));` +
+              DETACHED_GRANDCHILD_SCRIPT,
           ],
           { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
         );

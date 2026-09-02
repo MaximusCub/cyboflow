@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DevServerManager, interpolatePort } from '../devServerManager';
 import type { DeliverableVerifyConfig } from '../../../../../shared/types/visualVerification';
+import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../../__test_fixtures__/processTree';
 
 /**
  * Write the script body to a real file and reference it as `node "<path>"`.
@@ -308,24 +309,6 @@ describe('DevServerManager', () => {
 // negative-pid group kill is a no-op and the taskkill arm is load-bearing)
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return predicate();
-}
-
 describe('DevServerManager — win32 tree teardown', () => {
   it.skipIf(process.platform !== 'win32')(
     'signalTree reaps a real parent+grandchild tree via taskkill /T /F',
@@ -333,11 +316,7 @@ describe('DevServerManager — win32 tree teardown', () => {
       const { spawn } = await import('node:child_process');
       const mgr = new DevServerManager(FAST);
       // A REAL node child that spawns its own long-lived detached grandchild.
-      const child = spawn(
-        process.execPath,
-        ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
-        { stdio: 'ignore', detached: true },
-      );
+      const child = spawnDetachedGrandchildTree();
       const pid = child.pid;
       expect(pid).toBeTypeOf('number');
 

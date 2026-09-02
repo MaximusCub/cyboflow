@@ -16,27 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { spawn } from 'node:child_process';
 import { RunCommandManager } from '../runCommandManager';
 import type { DatabaseService } from '../../database/database';
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs: number,
-): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await predicate()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return predicate();
-}
+import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../__test_fixtures__/processTree';
 
 /** Expose the private process-ops primitives, as sibling tests in this repo do. */
 interface RunCommandManagerPrivate {
@@ -54,11 +34,7 @@ describe('RunCommandManager — win32 process ops', () => {
     'enumerates a real spawned grandchild tree (no longer always-empty on win32)',
     async () => {
       const mgr = makeManager();
-      const child = spawn(
-        process.execPath,
-        ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
-        { stdio: 'ignore', detached: true },
-      );
+      const child = spawnDetachedGrandchildTree();
       const pid = child.pid;
       expect(pid).toBeTypeOf('number');
 

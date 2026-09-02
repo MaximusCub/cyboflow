@@ -41,24 +41,7 @@ import { SessionManager } from '../sessionManager';
 import { collectDescendantPids } from '../processTable';
 import { listPidPpidTableSync } from '../../utils/platformProcess';
 import type { DatabaseService } from '../../database/database';
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return predicate();
-}
+import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../__test_fixtures__/processTree';
 
 describe('SessionManager.stopRunningScript — win32 ladder', () => {
   it.skipIf(process.platform !== 'win32')(
@@ -68,11 +51,7 @@ describe('SessionManager.stopRunningScript — win32 ladder', () => {
 
       // A REAL node child that spawns its own long-lived detached grandchild —
       // the shape a RUN script presents (shell + app + app children).
-      const child = spawn(
-        process.execPath,
-        ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
-        { stdio: 'ignore', detached: true },
-      );
+      const child = spawnDetachedGrandchildTree();
       const pid = child.pid;
       expect(pid).toBeTypeOf('number');
 

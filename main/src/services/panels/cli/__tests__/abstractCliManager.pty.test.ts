@@ -42,6 +42,8 @@ import type { SessionManager } from '../../../sessionManager';
 import type { ConversationMessage } from '../../../../database/models';
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { collectDescendantPids, listPidPpidTableSync } from '../../../../utils/platformProcess';
+import { collectDescendantPids as walkPidPpidTable } from '../../../processTable';
+import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../../../__test_fixtures__/processTree';
 
 // ---------------------------------------------------------------------------
 // Minimal concrete subclass exposing the protected primitives under test.
@@ -122,15 +124,6 @@ class TestCliManager extends AbstractCliManager {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function childPidsOf(pid: number): number[] {
   try {
     const out = execSync(`pgrep -P ${pid} || true`, { encoding: 'utf8' });
@@ -141,18 +134,6 @@ function childPidsOf(pid: number): number[] {
   } catch {
     return [];
   }
-}
-
-async function waitUntil(
-  predicate: () => boolean | Promise<boolean>,
-  timeoutMs: number,
-): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (await predicate()) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return predicate();
 }
 
 // Clean env (no undefined values) for pty.spawn's { [k]: string } contract.
@@ -306,21 +287,35 @@ describe('AbstractCliManager.killProcessTree', () => {
       // ladder (shared-table descendant enumeration + /T /F) must take BOTH;
       // the POSIX `kill`/`pkill` ladder below is a silent no-op on Windows.
       const child = trackChild(
-        spawn(
-          process.execPath,
-          ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
-          { detached: true, stdio: 'ignore' }
-        )
+        spawnDetachedGrandchildTree()
       );
       const pid = child.pid;
       if (!pid) throw new Error('no pid');
 
+      // Independently discover the grandchild BEFORE the kill, through the
+      // shared pid/ppid table rather than the production enumeration. It is
+      // detached, so a tree walk that loses the parent link orphans it — the
+      // exact case this ladder exists for, and the one the old assertion on
+      // the parent alone could not see.
+      let kids: number[] = [];
+      await waitUntil(() => {
+        kids = walkPidPpidTable(pid, listPidPpidTableSync());
+        return kids.length >= 1;
+      }, 8000);
+      expect(kids.length).toBeGreaterThanOrEqual(1);
+      expect(kids.every((k) => isAlive(k))).toBe(true);
+
       await mgr.killTree(pid);
 
+      // Parent and every discovered descendant must be gone.
       const parentGone = await waitUntil(() => !isAlive(pid), 8000);
       expect(parentGone).toBe(true);
+      for (const k of kids) {
+        const gone = await waitUntil(() => !isAlive(k), 8000);
+        expect(gone).toBe(true);
+      }
     },
-    20000,
+    30000,
   );
 });
 
@@ -360,11 +355,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
       // Same shape as the win32 killProcessTree fixture: a node child that
       // spawns its own long-lived detached grandchild.
       const child = trackChild(
-        spawn(
-          process.execPath,
-          ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
-          { detached: true, stdio: 'ignore' }
-        )
+        spawnDetachedGrandchildTree()
       );
       const pid = child.pid;
       if (!pid) throw new Error('no pid');

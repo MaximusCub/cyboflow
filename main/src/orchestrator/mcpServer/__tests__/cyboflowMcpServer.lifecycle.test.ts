@@ -33,6 +33,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
+import { isAlive } from '../../../__test_fixtures__/processTree';
 
 // main/src/orchestrator/mcpServer/__tests__ -> main/
 const MAIN_DIR = path.resolve(__dirname, '..', '..', '..', '..');
@@ -143,20 +144,6 @@ function ppidOf(pid: number): number | null {
     // ps exits non-zero when the pid does not exist.
     return null;
   }
-}
-
-function isAlive(pid: number): boolean {
-  if (process.platform === 'win32') {
-    // `ps` does not exist on Windows; signal 0 asks the kernel directly and
-    // throws ESRCH only when the pid is gone.
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      return (err as NodeJS.ErrnoException).code !== 'ESRCH';
-    }
-  }
-  return ppidOf(pid) !== null;
 }
 
 // ---------------------------------------------------------------------------

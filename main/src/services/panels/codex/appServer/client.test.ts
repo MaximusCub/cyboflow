@@ -17,6 +17,11 @@ import {
 import { collectDescendantPids } from '../../../processTable';
 import { listPidPpidTableSync } from '../../../../utils/platformProcess';
 import type { AppServerInitializeParams } from './protocol';
+import {
+  DETACHED_GRANDCHILD_SCRIPT,
+  isAlive,
+  waitUntil,
+} from '../../../../__test_fixtures__/processTree';
 
 class FakeAppServerProcess extends EventEmitter implements AppServerProcess {
   readonly stdin = new PassThrough();
@@ -481,24 +486,6 @@ describe('CodexAppServerClient', () => {
 // negative-pid group kill is a no-op and the taskkill arm is load-bearing)
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return predicate();
-}
-
 describe('CodexAppServerClient — win32 tree teardown', () => {
   it.skipIf(process.platform !== 'win32')(
     'reaps a real app-server tree via taskkill (grandchild not orphaned)',
@@ -511,7 +498,7 @@ describe('CodexAppServerClient — win32 tree teardown', () => {
       const spawn: SpawnAppServerProcess = () => {
         realChild = nodeSpawn(
           process.execPath,
-          ['-e', "require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }).unref(); setInterval(()=>{},1000);"],
+          ['-e', DETACHED_GRANDCHILD_SCRIPT],
           { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
         );
         return realChild as unknown as AppServerProcess;

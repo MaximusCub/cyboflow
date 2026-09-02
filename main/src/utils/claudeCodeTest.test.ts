@@ -131,8 +131,12 @@ describe('detectClaudeBinary — Windows .cmd shims', () => {
     expect(result).toEqual({ found: true, path: NPM_SHIM, version: '2.0.19' });
     expect(mockExecFile).toHaveBeenCalledTimes(1);
     const [command, args, opts] = mockExecFile.mock.calls[0] as [string, string[], Record<string, unknown>];
+    // This site owns the hand-off to execFile: the shim plan arrives with its
+    // verbatim flag and names the shim. The exact /c string is pinned once, in
+    // win32ShimProbe's suite.
     expect(command).toBe(process.env.comspec || 'cmd.exe');
-    expect(args).toEqual(['/d', '/s', '/c', '"C:\\Users\\dev\\AppData\\Roaming\\npm\\claude.cmd --version"']);
+    expect(args.slice(0, 3)).toEqual(['/d', '/s', '/c']);
+    expect(args[3]).toContain(NPM_SHIM);
     expect(opts.windowsVerbatimArguments).toBe(true);
   });
 
