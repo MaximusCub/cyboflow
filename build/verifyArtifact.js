@@ -79,7 +79,9 @@ exports.default = async function(context) {
 
   const platformName = packager && packager.platform && packager.platform.name;
   const isMac = platformName === 'mac';
-  const isWin = platformName === 'win';
+  // electron-builder's Platform.WINDOWS.name is 'windows'; 'win' is its
+  // buildConfigurationKey. Accept both, as afterSign does.
+  const isWin = platformName === 'windows' || platformName === 'win';
   if (!isMac && !isWin) {
     return;
   }
