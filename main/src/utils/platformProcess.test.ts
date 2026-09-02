@@ -17,6 +17,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   collectDescendantPidsAsync,
+  describeProcesses,
+  forceKillPids,
   killTree,
   killTreeImmediate,
   signalTree,
@@ -272,6 +274,68 @@ describe('killTree win32 — the taskkill ladder', () => {
     expect(onSurvivors).not.toHaveBeenCalled();
     expect(stopped).toBe(true);
     expect(verificationCalls).toBe(2);
+  });
+});
+
+describe('forceKillPids', () => {
+  it('issues one kill per pid, in the command form that platform uses', async () => {
+    const posix: string[] = [];
+    await forceKillPids([11, 22], {
+      platform: 'linux',
+      execCommand: (command) => {
+        posix.push(command);
+        return Promise.resolve({ stdout: '' });
+      },
+    });
+    expect(posix).toEqual(['kill -9 11', 'kill -9 22']);
+
+    const win: string[] = [];
+    await forceKillPids([11, 22], {
+      platform: 'win32',
+      execCommand: (command) => {
+        win.push(command);
+        return Promise.resolve({ stdout: '' });
+      },
+    });
+    expect(win).toEqual(['taskkill /PID 11 /F', 'taskkill /PID 22 /F']);
+  });
+
+  it('reports only the kills that did not throw, and never stops early', async () => {
+    const onKilled = vi.fn<(pid: number) => void>();
+    await forceKillPids([11, 22, 33], {
+      platform: 'linux',
+      execCommand: (command) =>
+        command.endsWith('22') ? Promise.reject(new Error('no such process')) : Promise.resolve({ stdout: '' }),
+      onKilled,
+    });
+
+    expect(onKilled.mock.calls.map(([pid]) => pid)).toEqual([11, 33]);
+  });
+});
+
+describe('describeProcesses', () => {
+  it('POSIX: asks ps for each comm name, and calls an unresolvable pid unknown', async () => {
+    const described = await describeProcesses([11, 22], {
+      platform: 'linux',
+      execCommand: (command) =>
+        command.includes('-p 11')
+          ? Promise.resolve({ stdout: 'node\n' })
+          : Promise.reject(new Error('gone')),
+    });
+
+    expect(described).toEqual([
+      { pid: 11, name: 'node' },
+      { pid: 22, name: 'unknown' },
+    ]);
+  });
+
+  it('POSIX: empty ps output reads as unknown rather than an empty name', async () => {
+    const described = await describeProcesses([11], {
+      platform: 'linux',
+      execCommand: () => Promise.resolve({ stdout: '   \n' }),
+    });
+
+    expect(described).toEqual([{ pid: 11, name: 'unknown' }]);
   });
 });
 

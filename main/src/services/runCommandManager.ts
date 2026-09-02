@@ -7,7 +7,7 @@ import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
+import { collectDescendantPidsAsync, forceKillPids, killTree } from '../utils/platformProcess';
 
 interface RunProcess {
   process: pty.IPty;
@@ -306,56 +306,25 @@ export class RunCommandManager extends EventEmitter {
    */
   private async killEscapedProcesses(sessionId: string, knownPids: number[]): Promise<void> {
     try {
-      // Find all processes that have any of our known PIDs as ancestors
-      // This is a more aggressive approach to catch processes that might have been orphaned
+      // Every process that still has one of our known pids as an ancestor.
       const allDescendants: number[] = [];
 
-      if (process.platform === 'win32') {
-        // Windows: the `ps -o pgid=`/`ps -o pid= -g` lookups and the `kill -9`
-        // sweep below are all dead through cmd.exe — this sweep ran nothing
-        // there. Enumerate via the shared (pid, ppid) table and force-kill
-        // every escapee with taskkill.
-        for (const pid of knownPids) {
-          allDescendants.push(...(await this.getAllDescendantPids(pid)));
-        }
-        const escapees = [...new Set(allDescendants)];
-        if (escapees.length > 0) {
-          this.logger?.warn(`Killing ${escapees.length} escaped processes: ${escapees.join(', ')}`);
-          for (const escapeePid of escapees) {
-            try {
-              await this.execAsync(`taskkill /PID ${escapeePid} /F`);
-              this.logger?.info(`Killed escaped process ${escapeePid}`);
-            } catch (error) {
-              // Already dead — fine.
-            }
-          }
-          this.emit('zombie-processes-detected', {
-            sessionId,
-            pids: escapees,
-            message: `Detected and killed ${escapees.length} processes that escaped normal termination`
-          });
-        }
-        return;
-      }
-
       for (const pid of knownPids) {
-        // Get all descendants, including orphaned ones
-        const descendants = await this.getAllDescendantPids(pid);
-        allDescendants.push(...descendants);
-        
-        // Also check for processes that might have been reparented to init (PID 1)
-        // by looking for processes with the same process group
+        allDescendants.push(...(await this.getAllDescendantPids(pid)));
+
+        // POSIX only, and the one place this file reads the platform: a
+        // process reparented to init has left the tree the walk above covers,
+        // but it is still in the group. Windows has no process groups, and its
+        // taskkill walk is the whole story there.
+        if (process.platform === 'win32') continue;
         try {
           const pgidResult = await this.execAsync(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
           const pgid = parseInt(pgidResult.stdout.trim());
-          
           if (!isNaN(pgid)) {
-            // Find all processes in this process group
             const pgResult = await this.execAsync(`ps -o pid= -g ${pgid} 2>/dev/null || true`);
             const pgPids = pgResult.stdout.split('\n')
               .map(line => parseInt(line.trim()))
               .filter(p => !isNaN(p) && !knownPids.includes(p));
-            
             if (pgPids.length > 0) {
               this.logger?.warn(`Found ${pgPids.length} orphaned processes in process group ${pgid}: ${pgPids.join(', ')}`);
               allDescendants.push(...pgPids);
@@ -365,28 +334,21 @@ export class RunCommandManager extends EventEmitter {
           // Process might be gone already
         }
       }
-      
-      // Remove duplicates and kill any remaining processes
-      const uniquePids = [...new Set(allDescendants)];
-      if (uniquePids.length > 0) {
-        this.logger?.warn(`Killing ${uniquePids.length} escaped processes: ${uniquePids.join(', ')}`);
-        
-        for (const pid of uniquePids) {
-          try {
-            await this.execAsync(`kill -9 ${pid}`);
-            this.logger?.info(`Killed escaped process ${pid}`);
-          } catch (error) {
-            // Process might already be dead
-          }
-        }
-        
-        // Emit warning about escaped processes
-        this.emit('zombie-processes-detected', {
-          sessionId,
-          pids: uniquePids,
-          message: `Detected and killed ${uniquePids.length} processes that escaped normal termination`
-        });
-      }
+
+      const escapees = [...new Set(allDescendants)];
+      if (escapees.length === 0) return;
+
+      this.logger?.warn(`Killing ${escapees.length} escaped processes: ${escapees.join(', ')}`);
+      await forceKillPids(escapees, {
+        execCommand: (command) => this.execAsync(command),
+        onKilled: (pid) => this.logger?.info(`Killed escaped process ${pid}`),
+      });
+
+      this.emit('zombie-processes-detected', {
+        sessionId,
+        pids: escapees,
+        message: `Detected and killed ${escapees.length} processes that escaped normal termination`
+      });
     } catch (error) {
       this.logger?.error('Error killing escaped processes:', error as Error);
     }

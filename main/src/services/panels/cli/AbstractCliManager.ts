@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import * as path from 'path';
-import { execSync, exec } from 'child_process';
+import { exec } from 'child_process';
 import { promisify } from 'util';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
@@ -15,7 +15,11 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { describeMissingInterpreter } from './cliVersionProbe';
 import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { managedTestConcurrencyEnv } from '../../../../../shared/types/testConcurrency';
-import { collectDescendantPidsAsync, killTree, listProcessTable } from '../../../utils/platformProcess';
+import {
+  collectDescendantPidsAsync,
+  describeProcesses,
+  killTree,
+} from '../../../utils/platformProcess';
 
 interface CliProcess {
   process: pty.IPty;
@@ -1105,43 +1109,16 @@ export abstract class AbstractCliManager extends EventEmitter {
   }
 
   /**
-   * Get process information for a list of PIDs
+   * A short name per pid, for the zombie report. The platform split lives in
+   * utils/platformProcess (describeProcesses): `ps -o comm=` on POSIX, the
+   * shared process table on Windows, which has no `ps`.
    */
   protected async getProcessInfo(pids: number[]): Promise<{ pid: number; name?: string }[]> {
-    const processInfo: { pid: number; name?: string }[] = [];
-
-    if (process.platform === 'win32') {
-      // `ps -p <pid> -o comm=` does not exist on Windows; the shared process
-      // table (PowerShell stand-in) supplies the command line instead, whose
-      // basename stands in for the comm name in the zombie report.
-      try {
-        const rows = await listProcessTable();
-        const commandByPid = new Map(rows.map(row => [row.pid, row.command]));
-        return pids.map((pid) => {
-          const command = commandByPid.get(pid) ?? '';
-          const firstToken = command.trim().split(/\s+/)[0] ?? '';
-          return { pid, name: firstToken ? path.basename(firstToken) : 'unknown' };
-        });
-      } catch (error) {
-        this.logger?.warn('Error getting process info from the Windows process table:', error as Error);
-        return pids.map(pid => ({ pid, name: 'unknown' }));
-      }
-    }
-
-    for (const pid of pids) {
-      try {
-        const result = execSync(
-          `ps -p ${pid} -o comm= 2>/dev/null || true`,
-          { encoding: 'utf8', windowsHide: true }
-        );
-        const name = result.trim();
-        processInfo.push({ pid, name: name || 'unknown' });
-      } catch (error) {
-        processInfo.push({ pid, name: 'unknown' });
-      }
-    }
-
-    return processInfo;
+    return describeProcesses(pids, {
+      execCommand: (command) => this.execAsync(command),
+      onError: (error) =>
+        this.logger?.warn('Error getting process info from the Windows process table:', error as Error),
+    });
   }
 
   /**

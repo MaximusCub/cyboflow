@@ -4,20 +4,24 @@
  *
  * The platform branches for the ladders live here, and only here — duplicated
  * win32 kill logic is not acceptable at a call site. Call sites may consult
- * the host platform to choose their {@link KillTreeOptions} timings and modes;
- * the kill commands themselves may not branch, with two documented
- * exceptions whose shapes the options cannot express: sessionManager's
- * counted-verify stop arm (stopRunningScriptWindows) and runCommandManager's
- * escapee sweep (killEscapedProcesses).
+ * the host platform to choose their {@link KillTreeOptions} timings, modes and
+ * log wording; the kill and enumeration commands themselves may not branch.
+ *
+ * The one place a call site still reads the platform for behaviour is
+ * runCommandManager's escapee sweep, where POSIX has an extra step with no
+ * Windows equivalent: a process-group lookup that finds processes reparented
+ * out of the tree. Windows has no process groups.
  *
  *   - {@link listProcessTable} / {@link listPidPpidTable} /
  *     {@link listPidPpidTableSync} — process-table listings (`ps -axo …` on
  *     POSIX, the winProcessTable.ts stand-in on win32).
- *   - {@link collectDescendantPids} — descendant-tree enumeration (table
- *     fetch + walk).
- *   - {@link killWindowsTree}, {@link killPidSync}, {@link killTree},
- *     {@link killTreeImmediate} — the fire-and-forget, synchronous,
- *     ladder-shaped, and immediate-hard tree kills.
+ *   - {@link collectDescendantPidsAsync} / {@link collectDescendantPids} —
+ *     descendant-tree enumeration (table fetch + walk).
+ *   - {@link describeProcesses} — pid → a short name, for survivor reports.
+ *   - {@link killWindowsTree}, {@link killPidSync}, {@link signalTree},
+ *     {@link forceKillPids}, {@link killTree}, {@link killTreeImmediate} — the
+ *     fire-and-forget, synchronous, group/tree-signalling, flat force-kill,
+ *     ladder-shaped, and immediate-hard kills.
  *
  * Per-site zombie emission, log wording and grace timings stay at the call
  * sites via {@link KillTreeOptions} hooks — this module owns the platform
@@ -27,6 +31,7 @@
  */
 import { exec, execFile, execSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
+import { basename } from 'node:path';
 import {
   collectDescendantPids as walkPidPpidTable,
   parseProcessTable,
@@ -323,6 +328,78 @@ export function killPidSync(pid: number, opts: PlatformProcessOptions = {}): voi
  *  - 'failed':   the group signal was rejected for another reason.
  */
 export type SignalTreeOutcome = 'signaled' | 'gone' | 'failed';
+
+/**
+ * Force-kill each pid outright, one command per pid, best effort: win32
+ * `taskkill /PID <pid> /F`, POSIX `kill -9 <pid>`. No tree walk and no grace —
+ * for a caller that has already decided exactly which processes must die.
+ */
+export async function forceKillPids(
+  pids: number[],
+  opts: PlatformProcessOptions & {
+    /** Shell runner. Defaults to `exec` wrapped with `windowsHide: true`. */
+    execCommand?: (command: string) => Promise<{ stdout: string }>;
+    /** Called after each kill command that did not throw. */
+    onKilled?: (pid: number) => void;
+  } = {},
+): Promise<void> {
+  const win32 = (opts.platform ?? process.platform) === 'win32';
+  const execCommand =
+    opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
+  for (const pid of pids) {
+    try {
+      await execCommand(win32 ? `taskkill /PID ${pid} /F` : `kill -9 ${pid}`);
+      opts.onKilled?.(pid);
+    } catch (error) {
+      // Already dead / no permission — the sweep is best effort by contract.
+    }
+  }
+}
+
+/**
+ * A short name per pid, for a user-facing "these processes survived" report.
+ *
+ * POSIX asks `ps` for the comm name one pid at a time. Windows has no `ps`:
+ * the shared process table supplies the command line, and its first token's
+ * basename stands in for the comm name. Never throws — an unresolvable pid
+ * reports 'unknown'.
+ */
+export async function describeProcesses(
+  pids: number[],
+  opts: PlatformProcessOptions & {
+    execCommand?: (command: string) => Promise<{ stdout: string }>;
+    onError?: (error: unknown) => void;
+  } = {},
+): Promise<{ pid: number; name: string }[]> {
+  const platform = opts.platform ?? process.platform;
+  const execCommand =
+    opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
+
+  if (platform === 'win32') {
+    try {
+      const rows = await listProcessTable({ platform });
+      const commandByPid = new Map(rows.map(row => [row.pid, row.command]));
+      return pids.map((pid) => {
+        const firstToken = (commandByPid.get(pid) ?? '').trim().split(/\s+/)[0] ?? '';
+        return { pid, name: firstToken ? basename(firstToken) : 'unknown' };
+      });
+    } catch (error) {
+      opts.onError?.(error);
+      return pids.map(pid => ({ pid, name: 'unknown' }));
+    }
+  }
+
+  const described: { pid: number; name: string }[] = [];
+  for (const pid of pids) {
+    try {
+      const { stdout } = await execCommand(`ps -p ${pid} -o comm= 2>/dev/null || true`);
+      described.push({ pid, name: String(stdout).trim() || 'unknown' });
+    } catch (error) {
+      described.push({ pid, name: 'unknown' });
+    }
+  }
+  return described;
+}
 
 /**
  * Signal a process TREE, one call instead of a win32 branch at every site.
