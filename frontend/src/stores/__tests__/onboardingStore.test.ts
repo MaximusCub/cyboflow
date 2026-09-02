@@ -623,8 +623,8 @@ describe('onboardingStore — forceNext (anchor-lost escape)', () => {
 describe('onboardingStore — skipStep (per-step escape)', () => {
   beforeEach(reset);
 
-  it('marks the do-step skipped AND advances like forceNext (6→7, 10→11, 11→12)', () => {
-    for (const [from, to] of [[6, 7], [10, 11], [11, 12]] as const) {
+  it('marks the do-step skipped AND advances like forceNext (6→10, 10→11, 11→12)', () => {
+    for (const [from, to] of [[6, 10], [10, 11], [11, 12]] as const) {
       reset();
       useOnboardingStore.setState({ status: 'active', step: from, maxVisitedStep: from });
       s().skipStep();
@@ -633,6 +633,28 @@ describe('onboardingStore — skipStep (per-step escape)', () => {
       expect(s().maxVisitedStep).toBe(to);
       expect(isStepSkipped(from, s())).toBe(true);
       expect(s().skippedDoSteps.has(from)).toBe(true);
+    }
+  });
+
+  it('skipping step 6 skips the Configure pointers it would have stranded', () => {
+    // 7-9 anchor controls that exist only on the wizard's Configure page, and
+    // step 6's card click is what opens it. Landing on them after skipping 6
+    // showed the "control isn't on screen" fallback three times.
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
+    s().skipStep();
+
+    expect(s().step).toBe(10);
+    for (const pointer of [7, 8, 9]) {
+      expect(isStepSkipped(pointer, s())).toBe(true);
+    }
+  });
+
+  it('skipping a later do-step leaves the Configure pointers alone', () => {
+    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
+    s().skipStep();
+
+    for (const pointer of [7, 8, 9]) {
+      expect(isStepSkipped(pointer, s())).toBe(false);
     }
   });
 
@@ -660,20 +682,20 @@ describe('onboardingStore — skipStep (per-step escape)', () => {
 
   it('a skipped do-step leaves the numbering/dots set and is stepped over by navigation', () => {
     useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
-    s().skipStep(); // → 7, 6 recorded
+    s().skipStep(); // → 10; 6 recorded, with its stranded pointers 7-9
     const skipped = skippedStepSet(s());
     expect(skipped.has(6)).toBe(true);
     // next()/back()/goTo must all refuse to land on it again.
-    s().back(); // 7 → 5 (steps over the skipped 6)
+    s().back(); // 10 → 5 (steps over the skipped 6-9)
     expect(s().step).toBe(5);
     s().next();
-    expect(s().step).toBe(7); // steps over 6 again
+    expect(s().step).toBe(10); // steps over 6-9 again
     s().goTo(6);
-    expect(s().step).toBe(7); // a dot the tour no longer renders
+    expect(s().step).toBe(10); // a dot the tour no longer renders
     s().goTo(5);
     expect(s().step).toBe(5);
     // multiRuntime skip (step 2) and the user skip coexist in ONE set.
-    useOnboardingStore.setState({ multiRuntime: false, step: 3, maxVisitedStep: 7 });
+    useOnboardingStore.setState({ multiRuntime: false, step: 3, maxVisitedStep: 10 });
     expect(skippedStepSet(s()).has(2)).toBe(true);
     expect(skippedStepSet(s()).has(6)).toBe(true);
   });
@@ -685,8 +707,39 @@ describe('onboardingStore — skipStep (per-step escape)', () => {
     useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
     s().skipStep();
     const set = skippedStepSet(s());
-    expect([...set].sort((a, b) => a - b)).toEqual([6, 10]);
+    // Skipping 6 carries its stranded Configure pointers with it.
+    expect([...set].sort((a, b) => a - b)).toEqual([6, 7, 8, 9, 10]);
     expect(skippedStepSet(s())).toBe(set);
+  });
+
+  it('a restart after skipping 6 does not offer step 6 again', () => {
+    // The reported bug: skip 6, quit at 7-9, relaunch. The boot clamp rewound
+    // 7-10 to 6 unconditionally, and hydrate applied it before the skip set
+    // was restored, so the tour re-offered the step the user had declined.
+    s().hydrate({ version: 3, status: 'active', step: 8, skippedDoSteps: [6, 7, 8, 9] }, 0);
+
+    expect(s().skippedDoSteps.has(6)).toBe(true);
+    expect(s().step).toBe(10);
+  });
+
+  it('the boot clamp still rewinds to 6 when 6 was not skipped', () => {
+    s().hydrate({ version: 3, status: 'active', step: 8 }, 0);
+
+    expect(s().step).toBe(6);
+  });
+
+  it('a real event lands on the first step still shown, not a skipped one', () => {
+    // 'project-created' unlocks step 6. With 6 skipped — and its pointers with
+    // it — the tour must go to 10 rather than back onto a declined step.
+    useOnboardingStore.setState({
+      status: 'active',
+      step: 5,
+      maxVisitedStep: 5,
+      skippedDoSteps: new Set([6, 7, 8, 9]),
+    });
+    s().realEvent('project-created');
+
+    expect(s().step).toBe(10);
   });
 
   it('begin() clears recorded skip-step decisions for a clean replay', () => {

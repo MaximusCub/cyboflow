@@ -50,22 +50,6 @@ export const ONBOARDING_ANCHORS = {
   humanReview: 'human-review',
 } as const;
 
-/**
- * Whether ANY of the wizard-Configure anchors (tour steps 7-9's targets) is
- * currently mounted. The Sidebar's "Resume setup" button probes this at click
- * time and passes the answer to store.resume({ wizardAnchorsMissing }) — a
- * resume with the wizard still open keeps the step, a cold re-entry rewinds
- * to 6. Any-of-three because the Configure page renders all three selectors
- * together, but the probe must not care which one a given step anchors.
- */
-export function wizardConfigureAnchorsPresent(): boolean {
-  return [
-    ONBOARDING_ANCHORS.substrateSelect,
-    ONBOARDING_ANCHORS.sessionPermission,
-    ONBOARDING_ANCHORS.modelSelect,
-  ].some((id) => document.querySelector(`[${ONBOARDING_ANCHOR_ATTR}="${id}"]`) !== null);
-}
-
 export const ONBOARDING_STEP_COUNT = 13;
 
 /** Steps rendered as the centered modal card. */
@@ -79,6 +63,13 @@ export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [6, 7, 8, 9, 10, 11
  * interacting with the anchored control never advances them.
  */
 export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [7, 8, 9];
+
+/**
+ * The step whose action opens the wizard's Configure page — the page that
+ * mounts every {@link ONBOARDING_POINTER_STEPS} anchor. Skipping it strands
+ * those pointers, so the store skips them alongside it.
+ */
+export const ONBOARDING_CONFIGURE_OPENER_STEP = 6;
 
 /**
  * The one CONDITIONAL step: "which agent should be your default?" only has a

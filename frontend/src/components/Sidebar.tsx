@@ -17,7 +17,6 @@ import {
   ONBOARDING_ANCHORS,
   visibleStepNumber,
   visibleStepTotal,
-  wizardConfigureAnchorsPresent,
 } from '../utils/onboarding';
 
 interface SidebarProps {
@@ -99,6 +98,7 @@ export const Sidebar = memo(function Sidebar({
   const settingsInitialTab = useNavigationStore((s) => s.settingsTab);
   const openSettings = useNavigationStore((s) => s.openSettings);
   const closeSettings = useNavigationStore((s) => s.closeSettings);
+  const navigationView = useNavigationStore((s) => s.view);
   const onboardingHydrated = useOnboardingStore((state) => state.hydrated);
   const onboardingStatus = useOnboardingStore((state) => state.status);
   const onboardingStep = useOnboardingStore((state) => state.step);
@@ -109,12 +109,15 @@ export const Sidebar = memo(function Sidebar({
   const showResumeSetup =
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
   // The wizard-Configure pointer steps (7-9) rewind to 6 on resume ONLY when
-  // their anchors are actually gone. The answer decides both the label below
-  // and (re-probed fresh at click time) the resume() call, so the button never
-  // advertises a step a rewind won't land on.
+  // their anchors are gone. That answer comes from the navigation store, not
+  // from a DOM query: a querySelector inside a memoised render is read once and
+  // never re-runs when the DOM changes, so the label could name one step while
+  // the click navigated to another. The Configure page cannot exist outside the
+  // wizard view, and the same value drives the click below, so the two can no
+  // longer disagree.
   const resumeAnchorsMissing =
     showResumeSetup && onboardingStep >= 7 && onboardingStep <= 9
-      ? !wizardConfigureAnchorsPresent()
+      ? navigationView !== 'wizard'
       : false;
   const resumeStep = resumeLandingStep(onboardingStep, resumeAnchorsMissing, onboardingSkippedDoSteps);
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
@@ -269,11 +272,12 @@ export const Sidebar = memo(function Sidebar({
             <button
               type="button"
               onClick={() =>
+                // The same value the label above was rendered from, so the
+                // button can never advertise a step the resume won't land on.
+                // A step kept while the wizard sits off its Configure page is
+                // handled by the Coachmark's anchor-lost fallback.
                 useOnboardingStore.getState().resume({
-                  // Re-probe at click time (the render-time probe above drives
-                  // the label; the wizard may have opened/closed since) so the
-                  // keep-step vs rewind decision is never made on stale DOM.
-                  wizardAnchorsMissing: !wizardConfigureAnchorsPresent(),
+                  wizardAnchorsMissing: resumeAnchorsMissing,
                 })
               }
               data-testid="onboarding-resume-setup"
