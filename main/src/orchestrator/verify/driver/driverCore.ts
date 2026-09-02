@@ -1470,14 +1470,13 @@ async function defaultSpawnDetachedShell(args: {
   const fd = openSync(args.logPath, 'a');
   try {
     // `detached: true` + unref is the POSIX detached-shape (new session via
-    // setsid). On Windows the same flag puts the child in a NEW PROCESS GROUP
-    // (no setsid), and there is no `sh` — cmd.exe /d /s /c is the interpreter
-    // that runs the command line; the tree is reaped via taskkill in
-    // defaultKillPid above.
+    // setsid). Windows has no `sh` — cmd.exe /d /s /c is the interpreter that
+    // runs the command line — and its tree is reaped via taskkill in
+    // defaultKillPid above, so detaching buys nothing there and costs a visible
+    // console: DETACHED_PROCESS overrides CREATE_NO_WINDOW for a console child.
     const isWindows = process.platform === 'win32';
     const child = isWindows
       ? spawn(process.env.comspec || 'cmd.exe', ['/d', '/s', '/c', args.command], {
-          detached: true,
           stdio: ['ignore', fd, fd],
           windowsHide: true,
         })

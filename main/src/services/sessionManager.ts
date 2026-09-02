@@ -1047,11 +1047,14 @@ export class SessionManager extends EventEmitter {
     // Get the user's default shell and command arguments
     const { shell, args } = ShellDetector.getShellCommandArgs(command);
     
-    // Spawn the process with its own process group for easier termination
+    // POSIX: a process group of its own, so the stop ladder can signal the
+    // whole tree. Windows has no process groups, and DETACHED_PROCESS overrides
+    // CREATE_NO_WINDOW there, so a console child would allocate a visible
+    // console; the stop path uses taskkill /T on the pid instead.
     this.runningScriptProcess = spawn(shell, args, {
       cwd: workingDirectory,
       stdio: 'pipe',
-      detached: true, // Create a new process group
+      detached: process.platform !== 'win32',
       windowsHide: true,
       env: {
         ...process.env,
