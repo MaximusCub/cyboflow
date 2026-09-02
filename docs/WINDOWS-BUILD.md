@@ -13,9 +13,15 @@ Windows-only file.
 
 ## Building
 
-A plain `pnpm install` does not work on Windows: the native modules'
-install scripts try to fetch prebuilds for the *host* Node ABI and then
-fall back to node-gyp compilation. The working sequence:
+A plain `pnpm install` does not work on Windows, but not for the reason a
+host-ABI mismatch would suggest. node-pty is N-API-stable — its binary
+imports only `napi_*` and no v8 symbols, so one binary loads under both Node
+and Electron. The failure is electron-rebuild's fallthrough: it looks for
+`prebuilds/<platform>-<arch>/node.napi.node`, and when that name is absent it
+tries prebuild-install for the Electron runtime, which node-pty 0.14.1
+publishes no assets for, and then node-gyp, which cannot build a package that
+ships no `src/`. `scripts/apply-pty-napi-prebuilds.js` exists to place that
+alias; the sequence below skips the install scripts entirely instead:
 
 ```bash
 set "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1"&& pnpm install --ignore-scripts
@@ -100,7 +106,8 @@ install skips install-app-deps entirely.
 ## Platform decisions (runtime)
 
 - **MCP IPC over a named pipe.** Windows cannot bind Unix sockets
-  (`EACCES`); the orch endpoint becomes
+  (`EACCES`); the orch endpoint — the IPC address the MCP subprocesses use
+  to reach the orchestrator in the main process — becomes
   `\\.\pipe\cyboflow-<user>-<hash>-orch` (first 8 hex of a SHA-256 digest
   over the per-instance socket path, so parallel app variants cannot
   cross-talk). Node's `net` module treats pipe paths transparently, so
@@ -137,12 +144,36 @@ install skips install-app-deps entirely.
 - **Updater**: no Windows update feed exists, so the auto-updater reports
   "not supported" instead of erroring on every check.
 
+## Installer configuration
+
+`package.json` `build.win` names the NSIS target and nothing else, so the
+installer takes electron-builder's defaults. Read from
+`app-builder-lib/scheme.json` at the pinned version, those are:
+
+| Option | Default | What it means here |
+|---|---|---|
+| `oneClick` | `true` | No wizard. The installer runs and finishes on its own. |
+| `perMachine` | `false` | Installs per user, under `%LOCALAPPDATA%`. No admin prompt in the normal case. |
+| `allowElevation` | `true` | An elevation prompt is still allowed if one turns out to be needed. |
+| `allowToChangeInstallationDirectory` | `false` | Follows from `oneClick`; the user is not offered a path. |
+| `createDesktopShortcut` | `true` | |
+| `createStartMenuShortcut` | `true` | |
+| `runAfterFinish` | `true` | |
+
+This is deliberate for a first port: a per-user, one-click install needs no
+administrator and cannot disturb a machine-wide install of anything else. The
+build is also unsigned, so there is no `publisherName` to declare — SmartScreen
+will warn on first run until a code-signing certificate exists. Adding an
+`nsis` block is the change to make when any of that should differ; leaving the
+block out is not the same as having chosen these values, which is why they are
+written down here.
+
 ## Known degradations and follow-ups
 
 - **Native-screen attestation** (proving which window was captured) has no
   Windows implementation; it fails loudly. Real-screen *screenshots* do
-  work (PowerShell capture, always full-screen — per-app scoping is a
-  peekaboo/macOS feature). Native-screen verification is scheduler-gated
+  work (PowerShell capture, always full-screen — per-app scoping comes from
+  peekaboo, the macOS-only screen-capture helper the verifier uses there). Native-screen verification is scheduler-gated
   to hosts with a capability probe.
 - **No Windows update feed** (see updater above).
 - **x64 only**; ARM64 needs its own packaging path and prebuild

@@ -11,8 +11,8 @@
  *     the detector applies) — without it, electron-rebuild falls through to a
  *     node-gyp source build that fails on CI runners and compiler-less hosts.
  *   - the package's runtime loader reads `prebuilds/<...>/<runtime>.abi<ABI>.node`
- *     or falls back to `build/Release/pty.node` — and its own postinstall
- *     cleans build/Release on POSIX, leaving nothing under Electron.
+ *     or falls back to `build/Release/pty.node`, and neither name is what the
+ *     download leaves behind on every platform.
  *
  * This hook copies the installed binary to both names. Runs from the root
  * postinstall before `electron-builder install-app-deps`. A missing binary is
