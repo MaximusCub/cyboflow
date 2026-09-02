@@ -25,6 +25,7 @@ vi.mock('./AgentThreadView', () => ({
 }));
 
 import { AgentRail, clampAgentRailWidth, shouldShowAgentRail } from './AgentRail';
+import { useLayoutStore } from '../../stores/layoutStore';
 
 const WIDTH_KEY = 'cyboflow.agentRail.width';
 const COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
@@ -32,6 +33,9 @@ const COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
 beforeEach(() => {
   localStorage.removeItem(WIDTH_KEY);
   localStorage.removeItem(COLLAPSED_KEY);
+  // Collapse state now lives in layoutStore (persisted under COLLAPSED_KEY);
+  // the store seeds from localStorage once at import, so tests reset it here.
+  useLayoutStore.setState({ agentRailCollapsed: false });
   // Large viewport so the ~50% cap never gates the absolute clamps.
   Object.defineProperty(window, 'innerWidth', {
     configurable: true,
@@ -83,7 +87,7 @@ describe('AgentRail — collapse', () => {
   });
 
   it('expanding from the collapsed strip persists the un-collapsed state', () => {
-    localStorage.setItem(COLLAPSED_KEY, 'true');
+    useLayoutStore.setState({ agentRailCollapsed: true });
     render(<AgentRail />);
 
     expect(screen.getByTestId('agent-rail-collapsed')).toBeInTheDocument();
@@ -94,8 +98,8 @@ describe('AgentRail — collapse', () => {
     expect(localStorage.getItem(COLLAPSED_KEY)).toBe('false');
   });
 
-  it('seeds the initial collapsed state from localStorage', () => {
-    localStorage.setItem(COLLAPSED_KEY, 'true');
+  it('renders collapsed when layoutStore says the rail is collapsed', () => {
+    useLayoutStore.setState({ agentRailCollapsed: true });
     render(<AgentRail />);
 
     expect(screen.getByTestId('agent-rail-collapsed')).toBeInTheDocument();

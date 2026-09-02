@@ -58,6 +58,7 @@ import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { guardedModelByAlias } from '../../../../shared/types/modelAvailability';
 import { resolveChatVisibility } from './unified/useChatVisibility';
 import { usePendingSendStore } from '../../stores/pendingSendStore';
+import { useComposerFocusRequest } from '../../stores/composerFocusStore';
 
 /**
  * Delay (ms) between relaying the message body and the separate '\r' that submits
@@ -171,6 +172,11 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   const [sendError, setSendError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Global ⌘' (toggleChat) focus mailbox. The flow-run composer registers under
+  // the RUN id — the same key useGlobalKeyboardShortcuts resolves for an active
+  // run (see composerFocusStore's key-scheme note).
+  useComposerFocusRequest(runId, textareaRef);
 
   // Pending-send (optimistic echo) — keyed by runId (the flow host key + railId).
   // The async structured-transcript sends (monitor / nudge / reopen / queueInput)

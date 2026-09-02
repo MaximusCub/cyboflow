@@ -4,6 +4,7 @@ import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
 import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
+import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
@@ -89,6 +90,10 @@ export interface AppConfig {
   // resolveSprintMaxTasks() — never the raw map — so the picker's client-side cap
   // matches the server-side 400 in runs.start.
   sprintMaxTasks?: SprintMaxTasksOverrides;
+  // User-remapped keyboard shortcuts (see shared/types/keyboardShortcuts.ts).
+  // SPARSE: an absent action falls back to KEYBOARD_SHORTCUT_DEFAULTS. Always
+  // read through resolveShortcut() / resolveAllShortcuts() — never the raw map.
+  keyboardShortcuts?: KeyboardShortcutOverrides;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Floors to 'worktree' when unset. The launch wizard's Advanced "Workspace"
   // tri-state overrides it per launch; workflow-host sessions always pin
