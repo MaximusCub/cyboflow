@@ -15,7 +15,12 @@
  *    members the tree walk missed swept into the per-descendant kills.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { collectDescendantPidsAsync, killTree, killTreeImmediate } from './platformProcess';
+import {
+  collectDescendantPidsAsync,
+  killTree,
+  killTreeImmediate,
+  signalTree,
+} from './platformProcess';
 
 type ExecSpy = ReturnType<typeof vi.fn<(command: string) => Promise<{ stdout: string }>>>;
 
@@ -267,6 +272,44 @@ describe('killTree win32 — the taskkill ladder', () => {
     expect(onSurvivors).not.toHaveBeenCalled();
     expect(stopped).toBe(true);
     expect(verificationCalls).toBe(2);
+  });
+});
+
+describe('signalTree', () => {
+  it('POSIX: signals the process group by negative pid', () => {
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
+
+    expect(signalTree(4242, 'SIGTERM', { platform: 'linux', sendSignal })).toBe('signaled');
+    expect(sendSignal).toHaveBeenCalledWith(-4242, 'SIGTERM');
+  });
+
+  it('POSIX: reports ESRCH as "gone", so a caller skips its fallback', () => {
+    const sendSignal = vi.fn(() => {
+      throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+    });
+
+    expect(signalTree(4242, 'SIGKILL', { platform: 'linux', sendSignal })).toBe('gone');
+  });
+
+  it('POSIX: reports any other rejection as "failed", so the caller falls back', () => {
+    const sendSignal = vi.fn(() => {
+      throw Object.assign(new Error('not permitted'), { code: 'EPERM' });
+    });
+
+    expect(signalTree(4242, 'SIGKILL', { platform: 'linux', sendSignal })).toBe('failed');
+  });
+
+  it('win32: kills the tree by positive pid and never signals', () => {
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
+    // Injected: a real taskkill at an arbitrary pid would kill a real process.
+    const killWindows = vi.fn<(pid: number) => void>();
+
+    expect(
+      signalTree(4242, 'SIGTERM', { platform: 'win32', sendSignal, killWindows }),
+    ).toBe('signaled');
+    expect(killWindows).toHaveBeenCalledWith(4242);
+    // A negative pid fails EINVAL on Windows, so the POSIX sender is not used.
+    expect(sendSignal).not.toHaveBeenCalled();
   });
 });
 

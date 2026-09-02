@@ -314,6 +314,64 @@ export function killPidSync(pid: number, opts: PlatformProcessOptions = {}): voi
   });
 }
 
+/**
+ * What {@link signalTree} managed to do, so the caller can decide whether its
+ * own fallback still applies.
+ *
+ *  - 'signaled': the tree was signalled.
+ *  - 'gone':     nothing there to signal (POSIX ESRCH).
+ *  - 'failed':   the group signal was rejected for another reason.
+ */
+export type SignalTreeOutcome = 'signaled' | 'gone' | 'failed';
+
+/**
+ * Signal a process TREE, one call instead of a win32 branch at every site.
+ *
+ * POSIX: the process GROUP, via a negative pid, so a spawn's own children are
+ * reaped rather than orphaned. win32: `taskkill /T /F`, because there are no
+ * process-group semantics through `process.kill` there — a negative pid fails
+ * with EINVAL — and taskkill walks the PPID chain instead.
+ *
+ * The win32 arm always force-kills: taskkill has no signal to deliver, so the
+ * `signal` argument only applies to POSIX.
+ */
+export function signalTree(
+  pid: number,
+  signal: NodeJS.Signals,
+  opts: PlatformProcessOptions & {
+    /**
+     * 'async' (default) fires taskkill and returns; 'sync' blocks until the
+     * kill was ISSUED, for a caller that continues straight into bookkeeping
+     * that assumes the tree is going away.
+     */
+    windowsKill?: 'async' | 'sync';
+    /**
+     * win32 tree killer. Defaults to the taskkill primitives above; injected
+     * by tests, which must never fire a real taskkill at an arbitrary pid.
+     */
+    killWindows?: (pid: number) => void;
+    /** Signal sender for the POSIX arm. Defaults to `process.kill`. */
+    sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
+  } = {},
+): SignalTreeOutcome {
+  if ((opts.platform ?? process.platform) === 'win32') {
+    const killWindows =
+      opts.killWindows ??
+      (opts.windowsKill === 'sync'
+        ? (target: number) => killPidSync(target, { platform: 'win32' })
+        : killWindowsTree);
+    killWindows(pid);
+    return 'signaled';
+  }
+  const sendSignal = opts.sendSignal ?? ((target: number, sig: NodeJS.Signals) => process.kill(target, sig));
+  try {
+    sendSignal(-pid, signal);
+    return 'signaled';
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'gone' : 'failed';
+  }
+}
+
 export interface KillTreeOptions extends PlatformProcessOptions {
   /**
    * Up-front enumerated descendants to force-kill individually after the tree

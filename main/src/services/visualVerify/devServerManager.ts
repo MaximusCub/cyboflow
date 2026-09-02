@@ -42,7 +42,7 @@
  * (verificationScheduler.ts) or by leaving the kill switch set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { killWindowsTree } from '../../utils/platformProcess';
+import { signalTree as signalTreeShared } from '../../utils/platformProcess';
 import type { DeliverableVerifyConfig } from '../../../../shared/types/visualVerification';
 import type {
   DevServerHandle,
@@ -355,35 +355,25 @@ export class DevServerManager implements DevServerProvider {
   }
 
   /**
-   * Send a signal to the child's whole process GROUP (negative pid), falling back
-   * to the single child if the group signal is rejected. Mirrors AbstractCliManager
-   * (SIGTERM/SIGKILL on -pid). Swallows ESRCH (already dead). On Windows there
-   * are no process-group semantics through `process.kill` (a negative pid fails
-   * with EINVAL, leaving the tree orphaned), so the whole tree is force-killed
-   * with `taskkill /T /F` instead.
+   * Signal the child's whole tree, falling back to the single child when the
+   * group signal does not land. The platform split lives in
+   * utils/platformProcess (signalTree): a POSIX process group by negative pid,
+   * taskkill /T /F on Windows.
    */
   private signalTree(child: ChildProcess, sig: NodeJS.Signals): void {
     const pid = child.pid;
     if (pid === undefined) return;
-    if (process.platform === 'win32') {
-      killWindowsTree(pid);
-      return;
-    }
+    const outcome = signalTreeShared(pid, sig);
+    if (outcome === 'signaled') return;
     try {
-      // Negative pid → the whole process group (detached:true makes pid the leader).
-      process.kill(-pid, sig);
-    } catch (err) {
-      // Group kill failed (e.g. no group / already gone) — try the single process.
-      try {
-        process.kill(pid, sig);
-      } catch {
-        // Already dead — nothing to do.
-      }
-      this.logger?.debug('[DevServerManager] group signal fell back to single pid', {
-        pid,
-        sig,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      process.kill(pid, sig);
+    } catch {
+      // Already dead — nothing to do.
     }
+    this.logger?.debug('[DevServerManager] group signal fell back to single pid', {
+      pid,
+      sig,
+      outcome,
+    });
   }
 }
