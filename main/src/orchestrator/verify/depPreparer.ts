@@ -304,6 +304,12 @@ export interface DepPreparerDeps {
   baseDir: string;
   /** Command runner (clone + rebuild). Faked in tests. */
   exec: DepExec;
+  /**
+   * Which platform's clone command to issue. Defaults to the host; injected so
+   * the robocopy arm is exercised from any host, since a macOS run would
+   * otherwise never reach it.
+   */
+  platform?: NodeJS.Platform;
   logger?: LoggerLike;
 }
 
@@ -582,7 +588,7 @@ export class VerifyDepPreparer {
    * real failures.
    */
   private async cloneDir(src: string, dest: string, cwd: string): Promise<void> {
-    if (process.platform === 'win32') {
+    if ((this.deps.platform ?? process.platform) === 'win32') {
       const copied = await this.deps.exec(
         'robocopy',
         [src, dest, '/E', '/NFL', '/NDL', '/NJH', '/NP', '/NS', '/NC'],

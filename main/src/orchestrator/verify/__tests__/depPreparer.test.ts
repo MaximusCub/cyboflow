@@ -492,6 +492,66 @@ describe('VerifyDepPreparer.prepare — every failure degrades to null', () => {
     });
   });
 
+  // The win32 clone arm, driven from any host through the injected platform.
+  // Without this the robocopy path is reachable only on a Windows runner, so a
+  // macOS CI gives no signal on it at all.
+  describe('win32 clone arm', () => {
+    it('clones with robocopy and treats a bitmask code below 8 as success', async () => {
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const calls: ExecCall[] = [];
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'win32',
+          exec: makeFakeExec(baseDir, calls),
+        });
+
+        expect(await preparer.prepare(worktree, depDirs)).not.toBeNull();
+
+        const clone = calls.find((c) => c.cmd === 'robocopy');
+        expect(clone).toBeDefined();
+        // /E recurses including empty dirs; the rest silence the per-file log,
+        // which robocopy prints by default and which nothing here reads.
+        expect(clone?.args.slice(2)).toEqual(['/E', '/NFL', '/NDL', '/NJH', '/NP', '/NS', '/NC']);
+        // Never the POSIX command: cp does not exist on Windows.
+        expect(calls.some((c) => c.cmd === 'cp')).toBe(false);
+      });
+    });
+
+    it('the POSIX arm is equally reachable from a Windows host', async () => {
+      // The mirror image of the case above, and what proves the seam drives
+      // the branch rather than the host doing so: this runs on Windows and
+      // must still take the cp path.
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const calls: ExecCall[] = [];
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'darwin',
+          exec: makeFakeExec(baseDir, calls),
+        });
+
+        expect(await preparer.prepare(worktree, depDirs)).not.toBeNull();
+        expect(calls.some((c) => c.cmd === 'cp' && c.args[0] === '-Rc')).toBe(true);
+        expect(calls.some((c) => c.cmd === 'robocopy')).toBe(false);
+      });
+    });
+
+    it('treats a robocopy code of 8 or more as a real failure', async () => {
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'win32',
+          exec: makeFakeExec(baseDir, [], { plainCopyFails: true }),
+        });
+
+        // A failed clone is fail-soft by contract: null, never a throw.
+        await expect(preparer.prepare(worktree, depDirs)).resolves.toBeNull();
+      });
+    });
+  });
+
   it('an exec seam that throws → null rather than propagating', async () => {
     await withFixture(async ({ worktree, baseDir }) => {
       const depDirs = await makeWorktree(worktree);
