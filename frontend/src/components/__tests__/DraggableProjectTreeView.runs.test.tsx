@@ -31,6 +31,7 @@ const mockSetActiveRun = vi.fn();
 const mockSetActiveQuickSession = vi.fn();
 const mockNavigateToSessions = vi.fn();
 const mockSetActiveProjectId = vi.fn();
+const mockNavigateToProject = vi.fn();
 const mockCloseHumanReview = vi.fn();
 
 // ---------------------------------------------------------------------------
@@ -135,8 +136,12 @@ vi.mock('../../stores/navigationStore', () => ({
       selector({ activeProjectId: null }),
     {
       getState: () => ({
+        // Mirrors the real store's initial value — the boot auto-select guards
+        // on `activeProjectId === null`, so omitting it (undefined) silently
+        // disabled that branch in every test here.
+        activeProjectId: null,
         navigateToSessions: mockNavigateToSessions,
-        navigateToProject: vi.fn(),
+        navigateToProject: mockNavigateToProject,
         setActiveProjectId: mockSetActiveProjectId,
         closeHumanReview: mockCloseHumanReview,
         closeBacklog: vi.fn(),
@@ -276,6 +281,7 @@ beforeEach(() => {
   mockSetActiveQuickSession.mockReset();
   mockNavigateToSessions.mockReset();
   mockSetActiveProjectId.mockReset();
+  mockNavigateToProject.mockReset();
   mockCloseHumanReview.mockReset();
   mockRunsByProject = {};
   mockRailByProject = {};
@@ -858,5 +864,27 @@ describe('DraggableProjectTreeView — stranded experiment group renders', () =>
     await waitFor(() => {
       expect(screen.getByTitle('Experiment running')).toBeInTheDocument();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Boot auto-select must not open the Project overview page
+// ---------------------------------------------------------------------------
+
+describe('DraggableProjectTreeView — boot auto-select', () => {
+  it('selects the first project WITHOUT navigating (overview stays closed)', async () => {
+    // The navigation store is not persisted, so `activeProjectId` is null on
+    // every boot and this auto-select runs every launch. `navigateToProject`
+    // also sets `projectOverviewOpen`, which made the app launch onto the full
+    // Project page instead of LandingHome — selection here must be silent.
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Alpha Project')).toBeInTheDocument();
+    });
+
+    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
+    expect(mockNavigateToProject).not.toHaveBeenCalled();
   });
 });

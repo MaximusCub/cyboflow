@@ -670,10 +670,17 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
         setExpandedFolders(new Set());
       }
 
-      // Auto-select the first project when none is active
+      // Auto-select the first project when none is active. SELECTION ONLY —
+      // deliberately `setActiveProjectId`, not `navigateToProject`: the latter
+      // also sets `projectOverviewOpen`, and since the navigation store is not
+      // persisted `activeProjectId` is null on EVERY boot, so navigating here
+      // made the app open the full Project overview page at launch instead of
+      // LandingHome (and made booting to LandingHome impossible whenever any
+      // project existed). The overview is a user gesture — a sidebar project
+      // click — never a boot side effect.
       const { activeProjectId: currentActive } = useNavigationStore.getState();
       if (currentActive === null && projectsWithRunsData.length > 0) {
-        useNavigationStore.getState().navigateToProject(projectsWithRunsData[0].id);
+        useNavigationStore.getState().setActiveProjectId(projectsWithRunsData[0].id);
       }
     } catch (error) {
       console.error('Failed to load projects with runs:', error);
