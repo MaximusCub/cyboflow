@@ -54,6 +54,7 @@ function renderCoach() {
       maxVisitedStep={7}
       onBack={noop}
       onSkip={noop}
+      onSkipStep={noop}
       onGoTo={noop}
       onAnchorActioned={noop}
       onNext={noop}

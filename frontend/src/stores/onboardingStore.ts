@@ -5,6 +5,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import {
   ONBOARDING_COACH_STEPS,
   ONBOARDING_DEFAULT_RUNTIME_STEP,
+  ONBOARDING_CONFIGURE_OPENER_STEP,
   ONBOARDING_POINTER_STEPS,
   ONBOARDING_STEP_COUNT,
 } from '../utils/onboarding';
@@ -52,6 +53,9 @@ import {
  *   so neither can bypass the step-1 gate or the coach preconditions.
  * - forceNext() is the anchor-lost escape (see its interface doc): the only way
  *   to move a do-step forward when its target has unmounted.
+ * - skipStep() is the deliberate per-step escape (see its interface doc): it
+ *   records a do-step (6/10/11) as skipped and advances past it, without
+ *   abandoning the rest of the tour the way skip() does.
  */
 
 export type OnboardingStatus = 'idle' | 'active' | 'pending' | 'skipped' | 'completed';
@@ -84,11 +88,16 @@ export interface PersistedOnboardingV2 {
  * step from the old index 2 onward forward by one. The user's ANSWER is not
  * persisted here — it goes straight to `AppConfig.defaultAgentRuntime`, the
  * field every launch already resolves through.
+ *
+ * `skippedDoSteps` is an ADDITIVE optional field (no version bump — absent in
+ * older snapshots and treated as empty): the do-steps the user explicitly
+ * skipped this run, persisted so hydrate never re-offers a declined step.
  */
 export interface PersistedOnboardingV3 {
   version: 3;
   status: Exclude<OnboardingStatus, 'idle'>;
   step: number;
+  skippedDoSteps?: number[];
 }
 
 /** JSON shape persisted under ONBOARDING_PREF_KEY (any schema version). */
@@ -141,10 +150,56 @@ export function migratePersistedOnboarding(persisted: PersistedOnboarding): Pers
  * wizard's Configure page and step 10 the session canvas — neither survives a
  * restart — so they re-run step 6, which rebuilds its own precondition (the
  * gate reopens the wizard). Step 11's rail anchor always exists.
+ *
+ * A step the user skipped is never re-offered, so the rewind target is checked
+ * against the skip set: without that, quitting at 7-10 after skipping 6 put the
+ * tour back on step 6 at the next launch — the one thing the skip promised
+ * would not happen.
  */
-export function clampResumeStep(step: number): number {
-  if (step >= 7 && step <= 10) return 6;
+export function clampResumeStep(
+  step: number,
+  skippedDoSteps: ReadonlySet<number> = new Set<number>(),
+): number {
+  if (step >= 7 && step <= 10) {
+    return skippedDoSteps.has(6) ? firstUnskippedFrom(step, skippedDoSteps) : 6;
+  }
   return Math.min(Math.max(step, 0), ONBOARDING_STEP_COUNT - 1);
+}
+
+/**
+ * The first step from `step` onward this run still shows, or the final step
+ * when everything after it was skipped. The final modal card is never
+ * skippable, so the tour always has somewhere to land.
+ */
+function firstUnskippedFrom(step: number, skippedDoSteps: ReadonlySet<number>): number {
+  for (let i = Math.max(step, 0); i < ONBOARDING_STEP_COUNT; i++) {
+    if (!skippedDoSteps.has(i)) return i;
+  }
+  return ONBOARDING_STEP_COUNT - 1;
+}
+
+/**
+ * The step resume() will actually land on from `step`: steps 7-9 rewind to 6
+ * when their anchors are missing, otherwise the step is kept. Shared by
+ * resume() and the Sidebar's "Resume setup" label, so the button can never
+ * advertise a step a rewind won't land on. A user-skipped step is never
+ * re-offered: a rewind whose target (6) is itself skipped walks past the
+ * wizard pointers to the first non-skipped step (10/11 or the final modal
+ * card, which is never skippable).
+ */
+export function resumeLandingStep(
+  step: number,
+  wizardAnchorsMissing: boolean,
+  skippedDoSteps: ReadonlySet<number> = new Set<number>(),
+): number {
+  if (step >= 7 && step <= 9 && wizardAnchorsMissing) {
+    if (!skippedDoSteps.has(6)) return 6;
+    for (let i = 10; i < ONBOARDING_STEP_COUNT; i++) {
+      if (!skippedDoSteps.has(i)) return i;
+    }
+    return ONBOARDING_STEP_COUNT - 1;
+  }
+  return step;
 }
 
 interface OnboardingState {
@@ -197,6 +252,13 @@ interface OnboardingState {
   multiRuntime: boolean;
   /** Boot gate resolved — render nothing until true (no-flash rule, docs/CODE-PATTERNS.md). */
   hydrated: boolean;
+  /**
+   * Do-steps (6/10/11) the user explicitly skipped this run — folded into
+   * isStepSkipped/skippedStepSet so every navigation path steps over them.
+   * Cleared by begin(); persisted additively (see
+   * PersistedOnboardingV3.skippedDoSteps).
+   */
+  skippedDoSteps: ReadonlySet<number>;
 
   /**
    * Resolve the boot gate. `persisted` is the parsed pref snapshot (null on a
@@ -219,8 +281,25 @@ interface OnboardingState {
   /** Dot navigation — only to steps already visited. */
   goTo: (step: number) => void;
   skip: () => void;
-  /** Skipped/pending → active at the current (clamped) step. */
-  resume: () => void;
+  /**
+   * Per-step escape for the advance-by-doing steps (6/10/11): records the
+   * current step as skipped (same mechanism as the conditional step-2 skip —
+   * see isStepSkipped) and advances like forceNext(). Never parks pending —
+   * a skip has no wait left in it. No-op on every other step (pointers have
+   * Next; modal steps are plain next()-steps) and when not active.
+   */
+  skipStep: () => void;
+  /**
+   * Skipped/pending → active at the current (clamped) step.
+   *
+   * `wizardAnchorsMissing` — the Sidebar "Resume setup" caller reports
+   * whether the wizard-Configure anchors (steps 7-9's targets) are still
+   * mounted. Absent (the default): steps 7-9 rewind to 6. Alive: the step is
+   * kept — rewinding would yank the user off live, on-screen anchors back to
+   * a step they already passed. A user-skipped step is never re-offered: a
+   * rewind whose target (6) is skipped lands past the pointers instead.
+   */
+  resume: (options?: { wizardAnchorsMissing?: boolean }) => void;
   /**
    * Permanent dismiss from the Sidebar "Resume setup" card: skipped/pending →
    * completed. Unlike skip() (which leaves the resume affordance standing),
@@ -286,12 +365,20 @@ export function activatedProviders(
 }
 
 /**
- * Whether `step` is skipped for this run. Only the conditional Default-agent
- * step ever is — a single activated provider leaves it with no question to ask,
- * so every navigation path steps over it and the progress numbering drops it.
+ * Whether `step` is skipped for this run. Two sources feed the ONE mechanism
+ * (no parallel skip state):
+ * - the conditional Default-agent step (2): a single activated provider leaves
+ *   it with no question to ask, so every navigation path steps over it;
+ * - do-steps (6/10/11) the user explicitly skipped with "Skip step"
+ *   (`skippedDoSteps`). Both make every navigation path step over the step and
+ *   drop it from the progress numbering and dots.
  */
-export function isStepSkipped(step: number, state: Pick<OnboardingState, 'multiRuntime'>): boolean {
-  return step === ONBOARDING_DEFAULT_RUNTIME_STEP && !state.multiRuntime;
+export function isStepSkipped(
+  step: number,
+  state: Pick<OnboardingState, 'multiRuntime' | 'skippedDoSteps'>,
+): boolean {
+  if (step === ONBOARDING_DEFAULT_RUNTIME_STEP && !state.multiRuntime) return true;
+  return state.skippedDoSteps.has(step);
 }
 
 // Stable identities: the gate feeds these straight into React props, so a fresh
@@ -299,9 +386,30 @@ export function isStepSkipped(step: number, state: Pick<OnboardingState, 'multiR
 const EMPTY_SKIPPED: ReadonlySet<number> = new Set<number>();
 const DEFAULT_RUNTIME_SKIPPED: ReadonlySet<number> = new Set([ONBOARDING_DEFAULT_RUNTIME_STEP]);
 
+// Identity-stable merge of the derived Default-agent skip with the user-skipped
+// do-steps. The inputs only ever change identity on skipStep/hydrate/begin, so
+// keying the cache on them keeps the merged output stable between those events
+// (same no-fresh-Set-per-render rule as above).
+let mergedSkippedCache: {
+  base: ReadonlySet<number>;
+  user: ReadonlySet<number>;
+  merged: ReadonlySet<number>;
+} | null = null;
+
 /** The set of skipped indices, for the progress-numbering helpers. */
-export function skippedStepSet(state: Pick<OnboardingState, 'multiRuntime'>): ReadonlySet<number> {
-  return state.multiRuntime ? EMPTY_SKIPPED : DEFAULT_RUNTIME_SKIPPED;
+export function skippedStepSet(
+  state: Pick<OnboardingState, 'multiRuntime' | 'skippedDoSteps'>,
+): ReadonlySet<number> {
+  // multiRuntime TRUE means step 2 is part of this run → nothing derived to skip.
+  if (state.skippedDoSteps.size === 0) {
+    return state.multiRuntime ? EMPTY_SKIPPED : DEFAULT_RUNTIME_SKIPPED;
+  }
+  const base = state.multiRuntime ? EMPTY_SKIPPED : DEFAULT_RUNTIME_SKIPPED;
+  const cached = mergedSkippedCache;
+  if (cached && cached.base === base && cached.user === state.skippedDoSteps) return cached.merged;
+  const merged = new Set([...base, ...state.skippedDoSteps]);
+  mergedSkippedCache = { base, user: state.skippedDoSteps, merged };
+  return merged;
 }
 
 /**
@@ -311,7 +419,7 @@ export function skippedStepSet(state: Pick<OnboardingState, 'multiRuntime'>): Re
 function stepAfter(
   step: number,
   dir: 1 | -1,
-  state: Pick<OnboardingState, 'multiRuntime'>,
+  state: Pick<OnboardingState, 'multiRuntime' | 'skippedDoSteps'>,
 ): number | null {
   for (let i = step + dir; i >= 0 && i < ONBOARDING_STEP_COUNT; i += dir) {
     if (!isStepSkipped(i, state)) return i;
@@ -338,6 +446,7 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   defaultProvider: null,
   multiRuntime: true,
   hydrated: false,
+  skippedDoSteps: EMPTY_SKIPPED,
 
   hydrate: (persisted, projectsCount) => {
     if (persisted === null) {
@@ -345,7 +454,14 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
         // Existing install upgrading into the feature — never show the tour.
         set({ status: 'completed', hydrated: true });
       } else {
-        set({ status: 'active', step: 0, maxVisitedStep: 0, replay: false, hydrated: true });
+        set({
+          status: 'active',
+          step: 0,
+          maxVisitedStep: 0,
+          replay: false,
+          hydrated: true,
+          skippedDoSteps: EMPTY_SKIPPED,
+        });
       }
       return;
     }
@@ -357,9 +473,21 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     // Any mid-tour state (active/pending/skipped) resumes as skipped — the
     // rail's Resume button re-enters at the clamped step, letting the gate
     // rebuild coach preconditions instead of dropping a coachmark on a stale
-    // anchor.
-    const step = clampResumeStep(migrated.step);
-    set({ status: 'skipped', step, maxVisitedStep: step, replay: false, hydrated: true });
+    // anchor. Explicit "Skip step" decisions ride along additively (absent in
+    // older snapshots → empty): a step the user already declined must not
+    // reappear after a restart.
+    // Restore the skip set FIRST: the clamp consults it, and applying the
+    // clamp before the set was known re-offered a step the user had declined.
+    const skippedDoSteps = new Set(migrated.skippedDoSteps ?? []);
+    const step = clampResumeStep(migrated.step, skippedDoSteps);
+    set({
+      status: 'skipped',
+      step,
+      maxVisitedStep: step,
+      replay: false,
+      hydrated: true,
+      skippedDoSteps,
+    });
   },
 
   begin: (replay) => set({
@@ -377,6 +505,7 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     defaultProvider: null,
     multiRuntime: true,
     hydrated: true,
+    skippedDoSteps: EMPTY_SKIPPED,
   }),
 
   next: () => {
@@ -398,7 +527,7 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     // straight over the question they now qualify for.
     const multiRuntime =
       s.step === 1 ? activatedProviders(s).length >= 2 : s.multiRuntime;
-    const step = stepAfter(s.step, 1, { multiRuntime });
+    const step = stepAfter(s.step, 1, { multiRuntime, skippedDoSteps: s.skippedDoSteps });
     if (step === null) {
       set({ multiRuntime, status: 'completed' });
       return;
@@ -438,21 +567,54 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     set({ status: 'skipped' });
   },
 
-  resume: () => {
+  skipStep: () => {
+    const s = get();
+    if (s.status !== 'active' || !isDoStep(s.step)) return;
+    const skippedDoSteps = new Set(s.skippedDoSteps);
+    skippedDoSteps.add(s.step);
+    // Steps 7-9 point at controls the wizard renders only on its Configure
+    // page, and step 6's own card click is what opens that page. Skipping 6
+    // therefore takes its pointers with it — otherwise the tour advances into
+    // three coachmarks in a row whose anchors are not on screen. Pointers are
+    // not skippable by the user (isDoStep), so this is the only path that can
+    // put them in the set.
+    if (s.step === ONBOARDING_CONFIGURE_OPENER_STEP) {
+      for (const pointer of ONBOARDING_POINTER_STEPS) skippedDoSteps.add(pointer);
+    }
+    // A skip means "move on" — advance like forceNext with the step recorded as
+    // skipped, so every later navigation path (next/back/goTo/dots/numbering)
+    // steps over it for the rest of this run. Never parks pending: step 10's
+    // NORMAL advance waits for 'workflow-run-started', but a skipped step has no
+    // wait left in it.
+    const step = stepAfter(s.step, 1, { multiRuntime: s.multiRuntime, skippedDoSteps });
+    if (step === null) {
+      set({ skippedDoSteps, status: 'completed' });
+      return;
+    }
+    set({ skippedDoSteps, step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
+  },
+
+  resume: (options) => {
     const s = get();
     if (s.status !== 'skipped' && s.status !== 'pending') return;
-    // The Sidebar "Resume setup" button is the only caller, so a resume is a
-    // COLD re-entry after the user skipped/parked and moved on. The wizard-
-    // Configure pointer steps (7-9) anchor the session-start screen, which is
-    // the first thing gone once the wizard closes — resuming onto a vanished
-    // anchor renders a disconnected, floating coachmark. Rebuild like the boot
-    // path: fall back to step 6 (its precondition reopens the wizard) and reset
-    // maxVisited so dots can't jump straight back onto the still-missing
-    // anchors. Steps 10-11 keep their step (the /ship coachmark's Continue escape
-    // and the always-present rail anchor cover a missing target), and modal
-    // steps never disconnect.
-    if (s.step >= 7 && s.step <= 9) {
-      set({ status: 'active', step: 6, maxVisitedStep: 6 });
+    // The Sidebar "Resume setup" button is the only caller. With the anchors
+    // MISSING (the cold re-entry after the wizard closed), rebuild like the
+    // boot path: fall back to step 6 (its precondition reopens the wizard) and
+    // reset maxVisited so dots can't jump straight back onto the still-missing
+    // anchors. With them ALIVE, keep the step: rewinding would yank the user
+    // off live, on-screen targets they already passed. Steps outside 7-9 always
+    // keep their step (10-11 have the /ship Continue escape and the
+    // always-present rail anchor; modal steps never disconnect).
+    const landing = resumeLandingStep(s.step, options?.wizardAnchorsMissing ?? true, s.skippedDoSteps);
+    if (landing !== s.step) {
+      // Landing 6 resets maxVisited so dots can't offer the still-missing
+      // anchors; a skipped-6 landing (10-12) keeps maxVisited current instead —
+      // the same exposure the 10-11 keep-branch already accepts.
+      set({
+        status: 'active',
+        step: landing,
+        maxVisitedStep: landing === 6 ? 6 : Math.max(s.maxVisitedStep, landing),
+      });
       return;
     }
     set({ status: 'active', step: s.step });
@@ -503,10 +665,14 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     if (s.status !== 'active' && s.status !== 'pending') return;
     const advanceTo = (step: number): void =>
       set({ status: 'active', step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
-    if (kind === 'project-created' && s.step === 5) advanceTo(6);
+    // A real event names the step it unlocks, but a step the user skipped must
+    // not be re-offered — land on the first one this run still shows.
+    const advanceToFirstShown = (step: number): void =>
+      advanceTo(firstUnskippedFrom(step, s.skippedDoSteps));
+    if (kind === 'project-created' && s.step === 5) advanceToFirstShown(6);
     // The launch may fire from ANY Configure-page step — the user can hit
     // Start quick session before Next-ing through every pointer.
-    else if (kind === 'quick-session-created' && s.step >= 6 && s.step <= 9) advanceTo(10);
-    else if (kind === 'workflow-run-started' && s.step === 10) advanceTo(11);
+    else if (kind === 'quick-session-created' && s.step >= 6 && s.step <= 9) advanceToFirstShown(10);
+    else if (kind === 'workflow-run-started' && s.step === 10) advanceToFirstShown(11);
   },
 }));

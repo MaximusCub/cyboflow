@@ -32,7 +32,13 @@ interface CoachmarkProps {
   /** Step indices this run does not show (see OnboardingDots). */
   skippedSteps?: ReadonlySet<number>;
   onBack: () => void;
+  /** Quit the WHOLE tour (skipped → Sidebar "Resume setup"). */
   onSkip: () => void;
+  /**
+   * Per-step escape (do-steps 6/10/11 only): mark THIS step skipped and move
+   * to the next, without abandoning the tour. Pointers 7-9 have Next instead.
+   */
+  onSkipStep: () => void;
   onGoTo: (step: number) => void;
   onAnchorActioned: () => void;
   onNext: () => void;
@@ -184,6 +190,7 @@ export function Coachmark({
   skippedSteps,
   onBack,
   onSkip,
+  onSkipStep,
   onGoTo,
   onAnchorActioned,
   onNext,
@@ -264,15 +271,17 @@ export function Coachmark({
         <div className="text-[11px] leading-[1.55] text-[var(--paper)]/80">{spec.body}</div>
         {rect === null && (
           <div className="mt-2 text-[10px] leading-[1.5] text-[var(--paper)]/60">
-            The highlighted control isn't on screen right now — use Back to revisit a step, or Skip and resume later
-            from the rail.
+            The highlighted control isn't on screen right now — use Back to revisit a step, or Skip tour and resume
+            later from the rail.
           </div>
         )}
       </div>
       {/* Dots on their own row above the actions: an 11-step dot rail + Skip/Back
           /Next does not fit one row in the 298px popover (the Next button on
           pointer steps overflowed the card). Two rows scale to any step count;
-          both rows are centered so the dots and buttons stay visually aligned. */}
+          both rows are centered so the dots and buttons stay visually aligned.
+          flex-wrap: a do-step's anchor-lost fallback carries the widest row
+          (Skip tour + Skip step + Back + Continue); wrapping beats clipping. */}
       <div className="flex flex-col items-center gap-2.5 px-[17px] pb-3.5 pt-[11px]">
         <OnboardingDots
           step={step}
@@ -280,14 +289,25 @@ export function Coachmark({
           skippedSteps={visible}
           onGoTo={onGoTo}
         />
-        <div className="flex items-center justify-center gap-2">
+        <div className="flex flex-wrap items-center justify-center gap-2">
           <button
             type="button"
             onClick={onSkip}
             className="border-none bg-transparent px-0.5 py-1.5 text-[9.5px] font-semibold uppercase tracking-[.1em] text-[var(--paper)]/55 transition-colors hover:text-[var(--paper)]"
           >
-            Skip
+            Skip tour
           </button>
+          {/* Per-step escape on the advance-by-doing steps only — the pointers
+              (7-9) have Next, and a skip there would strand their anchor beat. */}
+          {!spec.pointer && (
+            <button
+              type="button"
+              onClick={onSkipStep}
+              className="border-none bg-transparent px-0.5 py-1.5 text-[9.5px] font-semibold uppercase tracking-[.1em] text-[var(--paper)]/55 transition-colors hover:text-[var(--paper)]"
+            >
+              Skip step
+            </button>
+          )}
           <button
             type="button"
             onClick={onBack}

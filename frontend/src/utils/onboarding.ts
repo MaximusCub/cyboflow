@@ -65,6 +65,13 @@ export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [6, 7, 8, 9, 10, 11
 export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [7, 8, 9];
 
 /**
+ * The step whose action opens the wizard's Configure page — the page that
+ * mounts every {@link ONBOARDING_POINTER_STEPS} anchor. Skipping it strands
+ * those pointers, so the store skips them alongside it.
+ */
+export const ONBOARDING_CONFIGURE_OPENER_STEP = 6;
+
+/**
  * The one CONDITIONAL step: "which agent should be your default?" only has a
  * question to ask when the Connect step left more than one provider activated.
  * The store decides (onboardingStore.isStepSkipped) — this constant just names

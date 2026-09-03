@@ -21,6 +21,7 @@ import { ONBOARDING_EVENTS, ONBOARDING_MODAL_STEPS, ONBOARDING_PREF_KEY } from '
 import { emitTelemetryChangeEvents, trackEvent } from '../../utils/telemetry';
 import { OnboardingOverlay } from './OnboardingOverlay';
 import { OnboardingModalCard, type PrimaryAction } from './OnboardingModalCard';
+import { OnboardingPausedCard } from './OnboardingPausedCard';
 import { OnboardingSpiralReveal } from './OnboardingSpiralReveal';
 import { revealFraction } from '../../utils/onboardingSpiral';
 import { Coachmark } from './Coachmark';
@@ -41,9 +42,10 @@ import { RailMapStep } from './steps/RailMapStep';
  * effects (default agent runtime, permission mode, telemetry consent,
  * add-project). The store stays synchronously testable; every async lives here.
  *
- * Mounted once, app-wide, from App.tsx. Renders the overlay only while the tour
- * is 'active' (skipped/pending/completed render nothing — the Sidebar owns the
- * "Resume setup" affordance while skipped).
+ * Mounted once, app-wide, from App.tsx. Renders the overlay while the tour is
+ * 'active', and the small non-blocking OnboardingPausedCard while 'pending'
+ * (waiting on a real-world event). Skipped/completed render nothing — the
+ * Sidebar owns the "Resume setup" affordance while skipped.
  */
 
 const MISSING_DETECTION: ProviderDetectionResult<'claude'> = {
@@ -85,6 +87,7 @@ export function OnboardingGate(): React.JSX.Element | null {
   const permMode = useOnboardingStore((s) => s.permMode);
   const defaultProvider = useOnboardingStore((s) => s.defaultProvider);
   const multiRuntime = useOnboardingStore((s) => s.multiRuntime);
+  const skippedDoSteps = useOnboardingStore((s) => s.skippedDoSteps);
 
   const hydrate = useOnboardingStore((s) => s.hydrate);
   const next = useOnboardingStore((s) => s.next);
@@ -92,6 +95,7 @@ export function OnboardingGate(): React.JSX.Element | null {
   const back = useOnboardingStore((s) => s.back);
   const goTo = useOnboardingStore((s) => s.goTo);
   const skip = useOnboardingStore((s) => s.skip);
+  const skipStep = useOnboardingStore((s) => s.skipStep);
   const setDetection = useOnboardingStore((s) => s.setDetection);
   const setConnected = useOnboardingStore((s) => s.setConnected);
   const setCodexDetection = useOnboardingStore((s) => s.setCodexDetection);
@@ -120,11 +124,20 @@ export function OnboardingGate(): React.JSX.Element | null {
 
   // Persist the snapshot on any (status, step) change once hydrated. Registered
   // before hydration resolves so the initial idle→active/completed write lands.
+  // skippedDoSteps rides along additively (absent when empty, so untouched
+  // installs keep writing the exact pre-skipStep shape).
   useEffect(() => {
     return useOnboardingStore.subscribe((state, prev) => {
       if (!state.hydrated || state.status === 'idle') return;
-      if (state.status === prev.status && state.step === prev.step) return;
+      if (
+        state.status === prev.status
+        && state.step === prev.step
+        && state.skippedDoSteps === prev.skippedDoSteps
+      ) return;
       const snapshot: PersistedOnboardingV3 = { version: 3, status: state.status, step: state.step };
+      if (state.skippedDoSteps.size > 0) {
+        snapshot.skippedDoSteps = [...state.skippedDoSteps].sort((a, b) => a - b);
+      }
       void window.electron?.invoke('preferences:set', ONBOARDING_PREF_KEY, JSON.stringify(snapshot));
     });
   }, []);
@@ -579,12 +592,28 @@ export function OnboardingGate(): React.JSX.Element | null {
     return () => window.removeEventListener('keydown', onKey);
   }, [status, back]);
 
-  if (!hydrated || status !== 'active') return null;
+  if (!hydrated) return null;
+
+  // Parked (status 'pending'): the tour waits on a real-world event —
+  // 'quick-session-created' after step 9's Next, 'workflow-run-started' after
+  // step 10's /ship click — and realEvent below advances the moment it lands.
+  // Render a small non-blocking notice instead of vanishing: an overlay that
+  // disappears with no feedback reads as the tour having ended.
+  if (status === 'pending') {
+    return (
+      <OnboardingOverlay>
+        <OnboardingPausedCard step={step} onSkip={skip} />
+      </OnboardingOverlay>
+    );
+  }
+
+  if (status !== 'active') return null;
 
   const isModal = ONBOARDING_MODAL_STEPS.includes(step);
   // The steps this run does NOT show, so the dots and "STEP n / N" counters
-  // describe the tour the user actually walks.
-  const skippedSteps = skippedStepSet({ multiRuntime });
+  // describe the tour the user actually walks (the conditional step-2 skip plus
+  // any do-steps the user explicitly skipped).
+  const skippedSteps = skippedStepSet({ multiRuntime, skippedDoSteps });
 
   const body = ((): React.ReactNode => {
     switch (step) {
@@ -670,6 +699,7 @@ export function OnboardingGate(): React.JSX.Element | null {
           skippedSteps={skippedSteps}
           onBack={back}
           onSkip={skip}
+          onSkipStep={skipStep}
           onGoTo={goTo}
           onAnchorActioned={anchorActioned}
           onNext={next}

@@ -10,7 +10,7 @@ import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 import { useConfigStore } from '../stores/configStore';
 import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
-import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
+import { resumeLandingStep, skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import {
   ONBOARDING_ANCHOR_ATTR,
@@ -98,14 +98,28 @@ export const Sidebar = memo(function Sidebar({
   const settingsInitialTab = useNavigationStore((s) => s.settingsTab);
   const openSettings = useNavigationStore((s) => s.openSettings);
   const closeSettings = useNavigationStore((s) => s.closeSettings);
+  const navigationView = useNavigationStore((s) => s.view);
   const onboardingHydrated = useOnboardingStore((state) => state.hydrated);
   const onboardingStatus = useOnboardingStore((state) => state.status);
   const onboardingStep = useOnboardingStore((state) => state.step);
   // The tour may skip its one conditional step, so "Step n of N" has to count
   // what this run actually shows (skippedStepSet returns stable identities).
   const onboardingSkipped = useOnboardingStore((state) => skippedStepSet(state));
+  const onboardingSkippedDoSteps = useOnboardingStore((state) => state.skippedDoSteps);
   const showResumeSetup =
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
+  // The wizard-Configure pointer steps (7-9) rewind to 6 on resume ONLY when
+  // their anchors are gone. That answer comes from the navigation store, not
+  // from a DOM query: a querySelector inside a memoised render is read once and
+  // never re-runs when the DOM changes, so the label could name one step while
+  // the click navigated to another. The Configure page cannot exist outside the
+  // wizard view, and the same value drives the click below, so the two can no
+  // longer disagree.
+  const resumeAnchorsMissing =
+    showResumeSetup && onboardingStep >= 7 && onboardingStep <= 9
+      ? navigationView !== 'wizard'
+      : false;
+  const resumeStep = resumeLandingStep(onboardingStep, resumeAnchorsMissing, onboardingSkippedDoSteps);
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
@@ -257,7 +271,15 @@ export const Sidebar = memo(function Sidebar({
           >
             <button
               type="button"
-              onClick={() => useOnboardingStore.getState().resume()}
+              onClick={() =>
+                // The same value the label above was rendered from, so the
+                // button can never advertise a step the resume won't land on.
+                // A step kept while the wizard sits off its Configure page is
+                // handled by the Coachmark's anchor-lost fallback.
+                useOnboardingStore.getState().resume({
+                  wizardAnchorsMissing: resumeAnchorsMissing,
+                })
+              }
               data-testid="onboarding-resume-setup"
               className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-hover"
             >
@@ -270,7 +292,7 @@ export const Sidebar = memo(function Sidebar({
               <span className="min-w-0 flex-1">
                 <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
                 <span className="block text-[10px] text-text-secondary">
-                  Step {visibleStepNumber(onboardingStep, onboardingSkipped)} of{' '}
+                  Step {visibleStepNumber(resumeStep, onboardingSkipped)} of{' '}
                   {visibleStepTotal(onboardingSkipped)}
                 </span>
               </span>
