@@ -6838,13 +6838,14 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Session cleanup complete');
   }
 
-  // Stop orchestrator (drains run queues). The drain is bounded: a queue held
-  // by a session-lifetime execute() task is abandoned rather than waited out,
-  // so the teardown steps below still run. The run keeps its status and boot
-  // recovery picks it up on the next launch.
+  // Stop orchestrator (drains run queues). A run with a live execution holds
+  // its queue with a task that settles only when its session ends, so at quit
+  // it never will — waiting on one flushes nothing. Skip those and wait only
+  // for queues that can still go idle. Nothing is transitioned either way: the
+  // run keeps its status and boot recovery picks it up on the next launch.
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');
-    await orchestrator.stop();
+    await orchestrator.stop((runId) => !runExecutor?.hasActiveExecution(runId));
     console.log('[Main] Orchestrator stopped');
   }
 
