@@ -6,6 +6,28 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-09-02
+
+### Added
+
+- **Beads as a fourth tracker provider.** A keyless CLI adapter for [beads](https://github.com/steveyegge/beads): a Detect wizard step that names the workspace folder instead of asking for a token, an "Initialize beads here" button that creates a missing workspace in place, and a Map step that offers sync / don't-sync per project. Writes go through a guarded-update contract (identity sandwich, fingerprint revisions, detect-after-write) with a reconciliation sweep, ledger, and recovery surfaces — remap, adopt-new-workspace, and a Dolt-HEAD guard (migration 129).
+- **Human Review Queue redesign.** The landing page is rebuilt around a page-state machine and a recommended-actions engine, with a load-error state, a simplified Add-an-idea modal, and an idea-only New Task dialog. The Launch-flow card is hidden for established codebases.
+- **Keyboard shortcuts.** Eight remappable global shortcuts (new session, rails, chat, queue, backlog) with a dedicated Shortcuts tab in Settings, plus a custom application menu. `Cmd+,` opens Settings, `Cmd+/` opens the Shortcuts tab, and `Cmd+]` also toggles the global-assistant rail on landing surfaces.
+- **Claude Fable 5.1**, via an Agent SDK bump to 0.3.257.
+
+### Changed
+
+- The launch wizard presents workflows in a curated order (Ship first, Compound last).
+- Reload moves to `Shift+Cmd+R` under the new application menu; `Alt+Cmd+R` stays pinned to force-reload, and remaps onto either reserved accelerator are rejected.
+- Review-queue surfaces get a raised cream card treatment over a white canvas sheet, and their grids are intrinsically sized so narrow panes stack instead of overflowing.
+
+### Fixed
+
+- **Boot opens the landing page again.** The rail's auto-select pass navigated to the first project, which since the project-overview feature also opened the full Project page — and because the navigation store is not persisted, this ran at every launch, making it impossible to boot to LandingHome whenever any project existed. Selection no longer implies navigation.
+- **The updater runs over Node's HTTP stack**, with `electron.net` as a fallback that now recovers by rebinding its poisoned session.
+- Systemic environment conditions are no longer reported as app errors, and minidumps are dropped for deliberately terminated child processes.
+- A too-old-CLI model rejection is treated as model-unavailable rather than a hard failure.
+
 ## [0.2.10] — 2026-08-31
 
 ### Added

@@ -1,0 +1,217 @@
+=== A6: --tree (default) vs --flat JSON shape ===
+$ bd list --limit 3 --json  (default tree=true)
+[
+  {
+    "id": "bp-5yq",
+    "title": "status probe hooked",
+    "status": "hooked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:46Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:50Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-tmr",
+    "title": "status probe deferred",
+    "status": "deferred",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:45Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:48Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-4sp",
+    "title": "status probe blocked",
+    "status": "blocked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:44Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:47Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+$ bd list --flat --limit 3 --json
+[
+  {
+    "id": "bp-5yq",
+    "title": "status probe hooked",
+    "status": "hooked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:46Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:50Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-tmr",
+    "title": "status probe deferred",
+    "status": "deferred",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:45Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:48Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bp-4sp",
+    "title": "status probe blocked",
+    "status": "blocked",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:36:44Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:47Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== structural diff: types/shape ===
+-- tree shape --
+"array"
+"object"
+[
+  "comment_count",
+  "created_at",
+  "created_by",
+  "dependency_count",
+  "dependent_count",
+  "id",
+  "issue_type",
+  "owner",
+  "priority",
+  "status",
+  "title",
+  "updated_at"
+]
+-- flat shape --
+"array"
+"object"
+[
+  "comment_count",
+  "created_at",
+  "created_by",
+  "dependency_count",
+  "dependent_count",
+  "id",
+  "issue_type",
+  "owner",
+  "priority",
+  "status",
+  "title",
+  "updated_at"
+]
+diff:
+IDENTICAL SHAPE
+
+=== now with a real parent/child pair to see if tree JSON nests children ===
+parent=bp-ys2 child=bp-ys2.1
+-- tree(default) --json --id filter --
+[
+  {
+    "id": "bp-ys2.1",
+    "title": "tree child",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:20Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:20Z",
+    "dependencies": [
+      {
+        "issue_id": "bp-ys2.1",
+        "depends_on_id": "bp-ys2",
+        "type": "parent-child",
+        "created_at": "2026-08-26T21:38:19Z",
+        "created_by": "Krishna",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "bp-ys2"
+  },
+  {
+    "id": "bp-ys2",
+    "title": "tree parent",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:19Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:19Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+-- flat --json --id filter --
+[
+  {
+    "id": "bp-ys2.1",
+    "title": "tree child",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:20Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:20Z",
+    "dependencies": [
+      {
+        "issue_id": "bp-ys2.1",
+        "depends_on_id": "bp-ys2",
+        "type": "parent-child",
+        "created_at": "2026-08-26T21:38:19Z",
+        "created_by": "Krishna",
+        "metadata": "{}"
+      }
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0,
+    "parent": "bp-ys2"
+  },
+  {
+    "id": "bp-ys2",
+    "title": "tree parent",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:19Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:19Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

@@ -238,3 +238,43 @@ export function scrubBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
 
   return breadcrumb;
 }
+
+/**
+ * Electron `child-process-gone` reasons that describe a process we (or Chromium)
+ * ENDED ON PURPOSE, as opposed to one that died. Chromium tears utility
+ * processes down routinely — the Audio Service is stopped whenever nothing is
+ * playing — and the Electron SDK stamps the reason onto the minidump event as
+ * the `exit.reason` tag.
+ *
+ * Every other reason ('crashed', 'oom', 'abnormal-exit', 'launch-failed',
+ * 'integrity-failure') stays reportable: those are deaths, and a utility process
+ * dying unexpectedly is our problem even when the code that killed it is not.
+ */
+const DELIBERATE_EXIT_REASONS = new Set(['killed', 'clean-exit']);
+
+/**
+ * Whether a native event is the minidump of a process that was shut down
+ * deliberately rather than one that crashed.
+ *
+ * WHY THIS IS A DROP AND NOT A TAG. `tagCrashSource` below deliberately tags
+ * rather than discards, because the split it makes — our binary vs. an agent's
+ * stray descendant — is genuinely ambiguous from `beforeSend`, and the
+ * expensive mistake there is filing one of OUR crashes as noise. This predicate
+ * is the opposite case: `exit.reason` is not ambiguous. A SIGTERM'd child
+ * (Electron reports `reason: 'killed'`, `exitCode: 15`) did not fail — there is
+ * no defect behind it and no volume ranking it should influence.
+ *
+ * Observed live as CYBOFLOW-APP-1V: three "crashes" that were the Audio Service
+ * being stopped, each carrying a stack overflow inside macOS's own
+ * `sourcekitdInProc` / Swift `dispatch_apply` — a captured-at-teardown stack
+ * from OS code we never call, tagged `crash_source: app` because 'Utility' is a
+ * process type we recognize.
+ *
+ * Scoped to native events: a JS error never carries `exit.reason`, and this must
+ * not become a general-purpose drop.
+ */
+export function isDeliberateProcessTermination<T extends Event>(event: T): boolean {
+  if (event.platform !== 'native') return false;
+  const reason = event.tags?.['exit.reason'];
+  return typeof reason === 'string' && DELIBERATE_EXIT_REASONS.has(reason);
+}

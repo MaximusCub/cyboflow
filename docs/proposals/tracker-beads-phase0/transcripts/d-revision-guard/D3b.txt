@@ -1,0 +1,296 @@
+=== D3b: raw SQL access + schema discovery ===
+$ bd sql 'show tables'
+Error: 'bd sql' is not yet supported in embedded mode
+exit=1
+$ bd sql --json 'select 1'   (does --json change the refusal shape?)
+Error: 'bd sql' is not yet supported in embedded mode
+exit=1
+$ BD_JSON_ENVELOPE=1 bd sql --json 'select 1'
+Error: 'bd sql' is not yet supported in embedded mode
+exit=1
+$ bd dolt status
+Dolt engine: embedded (in-process, no server)
+  Data: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/d-revision-guard/.beads/embeddeddolt
+exit=0
+$ bd dolt show
+Dolt Configuration
+==================
+  Database: dg
+  Mode:     embedded (in-process Dolt engine)
+  Data:     /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/d-revision-guard/.beads/embeddeddolt
+
+Remotes:
+  (none)
+
+Config sources (priority order):
+  1. Environment variables (BEADS_DOLT_*)
+  2. metadata.json (local, gitignored)
+  3. config.yaml (team defaults)
+exit=0
+$ which dolt
+/opt/homebrew/bin/dolt
+exit=0
+$ ls -la .beads/embeddeddolt
+total 0
+drwx------@  4 raimundoesteva  wheel  128 Aug 26 21:30 .
+drwx------@ 10 raimundoesteva  wheel  320 Aug 26 21:31 ..
+-rw-------@  1 raimundoesteva  wheel    0 Aug 26 21:30 .lock
+drwxr-xr-x@  3 raimundoesteva  wheel   96 Aug 26 21:30 dg
+exit=0
+--- D3b: direct dolt CLI against embedded data dir ---
+$ pwd
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/d-revision-guard/.beads/embeddeddolt/dg
+$ dolt sql -q 'show tables' --result-format csv
+Tables_in_dg
+blocked_issues
+child_counters
+comments
+compaction_snapshots
+config
+custom_statuses
+custom_types
+dependencies
+events
+federation_peers
+ignored_schema_migrations
+interactions
+issue_counter
+issue_snapshots
+issues
+labels
+local_metadata
+metadata
+ready_issues
+repo_mtimes
+routes
+schema_migrations
+wisp_child_counters
+wisp_comments
+wisp_dependencies
+wisp_events
+wisp_labels
+wisps
+exit=0
+$ dolt sql -q 'describe issues' --result-format csv
+Field,Type,Null,Key,Default,Extra
+id,varchar(255),NO,PRI,,""
+content_hash,varchar(64),YES,"",,""
+title,varchar(500),NO,"",,""
+description,longtext,NO,"",,""
+design,longtext,NO,"",,""
+acceptance_criteria,longtext,NO,"",,""
+notes,longtext,NO,"",,""
+status,varchar(32),NO,MUL,'open',""
+priority,int,NO,MUL,2,""
+issue_type,varchar(32),NO,MUL,'task',""
+assignee,varchar(255),YES,MUL,,""
+estimated_minutes,int,YES,"",,""
+created_at,datetime,NO,MUL,CURRENT_TIMESTAMP,DEFAULT_GENERATED
+created_by,varchar(255),YES,"",'',""
+owner,varchar(255),YES,"",'',""
+updated_at,datetime,NO,"",CURRENT_TIMESTAMP,DEFAULT_GENERATED
+closed_at,datetime,YES,"",,""
+closed_by_session,varchar(255),YES,"",'',""
+external_ref,varchar(255),YES,MUL,,""
+spec_id,varchar(1024),YES,MUL,,""
+compaction_level,int,YES,"",0,""
+compacted_at,datetime,YES,"",,""
+compacted_at_commit,varchar(64),YES,"",,""
+original_size,int,YES,"",,""
+sender,varchar(255),YES,"",'',""
+ephemeral,tinyint(1),YES,"",0,""
+wisp_type,varchar(32),YES,"",'',""
+pinned,tinyint(1),YES,"",0,""
+is_template,tinyint(1),YES,"",0,""
+mol_type,varchar(32),YES,"",'',""
+work_type,varchar(32),YES,"",'mutex',""
+source_system,varchar(255),YES,"",'',""
+metadata,json,YES,"",(json_object()),DEFAULT_GENERATED
+source_repo,varchar(512),YES,"",'',""
+close_reason,longtext,YES,"",'',""
+event_kind,varchar(32),YES,"",'',""
+actor,varchar(255),YES,"",'',""
+target,varchar(255),YES,"",'',""
+payload,text,YES,"",'',""
+await_type,varchar(32),YES,"",'',""
+await_id,varchar(255),YES,"",'',""
+timeout_ns,bigint,YES,"",0,""
+waiters,text,YES,"",'',""
+hook_bead,varchar(255),YES,"",'',""
+role_bead,varchar(255),YES,"",'',""
+agent_state,varchar(32),YES,"",'',""
+last_activity,datetime,YES,"",,""
+role_type,varchar(32),YES,"",'',""
+rig,varchar(255),YES,"",'',""
+due_at,datetime,YES,"",,""
+defer_until,datetime,YES,MUL,,""
+no_history,tinyint(1),YES,"",0,""
+started_at,datetime,YES,"",,""
+is_blocked,tinyint(1),NO,MUL,0,""
+exit=0
+$ dolt sql -q 'select id,title,priority,content_hash,updated_at from issues' --result-format csv
+id,title,priority,content_hash,updated_at
+dg-qip,D2 title-A,3,9fd213c6df18d3ba49c588af9114cd2c4f1e1c70fbc1903a15295473e27a5b24,2026-08-27 04:32:01
+exit=0
+--- D3b: does content_hash mutate? (field scoping test) ---
+baseline:
+id,title,priority,content_hash
+dg-qip,D2 title-A,3,9fd213c6df18d3ba49c588af9114cd2c4f1e1c70fbc1903a15295473e27a5b24
+$ bd update dg-qip --title 'HASH-TEST title-B'  (TITLE change)
+✓ Updated issue: dg-qip — HASH-TEST title-B
+exit=0
+after title change:
+id,title,priority,content_hash
+dg-qip,HASH-TEST title-B,3,9fd213c6df18d3ba49c588af9114cd2c4f1e1c70fbc1903a15295473e27a5b24
+$ bd update dg-qip --priority 4   (PRIORITY change, title unchanged)
+✓ Updated issue: dg-qip — HASH-TEST title-B
+exit=0
+after priority change:
+id,title,priority,content_hash
+dg-qip,HASH-TEST title-B,4,9fd213c6df18d3ba49c588af9114cd2c4f1e1c70fbc1903a15295473e27a5b24
+--- D3b: content_hash NEGATIVE CONTROL (does it differ across issues at all?) ---
+$ bd create 'FRESH hash probe' --json
+{
+  "created_at": "2026-08-27T04:34:56.460108Z",
+  "created_by": "Krishna",
+  "id": "dg-sa7",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "FRESH hash probe",
+  "updated_at": "2026-08-27T04:34:56.460108Z"
+}
+exit=0
+hashes for all issues (proves hash is NOT a constant):
+id,title,content_hash,created_at,updated_at
+dg-qip,HASH-TEST title-B,9fd213c6df18d3ba49c588af9114cd2c4f1e1c70fbc1903a15295473e27a5b24,2026-08-27 04:31:10,2026-08-27 04:34:40
+dg-sa7,FRESH hash probe,efd0f654a2486d7c7cf310bcd49cbf66668a0688c1e2caf336a0ac8b8f947ca1,2026-08-27 04:34:56,2026-08-27 04:34:56
+--- D3b: SQL GUARD, ARM 1 = MATCHING updated_at (expect 1 row changed) ---
+$ dolt sql -q "select id,updated_at from issues where id='dg-sa7'" --result-format csv
+id,updated_at
+dg-sa7,2026-08-27 04:34:56
+exit=0
+$ dolt sql -q "UPDATE issues SET title='GUARDED-OK' WHERE id='dg-sa7' AND updated_at='2026-08-27 04:34:56'"
+exit=0
+verify:
+id,title,updated_at
+dg-sa7,GUARDED-OK,2026-08-26 21:35:10
+exit=0
+--- D3b: SQL GUARD, ARM 1 = MATCHING updated_at (expect 1 row changed) ---
+$ dolt sql -q "select id,updated_at from issues where id='dg-sa7'" --result-format csv
+id,updated_at
+dg-sa7,2026-08-26 21:35:10
+exit=0
+$ dolt sql -q "UPDATE issues SET title='GUARDED-OK' WHERE id='dg-sa7' AND updated_at='2026-08-27 04:34:56'"
+exit=0
+verify:
+id,title,updated_at
+dg-sa7,GUARDED-OK,2026-08-26 21:35:10
+exit=0
+--- D3b: is updated_at ON UPDATE CURRENT_TIMESTAMP? ---
+$ dolt sql -q 'show create table issues' --result-format json | grep -o 'updated_at[^,]*'
+`updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+`updated_at`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin"
+exit=0
+--- D3b: how to read rows-affected from dolt sql? ---
+$ dolt sql -q "UPDATE issues SET notes='x' WHERE id='dg-sa7' AND updated_at='1999-01-01 00:00:00'" --result-format json  (STALE guard)
+exit=0
+$ dolt sql -q "UPDATE issues SET notes='y' WHERE id='dg-sa7' AND updated_at='1999-01-01 00:00:00'; select row_count() as rows_affected;" --result-format csv
+rows_affected
+0
+exit=0
+=== D3b DEFINITIVE PAIRED GUARD TEST on dg-sa7 ===
+step 1: read current updated_at (the 'expected revision')
+id,title,updated_at
+dg-sa7,GUARDED-OK,2026-08-26 21:35:10
+EXP='2026-08-26 21:35:10'
+
+step 2: ARM A = STALE revision (negative control), expect rows_affected=0 + NO change
+$ UPDATE ... SET title='SHOULD-NOT-LAND' WHERE id='dg-sa7' AND updated_at='1999-01-01 00:00:00'; select row_count();
+rows_affected
+0
+exit=0
+verify ARM A did NOT land:
+id,title,updated_at
+dg-sa7,GUARDED-OK,2026-08-26 21:35:10
+
+step 3: ARM B = MATCHING revision, expect rows_affected=1 + change lands
+$ UPDATE ... SET title='GUARD-ARM-B-LANDED' WHERE id='dg-sa7' AND updated_at='2026-08-26 21:35:10'; select row_count();
+rows_affected
+1
+exit=0
+verify ARM B landed (and updated_at auto-bumped):
+id,title,updated_at
+dg-sa7,GUARD-ARM-B-LANDED,2026-08-26 21:36:00
+=== D3b: does a raw-SQL write corrupt bd bookkeeping? ===
+$ bd show dg-sa7 --json   (does bd see 'GUARD-ARM-B-LANDED'?)
+[
+  {
+    "id": "dg-sa7",
+    "title": "GUARD-ARM-B-LANDED",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:56Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-26T21:36:00Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+exit=0
+$ bd list --json | grep -E 'id|title'
+    "id": "dg-sa7",
+    "title": "GUARD-ARM-B-LANDED",
+    "id": "dg-qip",
+    "title": "HASH-TEST title-B",
+exit=0
+$ bd history dg-sa7   (did the raw SQL write create a Dolt commit?)
+
+📜 History for dg-sa7 (1 entries)
+
+10o5do1r 2026-08-26 21:34:56
+  Author: root
+  ○ dg-sa7: FRESH hash probe [P2 - open]
+
+exit=0
+=== D3b: timezone corruption proof ===
+$ date -u '+%Y-%m-%d %H:%M:%S UTC'  /  date '+%Y-%m-%d %H:%M:%S %Z'
+2026-08-27 04:36:33 UTC
+2026-08-26 21:36:33 PDT
+exit=0
+NOTE: bd-written rows carry UTC; the raw-SQL-written row carries LOCAL, but bd labels BOTH with 'Z'.
+$ bd list --json | grep -A1 updated_at ; per-issue updated_at as bd reports it:
+exit=1
+
+=== D3b: dolt working-set / commit state after raw SQL write ===
+$ dolt status
+On branch main
+
+Changes not staged for commit:
+  (use "dolt add <table>" to update what will be committed)
+  (use "dolt checkout <table>" to discard changes in working directory)
+	modified:         issues
+exit=0
+$ dolt log --oneline -n 5
+[33m10o5do1rqogh5l665u8g366jqk267a4i [0mbd: create dg-sa7
+[33mo9nkk8ej79tjmgq0lgdnidg81rjarpuf [0mbd: update (auto-commit) by Krishna [dg-qip]
+[33msge64ni0dnklr9frmse8j4fvp6jpr00r [0mbd: update (auto-commit) by Krishna [dg-qip]
+[33m66k2bi2atbe7ko6i41ovgkpq2tumissu [0mbd: update (auto-commit) by Krishna [dg-qip]
+[33m5v3kmpdctamh22qudcmu26291sunhotm [0mbd: update (auto-commit) by Krishna [dg-qip]
+exit=0
+=== D3b-2: does SERVER mode unlock 'bd sql'? ===
+$ bd dolt start
+Error: 'bd dolt start' is not supported in embedded mode (no Dolt server)
+exit=1
+$ bd dolt status
+Dolt engine: embedded (in-process, no server)
+  Data: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/d-revision-guard/.beads/embeddeddolt
+exit=0
+$ bd sql 'select id,title,updated_at from issues limit 3'
+Error: 'bd sql' is not yet supported in embedded mode
+exit=1

@@ -1,0 +1,18 @@
+=== plain text bd list (no --json), default limit ===
+○ bp-rvh [● P2] [task] - bulk 04
+○ bp-tls [● P2] [task] - bulk 02
+○ bp-akt [● P2] [task] - bulk 01
+
+💡 Tip: Install the beads plugin for automatic workflow context, or run 'bd setup claude' for CLI-only mode
+line count:
+0
+
+=== plain text bd list --tree (default) line count ===
+55
+
+=== explicit --limit 10 --json ===
+10
+=== explicit --limit 10 plain (no envelope) --json ===
+10
+=== explicit --limit 0 --json envelope ===
+55

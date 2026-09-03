@@ -10,6 +10,9 @@
  *   reconcilePreview              : mutation     -> TrackerReconcileItem[] (wizard Step 4)
  *   connect                       : mutation     -> { connectionId } (row + encrypted key + reconcile + first pass)
  *   updateCredentials             : mutation     -> TrackerWorkspaceIdentity (rotate the key in place, resume)
+ *   probeRecovery                 : query        -> TrackerRecoveryProbe (WHICH recovery a paused keyless connection needs)
+ *   remapRenamedPrefix            : mutation     -> TrackerRemapResult (rewrite links after `bd rename-prefix`)
+ *   adoptNewWorkspace             : mutation     -> TrackerAdoptionResult (retire + re-bind after a REPLACED workspace)
  *   connections                   : query        -> TrackerConnectionSummary[]
  *   mappings                      : query        -> TrackerConnectionSummary[] (one identity's siblings, ACROSS projects)
  *   setPushTarget                 : mutation     -> { ok } (arm this mapping as its pair's pusher)
@@ -54,7 +57,12 @@ import {
   TrackerSyncNotInitializedError,
   type TrackerChangedEvent,
 } from '../../trackerSyncBridge';
+import {
+  PROVIDER_NEEDS_SECRET,
+  providerNeedsSecret,
+} from '../../../../../shared/types/trackerSync';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictSummary,
   TrackerConnectionSummary,
   TrackerEntityLinkRef,
@@ -62,6 +70,8 @@ import type {
   TrackerGroupTree,
   TrackerIssue,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSourceNarrow,
   TrackerSourceTree,
   TrackerState,
@@ -83,6 +93,24 @@ import { eventToAsyncIterable } from './events';
  */
 function isErrorNamed(err: unknown, name: string): boolean {
   return err instanceof Error && err.name === name;
+}
+
+/**
+ * Does this error come from a KEYLESS provider's adapter?
+ *
+ * Read STRUCTURALLY (`provider` is a public readonly field on TrackerApiError)
+ * for the same reason the checks above read `name`: this file may not import
+ * the error classes. The own-property test is what keeps an unrelated error
+ * carrying a `provider`-shaped field from smuggling an adapter message into
+ * the wizard — an unknown string is not a keyless provider, it is not a
+ * provider at all.
+ */
+function isKeylessProviderError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const provider = (err as { provider?: unknown }).provider;
+  if (typeof provider !== 'string') return false;
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_NEEDS_SECRET, provider)) return false;
+  return !PROVIDER_NEEDS_SECRET[provider as keyof typeof PROVIDER_NEEDS_SECRET];
 }
 
 /**
@@ -126,9 +154,47 @@ function rethrowAsTRPCError(err: unknown): never {
   if (isErrorNamed(err, 'TrackerAuthError')) {
     throw new TRPCError({
       code: 'UNAUTHORIZED',
-      // Deliberately generic: the provider's own 401 body is not something to
-      // paste into the wizard, and the actionable part is always the same.
-      message: 'The tracker rejected these credentials. Check the API key and try again.',
+      // KEYLESS providers pass the message through VERBATIM. For a keyed one
+      // the generic line is right — the provider's own 401 body is not
+      // something to paste into a wizard, and "check the key" is always the
+      // fix. A keyless provider has no key to check: its auth failures are
+      // "`bd` is not installed" and "this repo has no beads workspace", two
+      // different fixes that the generic line would erase, and it would send
+      // the user hunting for an API key that does not exist.
+      message: isKeylessProviderError(err)
+        ? (err instanceof Error ? err.message : 'the tracker workspace could not be detected')
+        : 'The tracker rejected these credentials. Check the API key and try again.',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerCredentialsError')) {
+    throw new TRPCError({
+      // Not an auth failure: the connection is not wired to a workspace it can
+      // reach (no project named, no repo path on disk, no recorded workspace).
+      // Verbatim, because each of those has its own fix and none of them is
+      // "check the key".
+      code: 'PRECONDITION_FAILED',
+      message: err instanceof Error ? err.message : 'this connection cannot be built',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerRecoveryUnavailableError')) {
+    throw new TRPCError({
+      // Not a failure of the connection — the question does not apply to it.
+      // Verbatim, because it names the provider and the reconnect that DOES
+      // apply.
+      code: 'PRECONDITION_FAILED',
+      message: err instanceof Error ? err.message : 'this provider has no workspace recovery',
+      cause: err,
+    });
+  }
+  if (isErrorNamed(err, 'TrackerRecoveryStateError')) {
+    throw new TRPCError({
+      // The user acted on a classification that has since moved on. CONFLICT is
+      // the honest code (a state mismatch, not a bad request), and the message
+      // is verbatim because it names both the expected and the actual state.
+      code: 'CONFLICT',
+      message: err instanceof Error ? err.message : 'this workspace is in a different state now',
       cause: err,
     });
   }
@@ -170,17 +236,58 @@ function rethrowAsTRPCError(err: unknown): never {
 // Zod input schemas — the exact shapes in shared/types/trackerSync.ts
 // ---------------------------------------------------------------------------
 
-const providerSchema = z.enum(['linear', 'plane', 'dart']);
+const providerSchema = z.enum(['linear', 'plane', 'dart', 'beads']);
 
-/** Renderer -> main, wizard/connect only. This is the ONLY inbound key path. */
-const credentialsSchema = z.object({
-  provider: providerSchema,
-  apiKey: z.string().min(1),
-  /** Plane self-hosted origin; omitted = the provider's cloud default. */
-  baseUrl: z.string().min(1).optional(),
-  /** Plane only: the workspace slug all API paths are scoped under. */
-  workspaceSlug: z.string().min(1).optional(),
-});
+/**
+ * Renderer -> main, wizard/connect only. This is the ONLY inbound key path.
+ *
+ * `apiKey` is optional on the WIRE and required per PROVIDER: the refinement
+ * below is what keeps a keyed provider from arriving keyless (which would
+ * reach its adapter as an empty string and come back as a 401 the user cannot
+ * act on) while letting beads — whose credential is that the project has a
+ * `bd` workspace at all — connect with no key. `projectId` is beads' anchor,
+ * and it is an ID rather than a path on purpose: main resolves the path it
+ * spawns `bd` in, so nothing a renderer composed can point the CLI elsewhere.
+ */
+const credentialsSchema = z
+  .object({
+    provider: providerSchema,
+    apiKey: z.string().min(1).optional(),
+    /** Plane self-hosted origin; omitted = the provider's cloud default. */
+    baseUrl: z.string().min(1).optional(),
+    /** Plane only: the workspace slug all API paths are scoped under. */
+    workspaceSlug: z.string().min(1).optional(),
+    /** beads only: the project whose repo path anchors the workspace probe. */
+    projectId: z.number().int().positive().optional(),
+    /**
+     * beads only: an opaque token main minted for a folder the user picked in
+     * a NATIVE dialog (`wizardPickWorkspace`), overriding the project's repo
+     * path. It stays a token all the way through — the refinement below still
+     * requires `projectId`, because the token overrides path RESOLUTION only
+     * and a stale one must fail closed rather than fall back to an unanchored
+     * probe.
+     */
+    workspaceDirToken: z.string().min(1).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (providerNeedsSecret(value.provider)) {
+      if (value.apiKey === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['apiKey'],
+          message: `${value.provider} connections require an API key`,
+        });
+      }
+      return;
+    }
+    if (value.projectId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['projectId'],
+        message: `${value.provider} connections require the project whose repo holds the workspace`,
+      });
+    }
+  });
 
 /**
  * A wizard probe's CREDENTIAL SOURCE (TrackerWizardSourceInput): a pasted key, or
@@ -322,6 +429,41 @@ export const trackerRouter = router({
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().wizardValidate(input.credentials);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Step 0, KEYLESS ONLY — open the main-process folder dialog so the user can
+   * point Detect at a workspace that is not at the project's repo path, and
+   * answer with an opaque token for it (null = cancelled).
+   *
+   * A mutation for a reason of its own on top of the section note above: it
+   * opens a modal OS dialog, so a cached or transparently re-fetched call would
+   * put a second one on screen.
+   */
+  wizardPickWorkspace: protectedProcedure
+    .input(z.object({ provider: providerSchema }))
+    .mutation(async ({ input }): Promise<{ token: string; path: string } | null> => {
+      try {
+        return await getTrackerSyncFacade().wizardPickWorkspace(input.provider);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Step 0, KEYLESS ONLY — create the workspace Detect just failed to find, in
+   * the folder these credentials already name (main resolves it; the input
+   * carries no path). A mutation on top of the section note above because it
+   * WRITES to the user's disk, which nothing may re-issue on its own.
+   */
+  wizardInitWorkspace: protectedProcedure
+    .input(z.object({ credentials: credentialsSchema }))
+    .mutation(async ({ input }): Promise<void> => {
+      try {
+        await getTrackerSyncFacade().wizardInitWorkspace(input.credentials);
       } catch (err) {
         rethrowAsTRPCError(err);
       }
@@ -534,12 +676,75 @@ export const trackerRouter = router({
    * The key travels in, exactly like the wizard calls, and nothing comes back
    * out: the result is the validated workspace identity. Rejects NOT_FOUND for
    * an unknown id and CONFLICT when the key belongs to a different workspace.
+   *
+   * `apiKey` is OPTIONAL because a keyless connection (beads) reconnects by
+   * RE-DETECTING — there is no key to paste, and the same procedure re-probes
+   * the workspace and resumes on an identity match. Which providers may omit
+   * it is the SERVICE's call, not this schema's: the row names the provider,
+   * and the renderer's connection summary is not a trustworthy place to decide
+   * whether a key was required.
    */
   updateCredentials: protectedProcedure
-    .input(z.object({ connectionId: z.string().min(1), apiKey: z.string().min(1) }))
+    .input(z.object({ connectionId: z.string().min(1), apiKey: z.string().min(1).optional() }))
     .mutation(async ({ input }): Promise<TrackerWorkspaceIdentity> => {
       try {
         return await getTrackerSyncFacade().updateCredentials(input.connectionId, input.apiKey);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * WHICH recovery a paused KEYLESS connection needs — 'healthy' | 'redetect' |
+   * 'renamed' | 'replaced' — decided by re-probing the workspace and comparing
+   * the ids, never by reading an error message.
+   *
+   * A QUERY, and a genuinely cheap one to re-run: it persists nothing, resumes
+   * nothing, and is what the connected view's banner branches on to choose
+   * between "Re-detect", "Remap links" and "Adopt new workspace". PRECONDITION_
+   * FAILED for a keyed provider (which has no such classification);
+   * NOT_FOUND for an unknown id.
+   */
+  probeRecovery: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .query(async ({ input }): Promise<TrackerRecoveryProbe> => {
+      try {
+        return await getTrackerSyncFacade().probeRecovery(input.connectionId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * 'renamed': rewrite every link and unresolved outbox row from the old issue
+   * prefix to the new one, then resume and kick a pass. `bd rename-prefix`
+   * preserves the id suffix, so this is a deterministic rewrite rather than a
+   * re-match — but it is still a bulk write over every link, so the service
+   * re-probes first and rejects CONFLICT when the workspace no longer reads as
+   * renamed.
+   */
+  remapRenamedPrefix: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<TrackerRemapResult> => {
+      try {
+        return await getTrackerSyncFacade().remapRenamedPrefix(input.connectionId);
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * 'replaced': retire this connection, cancel its queued writes, and bind a
+   * fresh one to the database now at the same path — the destructive recovery,
+   * which is why the renderer confirms explicitly before calling it and why no
+   * timer may ever reach it. Same re-probe guard as the remap (CONFLICT when the
+   * state has moved on).
+   */
+  adoptNewWorkspace: protectedProcedure
+    .input(z.object({ connectionId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<TrackerAdoptionResult> => {
+      try {
+        return await getTrackerSyncFacade().adoptNewWorkspace(input.connectionId);
       } catch (err) {
         rethrowAsTRPCError(err);
       }

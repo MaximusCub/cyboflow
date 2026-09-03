@@ -13,6 +13,13 @@
  * "Project mappings" card lists sibling mappings (project names, Pushes chip,
  * current-row highlight), arms a new push target, and removes a mapping —
  * closing the view when the removed row is the one being viewed.
+ *
+ * Plus the paused-banner RECOVERY branch (Phase 4b): a paused keyless connection
+ * classifies itself, and each class gets its own affordance — Remap links for a
+ * renamed prefix, a confirmed Adopt new workspace for a replaced database, and
+ * the plain Re-detect for everything else, including a probe that failed. The
+ * cases pin the two things that would be silently wrong: offering Re-detect for
+ * a state where re-detecting cannot work, and adopting without a confirm.
  */
 import '@testing-library/jest-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -20,6 +27,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   TrackerConflictSummary,
   TrackerConnectionSummary,
+  TrackerRecoveryProbe,
 } from '../../../../../shared/types/trackerSync';
 
 vi.mock('../../../trpc/client', () => ({
@@ -34,6 +42,9 @@ vi.mock('../../../trpc/client', () => ({
         resolveConflict: { mutate: vi.fn() },
         disconnect: { mutate: vi.fn() },
         updateCredentials: { mutate: vi.fn() },
+        probeRecovery: { query: vi.fn() },
+        remapRenamedPrefix: { mutate: vi.fn() },
+        adoptNewWorkspace: { mutate: vi.fn() },
       },
     },
   },
@@ -51,6 +62,25 @@ const mockSyncNow = vi.mocked(trpc.cyboflow.tracker.syncNow.mutate);
 const mockResolve = vi.mocked(trpc.cyboflow.tracker.resolveConflict.mutate);
 const mockDisconnect = vi.mocked(trpc.cyboflow.tracker.disconnect.mutate);
 const mockUpdateCredentials = vi.mocked(trpc.cyboflow.tracker.updateCredentials.mutate);
+const mockProbeRecovery = vi.mocked(trpc.cyboflow.tracker.probeRecovery.query);
+const mockRemap = vi.mocked(trpc.cyboflow.tracker.remapRenamedPrefix.mutate);
+const mockAdopt = vi.mocked(trpc.cyboflow.tracker.adoptNewWorkspace.mutate);
+
+/** A recovery verdict, defaulting to the transient case the banner treats like re-detect. */
+function makeRecovery(
+  overrides: Partial<TrackerRecoveryProbe> = {},
+): TrackerRecoveryProbe {
+  return {
+    connectionId: 'conn-1',
+    recovery: 'healthy',
+    boundWorkspaceId: 'inst-1',
+    boundWorkspaceName: 'cf',
+    currentWorkspaceId: 'inst-1',
+    currentWorkspaceName: 'cf',
+    probeError: null,
+    ...overrides,
+  };
+}
 
 const onClose = vi.fn();
 const onChanged = vi.fn();
@@ -137,6 +167,20 @@ beforeEach(() => {
     workspaceId: 'ws-1',
     workspaceName: 'Acme',
     actorLabel: 'J. Kesteva',
+  });
+  mockProbeRecovery.mockResolvedValue(makeRecovery());
+  mockRemap.mockResolvedValue({
+    remappedLinks: 3,
+    remappedOutboxRows: 1,
+    workspaceName: 'newpfx',
+    unmatchedExternalIds: [],
+  });
+  mockAdopt.mockResolvedValue({
+    newConnectionId: 'conn-2',
+    orphanedLinks: 2,
+    cancelledWrites: 1,
+    relinked: 1,
+    ambiguous: 1,
   });
   mockSyncNow.mockResolvedValue({
     connectionId: 'conn-1',
@@ -545,5 +589,174 @@ describe('TrackerConnectedView — project mappings', () => {
     ).not.toBeInTheDocument();
     // A paused sibling in a DIFFERENT project keeps the affordance (SIBLING
     // above, projectId 9) — covered by the arming test.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless reconnect (beads) — Re-detect instead of a paste field
+// ---------------------------------------------------------------------------
+
+describe('TrackerConnectedView — keyless reconnect', () => {
+  it('re-detects a paused keyless connection with no key field and no key sent', async () => {
+    renderView(makeConnection({ provider: 'beads', status: 'paused', workspaceName: 'cf' }));
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    // A paste field here would ask for a credential that does not exist, and
+    // the button would stay disabled forever because nothing can fill it.
+    expect(within(banner).queryByRole('textbox')).not.toBeInTheDocument();
+    expect(banner).not.toHaveTextContent(/paste/i);
+
+    const button = within(banner).getByRole('button', { name: 'Re-detect' });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(mockUpdateCredentials).toHaveBeenCalledTimes(1));
+    // No apiKey key AT ALL — main refuses a keyless re-detect that carries one.
+    expect(mockUpdateCredentials).toHaveBeenCalledWith({ connectionId: 'conn-1' });
+  });
+
+  it('still asks a KEYED paused connection for a fresh key', async () => {
+    renderView(makeConnection({ status: 'paused' }));
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    expect(within(banner).getByRole('button', { name: 'Reconnect' })).toBeDisabled();
+    fireEvent.change(within(banner).getByLabelText(/^New /), {
+      target: { value: 'lin_rotated' },
+    });
+    fireEvent.click(within(banner).getByRole('button', { name: 'Reconnect' }));
+
+    await waitFor(() => expect(mockUpdateCredentials).toHaveBeenCalledTimes(1));
+    expect(mockUpdateCredentials).toHaveBeenCalledWith({
+      connectionId: 'conn-1',
+      apiKey: 'lin_rotated',
+    });
+  });
+
+  it('never probes for a recovery class on a KEYED connection', async () => {
+    renderView(makeConnection({ status: 'paused' }));
+
+    await screen.findByTestId('tracker-reconnect-banner');
+    // The service refuses this call for a keyed provider; asking anyway would
+    // surface a PRECONDITION_FAILED for a question that does not apply.
+    expect(mockProbeRecovery).not.toHaveBeenCalled();
+  });
+
+  it('does not probe an ACTIVE keyless connection', async () => {
+    renderView(makeConnection({ provider: 'beads', status: 'active' }));
+
+    await screen.findByText('Sync settings');
+    expect(mockProbeRecovery).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The three recovery classes a paused KEYLESS connection can land in. Each one
+ * needs a DIFFERENT repair, and offering the wrong affordance is the failure
+ * this branch exists to prevent: re-detecting a renamed or replaced workspace is
+ * exactly the action that cannot work.
+ */
+describe('TrackerConnectedView — keyless recovery classes', () => {
+  const pausedBeads = (): TrackerConnectionSummary =>
+    makeConnection({ provider: 'beads', status: 'paused', workspaceName: 'cf' });
+
+  it("offers Remap links — and NOT Re-detect — for a renamed prefix, naming both prefixes", async () => {
+    mockProbeRecovery.mockResolvedValue(
+      makeRecovery({ recovery: 'renamed', boundWorkspaceName: 'cf', currentWorkspaceName: 'newpfx' }),
+    );
+    renderView(pausedBeads());
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    await waitFor(() =>
+      expect(within(banner).getByRole('button', { name: 'Remap links' })).toBeInTheDocument(),
+    );
+    expect(within(banner).queryByRole('button', { name: 'Re-detect' })).not.toBeInTheDocument();
+    expect(banner).toHaveTextContent('cf');
+    expect(banner).toHaveTextContent('newpfx');
+
+    fireEvent.click(within(banner).getByRole('button', { name: 'Remap links' }));
+
+    await waitFor(() => expect(mockRemap).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
+    expect(mockAdopt).not.toHaveBeenCalled();
+    // The row survives a remap, so the view re-reads rather than closing.
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('puts adoption behind an explicit confirm that says what it destroys', async () => {
+    mockProbeRecovery.mockResolvedValue(
+      makeRecovery({ recovery: 'replaced', boundWorkspaceId: 'inst-1', currentWorkspaceId: 'inst-2' }),
+    );
+    renderView(pausedBeads());
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    await waitFor(() =>
+      expect(
+        within(banner).getByRole('button', { name: 'Adopt new workspace…' }),
+      ).toBeInTheDocument(),
+    );
+    expect(within(banner).queryByRole('button', { name: 'Re-detect' })).not.toBeInTheDocument();
+
+    // The first click only ARMS the confirm — nothing is sent.
+    fireEvent.click(within(banner).getByRole('button', { name: 'Adopt new workspace…' }));
+    expect(mockAdopt).not.toHaveBeenCalled();
+    expect(banner).toHaveTextContent(/retires this connection/i);
+    expect(banner).toHaveTextContent(/cancels every write still queued/i);
+    expect(banner).toHaveTextContent(/never archived/i);
+
+    fireEvent.click(within(banner).getByRole('button', { name: 'Adopt new workspace' }));
+
+    await waitFor(() => expect(mockAdopt).toHaveBeenCalledWith({ connectionId: 'conn-1' }));
+    // The viewed connection is retired by adoption, so the modal closes.
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('backs out of the adoption confirm without sending anything', async () => {
+    mockProbeRecovery.mockResolvedValue(makeRecovery({ recovery: 'replaced' }));
+    renderView(pausedBeads());
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    await waitFor(() =>
+      expect(
+        within(banner).getByRole('button', { name: 'Adopt new workspace…' }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(banner).getByRole('button', { name: 'Adopt new workspace…' }));
+    fireEvent.click(within(banner).getByRole('button', { name: 'Cancel' }));
+
+    expect(mockAdopt).not.toHaveBeenCalled();
+    expect(
+      within(banner).getByRole('button', { name: 'Adopt new workspace…' }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps Re-detect for 'healthy' and for a probe that itself failed", async () => {
+    renderView(pausedBeads());
+    let banner = await screen.findByTestId('tracker-reconnect-banner');
+    await waitFor(() => expect(mockProbeRecovery).toHaveBeenCalled());
+    expect(within(banner).getByRole('button', { name: 'Re-detect' })).toBeEnabled();
+
+    // A probe that rejects must degrade to the same always-safe action rather
+    // than leaving the banner with no affordance at all.
+    mockProbeRecovery.mockRejectedValue(new Error('bd exploded'));
+    renderView(pausedBeads());
+    banner = (await screen.findAllByTestId('tracker-reconnect-banner'))[1];
+    expect(within(banner).getByRole('button', { name: 'Re-detect' })).toBeEnabled();
+  });
+
+  it('surfaces a refused recovery in the banner rather than silently doing nothing', async () => {
+    mockProbeRecovery.mockResolvedValue(makeRecovery({ recovery: 'renamed' }));
+    mockRemap.mockRejectedValue(new Error('this recovery applies to a renamed workspace'));
+    renderView(pausedBeads());
+
+    const banner = await screen.findByTestId('tracker-reconnect-banner');
+    await waitFor(() =>
+      expect(within(banner).getByRole('button', { name: 'Remap links' })).toBeInTheDocument(),
+    );
+    fireEvent.click(within(banner).getByRole('button', { name: 'Remap links' }));
+
+    expect(
+      await within(banner).findByText(/this recovery applies to a renamed workspace/),
+    ).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

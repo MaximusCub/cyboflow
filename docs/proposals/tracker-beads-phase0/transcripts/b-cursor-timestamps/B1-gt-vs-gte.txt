@@ -1,0 +1,109 @@
+### exact updated_at from create: 2026-08-27T04:31:25.965256Z
+$ bd list --all --json --updated-after '2026-08-27T04:31:25.965256Z' | jq '.[] | select(.id=="bct-kji")'
+{
+  "id": "bct-kji",
+  "title": "B1 target issue",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "created_at": "2026-08-27T04:31:26Z",
+  "created_by": "Krishna",
+  "updated_at": "2026-08-27T04:31:26Z",
+  "dependency_count": 0,
+  "dependent_count": 0,
+  "comment_count": 0
+}
+exit=0
+--- full result count ---
+2
+--- raw (in case jq fails) ---
+[
+  {
+    "id": "bct-8tv",
+    "title": "B1 sentinel issue (untouched)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bct-kji",
+    "title": "B1 target issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+
+### NEGATIVE CONTROL: cursor = 2026-08-27T04:31:25.999999Z (later fractional second than actual .965256, same whole second)
+$ bd list --all --json --updated-after '2026-08-27T04:31:25.999999Z'
+[
+  {
+    "id": "bct-8tv",
+    "title": "B1 sentinel issue (untouched)",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "bct-kji",
+    "title": "B1 target issue",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+exit=0
+does bct-kji appear? -> 1
+
+### cursor = 2026-08-27T04:31:26Z (== rounded display second of bct-kji.updated_at)
+bct-kji present? -> 0
+[
+  "bct-8tv"
+]
+
+### cursor = 2026-08-27T04:31:27Z (next whole second after bct-kji, == bct-8tv second)
+bct-kji present? -> 0
+bct-8tv present? -> 0
+[]
+
+### cursor = 2026-08-27T04:31:25Z (whole second BEFORE bct-kji's second)
+bct-kji present? -> 1
+[
+  "bct-8tv",
+  "bct-kji"
+]
+
+### created-after equivalent tests (same timestamps, both issues created same second as updated)
+cursor=2026-08-27T04:31:26Z (created-after)
+[
+  "bct-8tv"
+]

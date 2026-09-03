@@ -1,0 +1,22 @@
+$ bd create --title 'gate target' --silent
+target=bp-8b8
+
+$ bd create --type gate --title 'direct gate type attempt' --silent
+bp-4em
+exit=0
+
+$ bd create --type molecule --title 'direct molecule type attempt' --silent
+bp-pni
+exit=0
+
+$ bd create --type convoy --title 'direct convoy type attempt' --silent
+Error: validation failed for issue : invalid issue type: convoy
+exit=1
+
+$ bd create --type merge-request --title 'direct mr type attempt' --silent
+Error: validation failed for issue : invalid issue type: merge-request
+exit=1
+
+$ bd create --type bogus-type --title 'bogus' --silent
+Error: validation failed for issue : invalid issue type: bogus-type
+exit=1

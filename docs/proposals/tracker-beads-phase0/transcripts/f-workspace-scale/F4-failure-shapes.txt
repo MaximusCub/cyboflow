@@ -1,0 +1,92 @@
+=== F4a: bd list, no .beads anywhere up tree, plain ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4a: BD_JSON_ENVELOPE=1 bd list --json ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4a: bd list --json (no envelope) ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4a: bd where ===
+Error: No active beads workspace found.
+Hint: check BEADS_DIR/worktree setup, or run 'bd init' to create a new database
+exit=1
+=== F4b: BEADS_DIR points at nonexistent dir ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4b: BEADS_DIR nonexistent, bd where ===
+Error: No active beads workspace found.
+Hint: check BEADS_DIR/worktree setup, or run 'bd init' to create a new database
+exit=1
+=== F4c: BEADS_DIR existing-but-empty dir ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4c: BEADS_DIR empty dir, bd where ===
+Error: No active beads workspace found.
+Hint: check BEADS_DIR/worktree setup, or run 'bd init' to create a new database
+exit=1
+=== F4d setup: bd init ===
+  Repository ID: a21e4c96
+  Clone ID: bc6293ff2a9b94e4
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f4d_rename_aside
+  Issue prefix: f4d-rename-aside
+  Issues will be named: f4d-rename-aside-<hash> (e.g., f4d-rename-aside-a3f2dd)
+
+Run bd quickstart to get started.
+
+=== F4d: mv .beads aside ===
+=== F4d: bd list with .beads renamed aside ===
+Error: no beads database found
+Hint: run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database
+      or set BEADS_DIR to point to your .beads directory
+exit=1
+=== F4d: bd where with .beads renamed aside ===
+Error: No active beads workspace found.
+Hint: check BEADS_DIR/worktree setup, or run 'bd init' to create a new database
+exit=1
+=== F4d: restore .beads ===
+=== F4e: sanity - bd list BEFORE corruption ===
+No issues found.
+exit=0
+=== F4e: corrupt manifest (append garbage) ===
+=== F4e: bd list AFTER manifest corruption ===
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: strconv.ParseUint: parsing "1858\xeariQ-\xe7r[5g\xfd\x05m\xe2\x9b\x0e&A\ue988\xc4\xfd\x15Dw\xa6LL?\x83l\xa1\x02\x91\x8a\x0f{L\xf0>\x00\xca\xfa\xc0\x13JBZc\xbb\xa7iE\xf7>I\x9d7\xf1\xbdeq\f": invalid syntax
+exit=1
+=== F4e: bd where AFTER manifest corruption ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f4e-corrupt-copy/.beads
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f4e-corrupt-copy/.beads/embeddeddolt
+exit=0
+=== F4e: bd info AFTER manifest corruption ===
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: strconv.ParseUint: parsing "1858\xeariQ-\xe7r[5g\xfd\x05m\xe2\x9b\x0e&A\ue988\xc4\xfd\x15Dw\xa6LL?\x83l\xa1\x02\x91\x8a\x0f{L\xf0>\x00\xca\xfa\xc0\x13JBZc\xbb\xa7iE\xf7>I\x9d7\xf1\xbdeq\f": invalid syntax
+exit=1
+=== F4e: bd doctor AFTER manifest corruption ===
+Note: 'bd doctor' is not yet supported in embedded mode.
+
+For embedded mode troubleshooting:
+  • Verify database exists:  ls -la .beads/embeddeddolt/
+  • Check bd version:        bd version
+  • Reinitialize if needed:  bd init --force
+  • Switch to server mode:   bd init --server
+exit=0

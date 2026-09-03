@@ -1,0 +1,120 @@
+=== bd create sentinel in workspace A (BASE) ===
+Error: unknown flag: --non-interactive
+=== bd init workspace B ===
+  Repository ID: 29b0df7e
+  Clone ID: dbfa307081c051e4
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f3_workspace_b
+  Issue prefix: f3-workspace-b
+  Issues will be named: f3-workspace-b-<hash> (e.g., f3-workspace-b-a3f2dd)
+
+Run bd quickstart to get started.
+
+=== bd create sentinel in workspace B ===
+Error: unknown flag: --non-interactive
+=== bd create sentinel in workspace A (BASE), retry ===
+✓ Created issue: f-workspace-scale-abp — SENTINEL-A only in workspace A
+  Priority: P2
+  Status: open
+
+💡 Tip: Install the beads plugin for automatic workflow context, or run 'bd setup claude' for CLI-only mode
+exit=0
+=== bd create sentinel in workspace B, retry ===
+✓ Created issue: f3-workspace-b-p9n — SENTINEL-B only in workspace B
+  Priority: P2
+  Status: open
+exit=0
+=== bd where from BASE root ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== bd where --json from BASE root ===
+{
+  "database_path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt",
+  "path": "/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads",
+  "prefix": "f-workspace-scale",
+  "schema_version": 1
+}
+exit=0
+=== bd where from BASE/subdir/deeper ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== bd list from BASE/subdir/deeper (walk-up test, plain) ===
+○ f-workspace-scale-abp ● P2 SENTINEL-A only in workspace A
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0
+=== BEADS_DIR=A/.beads cwd=B: bd list ===
+○ f-workspace-scale-abp ● P2 SENTINEL-A only in workspace A
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0
+=== BEADS_DIR=A/.beads cwd=B: bd where ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== neutral cwd, no BEADS_DIR: bd -C f3-workspace-b list ===
+○ f3-workspace-b-p9n ● P2 SENTINEL-B only in workspace B
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0
+=== neutral cwd, BEADS_DIR=A/.beads: bd -C f3-workspace-b list  (precedence test: -C vs BEADS_DIR) ===
+○ f3-workspace-b-p9n ● P2 SENTINEL-B only in workspace B
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0
+=== neutral cwd, BEADS_DIR=A/.beads: bd -C f3-workspace-b where  ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f3-workspace-b/.beads
+  prefix: f3-workspace-b
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f3-workspace-b/.beads/embeddeddolt
+exit=0
+=== --db flag alone: from neutral dir, --db pointing at A's dolt dir ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== --db vs BEADS_DIR precedence: BEADS_DIR=B, --db=A ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== --db vs -C precedence: -C=B, --db=A ===
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads
+  prefix: f-workspace-scale
+  database: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.beads/embeddeddolt
+exit=0
+=== --db vs -C precedence: -C=B, --db=A : bd list (content check) ===
+○ f-workspace-scale-abp ● P2 SENTINEL-A only in workspace A
+
+--------------------------------------------------------------------------------
+Total: 1 issues (1 open, 0 in progress)
+
+Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+exit=0

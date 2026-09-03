@@ -6,6 +6,7 @@ import {
   scrubBreadcrumb,
   isBenignStreamWriteEpipe,
   tagCrashSource,
+  isDeliberateProcessTermination,
 } from './scrub';
 import { resolveTelemetryCredentials } from './credentials';
 import { recordLocalError } from './diagnostics';
@@ -56,10 +57,14 @@ export function initTelemetry(cfg: {
         // (see isBenignStreamWriteEpipe). Everything else is scrubbed + kept.
         // Native crashes are additionally tagged by provenance first: the
         // crashpad handler catches processes spawned BENEATH the app too, so a
-        // minidump is not self-evidently ours (see tagCrashSource). Scrubbing
+        // minidump is not self-evidently ours (see tagCrashSource). A minidump
+        // from a process we ENDED ON PURPOSE is dropped outright first — that
+        // one is unambiguous (see isDeliberateProcessTermination). Scrubbing
         // stays the outermost step — nothing leaves without passing it.
         beforeSend: (event) =>
-          isBenignStreamWriteEpipe(event) ? null : scrubSentryEvent(tagCrashSource(event)),
+          isBenignStreamWriteEpipe(event) || isDeliberateProcessTermination(event)
+            ? null
+            : scrubSentryEvent(tagCrashSource(event)),
         beforeBreadcrumb: (breadcrumb) => scrubBreadcrumb(breadcrumb),
       });
       // Default integrations capture uncaught exceptions / unhandled

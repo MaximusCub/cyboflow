@@ -119,6 +119,11 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
       // -----------------------------------------------------------------------
       // Approve SPRINT second (AC#2: T2 > T1)
       // -----------------------------------------------------------------------
+      // Baseline the stream BEFORE approving: "the SDK kept going past the gate"
+      // is only meaningful relative to the moment the gate opened. Sampling it
+      // afterwards races the run to completion, and a completed run never emits
+      // another event — so a late baseline can never be beaten.
+      const sprintBefore = harness.getStreamEventCount(sprintRunId);
       await harness.approveRun(sprintRunId, sprintApproval.approvalId, 'allow');
       const t2 = Date.now();
       expect(t2).toBeGreaterThanOrEqual(t1);
@@ -140,11 +145,14 @@ describe('Day-3 gate: two runs in different workflows can be approved out of ord
       // -----------------------------------------------------------------------
       // Assert stream events grow after approval (AC#3: SDK continues past gate)
       // -----------------------------------------------------------------------
-      const sprintBefore = harness.getStreamEventCount(sprintRunId);
-      // Give the SDK a moment to emit more events after resuming
-      await new Promise((r) => setTimeout(r, 1_000));
-      const sprintAfter = harness.getStreamEventCount(sprintRunId);
-      expect(sprintAfter).toBeGreaterThan(sprintBefore);
+      // Poll rather than sleeping a fixed interval: how long the resumed turn
+      // takes to emit is a property of the live API, not of this test.
+      await waitFor(
+        () => harness.getStreamEventCount(sprintRunId) > sprintBefore,
+        30_000,
+        `sprint run ${sprintRunId} to emit stream events past the gate ` +
+          `(baseline ${sprintBefore})`,
+      );
     },
     120_000, // 120s total test timeout
   );

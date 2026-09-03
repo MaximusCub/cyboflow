@@ -1,0 +1,70 @@
+=== E11: final tally + hygiene checks ===
+$ total contended bd invocations logged with rc, and their exit histogram:
+awk: syntax error at source line 1
+ context is
+	 >>> {print(NF)+0>= <<< 
+awk: illegal statement at source line 1
+awk: illegal statement at source line 1
+E3 writer(60) + E4 A/B/C/D(200) + E6(100) exit codes:
+ 360 0
+$ count of every .err file produced across all probes, and how many are non-empty:
+err_files=452 non_empty=5
+non-empty ones (these are the ONLY error surfaces observed):
+== out/e7d1.err
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+== out/e7e-INT.err
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+== out/e7f.err
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+== out/e7e-TERM.err
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+== out/e7e-HUP.err
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+---
+=== hygiene: global git config UNTOUCHED? ===
+$ git config --global --get core.excludesfile
+(empty=untouched)
+$ git config --global --get core.attributesfile
+(empty=untouched)
+$ ls ~/.beads 2>&1 (must not exist / not created by us)
+/Users/raimundoesteva/.beads
+---
+=== landmine: bd telemetry ===
+$ pgrep -fl 'bd send-metrics'
+(bd spawns a detached metrics uploader)
+$ grep -i metrics .beads/config.yaml
+---
+=== store growth ===
+$ du -sh .beads ; issue count
+ 12M	.beads
+issues= 5
+---
+$ git -C /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks status --porcelain | head -5   (nothing committed by us)
+?? .gitignore
+?? ctl/
+?? out/
+?? t.sh
+?? transcripts/
+$ git -C /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks log --oneline | head -3
+d8cb290 init
+---
+=== ~/.beads provenance check (did THIS probe create it? session started 21:31) ===
+$ ls -laT ~/.beads | head -15
+total 0
+drwxr-xr-x@   3 raimundoesteva  staff    96 Aug 26 21:26:51 2026 .
+drwxr-x---+ 103 raimundoesteva  staff  3296 Aug 26 21:52:28 2026 ..
+drwxr-xr-x@   3 raimundoesteva  staff    96 Aug 26 21:52:25 2026 eventsData
+$ find ~/.beads -newermt '2026-08-26 21:25' | head -20  (files touched during this session)
+/Users/raimundoesteva/.beads
+/Users/raimundoesteva/.beads/eventsData
+/Users/raimundoesteva/.beads/eventsData/eventkit.lock
+---
+=== where does the metrics config live? ===
+$ bd config show 2>&1 | grep -i -B1 -A1 metrics | head -20
+  json                                     = false                                         (default)
+  metrics.disabled                         = false                                         (/Users/raimundoesteva/.config/bd/config.yaml)
+  metrics.endpoint                         = https://gastownhall-eventsapi.com/mp/collect  (/Users/raimundoesteva/.config/bd/config.yaml)
+  metrics.notice_shown                     = true                                          (/Users/raimundoesteva/.config/bd/config.yaml)
+  no-db                                    = false                                         (default)
+$ grep -rn metrics /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/config.yaml
+---

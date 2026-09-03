@@ -1,0 +1,153 @@
+=== bd show bp-4em --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-4em",
+    "title": "direct gate type attempt",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "gate",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:33:50Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:50Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-pni --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-pni",
+    "title": "direct molecule type attempt",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "molecule",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:33:51Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:51Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-oha --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-oha",
+    "title": "Gate: human",
+    "description": "Ad-hoc gate blocking bp-8b8\n\nReason: phase0 gate probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "gate",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:04Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:04Z",
+    "await_type": "human",
+    "dependent_count": 1,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-wisp-yrv --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-wisp-yrv",
+    "title": "ephemeral probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:05Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:05Z",
+    "ephemeral": true,
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-jbk --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-jbk",
+    "title": "wisp probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:05Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:05Z",
+    "wisp_type": "heartbeat",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-8lr --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-8lr",
+    "title": "mol-type swarm probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:06Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:06Z",
+    "mol_type": "swarm",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== bd show bp-z3s --json ===
+jq: error: syntax error, unexpected catch, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:
+{id, issue_type, status, defer_until, wisp_type, mol_type} catch .                                                           
+jq: 1 compile error
+[
+  {
+    "id": "bp-z3s",
+    "title": "deferred probe",
+    "status": "deferred",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:34:07Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:34:07Z",
+    "defer_until": "2026-08-27T21:34:06Z",
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+

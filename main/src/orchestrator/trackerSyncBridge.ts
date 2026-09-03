@@ -18,6 +18,7 @@
  */
 import { EventEmitter } from 'node:events';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictChoice,
   TrackerConflictSummary,
   TrackerConnectPayload,
@@ -28,7 +29,10 @@ import type {
   TrackerFieldOptions,
   TrackerGroupTree,
   TrackerIssue,
+  TrackerProvider,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -62,6 +66,21 @@ import type {
 export interface TrackerSyncFacade {
   /** Live credential probe — the wizard's "Authorized as …" card. Persists nothing. */
   wizardValidate(credentials: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity>;
+  /**
+   * KEYLESS ONLY — run the main-process folder dialog and answer with an
+   * opaque handle to the directory the user chose, or null when they
+   * cancelled. The `path` in the result is for the wizard to DISPLAY; the
+   * `token` is the only half that comes back, so the renderer never names a
+   * directory main would spawn a CLI in.
+   */
+  wizardPickWorkspace(provider: TrackerProvider): Promise<{ token: string; path: string } | null>;
+  /**
+   * KEYLESS ONLY — create the workspace Detect could not find, in the folder
+   * these same credentials point at (`bd init --stealth`, which commits
+   * nothing). Persists no connection and probes no identity: the wizard
+   * re-detects afterwards, which is where the identity still comes from.
+   */
+  wizardInitWorkspace(credentials: TrackerCredentialsInput): Promise<void>;
   /** The Map step's mappable tracker groups (Linear projects/teams, Plane projects, Dart spaces). */
   wizardGroups(source: TrackerWizardSourceInput): Promise<TrackerGroupTree>;
   /** Wizard Step 1, top level (Linear teams / Plane projects). */
@@ -110,11 +129,56 @@ export interface TrackerSyncFacade {
    * serve: against a connection that is still active or paused it would mint a
    * SECOND one and re-import the whole synced backlog.
    *
+   * KEYLESS CONNECTIONS (beads) take the same path with `apiKey` omitted, and
+   * it means RE-DETECT: the workspace is probed again, the connection resumes
+   * when the identity still matches, and nothing is stored. Passing a key for
+   * such a provider — or omitting one for a keyed provider — is refused.
+   *
    * Rejects with a NOT_FOUND-shaped error for an unknown id, and with a typed
    * mismatch error when the key authorizes a DIFFERENT workspace than the
    * connection is bound to. The returned identity carries no key material.
    */
-  updateCredentials(connectionId: string, apiKey: string): Promise<TrackerWorkspaceIdentity>;
+  updateCredentials(connectionId: string, apiKey?: string): Promise<TrackerWorkspaceIdentity>;
+
+  /**
+   * WHICH recovery a paused KEYLESS connection needs, classified by re-probing
+   * the workspace and comparing ids — see {@link TrackerRecoveryClass}. Purely
+   * a read: nothing is persisted and nothing resumes, so the connected view can
+   * ask on every render.
+   *
+   * KEYLESS-ONLY. A keyed provider rejects PRECONDITION_FAILED-shaped: its
+   * reconnect story is a pasted key, and none of the three keyless failure
+   * shapes (moved path, renamed prefix, replaced instance) has an analogue on an
+   * HTTP tracker. Unknown id rejects NOT_FOUND-shaped.
+   */
+  probeRecovery(connectionId: string): Promise<TrackerRecoveryProbe>;
+
+  /**
+   * `'renamed'`'s repair: rewrite every link (and every unresolved outbox row)
+   * of this connection from the old issue prefix to the new one — suffix
+   * preserved, which is exactly what `bd rename-prefix` did to the ids — then
+   * resume and kick a pass.
+   *
+   * Re-probes first and rejects CONFLICT-shaped unless the workspace still reads
+   * as renamed: the classification the UI acted on can be minutes old, and a
+   * rewrite applied to a state that has moved on would repoint every link at
+   * nothing.
+   */
+  remapRenamedPrefix(connectionId: string): Promise<TrackerRemapResult>;
+
+  /**
+   * `'replaced'`'s repair, and the destructive one: retire this connection and
+   * orphan its links, cancel every unresolved write as a review finding, mint a
+   * fresh connection bound to the database that is there now, re-link whatever
+   * can be PROVEN to be the same item, and kick the first pass.
+   *
+   * Local entities are never archived and never duplicated; a match that cannot
+   * be proven becomes a finding for the user rather than a guessed re-link.
+   * Re-probes first and rejects CONFLICT-shaped unless the workspace still reads
+   * as replaced. Declining is simply not calling it — the pair stays paused,
+   * which is safe.
+   */
+  adoptNewWorkspace(connectionId: string): Promise<TrackerAdoptionResult>;
 
   /** The project's connected-view cards. */
   connections(projectId: number): Promise<TrackerConnectionSummary[]>;

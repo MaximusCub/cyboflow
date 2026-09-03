@@ -59,8 +59,23 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
  * `CanUseTool` gained an optional `matchedAskRule` a host-side auto-approver is
  * obliged to honor. When this tripwire fires, read the changed d.ts CONTRACT TEXT for
  * the host callbacks too — do not stop at the `SDKMessage` union.
+ *
+ * 0.3.224 → 0.3.257 re-verification (bumped to reach a bundled CLI new enough for
+ * `claude-fable-5-1`; 2.1.224 answered a Fable 5.1 turn with a hard 400 reading
+ * "does not support this model; version 2.1.251 or newer is required"):
+ *   - `SDKMessage` union: UNCHANGED — zero variants added, zero dropped, so
+ *     `EXPECTED_DISCRIMINANTS` needs no edit.
+ *   - Host callbacks `CanUseTool`, `PermissionResult`, `Options`, `SDKMessageOrigin`:
+ *     byte-identical. The class of breakage this tripwire exists to catch is absent.
+ *   - REMOVED: `ExitReason`/`EXIT_REASONS` dropped `'bypass_permissions_disabled'`.
+ *     cyboflow never referenced it (grep-verified), so no arm went dead.
+ *   - Additive only, none of it implemented here: `PreModelSwitch`/`PostModelSwitch`
+ *     hook events, `SDKContextUsage`, `SDKMcpResourceLink`, `usage.thinkingTokens`,
+ *     `costBasis`, a widened `ApiKeySource`, and `requestId` + a `| null` return on
+ *     the elicitation / userDialog callbacks (cyboflow implements neither — its
+ *     `elicitation` hits are the unrelated Codex app-server protocol).
  */
-const PINNED_SDK_VERSION = '0.3.224';
+const PINNED_SDK_VERSION = '0.3.257';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.

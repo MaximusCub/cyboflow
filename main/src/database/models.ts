@@ -507,7 +507,7 @@ export type {
 export interface TrackerConnectionRow {
   id: string;
   project_id: number;
-  provider: 'linear' | 'plane' | 'dart';
+  provider: 'linear' | 'plane' | 'dart' | 'beads';
   status: 'active' | 'paused' | 'disconnected';
   workspace_id: string | null;
   workspace_name: string | null;
@@ -550,6 +550,15 @@ export interface TrackerConnectionRow {
   priority_mapping_json: string;
   /** categoryMapping.ts's overlay, same shape and default as priority_mapping_json. */
   category_mapping_json: string;
+  /**
+   * Counter (migration 129), bumped on any mapping/state-mapping/selection
+   * change. Consumed by `tracker_reconciliation_ledger`: a ledger row stamped
+   * at an older generation is treated as absent, so a config change
+   * re-evaluates every previously-skipped remote id exactly once. Read by
+   * providers declaring `requiresIdReconciliation` (beads today); the three
+   * HTTP providers bump and ignore it.
+   */
+  config_generation: number;
   mirror_subissues: number; // 0 | 1
   conflict_mode: 'auto' | 'manual';
   cursor_updated_at: string | null;
@@ -577,7 +586,7 @@ export interface EntityExternalLinkRow {
   connection_id: string;
   entity_type: 'idea' | 'epic' | 'task';
   entity_id: string;
-  provider: 'linear' | 'plane' | 'dart';
+  provider: 'linear' | 'plane' | 'dart' | 'beads';
   external_id: string;
   external_identifier: string | null;
   external_url: string | null;
@@ -653,6 +662,39 @@ export interface TrackerConflictRow {
   resolution: string | null;
   created_at: string;
   resolved_at: string | null;
+}
+
+/**
+ * `tracker_reconciliation_ledger` row (migration 123) — the durable record of
+ * a reconciliation sweep's SKIPPED decisions, one row per (connection, remote
+ * id). Written only by providers declaring
+ * `TrackerAdapterCapabilities.requiresIdReconciliation` (beads today).
+ *
+ * WHY IT EXISTS: the sweep's ground truth is the FULL remote id set, so every
+ * id it does not already link would be point-fetched on every sweep — hundreds
+ * of CLI spawns per pass on a workspace dominated by closed or unmapped issues.
+ * A ledger row says "this id was considered and resolved without a link", so a
+ * repeat sweep can skip it for free. An IMPORTED id gets no row: its link IS
+ * the record.
+ *
+ * `last_seen_revision` is the adapter-derived content fingerprint the sweep
+ * already carries per id, so "did this skipped issue change?" costs a string
+ * compare rather than a lookup — without it a backdated remote edit that makes
+ * a skipped issue eligible would be suppressed forever.
+ * `config_generation` is `tracker_connections.config_generation` AS OF this
+ * row's write; a row behind the connection's current generation is treated as
+ * absent, which is what makes a mapping change re-consider every skipped id
+ * exactly once.
+ */
+export interface TrackerReconciliationLedgerRow {
+  id: number;
+  connection_id: string;
+  external_id: string;
+  /** Why the id resolved without a link — see ReconciliationSkipReason in inboundSync.ts. */
+  reason: string;
+  last_seen_revision: string | null;
+  config_generation: number;
+  seen_at: string;
 }
 
 /**

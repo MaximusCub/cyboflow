@@ -42,6 +42,12 @@ export const PROVIDER_ARCHIVE_CAPABILITY: Record<
   linear: 'trash',
   plane: 'none',
   dart: 'trash',
+  // beads exposes no archive/trash endpoint at all (`bd delete` is a HARD
+  // delete, per docs/proposals/tracker-beads-provider.md's method-by-method
+  // mapping) — same 'none' shape as Plane: the engine falls back to the
+  // cancelled-state write, and the removal dialog's disclosure already
+  // handles the copy.
+  beads: 'none',
 };
 
 /**
@@ -73,3 +79,96 @@ export function removalWriteBackAction(
     ? 'archive'
     : 'cancel';
 }
+
+/**
+ * Does this provider's adapter guard an existing-issue write with a
+ * detect-after-write concurrency check (migration 123's `guardedUpdates`
+ * capability on {@link TrackerAdapterCapabilities})? True only for beads: its
+ * embedded single-writer database has no CAS/if-match primitive, so every
+ * outbound state/content mutation of an EXISTING issue must be sandwiched
+ * with a pre-send token capture and a post-write history diff (see
+ * `TrackerRevisionMismatchError` in errors.ts). The three HTTP providers
+ * write unguarded, as before.
+ *
+ * A SEPARATE table from `PROVIDER_ARCHIVE_CAPABILITY` rather than folded into
+ * the adapter's own capabilities object: this is consulted at the ENQUEUE
+ * chokepoint (docs/proposals/tracker-beads-provider.md, "The disable must be
+ * expressible" — the gate-at-enqueue pattern the `'off'` content/archive
+ * modes already use), where no adapter is in hand, exactly like
+ * `PROVIDER_ARCHIVE_CAPABILITY` above.
+ */
+export const PROVIDER_REQUIRES_GUARDED_UPDATES: Record<TrackerProvider, boolean> = {
+  linear: false,
+  plane: false,
+  dart: false,
+  beads: true,
+};
+
+/**
+ * Does the adapter this app SHIPS for the provider actually make guarded
+ * writes — i.e. what its `capabilities.guardedUpdates` says once constructed?
+ *
+ * THE SECOND HALF OF A GATE THAT NEEDS BOTH. The table above states the
+ * REQUIREMENT ("beads must not write unguarded"); this states the PROVISION
+ * ("the beads adapter can"). Only the pair answers the enqueue chokepoint's
+ * question — "may a state/content/archive row be written for this provider at
+ * all?" — and the requirement alone would answer it wrongly in the loudest
+ * possible way: it would refuse every beads update, permanently, on a build
+ * where guarded writes work fine.
+ *
+ * WHY A TABLE AND NOT A READ OF THE ADAPTER. Same reason
+ * `PROVIDER_ARCHIVE_CAPABILITY` exists: writeBack.ts runs inline on the
+ * entity-change broadcast with no adapter in hand (building one decrypts a
+ * key and it makes zero network calls by design). Unlike that one, this cannot
+ * be the SINGLE definition — an adapter's `guardedUpdates` is a statement about
+ * the transport it was built with, not a per-provider constant — so it is
+ * pinned to reality two ways instead: `adapterCapabilities.test.ts` asserts
+ * this table equals every constructed adapter's own declaration, and the DRAIN
+ * re-checks the live adapter and REFUSES a row that got past this
+ * (outboxWorker's `refusesUnguardedUpdate`), so a drift can strand nothing.
+ *
+ * The proposal's no-guard fallback (Phase 2 resolved it as unnecessary for
+ * beads: `bd history --limit` exists and auto-commit is effectively on) is
+ * expressed by flipping the beads entry to false — at which point creates keep
+ * flowing and every existing-issue mutation stops being enqueued.
+ */
+export const PROVIDER_ADAPTER_GUARDS_UPDATES: Record<TrackerProvider, boolean> = {
+  linear: false,
+  plane: false,
+  dart: false,
+  beads: true,
+};
+
+/**
+ * Must the outbound triggers DECLINE to enqueue an existing-issue mutation
+ * (`update_state` / `close_parent` / `update_content` / `archive_issue`) for
+ * this provider?
+ *
+ * True only in the degraded pairing: the provider requires guards and the
+ * shipped adapter cannot provide them. This is the gate-at-enqueue pattern the
+ * `'off'` content/archive modes already use (docs/proposals/
+ * tracker-beads-provider.md, "The disable must be expressible"), and it exists
+ * for the same reason theirs does: a queued row of a kind no drain will ever
+ * send is not a delay, it is a permanent inbound stall — the kind-agnostic
+ * blocker halts every later pass at that issue.
+ *
+ * CREATES ARE NEVER GATED. A fresh issue has no concurrent editor to race, so
+ * import + create-push remain fully live in the degraded mode.
+ */
+export function guardedUpdatesUnavailable(provider: TrackerProvider): boolean {
+  return PROVIDER_REQUIRES_GUARDED_UPDATES[provider] && !PROVIDER_ADAPTER_GUARDS_UPDATES[provider];
+}
+
+/**
+ * "Does this provider need a stored credential at all?" — the NULL-secret
+ * predicate every guard consults (`connect`, `buildAdapter`,
+ * `credentialsForConnection`, reconnect). Re-exported rather than declared
+ * here: the tRPC router enforces the same rule on the wire and may not import
+ * main/src/services/*, so the one definition lives in shared/ (see its own
+ * comment for why a second copy would be a correctness bug rather than a
+ * duplicate fact).
+ */
+export {
+  PROVIDER_NEEDS_SECRET,
+  providerNeedsSecret,
+} from '../../../../shared/types/trackerSync';

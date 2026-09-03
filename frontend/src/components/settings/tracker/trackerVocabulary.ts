@@ -33,6 +33,18 @@ export interface TrackerProviderMeta {
   mark: string;
   apiKeyLabel: string;
   apiKeyHint: string;
+  /**
+   * Does this provider need a pasted key at all? False only for beads
+   * (docs/proposals/tracker-beads-provider.md "1. Keyless connect"): its
+   * Connect step renders no key input and probes the local `bd` CLI instead,
+   * and its reconnect banner re-detects rather than asking for a paste.
+   *
+   * The main-side twin is `providerNeedsSecret` in
+   * shared/types/trackerSync.ts, which the service's NULL-secret guards
+   * consult; a parity test pins the two together, because a row this table
+   * calls keyless and the service calls keyed cannot connect at all.
+   */
+  needsApiKey: boolean;
   /** Plane scopes every REST path under a workspace slug; Linear does not. */
   needsWorkspaceSlug: boolean;
   /** Plane can be self-hosted, so its origin is user-supplied (pre-filled with the cloud default). */
@@ -49,6 +61,15 @@ export interface TrackerProviderMeta {
    * a caller reads this flag instead of checking `provider === 'dart'`.
    */
   supportsCategorySync: boolean;
+  /**
+   * Does this provider have exactly one workspace, anchored to the folder
+   * Detect probed (the project's repo, or a folder the user explicitly
+   * picked) rather than to an account the user authenticated into? Mapping
+   * such a workspace onto a DIFFERENT cyboflow project is meaningless, so the
+   * Map step offers sync/don't-sync into the wizard's own project instead of
+   * a project picker. True only for beads.
+   */
+  workspaceBound: boolean;
 }
 
 export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
@@ -60,6 +81,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'LN',
     apiKeyLabel: 'Personal API key',
     apiKeyHint: 'Linear → Settings → Security & access → Personal API keys.',
+    needsApiKey: true,
     needsWorkspaceSlug: false,
     defaultBaseUrl: null,
     scopes: [
@@ -68,6 +90,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
     supportsCategorySync: false,
+    workspaceBound: false,
   },
   {
     provider: 'plane',
@@ -77,6 +100,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'PL',
     apiKeyLabel: 'Personal access token',
     apiKeyHint: 'Plane → Workspace settings → API tokens.',
+    needsApiKey: true,
     needsWorkspaceSlug: true,
     defaultBaseUrl: 'https://api.plane.so',
     scopes: [
@@ -85,6 +109,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to comments, attachments, or billing.',
     supportsCategorySync: false,
+    workspaceBound: false,
   },
   {
     provider: 'dart',
@@ -93,6 +118,7 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     mark: 'DT',
     apiKeyLabel: 'Personal authentication token',
     apiKeyHint: 'Dart → Settings → Account → Authentication token.',
+    needsApiKey: true,
     // Dart scopes everything by the token itself and is cloud-only, so it needs
     // neither a workspace slug nor a base URL — see dartAdapter.ts.
     needsWorkspaceSlug: false,
@@ -103,6 +129,30 @@ export const TRACKER_PROVIDERS: readonly TrackerProviderMeta[] = [
     ],
     scopeFootnote: 'No access to docs, comments, attachments, or billing.',
     supportsCategorySync: true,
+    workspaceBound: false,
+  },
+  {
+    provider: 'beads',
+    name: 'Beads',
+    description: 'Map a beads workspace (local `bd` database) to a cyboflow project.',
+    mark: 'BD',
+    // Never rendered as an input (needsApiKey is false, so the Connect step
+    // shows Detect instead) — `apiKeyLabel` still names the credential in the
+    // prose both steps share, so it reads as a workspace, not a key.
+    apiKeyLabel: 'Local bd workspace',
+    apiKeyHint: 'beads connects via the local `bd` CLI — no key to paste.',
+    needsApiKey: false,
+    needsWorkspaceSlug: false,
+    // beads has no HTTP origin: its transport is a local `bd` CLI spawn
+    // against the project's own workspace.
+    defaultBaseUrl: null,
+    scopes: [
+      { label: 'read:issues', granted: true },
+      { label: 'write:issues', granted: true },
+    ],
+    scopeFootnote: 'Runs the `bd` CLI locally — no network access, no billing.',
+    supportsCategorySync: true,
+    workspaceBound: true,
   },
 ];
 
@@ -112,6 +162,67 @@ export function providerMeta(provider: TrackerProvider): TrackerProviderMeta {
   // return type is not needlessly optional.
   return meta ?? TRACKER_PROVIDERS[0];
 }
+
+// ---------------------------------------------------------------------------
+// Keyless detect (beads)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of the two keyless-detect failures a probe hit, for a Connect step
+ * that must offer two different fixes: install the CLI, or initialize a
+ * workspace in this repo.
+ *
+ * 'unknown' is the honest third answer — a lock timeout, an unreadable
+ * metadata file, a version below the supported floor — and its copy falls back
+ * to the server's own message, which already names the problem.
+ */
+export type KeylessDetectFailure = 'missing-cli' | 'missing-workspace' | 'unknown';
+
+/**
+ * MESSAGE MATCHING, and it is not the shape anyone would choose. Both failures
+ * arrive as the SAME error class (a `TrackerAuthError` with a null status, so
+ * the router hands both to the renderer as UNAUTHORIZED), and the CLI-missing
+ * case is an ENOENT the adapter has already turned into prose — there is no
+ * status, code, or class left to branch on by the time it crosses IPC.
+ *
+ * The markers are the stable, quoted halves of `beadsAdapter.ts`'s own
+ * strings: its ENOENT arm (`classifyBdFailure`) and the two ways an
+ * unresolvable workspace is reported (`bd`'s stderr marker in
+ * TERMINAL_STDERR_MARKERS, and `probeWorkspace`'s own message when `bd where`
+ * answers without a path). Both fall back to 'unknown', which degrades to the
+ * verbatim message rather than to wrong advice.
+ */
+const MISSING_CLI_MARKER = 'was not found on PATH';
+const MISSING_WORKSPACE_MARKERS: readonly string[] = [
+  'no beads database found',
+  // bd 1.2.2's wording when the workspace is pinned via `-C` (which every
+  // adapter spawn is): `cannot use -C directory "...": no beads project found`.
+  'no beads project found',
+  'no resolvable beads workspace',
+];
+
+export function classifyKeylessDetectFailure(message: string): KeylessDetectFailure {
+  if (message.includes(MISSING_CLI_MARKER)) return 'missing-cli';
+  if (MISSING_WORKSPACE_MARKERS.some((marker) => message.includes(marker))) {
+    return 'missing-workspace';
+  }
+  return 'unknown';
+}
+
+/**
+ * The caption under the Map step's Initialize buttons. "Locally" is load-bearing
+ * and probed (beads 1.2.2, docs/proposals/tracker-beads-provider.md "Keyless
+ * connect" / Phase 0): the button runs `bd init --stealth` + `bd metrics off`
+ * and NOTHING is committed — the ignore entry lands in the local-only
+ * `.git/info/exclude`. Plain `bd init` is the shared variant: it commits 18
+ * files (including a `.claude/settings.json` SessionStart hook that fires for
+ * every collaborator), which is exactly why cyboflow never runs it and the copy
+ * routes it to the terminal.
+ */
+export const BEADS_INIT_DISCLOSURE: readonly string[] = [
+  'Cyboflow initializes Beads locally using the --stealth config. If you want to set up ' +
+    'shared, git-enabled tracking then run `bd init` for the project directory in a terminal.',
+];
 
 // ---------------------------------------------------------------------------
 // State mapping

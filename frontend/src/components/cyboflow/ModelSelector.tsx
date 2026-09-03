@@ -29,7 +29,7 @@ export { DEFAULT_QUICK_MODEL } from '../../../../shared/types/sessionDefaults';
 export { DEFAULT_WORKFLOW_MODEL } from '../../../../shared/types/sessionDefaults';
 
 /**
- * The Ultracode-launch default model — Fable 5, per product direction (ultracode
+ * The Ultracode-launch default model — Fable 5.1, per product direction (ultracode
  * is the "most capable, fan work out" mode, so it defaults to the frontier
  * model). Only seeded when the availability snapshot says Fable is usable; the
  * wizard falls back to {@link DEFAULT_QUICK_MODEL} otherwise. A mid-run

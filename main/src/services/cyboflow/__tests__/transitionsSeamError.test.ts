@@ -16,8 +16,14 @@ import Database from 'better-sqlite3';
 // services/cyboflow/__tests__) that same absolute module is '../../telemetry'.
 // The spy is created via vi.hoisted so it exists when the hoisted vi.mock factory
 // runs (a plain const would be in the temporal dead zone at that point).
-const { captureSeamError } = vi.hoisted(() => ({ captureSeamError: vi.fn() }));
+const { captureSeamError, recordLocalError } = vi.hoisted(() => ({
+  captureSeamError: vi.fn(),
+  recordLocalError: vi.fn(),
+}));
 vi.mock('../../telemetry', () => ({ captureSeamError }));
+// A SYSTEMIC failure takes the local-only path instead (see the systemic
+// describe block below), so the diagnostics buffer needs a spy too.
+vi.mock('../../telemetry/diagnostics', () => ({ recordLocalError }));
 
 import { transitionToFailed, TransitionRejectedError } from '../transitions';
 import { GATE_SCHEMA } from '../../../database/__test_fixtures__/registrySchema';
@@ -43,6 +49,7 @@ describe('transitionToFailed → captureSeamError (seam A)', () => {
 
   beforeEach(() => {
     captureSeamError.mockClear();
+    recordLocalError.mockClear();
     db = new Database(':memory:');
     db.exec(GATE_SCHEMA);
     // migration-013 column, absent from GATE_SCHEMA — the report query reads it.
@@ -60,7 +67,7 @@ describe('transitionToFailed → captureSeamError (seam A)', () => {
     transitionToFailed(db, {
       runId: RUN_ID,
       fromStatus: 'running',
-      errorMessage: 'Claude AI usage limit reached|1751234567',
+      errorMessage: 'Command failed with exit code 1',
     });
 
     expect(captureSeamError).toHaveBeenCalledTimes(1);
@@ -68,7 +75,7 @@ describe('transitionToFailed → captureSeamError (seam A)', () => {
     expect(seam).toBe('run-finalize-failed');
     expect(error).toBeInstanceOf(Error);
     expect(tags).toEqual({
-      errorClass: 'usage-limit-reached',
+      errorClass: 'nonzero-exit',
       fromStatus: 'running',
       flow: 'sprint',
       substrate: 'sdk',
@@ -122,5 +129,42 @@ describe('transitionToFailed → captureSeamError (seam A)', () => {
     ).toThrow(TransitionRejectedError);
 
     expect(captureSeamError).not.toHaveBeenCalled();
+  });
+  // CYBOFLOW-APP-C / -1R: eight events of `run failed (usage-limit-reached)` —
+  // an environment condition the classifier got RIGHT, reported to Sentry as an
+  // application error and ranked against real defects by volume.
+  describe('systemic environment conditions', () => {
+    it.each([
+      ['Claude AI usage limit reached|1751234567', 'usage-limit-reached'],
+      ['5-hour limit reached ∙ resets 2:20pm', 'window-limit-reached-or-hit'],
+      ['Rate limit exceeded', 'rate-limit'],
+      ['Your credit balance is too low', 'billing-credit-balance'],
+      ['Failed to authenticate: OAuth session expired and could not be refreshed', 'auth-failed-to-authenticate'],
+    ])('reports %j to the local buffer only, never to Sentry', (errorMessage, errorClass) => {
+      seedWorkflow(db, 'sprint');
+      seedRun(db, 'running');
+
+      transitionToFailed(db, { runId: RUN_ID, fromStatus: 'running', errorMessage });
+
+      expect(captureSeamError).not.toHaveBeenCalled();
+      expect(recordLocalError).toHaveBeenCalledTimes(1);
+      const [seam, error] = recordLocalError.mock.calls[0];
+      expect(seam).toBe('run-finalize-failed');
+      // Same bounded vocabulary as the Sentry path — raw text never rides along.
+      expect((error as Error).message).toBe(`run failed (${errorClass})`);
+    });
+
+    it('still reports a NON-systemic failure to Sentry', () => {
+      seedWorkflow(db, 'sprint');
+      seedRun(db, 'running');
+
+      transitionToFailed(db, {
+        runId: RUN_ID,
+        fromStatus: 'running',
+        errorMessage: 'Stream closed unexpectedly',
+      });
+
+      expect(captureSeamError).toHaveBeenCalledTimes(1);
+    });
   });
 });

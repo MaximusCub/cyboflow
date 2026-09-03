@@ -2,7 +2,7 @@ import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug } from 'lucide-react';
+import { Info, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye, Bug, ChevronLeft } from 'lucide-react';
 import { BugReportDialog } from './BugReportDialog';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
@@ -23,6 +23,21 @@ interface SidebarProps {
   onAboutClick: () => void;
   width: number;
   onResize: (e: React.MouseEvent) => void;
+  /**
+   * Whether the left rail is collapsed. The rail's own root box is hidden
+   * (display:none) rather than unmounted, so the project tree's expansion state
+   * and in-flight queries survive a collapse. Applied HERE, not by a wrapper in
+   * App, because this component also renders the Settings / bug-report /
+   * status-guide dialogs as siblings — a hidden wrapper would hide those too,
+   * and Settings is openable from surfaces far outside the rail.
+   */
+  collapsed?: boolean;
+  /**
+   * Collapse the rail (App.tsx renders the thin strip that expands it again).
+   * Optional so render sites that predate the collapsible rail — and unit tests
+   * — keep compiling; when absent the header control is simply not shown.
+   */
+  onCollapse?: () => void;
   /** Count of pending human-review approvals (drives the rail badge). */
   pendingReviewCount: number;
   /** Whether the human-review pane is the active center view. */
@@ -74,6 +89,8 @@ export const Sidebar = memo(function Sidebar({
   onAboutClick,
   width,
   onResize,
+  collapsed = false,
+  onCollapse,
   pendingReviewCount,
   humanReviewActive,
   onToggleHumanReview,
@@ -184,7 +201,12 @@ export const Sidebar = memo(function Sidebar({
         // narrow one an unclamped 500px sidebar + the fixed 296px right rail
         // starve the center column to ~0 (composer collapses). Clamp to a
         // viewport fraction so the center always keeps usable width.
-        style={{ width: `${width}px`, maxWidth: 'min(600px, 40vw)' }}
+        // `collapsed` hides this box only — the dialogs below stay renderable.
+        style={{
+          width: `${width}px`,
+          maxWidth: 'min(600px, 40vw)',
+          ...(collapsed ? { display: 'none' } : {}),
+        }}
       >
         {/* Resize handle */}
         <div
@@ -195,14 +217,22 @@ export const Sidebar = memo(function Sidebar({
           <div className="absolute inset-0 bg-border-secondary group-hover:bg-interactive transition-colors" />
           {/* Larger grab area */}
           <div className="absolute -left-2 -right-2 top-0 bottom-0" />
-          {/* Drag indicator dots */}
-          <div className="absolute top-1/2 -translate-y-1/2 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
-            <div className="flex flex-col gap-1">
-              <div className="w-1 h-1 bg-interactive rounded-full" />
-              <div className="w-1 h-1 bg-interactive rounded-full" />
-              <div className="w-1 h-1 bg-interactive rounded-full" />
-            </div>
-          </div>
+          {/* Collapse handle — centered on the divider (the same pattern as the
+              chat dock's grip chevrons). mousedown stops here so a click never
+              starts a resize drag; ⌘[ does the same thing globally. */}
+          {onCollapse && (
+            <button
+              type="button"
+              data-testid="sidebar-collapse"
+              aria-label="Collapse left rail"
+              title="Collapse left rail"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={onCollapse}
+              className="absolute top-1/2 -translate-y-1/2 right-0 translate-x-1/2 z-20 flex h-9 w-4 items-center justify-center rounded-full border border-border-primary bg-surface-primary text-text-tertiary hover:text-text-primary hover:border-interactive cursor-pointer"
+            >
+              <ChevronLeft size={12} />
+            </button>
+          )}
         </div>
         <div className="p-4 border-b border-border-primary flex items-center justify-between overflow-hidden">
           <div className="flex items-center space-x-2 min-w-0">

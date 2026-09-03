@@ -1,0 +1,163 @@
+=== E7: deliberate failure shapes (exact stderr + exit codes for the classifier) ===
+$ bd --readonly update elock-0y1 -p 1
+Error: operation 'update' is not allowed in read-only mode
+exit=1
+---
+$ BD_JSON_ENVELOPE=1 bd --readonly update elock-0y1 -p 1 --json
+Error: operation 'update' is not allowed in read-only mode
+exit=1
+---
+$ BD_JSON_ENVELOPE=1 bd --readonly list --all --json | head -4
+{
+  "data": [
+    {
+      "id": "elock-l0n",
+exit=0
+---
+$ bd update elock-NOPE -p 1
+Error resolving elock-NOPE: no issue found matching "elock-NOPE"
+exit=1
+---
+$ BD_JSON_ENVELOPE=1 bd update elock-NOPE -p 1 --json
+Error resolving elock-NOPE: no issue found matching "elock-NOPE"
+exit=1
+---
+$ BD_JSON_ENVELOPE=1 bd show elock-NOPE --json
+Error fetching elock-NOPE: no issue found matching "elock-NOPE"
+{
+  "data": {
+    "error": "no issues found matching the provided IDs"
+  },
+  "schema_version": 1
+}
+exit=1
+---
+$ cd /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/noinit && bd list --all --json
+[
+  {
+    "id": "elock-l0n",
+    "title": "lock probe B",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:27Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "elock-w9n",
+    "title": "lock probe A",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:17Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "elock-wf4",
+    "title": "post-kill sanity",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:42:46Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:42:46Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "elock-0y1",
+    "title": "E4 target X",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:31Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:44:18Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "elock-6gt",
+    "title": "E4 target Y",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:31Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:42:45Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]
+exit=0
+---
+$ cd /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/noinit && BD_JSON_ENVELOPE=1 bd update x-1 -p 1 --json
+Error resolving x-1: no issue found matching "x-1"
+exit=1
+---
+=== E7b: does --readonly SKIP the exclusive flock? (parallelism lever test) ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=37837 holding 12.0s
+HOLDER: released
+bd --readonly list rc=0 elapsed=15.873s  (~0.4s => readonly SKIPS the lock; ~11s => it BLOCKS too)
+STDERR>>>
+<<<
+---
+=== E7c: 4 concurrent 'bd --readonly list' on the SAME workspace (do they parallelize?) ===
+wall=1.716s
+ro-w1 rc=0 elapsed=0.442s
+ro-w2 rc=0 elapsed=1.238s
+ro-w3 rc=0 elapsed=1.552s
+ro-w4 rc=0 elapsed=1.642s
+---
+=== E7d: engine-imposed timeout — SIGTERM then SIGKILL a BLOCKED bd; what exit code + residue? ===
+HOLDER: flock LOCK_EX acquired on /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/e-concurrency-locks/.beads/embeddeddolt/elock/.dolt/noms/LOCK pid=38022 holding 25.0s
+$ kill -TERM 38024 (bd was blocked on flock)
+SIGTERM'd blocked bd: exit=1  (128+15=143 expected if it died on the signal)
+STDOUT>>>
+<<<
+STDERR>>>
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+<<<
+$ kill -9 38033 (bd was blocked on flock)
+SIGKILL'd blocked bd: exit=137  (128+9=137 expected)
+STDERR>>>
+<<<
+HOLDER: released
+$ post-kill sanity: bd list
+rc=0 stderr=
+---
+=== E7e: reproducibility of the lock error under SIGTERM/SIGINT/SIGHUP (3 signals x blocked bd) ===
+SIGTERM -> exit=1
+  stdout: 
+  stderr: Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+SIGINT -> exit=1
+  stdout: 
+  stderr: Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+SIGHUP -> exit=1
+  stdout: 
+  stderr: Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+---
+=== E7f: SAME probe but with --json + envelope (is the lock error machine-readable?) ===
+exit=1
+STDOUT>>>
+<<<
+STDERR>>>
+Error: failed to open database: embeddeddolt: init schema: embeddeddolt: open db: failed to load database "elock": the database is locked by another dolt process
+<<<
+---

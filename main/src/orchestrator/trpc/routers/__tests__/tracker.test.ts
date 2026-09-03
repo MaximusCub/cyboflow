@@ -7,7 +7,11 @@
  * validation, and the mapping of the engine's typed failures onto TRPCError
  * codes the renderer branches on. That mapping is by ERROR NAME rather than by
  * `instanceof`, because router files may not import main/src/services/* — which
- * is precisely the kind of coupling a test should pin down.
+ * is precisely the kind of coupling a test should pin down. The keyless
+ * workspace-recovery trio (probeRecovery / remapRenamedPrefix /
+ * adoptNewWorkspace) adds two more of those names — the keyed-provider refusal
+ * and the stale-classification refusal — and both are load-bearing for what the
+ * banner does next.
  *
  * Wiring mirrors health.test.ts: `vi.resetModules()` + dynamic import per case,
  * so the bridge's module-level facade singleton cannot leak between tests.
@@ -15,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TRPCError } from '@trpc/server';
 import type {
+  TrackerAdoptionResult,
   TrackerConflictChoice,
   TrackerConflictSummary,
   TrackerConnectPayload,
@@ -24,7 +29,10 @@ import type {
   TrackerEntityType,
   TrackerFieldOptions,
   TrackerIssue,
+  TrackerProvider,
   TrackerReconcileItem,
+  TrackerRecoveryProbe,
+  TrackerRemapResult,
   TrackerSettingsPatch,
   TrackerSourceNarrow,
   TrackerSourceSelection,
@@ -53,6 +61,12 @@ const IDENTITY: TrackerWorkspaceIdentity = {
  */
 class UnusedFacade implements TrackerSyncFacade {
   wizardValidate(_c: TrackerCredentialsInput): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  wizardPickWorkspace(_p: TrackerProvider): Promise<{ token: string; path: string } | null> {
+    throw new Error('not used');
+  }
+  wizardInitWorkspace(_c: TrackerCredentialsInput): Promise<void> {
     throw new Error('not used');
   }
   wizardGroups(_s: TrackerWizardSourceInput): Promise<TrackerGroupTree> {
@@ -86,6 +100,15 @@ class UnusedFacade implements TrackerSyncFacade {
     throw new Error('not used');
   }
   updateCredentials(_id: string, _key: string): Promise<TrackerWorkspaceIdentity> {
+    throw new Error('not used');
+  }
+  probeRecovery(_id: string): Promise<TrackerRecoveryProbe> {
+    throw new Error('not used');
+  }
+  remapRenamedPrefix(_id: string): Promise<TrackerRemapResult> {
+    throw new Error('not used');
+  }
+  adoptNewWorkspace(_id: string): Promise<TrackerAdoptionResult> {
     throw new Error('not used');
   }
   connections(_p: number): Promise<TrackerConnectionSummary[]> {
@@ -165,6 +188,46 @@ async function codeOf(call: Promise<unknown>): Promise<string> {
   }
   throw new Error('expected the call to reject');
 }
+
+describe('cyboflow.tracker.wizardInitWorkspace', () => {
+  /** What the wizard sends after a missing-workspace Detect on a picked folder. */
+  const KEYLESS: TrackerCredentialsInput = {
+    provider: 'beads',
+    projectId: 1,
+    workspaceDirToken: 'tok-1',
+  };
+
+  it('forwards the credentials verbatim — the folder is main\'s to resolve', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardInitWorkspace = async (credentials) => {
+      seen.push(credentials);
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardInitWorkspace({ credentials: KEYLESS });
+
+    // The token and the project id ride through untouched; nothing path-shaped
+    // is in the input at all, which is what keeps the spawn directory main's.
+    expect(seen).toEqual([KEYLESS]);
+  });
+
+  it('maps a keyed-provider refusal to PRECONDITION_FAILED, like every credentials error', async () => {
+    const credentialsError = new Error('linear connections are keyed');
+    credentialsError.name = 'TrackerCredentialsError';
+    const facade = new UnusedFacade();
+    facade.wizardInitWorkspace = async () => {
+      throw credentialsError;
+    };
+    const caller = await callerWith(facade);
+
+    expect(
+      await codeOf(
+        caller.wizardInitWorkspace({ credentials: { provider: 'linear', apiKey: 'lin_1' } }),
+      ),
+    ).toBe('PRECONDITION_FAILED');
+  });
+});
 
 describe('cyboflow.tracker.wizardFieldOptions', () => {
   const OPTIONS: TrackerFieldOptions = {
@@ -425,5 +488,279 @@ describe('cyboflow.tracker.updateCredentials', () => {
     expect(await codeOf(caller.updateCredentials({ connectionId: 'trk_1', apiKey: 'k' }))).toBe(
       'UNAUTHORIZED',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless workspace recovery
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.tracker — keyless recovery', () => {
+  const PROBE: TrackerRecoveryProbe = {
+    connectionId: 'trk_1',
+    recovery: 'renamed',
+    boundWorkspaceId: 'inst-1',
+    boundWorkspaceName: 'cf',
+    currentWorkspaceId: 'inst-1',
+    currentWorkspaceName: 'newpfx',
+    probeError: null,
+  };
+
+  it('passes the classification through verbatim', async () => {
+    const facade = new UnusedFacade();
+    const seen: string[] = [];
+    facade.probeRecovery = async (id) => {
+      seen.push(id);
+      return PROBE;
+    };
+    const caller = await callerWith(facade);
+
+    await expect(caller.probeRecovery({ connectionId: 'trk_1' })).resolves.toEqual(PROBE);
+    expect(seen).toEqual(['trk_1']);
+  });
+
+  it('maps a keyed-provider refusal to PRECONDITION_FAILED, message intact', async () => {
+    // Another by-NAME mapping the router cannot express with `instanceof`.
+    const unavailable = new Error(
+      'linear connections have no workspace-recovery classification — reconnect them by pasting a fresh API key instead.',
+    );
+    unavailable.name = 'TrackerRecoveryUnavailableError';
+    const facade = new UnusedFacade();
+    facade.probeRecovery = async () => {
+      throw unavailable;
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.probeRecovery({ connectionId: 'trk_1' }))).toBe(
+      'PRECONDITION_FAILED',
+    );
+    // The message names the reconnect that DOES apply, which is the whole
+    // actionable content — so it is passed through rather than genericized.
+    await expect(caller.probeRecovery({ connectionId: 'trk_1' })).rejects.toThrow(
+      /pasting a fresh API key/,
+    );
+  });
+
+  it('maps a stale-state refusal on either recovery action to CONFLICT', async () => {
+    const stale = new Error(
+      'this recovery applies to a renamed workspace, and re-probing now reports replaced: …',
+    );
+    stale.name = 'TrackerRecoveryStateError';
+    const facade = new UnusedFacade();
+    facade.remapRenamedPrefix = async () => {
+      throw stale;
+    };
+    facade.adoptNewWorkspace = async () => {
+      throw stale;
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.remapRenamedPrefix({ connectionId: 'trk_1' }))).toBe('CONFLICT');
+    expect(await codeOf(caller.adoptNewWorkspace({ connectionId: 'trk_1' }))).toBe('CONFLICT');
+  });
+
+  it('returns each action result unchanged', async () => {
+    const remap: TrackerRemapResult = {
+      remappedLinks: 2,
+      remappedOutboxRows: 1,
+      workspaceName: 'newpfx',
+      unmatchedExternalIds: [],
+    };
+    const adoption: TrackerAdoptionResult = {
+      newConnectionId: 'trk_2',
+      orphanedLinks: 3,
+      cancelledWrites: 1,
+      relinked: 2,
+      ambiguous: 1,
+    };
+    const facade = new UnusedFacade();
+    facade.remapRenamedPrefix = async () => remap;
+    facade.adoptNewWorkspace = async () => adoption;
+    const caller = await callerWith(facade);
+
+    await expect(caller.remapRenamedPrefix({ connectionId: 'trk_1' })).resolves.toEqual(remap);
+    await expect(caller.adoptNewWorkspace({ connectionId: 'trk_1' })).resolves.toEqual(adoption);
+  });
+
+  it('rejects an empty connection id on all three, before the facade is reached', async () => {
+    const caller = await callerWith(new UnusedFacade());
+
+    expect(await codeOf(caller.probeRecovery({ connectionId: '' }))).toBe('BAD_REQUEST');
+    expect(await codeOf(caller.remapRenamedPrefix({ connectionId: '' }))).toBe('BAD_REQUEST');
+    expect(await codeOf(caller.adoptNewWorkspace({ connectionId: '' }))).toBe('BAD_REQUEST');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyless credentials (beads)
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.tracker — the keyless credential shape', () => {
+  it('accepts a keyless provider with a project id and no key at all', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async (credentials) => {
+      seen.push(credentials);
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } });
+
+    expect(seen).toEqual([{ provider: 'beads', projectId: 7 }]);
+  });
+
+  it('refuses a keyless provider that names no project — nothing anchors the probe', async () => {
+    // The project id is beads' whole credential: without it main has no repo
+    // path to spawn `bd` in, and a renderer may not supply one directly.
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardValidate({ credentials: { provider: 'beads' } })).rejects.toThrow();
+  });
+
+  it('still refuses a KEYED provider with no key, which the optional field now makes expressible', async () => {
+    const facade = new UnusedFacade();
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardValidate({ credentials: { provider: 'linear' } })).rejects.toThrow();
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'linear', apiKey: '' } }),
+    ).rejects.toThrow();
+    // …including on the connect path, whose schema shares the same object.
+    await expect(
+      caller.connect({ ...BASE_CONNECT_INPUT, credentials: { provider: 'dart' } }),
+    ).rejects.toThrow();
+  });
+
+  it('re-detects a keyless connection through updateCredentials with no key', async () => {
+    const seen: Array<{ connectionId: string; apiKey: string | undefined }> = [];
+    const facade = new UnusedFacade();
+    facade.updateCredentials = async (connectionId, apiKey) => {
+      seen.push({ connectionId, apiKey });
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.updateCredentials({ connectionId: 'trk_beads' });
+
+    expect(seen).toEqual([{ connectionId: 'trk_beads', apiKey: undefined }]);
+  });
+
+  it('passes a KEYLESS auth failure through verbatim and keeps the keyed one generic', async () => {
+    // Both failures are the same class. For a keyed provider "check the API
+    // key" is always the fix; for a keyless one there is no key, and the two
+    // real causes (no `bd` binary / no workspace in this repo) have different
+    // fixes that the generic line would erase.
+    const beadsFailure = Object.assign(
+      new Error('[beads] `bd` was not found on PATH — install beads and re-detect this connection.'),
+      { name: 'TrackerAuthError', provider: 'beads' },
+    );
+    const linearFailure = Object.assign(new Error('[linear] 401 unauthorized'), {
+      name: 'TrackerAuthError',
+      provider: 'linear',
+    });
+
+    const facade = new UnusedFacade();
+    let next: Error = beadsFailure;
+    facade.wizardValidate = async () => {
+      throw next;
+    };
+    const caller = await callerWith(facade);
+
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } }),
+    ).rejects.toThrow(/not found on PATH/);
+    expect(
+      await codeOf(caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } })),
+    ).toBe('UNAUTHORIZED');
+
+    next = linearFailure;
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'linear', apiKey: 'k' } }),
+    ).rejects.toThrow(/Check the API key/);
+  });
+
+  it('hands the picked folder’s token and path back untouched', async () => {
+    const seen: TrackerProvider[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async (provider) => {
+      seen.push(provider);
+      return { token: 'tok-1', path: '/dev/monorepo/packages/api' };
+    };
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardPickWorkspace({ provider: 'beads' })).resolves.toEqual({
+      token: 'tok-1',
+      path: '/dev/monorepo/packages/api',
+    });
+    expect(seen).toEqual(['beads']);
+  });
+
+  it('passes a cancelled pick through as null rather than as a failure', async () => {
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async () => null;
+    const caller = await callerWith(facade);
+
+    await expect(caller.wizardPickWorkspace({ provider: 'beads' })).resolves.toBeNull();
+  });
+
+  it('maps the keyed-provider refusal to PRECONDITION_FAILED, message intact', async () => {
+    // A keyed provider has no local workspace to point at, so the question does
+    // not apply — the same shape as the recovery trio's refusal above.
+    const facade = new UnusedFacade();
+    facade.wizardPickWorkspace = async () => {
+      throw Object.assign(
+        new Error('linear connections are keyed — there is no workspace folder to pick'),
+        { name: 'TrackerCredentialsError' },
+      );
+    };
+    const caller = await callerWith(facade);
+
+    expect(await codeOf(caller.wizardPickWorkspace({ provider: 'linear' }))).toBe(
+      'PRECONDITION_FAILED',
+    );
+    await expect(caller.wizardPickWorkspace({ provider: 'linear' })).rejects.toThrow(
+      /no workspace folder to pick/,
+    );
+  });
+
+  it('carries an opaque workspace token on the credential shape, and never a path', async () => {
+    const seen: TrackerCredentialsInput[] = [];
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async (credentials) => {
+      seen.push(credentials);
+      return IDENTITY;
+    };
+    const caller = await callerWith(facade);
+
+    await caller.wizardValidate({
+      credentials: { provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' },
+    });
+
+    // The project id rides along unchanged: the token overrides where the path
+    // is RESOLVED from, not whether the connection is anchored to a project.
+    expect(seen).toEqual([{ provider: 'beads', projectId: 7, workspaceDirToken: 'tok-1' }]);
+  });
+
+  it('maps a credential-wiring failure to PRECONDITION_FAILED, message intact', async () => {
+    // TrackerCredentialsError is not a provider rejection: the connection is
+    // not bound to a workspace it can reach, and the message names which of
+    // the three ways that happened.
+    const err = Object.assign(
+      new Error('project 7 has no repo path on disk, so there is no beads workspace to detect'),
+      { name: 'TrackerCredentialsError' },
+    );
+    const facade = new UnusedFacade();
+    facade.wizardValidate = async () => {
+      throw err;
+    };
+    const caller = await callerWith(facade);
+
+    const call = caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } });
+    expect(await codeOf(call)).toBe('PRECONDITION_FAILED');
+    await expect(
+      caller.wizardValidate({ credentials: { provider: 'beads', projectId: 7 } }),
+    ).rejects.toThrow(/no repo path on disk/);
   });
 });

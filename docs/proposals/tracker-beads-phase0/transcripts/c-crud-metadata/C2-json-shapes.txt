@@ -1,0 +1,105 @@
+$ BD_JSON_ENVELOPE=1 bd create "c2 create probe" --json
+{
+  "data": {
+    "id": "c-crud-metadata-v9n",
+    "title": "c2 create probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:26.982114Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:26.982114Z"
+  },
+  "schema_version": 1
+}
+exit=0
+
+$ bd create "c2 create probe no-envelope" --json (no BD_JSON_ENVELOPE)
+{
+  "created_at": "2026-08-27T04:31:32.275682Z",
+  "created_by": "Krishna",
+  "id": "c-crud-metadata-lg6",
+  "issue_type": "task",
+  "owner": "13578267+kesteva@users.noreply.github.com",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "c2 create probe no-envelope",
+  "updated_at": "2026-08-27T04:31:32.275682Z"
+}
+exit=0
+
+$ BD_JSON_ENVELOPE=1 bd update c-crud-metadata-v9n --priority 0 --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-v9n",
+      "title": "c2 create probe",
+      "status": "open",
+      "priority": 0,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:27Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:39Z"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+$ bd update c-crud-metadata-v9n --priority 1 --json (no envelope)
+[
+  {
+    "id": "c-crud-metadata-v9n",
+    "title": "c2 create probe",
+    "status": "open",
+    "priority": 1,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:27Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:40Z"
+  }
+]
+exit=0
+
+$ BD_JSON_ENVELOPE=1 bd close c-crud-metadata-v9n --reason 'c2 probe close' --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-v9n",
+      "title": "c2 create probe",
+      "status": "closed",
+      "priority": 1,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:31:27Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:31:48Z",
+      "closed_at": "2026-08-27T04:31:48Z",
+      "close_reason": "c2 probe close"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+$ bd close c-crud-metadata-lg6 --reason 'c2 probe close no-envelope' --json (no envelope)
+[
+  {
+    "id": "c-crud-metadata-lg6",
+    "title": "c2 create probe no-envelope",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:31:32Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:31:49Z",
+    "closed_at": "2026-08-27T04:31:49Z",
+    "close_reason": "c2 probe close no-envelope"
+  }
+]
+exit=0

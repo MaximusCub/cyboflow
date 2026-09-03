@@ -92,6 +92,11 @@ const CAPABILITIES: TrackerAdapterCapabilities = {
   // — reading it from the SHARED table, so the trigger (which has no adapter
   // in hand) and this adapter can never disagree.
   archive: PROVIDER_ARCHIVE_CAPABILITY.plane,
+  // Plane's `updatedAt` always advances on a real change, so the cursor
+  // alone is a sound ground truth — no reconciliation backstop needed.
+  requiresIdReconciliation: false,
+  // No CAS/concurrency-token primitive; writes stay unguarded, as before.
+  guardedUpdates: false,
 };
 
 /**

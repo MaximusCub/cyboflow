@@ -9,11 +9,11 @@ import {
 } from '../../../shared/types/modelAvailability';
 
 /**
- * ModelAvailabilityService — tracks whether the guarded models (currently Fable 5)
+ * ModelAvailabilityService — tracks whether the guarded models (currently Fable 5.1)
  * are usable, so the spawn seam can fall back to Opus and the pickers can grey a
  * pulled model out.
  *
- * A guarded model can lose availability at any time (Fable 5 has been pulled from
+ * A guarded model can lose availability at any time (Fable 5.1 has been pulled from
  * release before). Two signals feed the state:
  *   1. A best-effort Models-API probe ({@link refresh}) — runs at startup when an
  *      Anthropic credential is discoverable in the environment. Most cyboflow
@@ -233,7 +233,7 @@ export function isModelUnavailableError(message: string): boolean {
   // invokes this when a guarded model was the one pinned, so the signal list can be
   // fairly permissive — a false positive just degrades gracefully to Opus.
   return (
-    /not[\s_-]*found|does not exist|not available|unavailable|invalid[\s_-]*model|model[\s\S]*invalid|not_found_error|unsupported|access|permission|forbidden|deprecated|retired/.test(
+    /not[\s_-]*found|does not exist|not available|unavailable|invalid[\s_-]*model|model[\s\S]*invalid|not_found_error|unsupported|does not support|not supported|or newer is required|access|permission|forbidden|deprecated|retired/.test(
       m,
     ) ||
     /\b404\b/.test(m) ||

@@ -1,0 +1,115 @@
+=== create fresh issue for close/reopen probe ===
+$ bd create 'c5 close-reopen probe' --json
+{
+  "data": {
+    "id": "c-crud-metadata-0gd",
+    "title": "c5 close-reopen probe",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:33:03.410982Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:33:03.410982Z"
+  },
+  "schema_version": 1
+}
+exit=0
+
+=== close WITHOUT --session (no session flag) ===
+$ bd close c-crud-metadata-0gd --reason 'first close, no session' --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-0gd",
+      "title": "c5 close-reopen probe",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:33:03Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:33:08Z",
+      "closed_at": "2026-08-27T04:33:08Z",
+      "close_reason": "first close, no session"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+=== close an ALREADY-CLOSED issue (idempotent? error?) ===
+$ bd close c-crud-metadata-0gd --reason 'second close attempt' --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-0gd",
+      "title": "c5 close-reopen probe",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:33:03Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:33:08Z",
+      "closed_at": "2026-08-27T04:33:08Z",
+      "close_reason": "first close, no session"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+$ bd close c-crud-metadata-0gd --reason 'second close attempt (no json, human output)'
+✓ Closed c-crud-metadata-0gd — c5 close-reopen probe: second close attempt human output
+exit=0
+
+=== verify actual persisted state after the two 'close again' calls ===
+$ bd show c-crud-metadata-0gd --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-0gd",
+      "title": "c5 close-reopen probe",
+      "status": "closed",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:33:03Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:33:08Z",
+      "closed_at": "2026-08-27T04:33:08Z",
+      "close_reason": "first close, no session",
+      "dependent_count": 0,
+      "dependency_count": 0,
+      "comment_count": 0
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+=== reopen the closed issue ===
+$ bd reopen c-crud-metadata-0gd --reason 'c5 reopen probe' --json
+{
+  "data": [
+    {
+      "id": "c-crud-metadata-0gd",
+      "title": "c5 close-reopen probe",
+      "status": "open",
+      "priority": 2,
+      "issue_type": "task",
+      "owner": "13578267+kesteva@users.noreply.github.com",
+      "created_at": "2026-08-27T04:33:03Z",
+      "created_by": "Krishna",
+      "updated_at": "2026-08-27T04:33:32Z"
+    }
+  ],
+  "schema_version": 1
+}
+exit=0
+
+=== reopen an ALREADY-OPEN issue (idempotent? error?) ===
+$ bd reopen c-crud-metadata-0gd --reason 'reopen again' --json
+c-crud-metadata-0gd is already open
+exit=0

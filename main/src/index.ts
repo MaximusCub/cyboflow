@@ -36,6 +36,7 @@ import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
+import { installApplicationMenu } from './menu';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -1956,6 +1957,27 @@ async function initializeServices(): Promise<boolean> {
     db: databaseService.getDb(),
     router: taskChangeRouter,
     reviewRouter: reviewItemRouter,
+    // Keyless providers (beads) anchor their workspace to the project's repo.
+    // Resolved HERE rather than in the service so the renderer only ever sends
+    // a project id — no filesystem path it composes can decide where a CLI is
+    // spawned. See TrackerSyncServiceDeps.resolveProjectPath.
+    resolveProjectPath: (id) => sessionManager.getProjectById(id)?.path?.trim() || null,
+    // The OTHER anchor a keyless connection can have: a folder the user points
+    // at when the workspace is not at the project's repo path (a monorepo
+    // subdirectory, a workspace kept outside the repo). The dialog runs HERE,
+    // in main, so the chosen path never has to be composed by — or returned
+    // to — the renderer; it gets a token. See
+    // TrackerSyncServiceDeps.pickWorkspaceDirectory.
+    pickWorkspaceDirectory: async () => {
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        // `dontAddToRecent` keeps a beads workspace out of the OS recent-items
+        // list — this is a wiring step, not a document the user opened.
+        properties: ['openDirectory', 'dontAddToRecent'],
+        title: 'Point at a beads workspace',
+      });
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+    },
     logger: cyboflowLogger,
   });
   trackerSyncService.start();
@@ -3088,7 +3110,7 @@ async function initializeServices(): Promise<boolean> {
     });
   });
 
-  // Guarded-model availability (Fable 5). Seeds the guarded set as optimistically
+  // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically
   // usable; the spawn seam falls back to Opus and the pickers grey a model out
   // when it's marked unavailable. refresh() is a best-effort Models-API probe that
   // no-ops without an Anthropic credential in the environment (most users
@@ -4584,27 +4606,13 @@ app.whenReady().then(async () => {
   // handler there shows the dialog and exits — do no boot work here.
   if (!gotSingleInstanceLock) return;
 
-  // Windows/Linux: an explicit application menu, because the default menu's
-  // File > Exit never fires the quit path there. macOS keeps the system menu.
-  if (process.platform !== 'darwin') {
-    Menu.setApplicationMenu(Menu.buildFromTemplate([
-      {
-        label: '&File',
-        submenu: [
-          {
-            label: 'Exit',
-            click: () => {
-              console.log('[Menu] File → Exit clicked — calling app.quit()');
-              app.quit();
-            },
-          },
-        ],
-      },
-      { role: 'editMenu' },
-      { role: 'viewMenu' },
-      { role: 'windowMenu' },
-    ]));
-  }
+  // Replace Electron's stock default menu before any window exists — the menu
+  // is process-global, and the stock menu's View > Reload binds plain Cmd+R
+  // (Ctrl+R elsewhere), which would otherwise swallow that keydown before it
+  // ever reaches the renderer's keyboard-shortcut handler. On Windows and
+  // Linux its File submenu also carries Quit, which is what this branch's own
+  // menu was added for. See menu.ts.
+  installApplicationMenu();
 
   console.log('[Main] App is ready, initializing services...');
   // The schema-version gate now runs INSIDE initializeServices, immediately

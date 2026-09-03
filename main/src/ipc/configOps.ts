@@ -8,6 +8,11 @@ import {
   clampSprintMaxTasks,
   type SprintMaxTasksOverrides,
 } from '../../../shared/types/sprintBatch';
+import {
+  isBindableKeybinding,
+  SHORTCUT_ACTIONS,
+  type KeyboardShortcutOverrides,
+} from '../../../shared/types/keyboardShortcuts';
 
 /**
  * Concrete implementation of {@link ConfigOpsLike}, backing the `config`
@@ -73,6 +78,48 @@ export function createConfigOps(
             clean[substrate] = clamped;
           }
           normalized = { ...normalized, sprintMaxTasks: clean };
+        }
+
+        // Same treatment for the keyboard-shortcut overrides: reject a malformed
+        // shape at the boundary, and iterate ONLY the known ShortcutAction keys
+        // (never the caller's raw object keys) so a stray/unknown property can
+        // never sneak into storage. A member the caller clears (undefined / null)
+        // drops out entirely, which is how the Settings UI resets one action back
+        // to its built-in default without touching the others.
+        //
+        // The per-member guard is isBindableKeybinding, NOT isValidKeybinding:
+        // a modifier-less binding ('b', 'shift+b', 'alt+b') parses fine but is
+        // unsafe to store, because the global key handler has no input guard and
+        // would make that character untypeable app-wide. See
+        // shared/types/keyboardShortcuts.ts.
+        if (updates.keyboardShortcuts !== undefined) {
+          const patch: unknown = updates.keyboardShortcuts;
+          if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+            return { success: false, error: 'Invalid keyboardShortcuts payload' };
+          }
+          const raw = patch as Record<string, unknown>;
+          const clean: KeyboardShortcutOverrides = {};
+          for (const action of SHORTCUT_ACTIONS) {
+            const value = raw[action];
+            if (value === undefined || value === null) continue;
+            if (!isBindableKeybinding(value)) {
+              return {
+                success: false,
+                error: `Invalid keyboardShortcuts.${action}: expected a keybinding including the 'mod' modifier and not reserved by the application menu`,
+              };
+            }
+            clean[action] = value;
+          }
+          // An EMPTY cleaned map is stored as absent, not as `{}`: the map is
+          // sparse by contract (main/src/types/config.ts promises config.json
+          // stays byte-identical for an install that never remaps anything), and
+          // every settings save sends this field. `undefined` survives the
+          // shallow spread as an own key that JSON.stringify drops, so clearing
+          // the last override also REMOVES the key rather than leaving `{}`.
+          normalized = {
+            ...normalized,
+            keyboardShortcuts: Object.keys(clean).length === 0 ? undefined : clean,
+          };
         }
 
         await configManager.updateConfig(normalized);

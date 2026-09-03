@@ -294,7 +294,8 @@ export type TaskActor =
   | `agent:${string}`
   | 'linear'
   | 'plane'
-  | 'dart';
+  | 'dart'
+  | 'beads';
 
 export interface TaskChangedEvent {
   projectId: number;

@@ -1,0 +1,112 @@
+=== D4-A: SQL-GUARD with a real interleaved writer2 ===
+t0: engine READS the revision it intends to guard on
+engine captured EXP='2026-08-27 04:37:04'
+t1: WRITER2 (a human / another agent) updates the SAME issue via bd
+    "title": "WRITER2 WON",
+    "updated_at": "2026-08-27T04:37:23Z"
+exit=0
+t2: engine now attempts its guarded write with the STALE EXP
+rows_affected
+0
+exit=0
+t3: verify writer2's value SURVIVED (no lost update)
+id,title,updated_at
+dg-v42,WRITER2 WON,2026-08-27 04:37:23
+exit=0
+=== D4-B: same-second collision hazard (updated_at is DATETIME, 1s resolution) ===
+Doing 6 back-to-back bd updates, recording updated_at after each:
+  write #1 -> updated_at='2026-08-27 04:37:39'
+  write #2 -> updated_at='2026-08-27 04:37:40'
+  write #3 -> updated_at='2026-08-27 04:37:40'
+  write #4 -> updated_at='2026-08-27 04:37:41'
+  write #5 -> updated_at='2026-08-27 04:37:41'
+  write #6 -> updated_at='2026-08-27 04:37:42'
+If any two consecutive writes share an updated_at, a guard on updated_at CANNOT distinguish them.
+=== D4-C: DEMONSTRATED LOST UPDATE through the updated_at guard (same-second window) ===
+-- attempt 1 --
+  no collision (EXP='2026-08-27 04:37:57' AFTER='2026-08-27 04:37:58'), retrying
+-- attempt 2 --
+  no collision (EXP='2026-08-27 04:37:58' AFTER='2026-08-27 04:37:59'), retrying
+-- attempt 3 --
+  SAME-SECOND HIT: EXP='2026-08-27 04:38:00' == AFTER='2026-08-27 04:38:00' (writer2's write is INVISIBLE to the guard)
+rows_affected
+1
+  final row (writer2's value LOST if title=ENGINE-CLOBBER):
+dg-v42,ENGINE-CLOBBER-3
+=== D4-D: DETECT-AFTER-WRITE via bd history --json ===
+$ bd create 'D4D detect probe' --json | grep '"id"'
+  "id": "dg-ayz",
+exit=0
+t0: engine reads state + captures newest CommitHash as its revision token
+token= mcu4m4gkbbboekd1p3sam5foei31bndm title= D4D detect probe
+exit=0
+t1: WRITER2 makes an unrelated-field change (priority) via bd
+exit=0
+t2: ENGINE writes its own field (title) via bd -- unguarded
+exit=0
+t3: engine reads history and DETECTS the intervening write
+entries: 3
+   gsqhh11t title= 'ENGINE TITLE' prio= 0
+   sl5900f4 title= 'D4D detect probe' prio= 0
+   mcu4m4gk title= 'D4D detect probe' prio= 2
+exit=0
+=== D4-E: NEGATIVE CONTROL for attribution - writer2 touches the SAME field (title) ===
+issue=dg-4dp
+engine token=be5aid7p0focvffruqlh4c4cssco78fd (title='D4E same-field probe')
+engine diffs adjacent snapshots back to its token:
+commits since token: 2
+  be5aid7p -> ohe9m2g7  changed=['title']
+  ohe9m2g7 -> 32ht07f6  changed=['title']
+exit=0
+VERDICT: engine's field = title; an intervening commit that ALSO changed title = same-field divergence (conflict).
+=== D4-F: --claim as a NATIVE narrow CAS (contention test) ===
+issue=dg-38u
+$ BEADS_ACTOR=agentA bd update dg-38u --claim --json   (first claim)
+[
+  {
+    "id": "dg-38u",
+    "title": "D4F claim probe",
+    "status": "in_progress",
+    "priority": 2,
+    "issue_type": "task",
+    "assignee": "agentA",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:38:58Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:38:58Z",
+    "started_at": "2026-08-27T04:38:58Z"
+  }
+]
+exit=0
+$ BEADS_ACTOR=agentB bd update dg-38u --claim --json   (CONTENDING claim by a DIFFERENT actor -- does it refuse?)
+Error claiming dg-38u: issue already claimed by agentA
+exit=1
+final owner/assignee:
+    "status": "in_progress",
+    "assignee": "agentA",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+exit=0
+--- D4-F2: same-actor re-claim (idempotent?) ---
+$ BEADS_ACTOR=agentA bd update dg-38u --claim --json | head -6
+[
+  {
+    "id": "dg-38u",
+    "title": "D4F claim probe",
+    "status": "in_progress",
+    "priority": 2,
+exit=0
+--- D4-F3: release the claim, then agentB can take it ---
+$ bd update dg-38u --assignee '' --status open -q
+✓ Updated issue: dg-38u — D4F claim probe
+exit=0
+assignee now:
+    "status": "open",
+$ BEADS_ACTOR=agentB bd update dg-38u --claim --json | grep -E 'assignee|status'
+    "status": "in_progress",
+    "assignee": "agentB",
+exit=0
+--- D4-F4: does --claim guard ANY other field? (write title while claimed by agentB, as agentA) ---
+$ BEADS_ACTOR=agentA bd update dg-38u --title 'AGENT A WROTE ANYWAY' --json | grep -E 'title|assignee'
+    "title": "AGENT A WROTE ANYWAY",
+    "assignee": "agentB",
+exit=0

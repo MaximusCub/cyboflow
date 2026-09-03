@@ -2,6 +2,7 @@ import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/ag
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
+import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
@@ -138,6 +139,17 @@ export interface AppConfig {
   // clamped to [SPRINT_MAX_TASKS_MIN, SPRINT_MAX_TASKS_MAX] on read because
   // config.json is hand-editable. NOT seeded into the constructor defaults.
   sprintMaxTasks?: SprintMaxTasksOverrides;
+  // User-remapped keyboard shortcuts (see shared/types/keyboardShortcuts.ts).
+  // SPARSE: an absent action falls back to KEYBOARD_SHORTCUT_DEFAULTS for that
+  // action, so an install that never touches Settings → Shortcuts keeps the
+  // built-in bindings and config.json stays byte-identical. Sparse to the very
+  // end: the config:update boundary stores an EMPTY cleaned map as `undefined`
+  // rather than `{}`, so a settings save that carries no remaps (and clearing
+  // the last remaining one) leaves the key out of config.json entirely. Read via
+  // resolveShortcut() / resolveAllShortcuts() — never the raw map — validated
+  // and cleaned at that boundary (main/src/ipc/configOps.ts), which also rejects
+  // any binding without the 'mod' modifier. NOT seeded into constructor defaults.
+  keyboardShortcuts?: KeyboardShortcutOverrides;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Read via getQuickSessionWorktreeMode() (floor 'worktree') by the
   // sessions:create-quick handler when the request omits worktreeMode. NOT
@@ -323,6 +335,8 @@ export interface UpdateConfigRequest {
   fanOutDispatch?: FanOutDispatch;
   // Per-substrate override of the sprint task-selection cap (see AppConfig.sprintMaxTasks).
   sprintMaxTasks?: SprintMaxTasksOverrides;
+  // User-remapped keyboard shortcuts (see AppConfig.keyboardShortcuts).
+  keyboardShortcuts?: KeyboardShortcutOverrides;
   // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global default CLI substrate for new QUICK sessions (see AppConfig.quickSessionDefaultSubstrate).

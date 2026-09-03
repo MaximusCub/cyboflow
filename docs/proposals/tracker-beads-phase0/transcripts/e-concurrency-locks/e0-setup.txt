@@ -1,0 +1,41 @@
+$ git config --global --get core.excludesfile; echo '(global excludesfile above)'
+(global excludesfile above)
+exit=0
+---
+$ git config --global --get core.attributesfile; echo '(global attributesfile above)'
+(global attributesfile above)
+exit=0
+---
+$ bd version
+bd version 1.2.2 (Homebrew)
+exit=0
+---
+$ BD_NON_INTERACTIVE=1 bd init --prefix elock --skip-agents --skip-hooks --setup-exclude --non-interactive --role maintainer
+  Repository ID: 09aebba3
+  Clone ID: 1897aa860029ef2c
+
+✓ Added to .git/info/exclude:
+  .beads/
+  **/RECOVERY*.md
+  **/SESSION*.md
+
+Note: .git/info/exclude is local-only and won't affect upstream.
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: elock
+  Issue prefix: elock
+  Issues will be named: elock-<hash> (e.g., elock-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+---

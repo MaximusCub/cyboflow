@@ -32,6 +32,7 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { usePanelStore } from '../../stores/panelStore';
 import { useLandingStore } from '../../stores/landingStore';
+import { useLayoutStore } from '../../stores/layoutStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
@@ -71,30 +72,18 @@ interface CyboflowRootProps {
   projectId: number | null;
 }
 
-/** localStorage key for the right-rail collapsed state. Brand-new key — no migration. */
-const RAIL_COLLAPSED_KEY = 'cyboflow.runRightRail.collapsed';
-
 export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
 
-  // Whole-rail collapse — lifted here (the parent that sizes the rail) and
-  // persisted to localStorage so it survives reloads. (Brand-new key — no
-  // migrateLocalStorageKey needed.)
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
-    if (typeof localStorage === 'undefined') return false;
-    return localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
-  });
-  const handleToggleRail = useCallback(() => {
-    setRailCollapsed((prev) => {
-      const next = !prev;
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(RAIL_COLLAPSED_KEY, next ? 'true' : 'false');
-      }
-      return next;
-    });
-  }, []);
+  // Whole-rail collapse — LIFTED to layoutStore (which owns the same
+  // 'cyboflow.runRightRail.collapsed' localStorage key this component used to
+  // read/write itself, so an existing install keeps its state). It lives there
+  // rather than here because the global keyboard-shortcut handler
+  // (useGlobalKeyboardShortcuts, ⌘]) has to toggle it from outside this tree.
+  const railCollapsed = useLayoutStore((s) => s.rightRailCollapsed);
+  const handleToggleRail = useLayoutStore((s) => s.toggleRightRail);
   // "Add a workflow" on an interactive (PTY) session: a second workflow can't run
   // in the live-REPL session (descoped), so the affordance first confirms it will
   // launch in a SEPARATE session, then opens the picker with forceNewSession set.
@@ -504,6 +493,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     <QuickSessionDockTabs
                       chatContent={quickPanelSurface}
                       runId={effectiveSession.chatRunId ?? null}
+                      // ⌘' registers a quick session's composer under the
+                      // SESSION id (composerFocusStore's key scheme).
+                      composerFocusKey={effectiveSession.id}
                     />
                   }
                 />
@@ -532,7 +524,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </PerfProfiler>
 
         {/* Right rail — always rendered as layout shell (296px fixed, or a thin
-            collapsed strip). Collapse state is lifted here + persisted.
+            collapsed strip). Collapse state lives in layoutStore (persisted
+            there, and toggleable by ⌘] from the global shortcut handler).
             quickSessionProjectId lets the Artifacts tab work with no active flow
             run (mirroring the Diff tab's session fallback) — gated on
             !isMainRepo because the main-repo session has a panels-only layout

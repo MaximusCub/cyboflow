@@ -107,6 +107,9 @@ describe('Migration 093: tracker-sync data model', () => {
       'archive_sync_mode',
       'priority_mapping_json',
       'category_mapping_json',
+      // Appended by 129 (beads as a fourth provider + the reconciliation
+      // ledger's generation counter), asserted for real in migration123.test.ts.
+      'config_generation',
     ]);
 
     expect(columnNames(raw, 'entity_external_links')).toEqual([
