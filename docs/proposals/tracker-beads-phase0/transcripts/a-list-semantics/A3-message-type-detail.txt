@@ -1,0 +1,30 @@
+$ bd show bp-wisp-2pi --json
+[
+  {
+    "id": "bp-wisp-2pi",
+    "title": "infra probe message",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "message",
+    "owner": "13578267+kesteva@users.noreply.github.com",
+    "created_at": "2026-08-27T04:35:34Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:35:34Z",
+    "ephemeral": true,
+    "dependent_count": 0,
+    "dependency_count": 0,
+    "comment_count": 0
+  }
+]
+
+=== visibility of bp-wisp-2pi (type=message) ===
+-- default --
+0
+-- --all --
+0
+-- --all --include-infra --
+1
+-- --all --include-gates --
+0
+-- --all --include-templates --
+0

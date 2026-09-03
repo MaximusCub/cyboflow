@@ -10,7 +10,7 @@
  *
  * Singleton lifecycle mirrors SprintLaneStore / TaskChangeRouter (initialize /
  * getInstance / _resetForTesting). Pass `logger` at initialize time from
- * main/src/index.ts — omitting it silently disables diagnostics (CLAUDE.md
+ * main/src/index.ts — omitting it silently disables diagnostics (CODE-PATTERNS.md
  * optional-logger rule).
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
 import { emitSeamError } from '../telemetrySink';
-import { classifyErrorPattern } from '../programmatic/systemicError';
+import { classifyErrorPattern, unclassifiedErrorTags } from '../programmatic/systemicError';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
   CaptureContext,
@@ -5258,6 +5258,12 @@ export class VerificationScheduler {
         verifyType: row.verify_type,
         ...(extra.backend ? { backend: extra.backend } : {}),
         errorClass: verifyErrorClass,
+        // An UNCLASSIFIED verify failure is otherwise blind: the message is
+        // withheld above and `other`/`unknown` says nothing about which failure
+        // it was. The shape+digest split it without shipping the text — the last
+        // `other`-emitting seam to be wired for this (cf. stepResultStore,
+        // monitorQuery, claudeCodeManager).
+        ...unclassifiedErrorTags(verifyErrorClass, extra.error),
       });
     }
     const deliveredOk = await this.deliver(row, status, verdict, fileNames, input, extra);

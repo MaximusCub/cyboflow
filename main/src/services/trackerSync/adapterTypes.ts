@@ -80,6 +80,37 @@ export interface TrackerAdapterCapabilities {
    * no-op-ing. Phase 5 gates on this before enqueuing an `archive_issue` row.
    */
   archive: 'trash' | 'archive' | 'none';
+  /**
+   * Can this provider surface a remote change to the sync engine's
+   * incremental `--updated-after`-style cursor at all? False for every HTTP
+   * provider today (Linear/Plane/Dart's timestamp always advances on a real
+   * change). True only for beads (docs/proposals/tracker-beads-provider.md
+   * "4. Pull reconciliation"): a `bd dolt pull` preserves each issue's
+   * original `updated_at`, and label/comment/dependency edits never bump it
+   * at all, so a cursor-only sweep can miss real changes permanently. When
+   * true, the deletion sweep calls {@link TrackerAdapter.listIssueRevisions}
+   * (which the adapter MUST then implement) instead of
+   * {@link TrackerAdapter.listIssueIds}, diffing the returned
+   * `(id, revision)` pairs against known links and the durable
+   * `tracker_reconciliation_ledger` rather than trusting the cursor alone.
+   */
+  requiresIdReconciliation: boolean;
+  /**
+   * Does this adapter guard an existing-issue mutation (state or content)
+   * with a detect-after-write concurrency check? False for every HTTP
+   * provider today — their writes are unguarded, as before. True only for
+   * beads (docs/proposals/tracker-beads-provider.md, "Dual writers on one
+   * issue"): its embedded single-writer database has no CAS/if-match
+   * primitive, so the adapter instead captures a `concurrencyToken` before
+   * the write and verifies after, throwing {@link
+   * import('./errors').TrackerRevisionMismatchError} on an interleaved
+   * same-field write. When a provider requires this (see
+   * `PROVIDER_REQUIRES_GUARDED_UPDATES` in providerCapabilities.ts) but its
+   * adapter cannot provide it, every existing-issue mutation must be gated at
+   * the enqueue chokepoint rather than sent unguarded — see that table's doc
+   * comment.
+   */
+  guardedUpdates: boolean;
 }
 
 /** The fields a create carries, for BOTH `createSubIssue` and `createIssue`. */
@@ -222,6 +253,43 @@ export interface TrackerAdapter {
   /** Full external-id set for the selection — the deletion sweep's ground truth. */
   listIssueIds(selection: TrackerSourceSelection): Promise<string[]>;
 
+  /**
+   * OPTIONAL. Full external-id set for the selection, each paired with an
+   * OPAQUE compare-for-equality revision token — the timestamp-independent
+   * reconciliation sweep's ground truth (docs/proposals/
+   * tracker-beads-provider.md "4. Pull reconciliation"). Implemented only by
+   * adapters whose `capabilities.requiresIdReconciliation` is true (beads);
+   * the deletion sweep calls this when the adapter provides it and falls
+   * back to {@link listIssueIds} otherwise, so the three HTTP providers are
+   * unaffected. `revision` need not be a server-issued token — a stable
+   * content fingerprint the adapter derives itself (e.g. a hash over the
+   * sync-relevant listed fields) satisfies the same contract, since callers
+   * only ever compare it for equality, never parse or order it.
+   */
+  listIssueRevisions?(
+    selection: TrackerSourceSelection,
+  ): Promise<Array<{ id: string; revision: string }>>;
+
+  /**
+   * OPTIONAL. An opaque token for the workspace's CURRENT state as a whole —
+   * beads' Dolt HEAD (docs/proposals/tracker-beads-provider.md, round 16). Only
+   * compared for equality, never parsed.
+   *
+   * The reconciliation sweep captures it at the start and re-reads it before
+   * applying ARCHIVAL decisions: identity catches a REPLACED database, but not a
+   * concurrent write inside the same one restoring an issue between its
+   * absent-id lookup and the local archive. A moved token defers the archival
+   * subset for that sweep; imports and merges apply regardless.
+   *
+   * `anyLinkedExternalId` is a lever, not a filter — the token describes the
+   * workspace, and the id only gives the provider something to address the read
+   * with. BEST-EFFORT by contract: null means "no token available" (an
+   * unresolvable id, no history), and every caller must degrade to running
+   * without the guard rather than failing. Implemented only by beads; the three
+   * HTTP providers omit it and the guard never engages.
+   */
+  workspaceHead?(anyLinkedExternalId: string): Promise<string | null>;
+
   /** Point lookup; null when the issue does not exist (or is hard-deleted). */
   getIssue(externalId: string): Promise<TrackerIssue | null>;
 
@@ -255,8 +323,20 @@ export interface TrackerAdapter {
     clientKey: string
   ): Promise<TrackerIssue>;
 
-  /** Move an issue to a provider state (write-back). */
-  updateIssueState(externalId: string, stateId: string): Promise<void>;
+  /**
+   * Move an issue to a provider state (write-back).
+   *
+   * `expectedToken` is OPTIONAL and populated by the caller only when the
+   * adapter's own {@link TrackerIssue.concurrencyToken} was populated on the
+   * pre-send read (i.e. `capabilities.guardedUpdates === true`). Every
+   * adapter that does not declare `guardedUpdates` ignores this parameter
+   * entirely — its signature needs no change under TS structural typing.
+   * A guarded adapter (beads) is expected to verify AFTER the write (its
+   * writes are not conditional) and throw {@link
+   * import('./errors').TrackerRevisionMismatchError} on an interleaved
+   * same-field write; see that class and `guardedUpdates`'s doc comment.
+   */
+  updateIssueState(externalId: string, stateId: string, expectedToken?: string): Promise<void>;
 
   /**
    * Write a partial content patch (title/description/priority/category) and
@@ -275,8 +355,16 @@ export interface TrackerAdapter {
    * See `IssueContentPatch` for the field-presence contract and the
    * marker-ownership note (this method never re-appends a recovery marker
    * itself).
+   *
+   * `expectedToken` is the same optional guarded-update parameter documented
+   * on {@link updateIssueState} — ignored by every adapter that does not
+   * declare `capabilities.guardedUpdates`.
    */
-  updateIssueContent(externalId: string, patch: IssueContentPatch): Promise<TrackerIssue | null>;
+  updateIssueContent(
+    externalId: string,
+    patch: IssueContentPatch,
+    expectedToken?: string,
+  ): Promise<TrackerIssue | null>;
 
   /**
    * Archive (never hard-delete) an issue remotely. A 404 — the twin was

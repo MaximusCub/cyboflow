@@ -1,7 +1,7 @@
 // Shared contract for the in-app auto-updater (electron-updater). Lives in
 // shared/ so the main-process service (main/src/services/appUpdater.ts) and the
 // renderer (preload + electron.d.ts + UI) reference ONE definition — per the
-// no-dual-declaration rule in CLAUDE.md. The renderer subscribes to UpdaterEvent
+// no-dual-declaration rule in CODE-PATTERNS.md. The renderer subscribes to UpdaterEvent
 // over the 'updater:event' IPC channel and drives check/download/install via
 // the updater IPC handlers.
 

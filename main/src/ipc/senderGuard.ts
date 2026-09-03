@@ -24,11 +24,30 @@
  * (`uiState`, `logs`, `artifactHtml`, `artifactImages`, `designPrototypeServer`)
  * import `ipcMain` directly instead of taking it as a parameter, and two
  * handlers are registered inline in `main/src/index.ts`. Patching the singleton
- * covers every one of them from a single call site. `trpc-electron` is NOT
- * affected: it rides `ipcMain.on('trpc-electron')`, not `handle`.
+ * covers every one of them from a single call site.
+ *
+ * The tRPC surface is guarded too: `trpc-electron` rides
+ * `ipcMain.on(ELECTRON_TRPC_CHANNEL)`, not `handle`, so `ipcMain.on` is ALSO
+ * patched — for that one channel only — with the same frame-identity check. As
+ * the IPC→tRPC migration moves channels off `ipcMain.handle`, this is what
+ * keeps them on the guarded surface. An `.on` listener has no return path for a
+ * rejection envelope, so an untrusted frame's tRPC message is DROPPED (logged,
+ * never answered) — its request simply never resolves, which is fine for a
+ * frame that has no preload and therefore no legitimate way to have sent one.
  */
 import { ipcMain, app } from 'electron';
-import type { IpcMainInvokeEvent } from 'electron';
+import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron';
+
+/**
+ * trpc-electron's wire channel — the literal behind its ELECTRON_TRPC_CHANNEL
+ * export. Declared locally rather than imported because importing
+ * 'trpc-electron/main' here would drag the real package (and its own `electron`
+ * named imports) into every unit test that transitively loads this module.
+ * senderGuard.test.ts pins this literal against the package's OWN declaration,
+ * so a channel rename in an upgrade fails a test instead of silently
+ * registering the tRPC listener unwrapped.
+ */
+export const TRPC_ELECTRON_CHANNEL = 'trpc-electron';
 
 /** Where the packaged/e2e renderer's document lives inside the app bundle. */
 const RENDERER_DOCUMENT_SUFFIX = '/frontend/dist/index.html';
@@ -104,10 +123,15 @@ export function senderRejection(channel: string): SenderRejection {
 }
 
 /**
- * Decide whether an invoke may proceed. Exported for direct unit testing of the
- * frame-identity rules (top-frame-ness plus URL) without patching the singleton.
+ * Decide whether an invoke (or a trpc-electron `.on` message — both event
+ * shapes carry `senderFrame`) may proceed. Exported for direct unit testing of
+ * the frame-identity rules (top-frame-ness plus URL) without patching the
+ * singleton.
  */
-export function isTrustedSender(event: IpcMainInvokeEvent, config: SenderGuardConfig): boolean {
+export function isTrustedSender(
+  event: IpcMainInvokeEvent | IpcMainEvent,
+  config: SenderGuardConfig,
+): boolean {
   const frame = event.senderFrame;
   // A destroyed or absent frame cannot be attributed to the main window; there
   // is no safe way to serve it.
@@ -121,13 +145,21 @@ export function isTrustedSender(event: IpcMainInvokeEvent, config: SenderGuardCo
 let installed = false;
 
 /**
- * Patch `ipcMain.handle` so every channel registered from this point on is
+ * Patch `ipcMain.handle` (every channel) and `ipcMain.on` (the trpc-electron
+ * channel only) so everything registered from this point on is
  * sender-validated. Idempotent — a second call is a no-op, so a re-entered boot
  * path cannot stack wrappers.
  *
- * Must run BEFORE any `ipcMain.handle` call: handlers registered earlier keep
- * their unwrapped listener. `registerIpcHandlers` is the first registration in
- * the boot sequence, which is why the install lives at the top of it.
+ * Must run BEFORE any `ipcMain.handle` call AND before trpc-electron's
+ * `createIPCHandler` registers its global `.on` listener: listeners registered
+ * earlier keep their unwrapped form. `registerIpcHandlers` is the first
+ * registration in the boot sequence (inside `initializeServices`, which
+ * completes before `createWindow` calls `attachOrchestratorTrpcToWindow`),
+ * which is why the install lives at the top of it.
+ *
+ * The `.on` wrapper breaks `removeListener`-by-reference for the wrapped
+ * channel; acceptable because trpc-electron registers its listener once for the
+ * process lifetime and never removes it.
  */
 export function installIpcSenderGuard(config: SenderGuardConfig): void {
   if (installed) return;
@@ -157,6 +189,30 @@ export function installIpcSenderGuard(config: SenderGuardConfig): void {
       return listener(event, ...args);
     });
   };
+
+  // The tRPC bridge: wrap ONLY the trpc-electron channel — every other
+  // `ipcMain.on` channel (terminal PTY bridge, panel events, …) keeps its
+  // untouched listener and semantics. A rejected message is dropped, not
+  // answered — see the module header.
+  const originalOn = ipcMain.on.bind(ipcMain);
+  ipcMain.on = ((
+    channel: string,
+    listener: (event: IpcMainEvent, ...args: unknown[]) => void,
+  ) => {
+    if (channel !== TRPC_ELECTRON_CHANNEL) {
+      return originalOn(channel, listener);
+    }
+    return originalOn(channel, (event: IpcMainEvent, ...args: unknown[]) => {
+      if (!isTrustedSender(event, config)) {
+        console.warn(
+          `[IPC] Dropped "${channel}" message from untrusted frame: ${event.senderFrame?.url ?? '<no frame>'}` +
+            `${event.senderFrame && event.senderFrame.parent !== null ? ' (sub-frame)' : ''}`,
+        );
+        return;
+      }
+      listener(event, ...args);
+    });
+  }) as typeof ipcMain.on;
 }
 
 /** Config from the same sources `main/src/index.ts` uses for its own window load. */

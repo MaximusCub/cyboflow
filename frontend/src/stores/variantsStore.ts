@@ -20,7 +20,7 @@ import type { AppRouter } from '../../../shared/types/trpc';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 
-/** AppRouter-inferred variant row — never a local mirror (CLAUDE.md IPC rule). */
+/** AppRouter-inferred variant row — never a local mirror (CODE-PATTERNS.md IPC rule). */
 export type WorkflowVariantRow = RouterOutputs['cyboflow']['variants']['list'][number];
 
 /** AppRouter-inferred baseline rotation participation (migration 054). */

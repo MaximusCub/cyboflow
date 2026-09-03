@@ -105,16 +105,20 @@ import type {
 } from '../../../../shared/types/trackerSync';
 import {
   advanceCursor,
+  clearOrphaned,
+  deleteLedgerEntries,
   findSiblingLinkForExternal,
   getLinkByEntity,
   getLinkByExternal,
   hasOpenConflictForLink,
   insertConflict,
+  listLedgerEntries,
   listLinks,
   listUnresolvedOutbox,
   markOrphaned,
   resolveConflict,
   updateBaseline,
+  upsertLedgerEntry,
   upsertLink,
 } from './store';
 import {
@@ -235,6 +239,21 @@ export interface TrackerBaseline {
    */
   priority?: string | null;
   category?: string | null;
+  /**
+   * The link's LAST-SEEN reconciliation fingerprint — `TrackerIssue.revision`
+   * as of the last pass that saw this issue. Written only by providers that
+   * populate it (those declaring `requiresIdReconciliation`; beads today) and
+   * read only by {@link runDeletionSweep}, which compares it against the swept
+   * value to decide whether a LINKED id needs a point fetch.
+   *
+   * IT LIVES ON THE BASELINE BLOB RATHER THAN A COLUMN because it is exactly
+   * the same kind of fact as the rest of it — "what the remote looked like when
+   * we last agreed with it" — and because a column would have to be widened
+   * into every provider's schema for one provider's benefit. It is deliberately
+   * NOT part of the three-way merge: a fingerprint has no local counterpart, so
+   * nothing can conflict on it.
+   */
+  revision?: string;
 }
 
 /**
@@ -406,6 +425,37 @@ export interface InboundSweepReport {
    * next sweep retries it. See {@link isDeferrableRejection}.
    */
   entityLocked: number;
+  /**
+   * RECONCILIATION ONLY (`capabilities.requiresIdReconciliation`). Point
+   * lookups the reconciliation phase actually performed — the cost metric the
+   * whole ledger exists to hold down, and the one the zero-lookup repeat-sweep
+   * guarantee is stated in terms of.
+   */
+  reconcileFetched: number;
+  /** Reconciled ids that reached the ordinary import path and now hold a link. */
+  reconcileImported: number;
+  /** Reconciled ids resolved WITHOUT a link and recorded in the ledger. */
+  reconcileLedgered: number;
+  /**
+   * Ids the ledger (or a matching link fingerprint) answered for free — no
+   * point lookup, no work. The number this sweep did NOT spend.
+   */
+  reconcileSkipped: number;
+  /**
+   * Orphaned links whose remote issue REAPPEARED in the full listing and were
+   * put back in sync (docs/proposals/tracker-beads-provider.md, round 18's
+   * reversible archival). Never zero for long: a sweep that archives something
+   * a concurrent restore brought back reports it here on the very next pass.
+   */
+  resurrected: number;
+  /**
+   * Archival decisions this sweep DID NOT apply because the workspace changed
+   * under it (`TrackerAdapter.workspaceHead` moved between the sweep's start and
+   * the first archive). Nothing was written for them; the next sweep decides
+   * again from a fresh listing. See the HEAD-guard note in
+   * {@link runDeletionSweep}.
+   */
+  archivalDeferred: number;
 }
 
 /** The connection is not configured well enough to sync (bad/absent source_json). */
@@ -431,6 +481,7 @@ const PROVIDER_LABEL: Record<TrackerProvider, string> = {
   linear: 'Linear',
   plane: 'Plane',
   dart: 'Dart',
+  beads: 'Beads',
 };
 
 /** The provenance block appended to an imported idea's body (issue ref + URL). */
@@ -497,8 +548,15 @@ function computeSince(connection: TrackerConnectionRow): string | undefined {
 // Connection JSON blobs
 // ---------------------------------------------------------------------------
 
-/** Parse `source_json` into the adapter's source selection. */
-function parseSourceSelection(connection: TrackerConnectionRow): TrackerSourceSelection {
+/**
+ * Parse `source_json` into the adapter's source selection.
+ *
+ * Exported for the ADOPTION path, whose pre-import reconciliation lists the
+ * newly adopted workspace itself, ahead of any pass: it needs the same selection
+ * a pass would use, and re-deriving one at that call site would be a second
+ * parser of the same blob with its own defaults.
+ */
+export function parseSourceSelection(connection: TrackerConnectionRow): TrackerSourceSelection {
   if (connection.source_json === null || connection.source_json.length === 0) {
     throw new TrackerSyncConfigError(`connection ${connection.id} has no source selected`);
   }
@@ -575,7 +633,24 @@ function parseBaseline(baselineJson: string | null): TrackerBaseline | null {
   // erase that distinction — see TrackerBaseline.priority.
   if ('priority' in candidate) baseline.priority = asNullableString(candidate.priority);
   if ('category' in candidate) baseline.category = asNullableString(candidate.category);
+  if (typeof candidate.revision === 'string') baseline.revision = candidate.revision;
   return baseline;
+}
+
+/**
+ * The reconciliation fingerprint stored on a link's baseline blob, or null when
+ * it carries none (every HTTP-provider link, and a beads link written before
+ * the first fingerprinted pass).
+ *
+ * Read STANDALONE rather than through {@link parseBaseline} because the sweep
+ * asks its question of links whose baseline may not be a usable MERGE baseline
+ * at all — a half-written blob, or the outbound half's write-back stamp on its
+ * own. Those still hold a perfectly good fingerprint, and rejecting them would
+ * point-fetch the whole workspace on every sweep.
+ */
+export function readBaselineRevision(baselineJson: string | null): string | null {
+  const revision = parseJsonObject(baselineJson).revision;
+  return typeof revision === 'string' && revision.length > 0 ? revision : null;
 }
 
 /** A stored token, or null for anything that is not a usable string. */
@@ -592,7 +667,7 @@ function asNullableString(value: unknown): string | null {
  * the NEXT pass has a real baseline to diff against.
  */
 function snapshotOf(issue: TrackerIssue): TrackerBaseline {
-  return {
+  const snapshot: TrackerBaseline = {
     title: issue.title,
     description: issue.description,
     stateId: issue.stateId,
@@ -600,6 +675,30 @@ function snapshotOf(issue: TrackerIssue): TrackerBaseline {
     priority: issue.priority,
     category: issue.category,
   };
+  // OMITTED WHEN THE PROVIDER HAS NONE, rather than emitted as undefined:
+  // composeBaselineJson overlays this object key-by-key, so an explicit
+  // `revision: undefined` would ERASE a fingerprint an earlier pass stored.
+  // (JSON.stringify drops the undefined, which is precisely how the erasure
+  // would be silent.)
+  if (issue.revision !== undefined) snapshot.revision = issue.revision;
+  return snapshot;
+}
+
+/**
+ * A FRESH `baseline_json` for a link being bound to `issue` for the first time,
+ * with NOTHING carried over from whatever the link held before.
+ *
+ * The adoption path's re-link is the caller (docs/proposals/
+ * tracker-beads-provider.md, round 18's pre-import reconciliation): it repoints
+ * an orphaned link at an issue in a DIFFERENT DATABASE, so every key the old
+ * blob carried — the previous remote snapshot, the write-back dedupe stamps, the
+ * sweep's archival marker — describes a workspace that no longer exists.
+ * Overlaying onto it, the way {@link composeBaselineJson} deliberately does for
+ * an ongoing link, would leave the first pass diffing the new issue against the
+ * old one's fields.
+ */
+export function freshBaselineJson(issue: TrackerIssue): string {
+  return JSON.stringify(snapshotOf(issue));
 }
 
 /**
@@ -739,8 +838,65 @@ interface SyncContext {
   applyLinkedStage: boolean;
   /** See {@link InboundSyncDeps.importNewIssues}. */
   importNewIssues: boolean;
+  /**
+   * Called by {@link applyIssue} with the REASON an UNLINKED issue was skipped
+   * permanently — the reconciliation ledger's `reason` column. Wired only by
+   * {@link runDeletionSweep}; the ordinary pass leaves it undefined and the
+   * gates just count as they always did.
+   *
+   * A CALLBACK RATHER THAN A RE-DERIVATION AT THE CALL SITE. The sweep needs to
+   * know which of four gates a skipped issue actually took, and re-evaluating
+   * the same predicates afterwards would encode their ORDER a second time —
+   * a duplicate that goes wrong silently (a mis-ordered copy just files the
+   * wrong reason string). Reporting from the branch itself cannot drift.
+   */
+  onPermanentSkip?: (reason: ReconciliationSkipReason) => void;
+  /**
+   * Remote ids an ADOPTION put ON HOLD — the `'awaiting-adoption'` ledger rows
+   * its pre-import reconciliation wrote for issues that plausibly, but not
+   * provably, belong to an entity the replaced workspace orphaned
+   * (docs/proposals/tracker-beads-provider.md, round 18).
+   *
+   * READ BY BOTH DETECTION PATHS, which is the whole reason it lives on the
+   * context rather than in the sweep. The ledger alone holds only the SWEEP
+   * back; the ordinary incremental pass has its own route to the import, and a
+   * fresh connection's first pass fetches from a null cursor — so without this
+   * the held issue would be imported as a new idea within seconds of the
+   * finding being filed, which is exactly what the hold exists to prevent.
+   *
+   * Empty for every connection that has never been adopted, which is all of them
+   * on the three HTTP providers.
+   */
+  heldExternalIds: ReadonlySet<string>;
   report: InboundSyncReport;
 }
+
+/**
+ * Why a reconciliation point-fetch resolved a remote id WITHOUT minting a link
+ * — persisted verbatim as `tracker_reconciliation_ledger.reason` so a user (or
+ * a support read of the table) can tell "your mapping declines this state" from
+ * "another mapping owns it" without re-running anything.
+ *
+ * Deliberately narrower than the ordinary pass's skip counters: only the
+ * UNLINKED gates can produce a ledger row, because every other skip either has
+ * a link already (which is its own record) or is a DEFERRAL, which must be
+ * re-offered rather than remembered.
+ *
+ * `'awaiting-adoption'` is the one reason NO gate in {@link applyIssue}
+ * produces: the ADOPTION path writes it directly (see
+ * TrackerSyncService.adoptNewWorkspace) for an issue in a newly adopted
+ * workspace that plausibly — but not conclusively — belongs to an entity whose
+ * link was orphaned by the replacement. It is a HOLD, not a verdict: the issue
+ * must not be imported as new behind the user's back while the confirmation
+ * finding is still open, and the ledger is what makes that hold survive the
+ * sweep that would otherwise import it minutes later.
+ */
+export type ReconciliationSkipReason =
+  | 'archived'
+  | 'unmapped-state'
+  | 'out-of-selection'
+  | 'sibling-owned'
+  | 'awaiting-adoption';
 
 /**
  * The mapping target for an issue's state; an unmapped state never imports.
@@ -837,16 +993,9 @@ function isDeferrableRejection(err: unknown): boolean {
 // runInboundSync
 // ---------------------------------------------------------------------------
 
-/**
- * Run ONE inbound pass for a connection. See the module header for the cursor,
- * echo-suppression and error semantics.
- */
-export async function runInboundSync(
-  deps: InboundSyncDeps,
-  connection: TrackerConnectionRow,
-): Promise<InboundSyncReport> {
-  const { db, adapter, router } = deps;
-  const report: InboundSyncReport = {
+/** The per-pass counters every {@link SyncContext} starts from. */
+function emptyInboundReport(): InboundSyncReport {
+  return {
     imported: 0,
     updated: 0,
     skipped: 0,
@@ -860,8 +1009,27 @@ export async function runInboundSync(
     entityLocked: 0,
     unmappedFieldValues: 0,
   };
+}
 
-  const selection = parseSourceSelection(connection);
+/**
+ * Resolve everything {@link applyIssue} needs before it can judge a single
+ * issue: the board's stage ids, the provider's live state and field
+ * vocabularies, and the connection's effective mappings over them.
+ *
+ * EXTRACTED SO THE RECONCILIATION SWEEP CAN REUSE IT. The sweep's point
+ * fetches run through the ordinary import/merge path, and that path is only
+ * correct against the same resolved mappings a pass would have used — a second
+ * copy of this resolution would be a second chance to disagree with it. Two
+ * adapter calls, which is why the sweep builds this LAZILY (see
+ * {@link runDeletionSweep}): a sweep with nothing to point-fetch pays nothing.
+ */
+async function buildSyncContext(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+  selection: TrackerSourceSelection,
+  report: InboundSyncReport,
+): Promise<SyncContext> {
+  const { db, adapter, router } = deps;
   const stageIds = resolveStageIds(db, connection.project_id);
   const states = await adapter.listStates(selection);
   const mapping = resolveEffectiveMapping(states, connection.state_mapping_json);
@@ -894,6 +1062,65 @@ export async function runInboundSync(
     onStaleOverlayToken,
   );
 
+  const stateGroups: Record<string, TrackerStateGroup> = {};
+  for (const state of states) stateGroups[state.id] = state.group;
+
+  return {
+    db,
+    router,
+    reviewRouter: deps.reviewRouter,
+    nowIso: deps.nowIso,
+    connection,
+    stageIds,
+    mapping,
+    stateGroups,
+    priorityMapping,
+    categoryMapping,
+    categorySync: providerSupportsCategorySync(connection.provider),
+    applyLinkedStage: deps.applyLinkedStage !== false,
+    importNewIssues: deps.importNewIssues !== false,
+    heldExternalIds: readAdoptionHolds(db, connection),
+    report,
+  };
+}
+
+/**
+ * The `'awaiting-adoption'` ledger rows still in force for a connection — see
+ * {@link SyncContext.heldExternalIds}.
+ *
+ * ONE QUERY PER PASS, over a table already scoped to the connection, and empty
+ * for anything that was never adopted. A row from an older `config_generation`
+ * is treated as absent exactly like every other ledger read: a mapping change is
+ * the user re-deciding what this connection syncs, and a hold must not outlive
+ * that decision silently.
+ */
+function readAdoptionHolds(
+  db: Database.Database,
+  connection: TrackerConnectionRow,
+): ReadonlySet<string> {
+  const held = new Set<string>();
+  for (const [externalId, row] of listLedgerEntries(db, connection.id)) {
+    if (row.reason === 'awaiting-adoption' && row.config_generation === connection.config_generation) {
+      held.add(externalId);
+    }
+  }
+  return held;
+}
+
+/**
+ * Run ONE inbound pass for a connection. See the module header for the cursor,
+ * echo-suppression and error semantics.
+ */
+export async function runInboundSync(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+): Promise<InboundSyncReport> {
+  const { db, adapter } = deps;
+  const report = emptyInboundReport();
+
+  const selection = parseSourceSelection(connection);
+  const ctx = await buildSyncContext(deps, connection, selection, report);
+
   const issues = await adapter.listIssues(selection, computeSince(connection));
 
   // The stored compound high-water mark. Both halves must be present — a
@@ -911,26 +1138,6 @@ export async function runInboundSync(
     .filter((issue) => cursor === null || compareCursor(issueKey(issue), cursor) > 0);
 
   const blockers = collectOutboxBlockers(db, connection.id);
-
-  const stateGroups: Record<string, TrackerStateGroup> = {};
-  for (const state of states) stateGroups[state.id] = state.group;
-
-  const ctx: SyncContext = {
-    db,
-    router,
-    reviewRouter: deps.reviewRouter,
-    nowIso: deps.nowIso,
-    connection,
-    stageIds,
-    mapping,
-    stateGroups,
-    priorityMapping,
-    categoryMapping,
-    categorySync: providerSupportsCategorySync(connection.provider),
-    applyLinkedStage: deps.applyLinkedStage !== false,
-    importNewIssues: deps.importNewIssues !== false,
-    report,
-  };
 
   // The cursor is a high-water mark of "everything at or before this is FULLY
   // applied", so it stops moving the moment this pass DEFERS anything — a stage
@@ -1069,19 +1276,34 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
       return 'applied';
     }
 
+    // AHEAD OF EVERY OTHER PERMANENT GATE, because it is the only one that
+    // represents a decision a HUMAN still owes: an adoption found this issue
+    // plausibly-but-not-provably the same as an item whose link the replacement
+    // orphaned, and filed it for confirmation. Relabelling it as 'archived' or
+    // 'unmapped-state' would record the wrong reason in the ledger and, worse,
+    // let a later mapping change turn the open question into an import.
+    if (ctx.heldExternalIds.has(issue.externalId)) {
+      report.skipped++;
+      ctx.onPermanentSkip?.('awaiting-adoption');
+      return 'applied';
+    }
+
     // An archived remote issue never seeds a NEW local idea — importing
     // something the tracker already retired is pure noise.
     if (issue.archivedAt !== null) {
       report.skipped++;
+      ctx.onPermanentSkip?.('archived');
       return 'applied';
     }
     const target = targetFor(ctx, issue);
     if (target === 'dont') {
       report.skipped++;
+      ctx.onPermanentSkip?.('unmapped-state');
       return 'applied';
     }
     if (!passesSelectionFilter(connection, issue)) {
       report.skipped++;
+      ctx.onPermanentSkip?.('out-of-selection');
       return 'applied';
     }
     // A sibling mapping already imported this issue. PERMANENT, so it is a skip
@@ -1090,6 +1312,7 @@ async function applyIssue(ctx: SyncContext, issue: TrackerIssue): Promise<ApplyO
     if (isOwnedBySiblingMapping(ctx, issue)) {
       report.skipped++;
       report.crossScopeSkips++;
+      ctx.onPermanentSkip?.('sibling-owned');
       return 'applied';
     }
     if (!ctx.importNewIssues) {
@@ -1420,7 +1643,10 @@ async function importIssueAsIdea(
     provider: connection.provider,
     external_id: issue.externalId,
     external_identifier: issue.identifier,
-    external_url: issue.url,
+    // beads reports '' — it has no web UI and therefore no per-issue URL — and
+    // an empty link is worse than none, so it is stored as NULL. Never reached
+    // by the HTTP providers, whose `url` is always populated.
+    external_url: issue.url || null,
     external_parent_id: issue.parentExternalId,
     baseline_json: JSON.stringify(group === null ? snapshot : { ...snapshot, lastWrittenGroup: group }),
   });
@@ -2029,6 +2255,25 @@ async function applyRemoteArchive(
 // ---------------------------------------------------------------------------
 
 /**
+ * `baseline_json` key stamped when the SWEEP archives a link, and cleared when
+ * reconciliation resurrects it.
+ *
+ * IT EXISTS TO MAKE RESURRECTION SELECTIVE. A link can be orphaned for three
+ * very different reasons — this sweep decided its issue was gone, the user
+ * ruled it out of sync, or our own outbound archive trashed the twin — and only
+ * the FIRST is a guess that a later sweep may overturn. Un-archiving on a bare
+ * `orphaned_at` would undo the user's own removal on the next pass, which is
+ * why the reversible-archival rule needs a marker rather than a null check.
+ */
+const SWEPT_ARCHIVED_AT = 'sweptArchivedAt';
+
+/** True when THIS module's sweep is what orphaned the link (see {@link SWEPT_ARCHIVED_AT}). */
+function wasSweptArchived(link: EntityExternalLinkRow): boolean {
+  const stamp = parseJsonObject(link.baseline_json)[SWEPT_ARCHIVED_AT];
+  return typeof stamp === 'string' && stamp.length > 0;
+}
+
+/**
  * Reconciliation sweep for remote HARD deletes (proposal, "Durability &
  * failure semantics" #3). The incremental path only ever sees issues that
  * still exist, so a deleted issue is invisible to it; this compares the
@@ -2054,6 +2299,62 @@ async function applyRemoteArchive(
  * Exported separately from {@link runInboundSync}: it costs a full id listing,
  * so the service layer decides the cadence (every Nth poll, and every manual
  * "Sync now").
+ *
+ * ═══ THE RECONCILIATION HALF ═══ (`capabilities.requiresIdReconciliation`,
+ * beads only — docs/proposals/tracker-beads-provider.md "4. Pull
+ * reconciliation"). For a provider whose `updated_at` cannot be trusted as a
+ * change cursor — beads preserves an issue's original stamp across a
+ * `bd dolt pull`, and label/comment/dependency edits never bump it at all — the
+ * incremental window is not a complete detection path, and the sweep becomes
+ * the backstop that closes the gap. Such an adapter reports (id, revision)
+ * pairs instead of bare ids, and this pass partitions EVERY id in the listing
+ * into exactly one of three classes, each with its own detection path:
+ *
+ *   UNSEEN   — no link, and no ledger row at the current `config_generation`.
+ *              Point-fetched and run through the ordinary import path, which is
+ *              what makes a backdated pull-merged issue importable at all. An
+ *              imported id needs no ledger row (its link IS the record); one
+ *              resolved WITHOUT a link is ledgered at the swept revision.
+ *   LEDGERED — a current-generation ledger row exists. Its stored revision is
+ *              compared against the swept one: EQUAL COSTS NOTHING (the
+ *              zero-lookup guarantee the ledger exists for), and a difference
+ *              point-fetches and re-evaluates, so a skipped issue that a
+ *              backdated remote edit makes eligible is not suppressed forever.
+ *   LINKED   — the link's last-seen fingerprint (`baseline_json.revision`) is
+ *              compared against the swept one; a difference point-fetches into
+ *              the ordinary merge/conflict path. This is the only thing that
+ *              catches a backdated edit to an ALREADY-LINKED issue, which both
+ *              the cursor and a bare id diff are blind to.
+ *
+ * Plus the inverse of archival: an orphaned link whose id REAPPEARS in the
+ * listing is put back in sync (see {@link SWEPT_ARCHIVED_AT}). No probe
+ * sequence can be atomic with the local archive over a CLI, so archival is
+ * defined REVERSIBLE instead — every residual race in that family degrades from
+ * "wrongly archived" to "archived for at most one sweep interval, then
+ * self-healed".
+ *
+ * ═══ THE HEAD GUARD ═══ (round 16, BEST-EFFORT). Identity catches a REPLACED
+ * database; it says nothing about a concurrent `bd dolt pull` RESTORING an issue
+ * inside the same one, between its absent-id lookup and the local archive. So
+ * when the adapter can hand back a whole-workspace token
+ * ({@link TrackerAdapter.workspaceHead}), it is captured at the top of the sweep
+ * and re-read before the FIRST archival decision is applied. A moved token
+ * defers the ARCHIVAL SUBSET ONLY — imports, merges and resurrections apply
+ * regardless, each individually safe under ordinary merge semantics, and
+ * scoping the guard this way keeps a busy workspace from starving the whole
+ * sweep.
+ *
+ * Two deliberate limits. It is skipped entirely with no linked id to address the
+ * read with, or when the token cannot be read: a guard that cannot run must
+ * degrade to no guard, never to a failed sweep — the reversible-archival rule
+ * above is the primary defense and was designed to suffice alone. And the
+ * re-read happens LAZILY, at the first link that would actually be archived, so
+ * a sweep with nothing to archive (the steady state) spends no extra call, and
+ * the token is compared as late as it can be — after the absent-id point
+ * lookups, which is strictly narrower than re-reading before them.
+ *
+ * Providers without the flag take the byte-for-byte path they always did: one
+ * `listIssueIds`, no ledger, no fingerprints, no extra adapter calls.
  */
 export async function runDeletionSweep(
   deps: InboundSyncDeps,
@@ -2065,10 +2366,24 @@ export async function runDeletionSweep(
     conflictsOpened: 0,
     outOfScope: 0,
     entityLocked: 0,
+    reconcileFetched: 0,
+    reconcileImported: 0,
+    reconcileLedgered: 0,
+    reconcileSkipped: 0,
+    resurrected: 0,
+    archivalDeferred: 0,
   };
 
   const selection = parseSourceSelection(connection);
-  const remoteIds = new Set(await adapter.listIssueIds(selection));
+  // BEFORE the listing, so the window the guard covers spans everything the
+  // archival decisions were derived from.
+  const guard = await openHeadGuard(deps, connection);
+  const revisions = await sweepListing(adapter, selection);
+  const remoteIds = new Set(revisions.map((entry) => entry.id));
+
+  if (adapter.capabilities.requiresIdReconciliation) {
+    await reconcileRemoteIds(deps, connection, selection, revisions, sweep);
+  }
 
   for (const link of listLinks(db, connection.id, { activeOnly: true })) {
     if (remoteIds.has(link.external_id)) continue;
@@ -2079,6 +2394,13 @@ export async function runDeletionSweep(
     const remote = await adapter.getIssue(link.external_id);
     if (remote !== null && remote.archivedAt === null) {
       sweep.outOfScope++;
+      continue;
+    }
+
+    // The last thing before the first WRITE of the archival subset: the
+    // workspace may have moved under everything above (see the HEAD-guard note).
+    if (!(await guard.stillCurrent())) {
+      sweep.archivalDeferred++;
       continue;
     }
 
@@ -2117,6 +2439,16 @@ export async function runDeletionSweep(
       continue;
     }
     markOrphaned(db, link.id);
+    // Stamped BEFORE the conflict row so a crash between the two still leaves a
+    // link a later sweep can recognize as its own and reverse.
+    updateBaseline(
+      db,
+      link.id,
+      JSON.stringify({
+        ...parseJsonObject(link.baseline_json),
+        [SWEPT_ARCHIVED_AT]: deps.nowIso(),
+      }),
+    );
     const row = insertConflict(db, {
       connection_id: connection.id,
       link_id: link.id,
@@ -2128,4 +2460,339 @@ export async function runDeletionSweep(
   }
 
   return sweep;
+}
+
+/**
+ * One sweep's archival HEAD guard: the token captured at the start, plus the
+ * lazy, memoized re-read that decides whether the archival subset may still be
+ * applied. See {@link runDeletionSweep}'s HEAD-guard note for why the guard is
+ * scoped to archival, best-effort, and evaluated late.
+ */
+interface HeadGuard {
+  /**
+   * True while archival may proceed. The FIRST call re-reads the token and
+   * caches the verdict for the rest of the sweep — the question is "did the
+   * workspace change under THIS sweep", which has one answer per sweep, and
+   * re-reading per link would spend a spawn per archived issue to keep asking it.
+   */
+  stillCurrent(): Promise<boolean>;
+}
+
+/** A guard that always allows — the shape every skip condition degrades to. */
+const OPEN_HEAD_GUARD: HeadGuard = { stillCurrent: async () => true };
+
+async function openHeadGuard(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+): Promise<HeadGuard> {
+  const { db, adapter } = deps;
+  if (!adapter.capabilities.requiresIdReconciliation) return OPEN_HEAD_GUARD;
+  const readHead = adapter.workspaceHead;
+  if (typeof readHead !== 'function') return OPEN_HEAD_GUARD;
+
+  // Any ACTIVE link answers: the token describes the workspace, and the id is
+  // only what the read is addressed with. A connection with none has nothing to
+  // archive either, so the guard is moot as well as unavailable.
+  const anchor = listLinks(db, connection.id, { activeOnly: true })[0];
+  if (anchor === undefined) return OPEN_HEAD_GUARD;
+
+  const captured = await readHead.call(adapter, anchor.external_id);
+  if (captured === null) return OPEN_HEAD_GUARD;
+
+  let verdict: boolean | null = null;
+  return {
+    stillCurrent: async (): Promise<boolean> => {
+      if (verdict === null) {
+        const current = await readHead.call(adapter, anchor.external_id);
+        // An unreadable token now is NOT a moved one: the guard is best-effort,
+        // and refusing every archive because a read failed would let one flaky
+        // spawn suppress deletion handling indefinitely.
+        verdict = current === null || current === captured;
+      }
+      return verdict;
+    },
+  };
+}
+
+/**
+ * The sweep's ground truth, in whichever shape the adapter can provide it.
+ *
+ * A `requiresIdReconciliation` adapter MUST implement `listIssueRevisions` —
+ * the flag is what declares the whole reconciliation contract, and an adapter
+ * that sets it without the method would silently degrade to a bare id diff,
+ * which is exactly the blind spot the flag exists to close. So that pairing is
+ * asserted rather than fallen back from: it is a programming error in the
+ * adapter, not a provider condition, and it must fail where it is introduced.
+ *
+ * Everyone else gets `listIssueIds` and a null revision, which every consumer
+ * below reads as "this provider has no fingerprints".
+ */
+async function sweepListing(
+  adapter: TrackerAdapter,
+  selection: TrackerSourceSelection,
+): Promise<Array<{ id: string; revision: string | null }>> {
+  if (!adapter.capabilities.requiresIdReconciliation) {
+    return (await adapter.listIssueIds(selection)).map((id) => ({ id, revision: null }));
+  }
+  if (typeof adapter.listIssueRevisions !== 'function') {
+    throw new Error(
+      `[trackerSync] the ${adapter.provider} adapter declares requiresIdReconciliation but ` +
+        'implements no listIssueRevisions — the reconciliation sweep cannot run without it',
+    );
+  }
+  return await adapter.listIssueRevisions(selection);
+}
+
+/**
+ * The reconciliation half of the sweep: partition every swept id into
+ * unseen / ledgered / linked and spend a point lookup only where one of those
+ * classes says a change is possible. See {@link runDeletionSweep}'s header for
+ * the class definitions and why each exists.
+ *
+ * THE SYNC CONTEXT IS BUILT LAZILY, on the first id that actually needs a
+ * lookup. It costs two adapter round-trips (states + field options), and the
+ * steady state of this pass — every id linked-and-unchanged or
+ * ledgered-and-unchanged — needs none of it. A workspace nobody has touched
+ * since the last sweep therefore costs exactly one listing, which is the
+ * property the ledger was designed to buy.
+ */
+async function reconcileRemoteIds(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+  selection: TrackerSourceSelection,
+  revisions: ReadonlyArray<{ id: string; revision: string | null }>,
+  sweep: InboundSweepReport,
+): Promise<void> {
+  const { db } = deps;
+  const ledger = listLedgerEntries(db, connection.id);
+  // The ordinary pass's counters, filled in by the merges these point fetches
+  // drive. Most have no reader on a sweep — but `conflictsOpened` does: the
+  // service adds the sweep's to `conflictsTouched`, which is what broadcasts a
+  // 'conflicts' change to the connected view. A conflict a reconciliation merge
+  // opened must reach the user as promptly as one the incremental pass opened,
+  // so it is folded into the sweep's own count below.
+  const report = emptyInboundReport();
+  let ctx: SyncContext | null = null;
+  const context = async (): Promise<SyncContext> => {
+    ctx ??= await buildSyncContext(deps, connection, selection, report);
+    return ctx;
+  };
+
+  for (const { id, revision } of revisions) {
+    const link = getLinkByExternal(db, connection.id, id);
+
+    if (link !== null) {
+      // REVERSIBLE ARCHIVAL, first: the id is present remotely, so an orphaning
+      // this sweep performed was wrong (or has been overtaken by a restore).
+      // Ahead of the fingerprint compare so the resurrected link then merges in
+      // the same pass rather than waiting for the next one.
+      if (link.orphaned_at !== null && wasSweptArchived(link)) {
+        await resurrectSweptLink(deps, connection, link, sweep);
+      }
+      if (revision !== null && readBaselineRevision(link.baseline_json) === revision) {
+        sweep.reconcileSkipped++;
+        continue;
+      }
+      // A link whose remote issue changed (or whose fingerprint we have never
+      // stored) takes the ordinary merge/conflict path.
+      await reconcileOneIssue(deps, await context(), id, revision, sweep);
+      continue;
+    }
+
+    const ledgered = ledger.get(id);
+    if (
+      ledgered !== undefined &&
+      ledgered.config_generation === connection.config_generation &&
+      revision !== null &&
+      ledgered.last_seen_revision === revision
+    ) {
+      // THE ZERO-LOOKUP CASE. A ledger row from an OLDER generation deliberately
+      // fails this test: a mapping/selection change must re-consider every
+      // previously-skipped id exactly once, which is what the generation
+      // counter buys over deleting the rows outright.
+      sweep.reconcileSkipped++;
+      continue;
+    }
+
+    const resolved = await reconcileOneIssue(deps, await context(), id, revision, sweep);
+    if (resolved.outcome === 'linked') {
+      // Its link is now the record; a ledger row would be a second, staler one.
+      deleteLedgerEntries(db, connection.id, [id]);
+      sweep.reconcileImported++;
+      continue;
+    }
+    if (resolved.outcome === 'deferred' || resolved.skipReason === null) {
+      // DEFERRED (a held import direction), or gone between the listing and the
+      // lookup. Neither is a settled verdict, so nothing is ledgered and the
+      // next sweep asks again — a ledger row here would turn a delay into a
+      // permanent drop.
+      continue;
+    }
+    upsertLedgerEntry(db, {
+      connection_id: connection.id,
+      external_id: id,
+      reason: resolved.skipReason,
+      last_seen_revision: revision,
+      config_generation: connection.config_generation,
+    });
+    sweep.reconcileLedgered++;
+  }
+
+  sweep.conflictsOpened += report.conflictsOpened;
+
+  // OPPORTUNISTIC CLEANUP, in the same pass that already holds both sets: a
+  // ledger row for an id that is no longer in the remote listing describes
+  // nothing, and without this the table would only ever grow.
+  const swept = new Set(revisions.map((entry) => entry.id));
+  const stale = [...ledger.keys()].filter((id) => !swept.has(id));
+  if (stale.length > 0) deleteLedgerEntries(db, connection.id, stale);
+}
+
+/** {@link reconcileOneIssue}'s verdict on one point-fetched id. */
+interface ReconcileOutcome {
+  /**
+   * `'linked'` — the id now holds a link (imported, repaired, or already
+   * merged). `'deferred'` — a direction hold declined it, so ask again next
+   * sweep. `'unlinked'` — resolved without a link.
+   */
+  outcome: 'linked' | 'deferred' | 'unlinked';
+  /**
+   * Which permanent-skip gate an UNLINKED id took, or null when no gate ran
+   * (the issue vanished between the listing and the lookup). Only a non-null
+   * reason may be ledgered — see the caller.
+   */
+  skipReason: ReconciliationSkipReason | null;
+}
+
+/**
+ * Point-fetch one swept id and run it through the ordinary inbound path.
+ *
+ * The fingerprint is stamped onto the link SEPARATELY from whatever the merge
+ * did, and that separation is load-bearing: the fingerprint covers labels,
+ * comment counts and dependencies, NONE of which have a local counterpart, so a
+ * merge can legitimately apply nothing at all and still owe the link a fresh
+ * fingerprint. Leaving it unstamped would point-fetch that same issue on every
+ * sweep forever.
+ */
+async function reconcileOneIssue(
+  deps: InboundSyncDeps,
+  ctx: SyncContext,
+  externalId: string,
+  sweptRevision: string | null,
+  sweep: InboundSweepReport,
+): Promise<ReconcileOutcome> {
+  sweep.reconcileFetched++;
+  const issue = await deps.adapter.getIssue(externalId);
+  // Deleted between the listing and this lookup. The deletion pass owns that
+  // case for a LINKED id, and an unlinked one simply never existed for us.
+  if (issue === null) return { outcome: 'unlinked', skipReason: null };
+
+  // A holder rather than a bare `let`: applyIssue reports the reason through a
+  // callback, and a local narrowed to `null` by its own initializer would read
+  // back as `null` no matter what the callback wrote.
+  const skip: { reason: ReconciliationSkipReason | null } = { reason: null };
+  const outcome = await applyIssue(
+    {
+      ...ctx,
+      onPermanentSkip: (reason) => {
+        skip.reason = reason;
+      },
+    },
+    issue,
+  );
+
+  const link = getLinkByExternal(deps.db, ctx.connection.id, externalId);
+  if (link !== null) {
+    // Prefer the POINT FETCH's own fingerprint over the swept one: if the issue
+    // changed again between the two, this is the value the next sweep's listing
+    // will report, so stamping it converges immediately instead of costing one
+    // more lookup.
+    //
+    // A PARKED LINK IS NOT STAMPED. An item behind an open conflict has had
+    // NOTHING applied — the merge stood down and waited for the user — so
+    // stamping the fingerprint would tell every later sweep "we are up to date
+    // with this issue" and the remote change would be lost the moment the
+    // conflict is resolved. The cursor path pins these the same way
+    // (`contentDeferred`), and here the cursor may never deliver the issue
+    // again at all, which is the whole reason this sweep exists. The cost is
+    // one point lookup per sweep per OPEN conflict — bounded by a set that is
+    // already waiting on a human.
+    const revision = issue.revision ?? sweptRevision;
+    if (revision !== null && !hasOpenConflictForLink(deps.db, link.id)) {
+      updateBaseline(
+        deps.db,
+        link.id,
+        JSON.stringify({ ...parseJsonObject(link.baseline_json), revision }),
+      );
+    }
+    return { outcome: 'linked', skipReason: null };
+  }
+  return { outcome: outcome === 'applied' ? 'unlinked' : 'deferred', skipReason: skip.reason };
+}
+
+/**
+ * Put a link this sweep previously archived back in sync, because its remote
+ * issue is in the listing again (docs/proposals/tracker-beads-provider.md,
+ * round 18). Un-archives the local twin, un-orphans the link, clears the
+ * {@link SWEPT_ARCHIVED_AT} marker, and files a review finding so the round
+ * trip is visible rather than silent.
+ *
+ * A REFUSED UN-ARCHIVE IS NOT AN ERROR: a live run owning the entity is the
+ * same deferrable condition the archive half already tolerates, and the next
+ * sweep sees the same reappeared id and tries again. The marker is left in
+ * place in that case so the link stays eligible for exactly this.
+ */
+async function resurrectSweptLink(
+  deps: InboundSyncDeps,
+  connection: TrackerConnectionRow,
+  link: EntityExternalLinkRow,
+  sweep: InboundSweepReport,
+): Promise<void> {
+  try {
+    await deps.router.applyChange(connection.project_id, {
+      actor: connection.provider,
+      entityType: link.entity_type,
+      taskId: link.entity_id,
+      archived: false,
+    });
+  } catch (err) {
+    if (!isDeferrableRejection(err)) throw err;
+    sweep.entityLocked++;
+    return;
+  }
+  clearOrphaned(deps.db, link.id);
+  const blob = parseJsonObject(link.baseline_json);
+  delete blob[SWEPT_ARCHIVED_AT];
+  updateBaseline(deps.db, link.id, JSON.stringify(blob));
+  sweep.resurrected++;
+
+  const reviewRouter = deps.reviewRouter;
+  if (reviewRouter === undefined) return;
+  const label = PROVIDER_LABEL[connection.provider];
+  const identifier = link.external_identifier ?? link.external_id;
+  try {
+    await reviewRouter.applyReviewItem(connection.project_id, {
+      op: 'create',
+      actor: connection.provider,
+      kind: 'finding',
+      title: `Tracker sync un-archived ${identifier} — the issue came back`,
+      body: [
+        `A reconciliation sweep archived this item because \`${link.external_id}\` was missing`,
+        `from ${label}'s issue listing, and a later sweep found it there again. The local entity`,
+        'has been un-archived and its link put back in sync — nothing was lost.',
+        '',
+        'The usual cause is a concurrent restore landing between the sweep\'s lookup and its',
+        'archive. Worth knowing about if it repeats.',
+      ].join('\n'),
+      blocking: false,
+      severity: 'info',
+      source: `tracker:${connection.provider}`,
+      entityType: link.entity_type,
+      entityId: link.entity_id,
+      payload: { kind: 'finding', category: 'tracker-sync' },
+    });
+  } catch {
+    // Fail-soft, exactly like the auto-resolution findings: an audit record
+    // must never sink a sweep that has already done the right thing.
+  }
 }

@@ -1,0 +1,44 @@
+$ pwd
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/f1-skipagents
+$ bd init --non-interactive --skip-agents --skip-hooks
+  Repository ID: 0bb47d11
+  Clone ID: 9df7178c1d1a1618
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f1_skipagents
+  Issue prefix: f1-skipagents
+  Issues will be named: f1-skipagents-<hash> (e.g., f1-skipagents-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+--- inventory ---
+$ git status --porcelain
+$ find . -maxdepth 1 -mindepth 1 | sort
+./.beads
+./.git
+./.gitignore
+$ find .beads -type f | sort
+.beads/.gitignore
+.beads/.local_version
+.beads/README.md
+.beads/config.yaml
+.beads/embeddeddolt/.lock
+.beads/embeddeddolt/f1_skipagents/.dolt/config.json
+.beads/embeddeddolt/f1_skipagents/.dolt/noms/LOCK
+.beads/embeddeddolt/f1_skipagents/.dolt/noms/journal.idx
+.beads/embeddeddolt/f1_skipagents/.dolt/noms/manifest
+.beads/embeddeddolt/f1_skipagents/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+.beads/embeddeddolt/f1_skipagents/.dolt/repo_state.json
+.beads/interactions.jsonl
+.beads/metadata.json

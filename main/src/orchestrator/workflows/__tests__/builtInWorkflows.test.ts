@@ -183,13 +183,13 @@ describe('buildBuiltInWorkflows', () => {
     // Instruction-file edits clear a bar ABOVE the durability bar, with CLAUDE.md
     // strictest — that skepticism is the point of the two rungs.
     expect(body, 'CLAUDE.md edits require all five admission questions').toContain(
-      'Propose a CLAUDE.md edit ONLY when ALL FIVE hold',
+      'Propose a `doc:claude-md` edit ONLY when ALL FIVE hold',
     );
     expect(body, 'CLAUDE.md edits are capped at one per run, zero expected').toContain(
-      'At most ONE CLAUDE.md edit per run, and zero is the expected outcome',
+      'At most ONE `doc:claude-md` edit per run, and zero is the expected outcome',
     );
     expect(body, 'reference docs clear a lower but real bar').toContain(
-      'A lower bar than CLAUDE.md, but still a real one',
+      'A lower bar than rung 1, but still a real one',
     );
     expect(body, 'incident detail is an automatic discard').toContain(
       'carrying a migration number, version stamp, date, commit SHA, session name, or run id as part of the rule',

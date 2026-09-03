@@ -1,3 +1,12 @@
+// @cyboflow-hidden: the whole `editor` panel surface is unreachable in cyboflow v1 —
+// nothing in the frontend ever creates a panel of type 'editor' (only 'claude',
+// 'terminal', 'dashboard' and 'setup-tasks' are constructed), and the two main-process
+// channels that could (`editor:createPanel` / `editor:openFile`, registered in
+// main/src/ipc/editorPanel.ts) are absent from main/src/preload.ts, so the renderer
+// cannot invoke them at all. Monaco reaches the UI only through the DIFF viewer
+// (frontend/src/components/panels/diff/MonacoDiffViewer.tsx), which is live.
+// Re-enable by exposing `editor:createPanel` in preload.ts and adding a UI affordance
+// that calls it (see useAddTerminalPanel.ts for the shape a panel-creating hook takes).
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { FileEditor } from './FileEditor';
 import { EditorPanelState, ToolPanel } from '../../../../../shared/types/panels';

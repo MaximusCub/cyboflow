@@ -24,7 +24,7 @@
  * `shared/types` + its local `./types`, so it does NOT pull in 'electron',
  * 'better-sqlite3', or a concrete service.
  *
- * Logger note (per project CLAUDE.md): the optional `logger` is THREADED into
+ * Logger note (per project CODE-PATTERNS.md): the optional `logger` is THREADED into
  * both `TypedEventNarrowing` and `MessageProjection` — omitting it would silently
  * turn their observability into a no-op. `LoggerLike` has no `verbose` method, so
  * the call site adapts `verbose` to the logger's `debug` channel, matching the

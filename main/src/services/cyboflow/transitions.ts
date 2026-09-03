@@ -6,7 +6,12 @@ import { emitUsage } from '../../orchestrator/telemetrySink';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
 import { captureSeamError } from '../telemetry';
-import { classifyErrorPattern, unclassifiedErrorTags } from '../../orchestrator/programmatic/systemicError';
+import { recordLocalError } from '../telemetry/diagnostics';
+import {
+  classifyErrorPattern,
+  isSystemicStepError,
+  unclassifiedErrorTags,
+} from '../../orchestrator/programmatic/systemicError';
 
 /**
  * Emit an anonymized `workflow_run_completed` usage event after a terminal
@@ -64,6 +69,26 @@ function reportRunFinalizeFailure(
   errorMessage: string,
 ): void {
   try {
+    // A SYSTEMIC class is an environment condition no retry can fix — a usage
+    // window exhausted, a rate limit, a dead login. The app already handles
+    // those: it parks the run and tells the user. Reporting them to Sentry files
+    // a user's own environment as an application error, and — because triage
+    // ranks by volume — lets them outrank real defects. CYBOFLOW-APP-C/-1R are
+    // eight events of `run failed (usage-limit-reached)`, a condition we
+    // CORRECTLY classified and then reported as a bug.
+    //
+    // Checked before the lookup below, whose only purpose is Sentry tags.
+    // Still recorded locally: recordLocalError feeds the in-app bug reporter's
+    // buffer, which is exactly what a user hitting this would attach by hand.
+    if (isSystemicStepError(errorMessage)) {
+      const errorClass = classifyErrorPattern(errorMessage);
+      recordLocalError(
+        'run-finalize-failed',
+        new Error(`run failed (${errorClass})`),
+        new Date().toISOString(),
+      );
+      return;
+    }
     const row = db
       .prepare(
         `SELECT w.name AS workflow_name, wr.substrate AS substrate

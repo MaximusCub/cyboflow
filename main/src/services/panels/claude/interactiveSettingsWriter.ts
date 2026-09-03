@@ -270,7 +270,7 @@ export function resolveInlineGatingHooks(
 export class InteractiveSettingsWriter {
   /**
    * @param logger Optional structured logger. Passed through for skip/remove
-   *   diagnostics (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   *   diagnostics (CODE-PATTERNS.md optional-logger rule: pass it, don't omit it).
    */
   constructor(private readonly logger?: LoggerLike) {}
 

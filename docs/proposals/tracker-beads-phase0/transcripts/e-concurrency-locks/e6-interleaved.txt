@@ -1,0 +1,15 @@
+=== E6: 50 iterations of (bd update ‖ bd list --all --json) launched simultaneously ===
+--- exit code histogram by kind:
+  50 L 0
+  50 U 0
+--- total pairs=50, total commands=100
+--- failures (rc!=0):
+--- non-empty stderr:
+nonempty_stderr_count=0
+--- elapsed stats:
+min=0.383 median=0.740 p90=1.202 max=1.333 n=100
+--- empty/short list outputs (torn reads?):
+(none listed = every read returned a full document)
+--- JSON validity of all 50 reads:
+valid=50 invalid=0
+---

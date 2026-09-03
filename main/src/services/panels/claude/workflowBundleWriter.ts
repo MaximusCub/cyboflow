@@ -56,7 +56,7 @@ export interface WorkflowBundleWriteResult {
 export class WorkflowBundleWriter {
   /**
    * @param logger Optional structured logger. Passed through for write/skip/remove
-   *   diagnostics (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   *   diagnostics (CODE-PATTERNS.md optional-logger rule: pass it, don't omit it).
    */
   constructor(private readonly logger?: LoggerLike) {}
 

@@ -1,5 +1,11 @@
 # Session Output Handling System
 
+> **HISTORICAL — Crystal-era guide.** `SessionView` and `useSessionView`, described below as the
+> frontend layer, were deleted (TASK-691) — ignore the "Frontend Display" section as a live
+> example. The database/streaming/loading path is still accurate: the `sessions:get-output` IPC
+> handler (`main/src/ipc/session.ts`) and `sessionStore`'s `setSessionOutputs` (`frontend/src/stores/sessionStore.ts`)
+> remain the live code. See `docs/ARCHITECTURE.md` for the current frontend layer.
+
 ⚠️ **WARNING**: The session output handling system is complex and fragile. Modifying it frequently causes issues like duplicate messages, disappearing content, or blank screens. Any changes require explicit user permission.
 
 ## How It Works

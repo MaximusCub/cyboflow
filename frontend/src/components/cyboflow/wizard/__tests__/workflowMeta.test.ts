@@ -309,7 +309,35 @@ describe('buildWorkflowMeta — setup flows', () => {
       [],
     );
 
-    expect(launcherWorkflowMetas(metas).map((m) => m.name)).toEqual(['sprint', 'ship']);
+    expect(launcherWorkflowMetas(metas).map((m) => m.name)).toEqual(['ship', 'sprint']);
+  });
+
+  it('orders the launcher list ship → planner → sprint → launch → compound, custom flows trailing', () => {
+    // The curated display order, independent of the registry tuple order the
+    // rows arrive in. Custom flows keep their incoming relative order after
+    // the built-ins (stable sort).
+    const metas = buildWorkflowMeta(
+      [
+        makeWorkflow({ id: 'wf-custom-b', name: 'my-flow-b' }),
+        makeWorkflow({ id: 'wf-compound', name: 'compound' }),
+        makeWorkflow({ id: 'wf-launch', name: 'launch' }),
+        makeWorkflow({ id: 'wf-planner', name: 'planner' }),
+        makeWorkflow({ id: 'wf-ship', name: 'ship' }),
+        makeWorkflow({ id: 'wf-sprint', name: 'sprint' }),
+        makeWorkflow({ id: 'wf-custom-a', name: 'my-flow-a' }),
+      ],
+      [],
+    );
+
+    expect(launcherWorkflowMetas(metas).map((m) => m.name)).toEqual([
+      'ship',
+      'planner',
+      'sprint',
+      'launch',
+      'compound',
+      'my-flow-b',
+      'my-flow-a',
+    ]);
   });
 
   it('the hide-list and the CTA name the SAME flow', () => {

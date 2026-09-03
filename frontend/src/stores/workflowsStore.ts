@@ -33,7 +33,7 @@
  *
  * After the first fetch we wire `events.onRunStatusChanged` (no input) plus ONE
  * `agents.onChanged({ projectId })` subscription per ENUMERATED project. Both
- * payloads are AppRouter-inferred (CLAUDE.md rule) and used only as debounce
+ * payloads are AppRouter-inferred (CODE-PATTERNS.md rule) and used only as debounce
  * triggers. The agent subscriptions are torn down + re-wired whenever the
  * resolved project set changes (e.g. on a filter change), so we never leak a
  * stale per-project subscription.

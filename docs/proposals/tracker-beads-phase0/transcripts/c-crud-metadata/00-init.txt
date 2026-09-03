@@ -1,0 +1,25 @@
+$ bd init --stealth --skip-agents --skip-hooks --non-interactive
+Configured git exclude for stealth mode: .git/info/exclude
+
+✓ Stealth mode configured successfully!
+
+  Git exclude: .git/info/exclude configured
+
+Your beads setup is now invisible - other repo collaborators won't see any beads-related files.
+To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
+
+Configured git exclude for Dolt files: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/c-crud-metadata/.git/info/exclude
+  Repository ID: 092587ee
+  Clone ID: 5d08286f2880d6be
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: c_crud_metadata
+  Issue prefix: c-crud-metadata
+  Issues will be named: c-crud-metadata-<hash> (e.g., c-crud-metadata-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0

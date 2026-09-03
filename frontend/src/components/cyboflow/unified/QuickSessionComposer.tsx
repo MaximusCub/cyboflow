@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
+import { useComposerFocusRequest } from '../../../stores/composerFocusStore';
 import { errorText } from '../../../utils/errorText';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
@@ -72,7 +73,7 @@ export interface QuickSessionComposerProps {
   onPermissionApplied?: (message: string) => void;
   /**
    * Surface a notice when this session's turn fell back off a pulled model (e.g.
-   * Fable 5 → Opus) mid-call. The host shows it in the same toast slot.
+   * Fable 5.1 → Opus) mid-call. The host shows it in the same toast slot.
    */
   onModelFallback?: (message: string) => void;
   /**
@@ -139,6 +140,13 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // Falls back to the status check when the host does not pass `working`.
   const running = working ?? activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
+
+  // Global ⌘' (toggleChat) focus mailbox. The quick-session composer registers
+  // under the SESSION id — NOT the panel-scoped `hostKey` below, which is the
+  // pending-send key and is per-panel. The shortcut handler resolves
+  // `activeRunId ?? selectedSessionId`, and a quick session has no active run,
+  // so the session id is what arrives (see composerFocusStore's key scheme).
+  useComposerFocusRequest(activeSession.id, textareaRef);
 
   // Question-gate answer plumbing: direct-answer submits reuse the card's
   // trpc mutation; multi-question gates go through the card's Other-text bus.
@@ -256,7 +264,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     [fastMode, panelId],
   );
 
-  // A turn that discovered its pinned model was pulled mid-call (e.g. Fable 5)
+  // A turn that discovered its pinned model was pulled mid-call (e.g. Fable 5.1)
   // retries transparently on the fallback family (Opus). Reflect that swap in the
   // pill — persist the fallback alias so it sticks past a remount, update the
   // local display, and raise a one-off toast. Filtered to THIS panel's runs.

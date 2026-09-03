@@ -124,8 +124,9 @@ files still exist alongside them in the bucket.
   About dialog).
 - electron-builder bakes `build.publish` (the generic `updates.cyboflow.com/<variant>`
   URL) into the packaged `app-update.yml`, so the app knows where to poll with no
-  extra config. The stable URL is in `package.json`; the dev build overrides it
-  with `--config.publish.url=.../dev` (see `build:mac:dev`).
+  extra config. The stable URL is in `package.json`; `scripts/configure-build.js`
+  overrides it to `.../dev` (gated on `BUILD_VARIANT=dev`) when it writes the merged
+  config that every `build:mac:*` script passes via `--config`.
 
 ---
 

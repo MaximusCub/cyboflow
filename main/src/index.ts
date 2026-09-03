@@ -8,6 +8,7 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  screen,
   shell,
   dialog,
   systemPreferences,
@@ -35,6 +36,14 @@ import { drainQueuedBugReports } from './services/telemetry/bugReport';
 import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } from './services/archGuard';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
+import { installApplicationMenu } from './menu';
+import {
+  clampWindowBounds,
+  defaultWindowBounds,
+  loadWindowState,
+  saveWindowState,
+  type WindowRect,
+} from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -145,9 +154,11 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrator/trpc/context';
 import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGitOps';
+import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
+import { createSessionOps } from './ipc/sessionOps';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps, setSessionSettleDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
@@ -945,6 +956,18 @@ let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
 let sessionGitOps: SessionGitOpsLike | undefined;
 
 /**
+ * The `cyboflow.sessions` router's ops implementation (batch 1 of the
+ * session-surface IPC→tRPC migration) — the exact twin of the sessionGit holder
+ * above, and for the same reason: createSessionOps needs the full AppServices
+ * object, which is assembled inside initializeServices and is not in scope
+ * here. Read LAZILY by the per-request context factory below, so a window
+ * attached before initializeServices finished still sees the ops once they
+ * exist. Undefined before then, which the router reports as
+ * PRECONDITION_FAILED.
+ */
+let sessionOps: SessionOpsLike | undefined;
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -1026,6 +1049,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // the full AppServices object, which only exists inside
         // initializeServices.
         sessionGitOps,
+        sessionOps,
       }),
   });
 }
@@ -1154,9 +1178,30 @@ function runDeferredStartupWork(): void {
 }
 
 async function createWindow() {
+  // Window geometry (see utils/windowState.ts): restore the previous session's
+  // bounds from <userData>/window-state.json, or — when nothing trustworthy is
+  // saved (first run, corrupt file) — size to THIS display. Restored bounds are
+  // clamped against the work area of the display they last lived on, so a
+  // monitor unplug or resolution change can never resurrect an off-screen
+  // window. Any failure downgrades to first-run sizing, never a crash.
+  const windowStateDir = app.getPath('userData');
+  const savedWindowState = loadWindowState(windowStateDir);
+  let windowBounds: WindowRect;
+  if (savedWindowState) {
+    windowBounds = clampWindowBounds(
+      savedWindowState.bounds,
+      screen.getDisplayMatching(savedWindowState.bounds).workArea,
+    );
+  } else {
+    const workArea = screen.getPrimaryDisplay().workArea;
+    windowBounds = clampWindowBounds(defaultWindowBounds(workArea), workArea);
+  }
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    x: windowBounds.x,
+    y: windowBounds.y,
+    width: windowBounds.width,
+    height: windowBounds.height,
     icon: path.join(__dirname, '../assets/icon.png'),
     // First-paint: start hidden and paint the renderer's root background so the
     // window never flashes an empty white frame while the (heavy) renderer boots;
@@ -1189,10 +1234,49 @@ async function createWindow() {
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
 
+  // Persist bounds so the next launch restores them. resize/move fire in a
+  // flood during interactive drags, so they only arm a 500ms debounce; close
+  // flushes immediately (and cancels the pending timer) so a quick open→close
+  // still records the final geometry. getNormalBounds() — NOT getBounds() —
+  // so a maximized window stores its restore size, not the maximized rect.
+  const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
+  let windowStateSaveTimer: NodeJS.Timeout | null = null;
+  const persistWindowState = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    saveWindowState(windowStateDir, {
+      bounds: mainWindow.getNormalBounds(),
+      maximized: mainWindow.isMaximized(),
+    });
+  };
+  const scheduleWindowStateSave = (): void => {
+    if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+    windowStateSaveTimer = setTimeout(() => {
+      windowStateSaveTimer = null;
+      persistWindowState();
+    }, WINDOW_STATE_SAVE_DEBOUNCE_MS);
+  };
+  mainWindow.on('resize', scheduleWindowStateSave);
+  mainWindow.on('move', scheduleWindowStateSave);
+  mainWindow.on('close', () => {
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+      windowStateSaveTimer = null;
+    }
+    persistWindowState();
+  });
+
   // Reveal the window only once the renderer has painted its first frame, and
   // kick off the deferrable startup work at that point. Registered BEFORE
   // loadURL/loadFile so the one-shot 'ready-to-show' is never missed.
   mainWindow.once('ready-to-show', () => {
+    // A maximized previous session comes back maximized — the restored x/y/w/h
+    // are the window's NORMAL (restore) geometry, so un-maximizing later lands
+    // where the user left it. maximize() shows the window itself, so it belongs
+    // inside this gate: called earlier it reveals the unpainted frame the gate
+    // exists to hide.
+    if (savedWindowState?.maximized) {
+      mainWindow?.maximize();
+    }
     mainWindow?.show();
     runDeferredStartupWork();
   });
@@ -1938,6 +2022,27 @@ async function initializeServices(): Promise<boolean> {
     db: databaseService.getDb(),
     router: taskChangeRouter,
     reviewRouter: reviewItemRouter,
+    // Keyless providers (beads) anchor their workspace to the project's repo.
+    // Resolved HERE rather than in the service so the renderer only ever sends
+    // a project id — no filesystem path it composes can decide where a CLI is
+    // spawned. See TrackerSyncServiceDeps.resolveProjectPath.
+    resolveProjectPath: (id) => sessionManager.getProjectById(id)?.path?.trim() || null,
+    // The OTHER anchor a keyless connection can have: a folder the user points
+    // at when the workspace is not at the project's repo path (a monorepo
+    // subdirectory, a workspace kept outside the repo). The dialog runs HERE,
+    // in main, so the chosen path never has to be composed by — or returned
+    // to — the renderer; it gets a token. See
+    // TrackerSyncServiceDeps.pickWorkspaceDirectory.
+    pickWorkspaceDirectory: async () => {
+      if (!mainWindow) return null;
+      const result = await dialog.showOpenDialog(mainWindow, {
+        // `dontAddToRecent` keeps a beads workspace out of the OS recent-items
+        // list — this is a wiring step, not a document the user opened.
+        properties: ['openDirectory', 'dontAddToRecent'],
+        title: 'Point at a beads workspace',
+      });
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+    },
     logger: cyboflowLogger,
   });
   trackerSyncService.start();
@@ -1968,7 +2073,7 @@ async function initializeServices(): Promise<boolean> {
   // injected (structurally, as narrow slices) into RunLauncher (createForRun at
   // sprint launch), RunExecutor (lane task ids for the `# Sprint tasks` prompt
   // block), and the runs-router lane dep-bag below. The cyboflow_update_sprint_task
-  // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CLAUDE.md
+  // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CODE-PATTERNS.md
   // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
 
@@ -3070,7 +3175,7 @@ async function initializeServices(): Promise<boolean> {
     });
   });
 
-  // Guarded-model availability (Fable 5). Seeds the guarded set as optimistically
+  // Guarded-model availability (Fable 5.1). Seeds the guarded set as optimistically
   // usable; the spawn seam falls back to Opus and the pickers grey a model out
   // when it's marked unavailable. refresh() is a best-effort Models-API probe that
   // no-ops without an Anthropic credential in the environment (most users
@@ -3264,7 +3369,7 @@ async function initializeServices(): Promise<boolean> {
   // 'output'/'exit' events, re-emitting them on itself — so the SAME facade serves
   // as RunExecutor's single `source` EventEmitter (which is bound once at
   // construction and cannot be swapped per run). One object satisfies both seams.
-  // cyboflowLogger is PASSED (CLAUDE.md optional-logger rule).
+  // cyboflowLogger is PASSED (CODE-PATTERNS.md optional-logger rule).
   // Assign the module-level binding (declared near the other shared services) so
   // the run dep-bag wiring in app.whenReady() can reach the SAME facade instance
   // for the live-input relay (IDEA-030 / TASK-817).
@@ -4408,6 +4513,11 @@ async function initializeServices(): Promise<boolean> {
   // included. Publish it on the module-scope holder the per-request tRPC
   // context reads.
   sessionGitOps = createGitOps(services);
+  // Same seam, same reason, for the session-record surface (batch 1 of the
+  // session-side migration): the `cyboflow.sessions` router's reads and small
+  // mutations are ops closures over this very services object now, not
+  // ipcMain.handle registrations.
+  sessionOps = createSessionOps(services);
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
@@ -4560,6 +4670,12 @@ app.whenReady().then(async () => {
   // another instance of this kind owns the data dir. The dedicated whenReady
   // handler there shows the dialog and exits — do no boot work here.
   if (!gotSingleInstanceLock) return;
+
+  // Replace Electron's stock default menu before any window exists — the menu
+  // is process-global, and the stock menu's View > Reload binds plain Cmd+R
+  // (Ctrl+R elsewhere), which would otherwise swallow that keydown before it
+  // ever reaches the renderer's keyboard-shortcut handler. See menu.ts.
+  installApplicationMenu();
 
   console.log('[Main] App is ready, initializing services...');
   // The schema-version gate now runs INSIDE initializeServices, immediately

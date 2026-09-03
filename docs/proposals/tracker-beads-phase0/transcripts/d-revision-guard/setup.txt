@@ -1,0 +1,49 @@
+=== SETUP ===
+$ bd version
+bd version 1.2.2 (Homebrew)
+exit=0
+$ bd init --prefix dg --skip-agents --skip-hooks --non-interactive
+Thanks for using bd! Quick heads-up: bd shares anonymous usage metrics —
+   just which commands get run (plus the bd version and OS platform), never your
+   issues, paths, remotes, identity, or anything you type. Seeing how people use
+   bd is how we decide what to improve next, so it genuinely makes bd better for
+   everyone.
+      Curious what's sent?   bd metrics example
+      Prefer to opt out?     bd metrics off    (one command, no restart needed)
+
+  Repository ID: 443c6b18
+  Clone ID: f865285bd8b4d2be
+  ✓ Committed beads files to git
+
+⚠ No Dolt remote configured
+  Issues are stored in local Dolt. .beads/issues.jsonl is an export,
+  not cross-machine sync or the source of truth.
+  To enable durable sync, add a git origin and then run:
+    bd dolt push
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: dg
+  Issue prefix: dg
+  Issues will be named: dg-<hash> (e.g., dg-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0
+$ ls -la .beads
+total 40
+drwx------@ 9 raimundoesteva  wheel   288 Aug 26 21:30 .
+drwxr-xr-x@ 6 raimundoesteva  wheel   192 Aug 26 21:30 ..
+-rw-------@ 1 raimundoesteva  wheel  1758 Aug 26 21:30 .gitignore
+-rw-------@ 1 raimundoesteva  wheel     6 Aug 26 21:30 .local_version
+-rw-r--r--@ 1 raimundoesteva  wheel  2283 Aug 26 21:30 README.md
+-rw-------@ 1 raimundoesteva  wheel  2622 Aug 26 21:30 config.yaml
+drwx------@ 4 raimundoesteva  wheel   128 Aug 26 21:30 embeddeddolt
+-rw-r--r--@ 1 raimundoesteva  wheel     0 Aug 26 21:30 interactions.jsonl
+-rw-------@ 1 raimundoesteva  wheel   153 Aug 26 21:30 metadata.json
+exit=0
+$ git status --porcelain
+?? transcripts/
+exit=0

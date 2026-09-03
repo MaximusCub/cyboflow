@@ -148,7 +148,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       set({ activeSessionId: null, activeMainRepoSession: null });
       // Notify backend about active session change for smart git status polling
       try {
-        await window.electronAPI.invoke('sessions:set-active-session', null);
+        await API.sessions.setActiveSession(null);
       } catch (error) {
         console.warn('Failed to notify backend about active session change:', error);
       }
@@ -161,7 +161,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       
       // Notify backend about active session change for smart git status polling
       try {
-        await window.electronAPI.invoke('sessions:set-active-session', sessionId);
+        await API.sessions.setActiveSession(sessionId);
       } catch (error) {
         console.warn('Failed to notify backend about active session change:', error);
       }

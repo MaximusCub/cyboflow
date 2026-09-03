@@ -1480,12 +1480,12 @@ describe('WorkflowRegistry', () => {
       // Codex HAS the orchestrated pieces (prompt envelope + question bridge),
       // so the guard must be a capability check, not "non-Claude is refused".
       //
-      // Driven through a VARIANT since migration 128: on a BUILT-IN flow an
-      // explicit codex request reconciles the flow's runtime mix to 'codex',
-      // which forces the programmatic plane (see the runtime-mix suite). A
-      // variant run is mix-suppressed — its graph is its own — so it is where a
-      // whole-run orchestrated Codex launch still lives, and where this
-      // capability check stays observable.
+      // Driven through a VARIANT, which is mix-suppressed — its graph is its
+      // own — so the capability check stays observable no matter what the
+      // flow's saved runtime mix says. (A saved NON-claude mix would force the
+      // programmatic plane on a built-in flow and hide this guard; the mix and
+      // the requested provider are otherwise orthogonal — see the runtime-mix
+      // suite.)
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'codex-orchestrated.md', '---\n---\n');
         const gated = ompEnabledRegistry();
@@ -1832,18 +1832,18 @@ describe('WorkflowRegistry', () => {
           requestedAgentProvider: 'codex',
         });
 
-        // Since migration 128 the request also RECONCILES this built-in flow's
-        // runtime mix to 'codex' (runtime-mix plan D3 step 2), which forces the
-        // programmatic plane — the only one that honors the per-step tier pins
-        // the mix writes. The plane is the one thing that changed here; the
-        // guard's verdict (no throw) is what this test pins.
-        expect(result.executionModel).toBe('programmatic');
+        // The request moves the ORCHESTRATOR only — it does not rewrite the
+        // flow's runtime mix, which stays on its saved `claude` stamp (the two
+        // are orthogonal dials). The identity mix writes no per-step pins and
+        // forces no plane, so the run stays orchestrated; the guard's verdict
+        // (no throw) is what this test pins.
+        expect(result.executionModel).toBe('orchestrated');
         interface AgentRow { agent_provider: string; runtime_mix: string | null }
         const row = db
           .prepare('SELECT agent_provider, runtime_mix FROM workflow_runs WHERE id = ?')
           .get(result.runId) as AgentRow;
         expect(row.agent_provider).toBe('codex');
-        expect(row.runtime_mix).toBe('codex');
+        expect(row.runtime_mix).toBe('claude');
       });
     });
 

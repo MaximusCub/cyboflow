@@ -1,8 +1,15 @@
 # OMP (oh-my-pi) as a third agent provider
 
-Status: PROPOSAL (2026-08-14), revised same day after a Codex adversarial review (8 findings, all
-accepted; dispositions in §14). Not yet scheduled.
-Prior art: `docs/proposals/codex-provider-integration.md` (the second-provider integration this one
+Status: Phases 0-2 SHIPPED and live-smoked (§15.1-15.3: full-app UI smoke plus a real
+production `/sprint` run on `omp-sdk`, 4 defects found and fixed, reverified 2026-08-15/16).
+Phase 3 (T2 orchestrator + T3 juror/verifier, §7) remains deliberately deferred, not yet
+scheduled. Originally PROPOSAL (2026-08-14), revised same day after a Codex adversarial
+review (8 findings, all accepted; dispositions in §14).
+Note: `omp` and `pi` are two separate providers — `AGENT_PROVIDERS` is
+`['claude', 'codex', 'omp', 'pi']`. This document covers only `omp` (`omp-sdk`/`omp-pty`);
+`pi` (`pi-sdk`/`pi-pty`, `main/src/services/panels/pi/`) landed later and has no proposal
+doc of its own — don't conflate the two when reading this file.
+Prior art: `docs/archive/codex-provider-integration.md` (the second-provider integration this one
 deliberately mirrors and generalizes), `docs/ARCHITECTURE.md` §"Dual-substrate seam".
 
 ## 1. Why
@@ -93,7 +100,7 @@ changes (verified: `isAgentStreamEvent` dispatches on event `type`, not provider
 ### 3.2 Tier placement (what OMP serves, in order)
 
 Using the orchestration-capability tiers (see §"capability registry" in the research notes /
-`codex-provider-integration.md`):
+`docs/archive/codex-provider-integration.md`):
 
 | Tier | What | OMP verdict |
 |---|---|---|

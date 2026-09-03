@@ -77,10 +77,10 @@ describe('exposed bridge shape is unchanged', () => {
 describe.each(['electronAPI', 'electron'] as const)('%s.invoke allowlist', (bridge) => {
   it('forwards an allowlisted channel to ipcRenderer.invoke with its args intact', async () => {
     invokeCalls.length = 0;
-    const result = await bridgeInvoke(bridge)('sessions:set-active-session', { sessionId: 's1' });
+    const result = await bridgeInvoke(bridge)('projects:refresh-git-status', { projectId: 1 });
     expect(result).toEqual({ success: true });
     expect(invokeCalls).toEqual([
-      { channel: 'sessions:set-active-session', args: [{ sessionId: 's1' }] },
+      { channel: 'projects:refresh-git-status', args: [{ projectId: 1 }] },
     ]);
   });
 
@@ -141,7 +141,12 @@ function collectRendererGenericInvokeChannels(): Set<string> {
 
 describe('allowlist covers the renderer’s actual generic-invoke usage', () => {
   it('the extraction is not vacuous', () => {
-    expect(collectRendererGenericInvokeChannels().size).toBeGreaterThan(15);
+    // A floor, not a ratchet: the real count only ever SHRINKS as channels move
+    // onto tRPC (batch 1 of the session migration took two renderer call sites
+    // — sessions:set-active-session and archive:get-progress — with it). The
+    // assertion exists so a broken regex, which would report zero, cannot make
+    // the coverage check below pass by finding nothing.
+    expect(collectRendererGenericInvokeChannels().size).toBeGreaterThan(10);
   });
 
   it('no renderer call site invokes a channel the allowlist omits', () => {

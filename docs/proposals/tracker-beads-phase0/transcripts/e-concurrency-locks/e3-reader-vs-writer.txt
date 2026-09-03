@@ -1,0 +1,44 @@
+=== E3: 60-iteration write loop + concurrent read hammer ===
+read#1 rc=0 elapsed=0.361s errbytes=0
+read#2 rc=0 elapsed=1.312s errbytes=0
+read#3 rc=0 elapsed=0.352s errbytes=0
+read#4 rc=0 elapsed=1.726s errbytes=0
+read#5 rc=0 elapsed=0.978s errbytes=0
+read#6 rc=0 elapsed=0.374s errbytes=0
+read#7 rc=0 elapsed=0.365s errbytes=0
+read#8 rc=0 elapsed=0.362s errbytes=0
+read#9 rc=0 elapsed=0.352s errbytes=0
+writer progress 10/60
+read#10 rc=0 elapsed=1.195s errbytes=0
+read#11 rc=0 elapsed=0.362s errbytes=0
+read#12 rc=0 elapsed=2.283s errbytes=0
+writer progress 20/60
+read#13 rc=0 elapsed=1.756s errbytes=0
+read#14 rc=0 elapsed=0.374s errbytes=0
+read#15 rc=0 elapsed=0.353s errbytes=0
+read#16 rc=0 elapsed=0.384s errbytes=0
+read#17 rc=0 elapsed=0.930s errbytes=0
+read#18 rc=0 elapsed=0.536s errbytes=0
+read#19 rc=0 elapsed=0.459s errbytes=0
+read#20 rc=0 elapsed=1.967s errbytes=0
+writer progress 30/60
+read#21 rc=0 elapsed=5.369s errbytes=0
+writer progress 40/60
+read#22 rc=0 elapsed=2.305s errbytes=0
+read#23 rc=0 elapsed=0.460s errbytes=0
+read#24 rc=0 elapsed=2.960s errbytes=0
+read#25 rc=0 elapsed=0.355s errbytes=0
+writer progress 50/60
+read#26 rc=0 elapsed=0.455s errbytes=0
+read#27 rc=0 elapsed=0.396s errbytes=0
+read#28 rc=0 elapsed=0.388s errbytes=0
+read#29 rc=0 elapsed=0.361s errbytes=0
+read#30 rc=0 elapsed=1.256s errbytes=0
+writer progress 60/60
+WRITER-DONE
+read#31 rc=0 elapsed=3.321s errbytes=0
+reads_total=31 read_failures=0
+--- writer exit codes histogram:
+  60 0
+--- writer non-empty stderr files:
+---

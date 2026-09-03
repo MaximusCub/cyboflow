@@ -1,0 +1,10 @@
+$ BD_JSON_ENVELOPE=1 bd list --json | jq length
+exit=0
+--- stderr ---
+--- top-level jq keys ---
+[
+  "data",
+  "schema_version"
+]
+--- length of .data or top array ---
+55

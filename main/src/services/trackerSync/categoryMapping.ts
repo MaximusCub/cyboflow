@@ -7,13 +7,15 @@
  * seed, a persisted overlay, pure lookups. Two things make it a separate module
  * rather than a parameterization of that one.
  *
- * 1. IT IS SUPPORTED BY EXACTLY ONE PROVIDER. Dart models a native task TYPE
- *    (`Task`, `Subtask`, `Bug`, …) that can carry cyboflow's `feature|bug|chore`
- *    classification; Linear and Plane model no type at all, and label emulation
- *    is explicitly out of v1 scope. So `TrackerIssue.category` is permanently
- *    null on two of the three providers, and the merge must read that as
- *    "unsupported", never as "the category was cleared" — hence
- *    {@link providerSupportsCategorySync}, which is what gates the arm.
+ * 1. IT IS SUPPORTED BY ONLY SOME PROVIDERS. Dart and beads each model a
+ *    native issue TYPE (Dart: `Task`, `Subtask`, `Bug`, …; beads:
+ *    `bug`/`feature`/`task`/`epic`/`chore`/…) that can carry cyboflow's
+ *    `feature|bug|chore` classification; Linear and Plane model no type at
+ *    all, and label emulation is explicitly out of v1 scope. So
+ *    `TrackerIssue.category` is permanently null on those two providers, and
+ *    the merge must read that as "unsupported", never as "the category was
+ *    cleared" — hence {@link providerSupportsCategorySync}, which is what
+ *    gates the arm.
  *
  * 2. THERE IS NO CANONICAL VOCABULARY TO FALL BACK ON. A priority scale is a
  *    documented enum on all three providers, so priorityMapping can seed from
@@ -47,6 +49,9 @@ const CATEGORY_SYNC_SUPPORTED: Record<TrackerProvider, boolean> = {
   linear: false,
   plane: false,
   dart: true,
+  // beads models a native issue TYPE (bug/feature/task/epic/chore/…) that can
+  // carry cyboflow's category, same shape as Dart's task type.
+  beads: true,
 };
 
 /**

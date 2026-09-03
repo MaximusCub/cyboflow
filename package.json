@@ -1,6 +1,6 @@
 {
   "name": "cyboflow",
-  "version": "0.2.9",
+  "version": "0.2.11",
   "private": true,
   "description": "Cyboflow - Multi-session AI code assistant manager",
   "author": {
@@ -100,7 +100,7 @@
     "test:integration": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.integration.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.224",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.257",
     "@anthropic-ai/sdk": "^0.110.0",
     "@aptabase/electron": "^0.3.1",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
@@ -110,10 +110,11 @@
     "@trpc/client": "^11.17.0",
     "@trpc/server": "^11.17.0",
     "better-sqlite3": "^11.7.0",
+    "builder-util-runtime": "9.7.0",
     "electron-updater": "^6.3.9",
     "glob": "^11.1.0",
     "p-queue": "^7.4.1",
-    "playwright": "^1.55.1",
+    "playwright": "1.62.1",
     "superjson": "^2.2.1",
     "trpc-electron": "0.1.2",
     "uuid": "^13.0.2",
@@ -126,7 +127,7 @@
     "@aws-sdk/client-s3": "^3.726.0",
     "@aws-sdk/lib-storage": "^3.726.0",
     "@electron/rebuild": "^4.0.1",
-    "@playwright/test": "^1.52.0",
+    "@playwright/test": "1.62.1",
     "@types/better-sqlite3": "^7.6.13",
     "concurrently": "^9.1.0",
     "electron": "^37.6.0",

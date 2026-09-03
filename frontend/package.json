@@ -1,11 +1,11 @@
 {
   "name": "frontend",
-  "version": "0.2.9",
+  "version": "0.2.11",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "preview": "vite preview",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc -b",

@@ -15,7 +15,7 @@ to a canonical example — read those for the actual implementation.
   examples (`dbAdapter.ts`, `loggerLikeSpy.ts`, and `rawEvents.ts`).
 - **Barrels:** No barrel `index.ts` re-exports as a rule; import paths are explicit. Known
   exceptions: `main/src/services/panels/codex/appServer/index.ts` (a pure `export *` barrel),
-  plus the named-re-export barrels `main/src/services/streamParser/index.ts` and
+  plus the named-re-export barrels `shared/streamParser/index.ts` and
   `main/src/orchestrator/dynamicWorkflows/index.ts` — not license to add more.
 - **Formatting:** No Prettier config. ESLint with TypeScript rules in each workspace
   (`frontend/eslint.config.js`, `main/eslint.config.js`). Run via `pnpm lint`. The `any` type is
@@ -60,9 +60,8 @@ to a canonical example — read those for the actual implementation.
   a console-based shim, so callers never need a null check. Companion `makeDatabaseLike`
   builds the matching `DatabaseLike` adapter.
 - **Why single-source:** Hand-rolled inline adapters (`{ info: m => logger.info(m), ... }`)
-  silently drift when `Logger` or `LoggerLike` gain methods — FIND-017-5 extracted this
-  utility specifically to kill that drift surface, and TASK-651 re-introduced it before
-  the code-reviewer caught the duplication. Do NOT inline.
+  silently drift when `Logger` or `LoggerLike` gain methods — this utility exists to kill
+  that drift surface, and inline copies have crept back in before. Do NOT inline.
 - **Canonical example:** `main/src/services/panels/claude/claudeCodeManager.ts:503`;
   `main/src/index.ts:559` and `:717`.
 
@@ -73,10 +72,10 @@ to a canonical example — read those for the actual implementation.
   from components — go through this module.
 - **Canonical example:** Any store in `frontend/src/stores/`
 - **Exception — `frontend/src/utils/cyboflowApi.ts`:** temporary parallel surface for the
-  cyboflow workflow domain pending the epic-6 transport decision (raw IPC vs tRPC). Do NOT
-  add new channels here, do NOT copy this module pattern into other domains, and do NOT
-  deepen its surface — extend `api.ts` (`API.cyboflow.*`) or wait for the tRPC routers.
-  Once epic 6 lands, `cyboflowApi.ts` is deleted or replaced by a tRPC client wrapper.
+  cyboflow workflow domain, pending the in-progress tRPC migration. Do NOT add new channels
+  here, do NOT copy this module pattern into other domains, and do NOT deepen its surface —
+  extend `api.ts` (`API.cyboflow.*`) or use the tRPC routers, which will eventually replace
+  this module.
 
 ### `frontend/src/trpc/client`
 
@@ -114,20 +113,20 @@ to a canonical example — read those for the actual implementation.
 
 - **Path:** `main/src/orchestrator/__test_fixtures__/dbAdapter.ts`
 - **Use it for:** Wrapping a `better-sqlite3` `Database` into the `DatabaseLike` (`{ prepare, transaction }`) shape required by orchestrator and tRPC handler tests. Do NOT clone locally — the `: DatabaseLike` return-type annotation is the build-time tripwire that catches future widening of `DatabaseLike`.
-- **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`; recurring drift fixed in FIND-SPRINT-017-11.
+- **Canonical example:** `main/src/orchestrator/__tests__/workflowRegistry.test.ts`.
 
 ### `main/src/orchestrator/__test_fixtures__/loggerLikeSpy`
 
 - **Path:** `main/src/orchestrator/__test_fixtures__/loggerLikeSpy.ts`
 - **Use it for:** A `vi.fn()`-based `LoggerLike` spy for orchestrator, IPC, and pipeline tests. `makeSpyLogger()` returns `LoggerLike & { calls: LogCall[] }` — each method is a Vitest spy and pushes structured entries onto `calls` for log assertions. `makeProdLoggerSpy()` returns a `Pick<Logger, 'warn' | 'info' | 'verbose'>`-shaped spy for service-layer call sites that pass the spy to code expecting the production `Logger` (cast via `as unknown as Logger` at the seam).
-- **Why single-source:** TASK-646 consolidated 6+ local `makeLogger()` helpers; a second local factory regressed in the same sprint (FIND-SPRINT-024-10). Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
+- **Why single-source:** consolidated from 6+ local `makeLogger()` helpers, and new local factories have regressed back in before. Do NOT clone locally. If a call site needs a different shape, extend this file with a new factory — do not fork.
 - **Canonical example:** `main/src/orchestrator/__tests__/runLauncher.test.ts` (LoggerLike); `main/src/services/panels/claude/__tests__/claudeCodeManagerWiring.test.ts` (production Logger).
 
 ### `main/src/orchestrator/__test_fixtures__/rawEvents`
 
 - **Path:** `main/src/orchestrator/__test_fixtures__/rawEvents.ts`
 - **Use it for:** Any test that needs a `raw_events` table — persistence (`bridgeEvents`, `RawEventsSink`), consumption (`runExecutor`), or schema reconciliation. Exports `RAW_EVENTS_DDL`, `makeRawEventsDb()` (in-memory `better-sqlite3` with the table created and FKs off), and `countRawEvents(db, runId)`. Do NOT inline `CREATE TABLE ... raw_events` locally — a migration 006 schema change must propagate via this single source.
-- **Why single-source:** TASK-665 extracted this to kill three inline DDL copies; FIND-SPRINT-025-9 caught a fourth (`rawEventsSink.test.ts`) the migration sweep missed. New `raw_events` test sites import here.
+- **Why single-source:** extracted to kill repeated inline DDL copies — the kind a schema-migration sweep misses. New `raw_events` test sites import here.
 - **Canonical example:** `main/src/orchestrator/__tests__/runEventBridge.test.ts`; `main/src/orchestrator/__tests__/runExecutor.test.ts`.
 
 ### Database seed helpers
@@ -168,15 +167,15 @@ type definitions across packages.
 - `shared/types/cliPanels.ts` — CLI-specific panel types
 
 **Stuck-event types** live in `shared/types/stuckDetection.ts` — `StuckDetectedEvent` and
-`StuckReason`. Since TASK-695, `reviewQueueSlice`'s `subscribeToStuckEvents()` action
+`StuckReason`. `reviewQueueSlice`'s `subscribeToStuckEvents()` action
 (called from an App-level `useEffect`) subscribes directly on the typed
 tRPC proxy (`trpc.cyboflow.events.onStuckDetected.subscribe(...)`, `onData: (event:
 StuckDetectedEvent) => …`) — the earlier `StuckEventsClient` cast-through-`unknown` shim is no
 longer used anywhere in `frontend/src`. Rules:
 
 - Import stuck-event types from `shared/types/stuckDetection.ts`. Do NOT re-declare
-  `StuckDetectedEvent` or `StuckReason` locally — SPRINT-023 had two sites do this
-  independently, producing a verbatim duplicate interface and a doubled IPC subscription.
+  `StuckDetectedEvent` or `StuckReason` locally — independent re-declarations have
+  produced a verbatim duplicate interface and a doubled IPC subscription before.
 - Exactly one App-level mount (`reviewQueueSlice`'s `subscribeToStuckEvents()`) should open
   the `onStuckDetected` subscription. Other consumers read from the Zustand `reviewQueueSlice`
   (`runStatusMap`) instead of opening their own tRPC subscription.
@@ -187,8 +186,7 @@ longer used anywhere in `frontend/src`. Rules:
 or a companion `*Labels.ts` in `shared/types/`), keyed by `Record<Union['kind'], string>`
 so adding a new variant breaks the map at compile time. Never duplicate the map in a
 component and a hook — see `frontend/src/components/ReviewQueue/StuckInspectorModal.tsx`
-and `frontend/src/hooks/useStuckNotifications.ts` (SPRINT-013 divergence) for the
-anti-pattern.
+and `frontend/src/hooks/useStuckNotifications.ts` for the anti-pattern.
 
 **Claude stream block types** live in `shared/types/claudeStream.ts` — the single source of
 truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and the
@@ -197,16 +195,15 @@ truth for `TextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ThinkingBlock`, and t
 - Import block types directly from `shared/types/claudeStream.ts`. Do NOT re-declare local
   `interface ToolResult`/`TextBlock`/`ToolUseBlock` shadow types — a shadow that pins
   `ToolResultBlock.content` back to `string` hides the array branch from TypeScript at every
-  downstream callsite (FIND-SPRINT-020-9 — `main/src/utils/toolFormatter.ts`, the only
-  surviving copy).
+  downstream callsite.
 - `ToolResultBlock.content` is `string | Array<{type: 'text'; text: string}>`. Always guard:
   `typeof content === 'string' ? content : content.map(b => b.text).join('')`. Never call
   `JSON.parse`, `.includes(...)`, or template-string interpolation on raw `content`.
 - The `@deprecated` re-exports in `{frontend,main}/src/types/session.ts` (`TextContent`,
   `ToolUseContent`, `ToolResultContent`) are a temporary migration bridge — do not add new
   consumers.
-- TS↔Zod drift bridge: `main/src/services/streamParser/schemas.ts` `_typeCheck` catches
-  required-field drift. Optional-field drift is a known gap (SPRINT-020 TASK-571 HUMAN_NEEDED).
+- TS↔Zod drift bridge: `shared/streamParser/schemas.ts` `_typeCheck` catches
+  required-field drift. Optional-field drift is a known gap.
 
 **StreamEvent discriminated-union narrowing:** `StreamEvent.type` (`frontend/src/utils/cyboflowApi.ts`)
 and `StreamEvent.payload` MUST be narrowed in the same pass. Leaving `payload: unknown`
@@ -216,8 +213,8 @@ bootstrap `run_started` row with no SDK payload), model it as its own union memb
 (`{ type: 'run_started'; payload?: undefined }`) so `switch (event.type)` stays
 exhaustively auto-narrowed. A bare `payload: unknown` on a typed envelope is the
 tripwire — grep for it before merging.
-Canonical (resolved) example: the FIND-SPRINT-026-20 casts are gone — `RunView.tsx`'s
-per-type row components (`SystemEventRow`, `AssistantEventRow`, `UserEventRow`, …) each take
+Canonical example: `RunView.tsx`'s per-type row components (`SystemEventRow`,
+`AssistantEventRow`, `UserEventRow`, …) each take
 `Extract<StreamEvent, { type: '<discriminant>' }>` instead of casting.
 
 **`StreamEvent` is a derived alias, not a re-declaration.** `frontend/src/utils/cyboflowApi.ts`
@@ -226,9 +223,8 @@ declares `export type StreamEvent = StreamEnvelope;` — never re-declare the
 edits across `StreamEventType`, `StreamEnvelopePayload`, and the renderer
 type; omission silently routes new variants to `UnknownEventRow` instead of
 failing typecheck. The envelope carries no top-level `runId` field — the run is
-already discriminated by the `cyboflow:stream:<runId>` IPC channel (FIND-SPRINT-016-3),
-so do not add one back. Canonical drift: FIND-SPRINT-031-4 — resolved as A4 in
-the SPRINT-031 compound.
+already discriminated by the `cyboflow:stream:<runId>` IPC channel — so do not
+add one back.
 
 ### Zustand store structure (renderer)
 
@@ -252,11 +248,8 @@ its frozen entry there.
 
 - **Canonical example:** `main/src/ipc/session.ts`
 
-**Runtime input validation:** Every handler that reads from `args` MUST validate args via
-`validateInput` from `main/src/ipc/validateInput.ts`. A bare `const { projectId } = args as
-{ projectId: number }` cast is insufficient — if the renderer passes `undefined`,
-better-sqlite3 throws or returns wrong rows silently. Hand-rolled type guards are forbidden
-— they fork the error-shape and make the in-progress tRPC ipcLink migration harder.
+**Runtime input validation:** every handler that reads from `args` MUST validate them —
+see "IPC handler input validation" below for the contract and canonical usage.
 
 ### Per-run workflow definitions resolve the FROZEN spec (never live `workflows.spec_json`)
 
@@ -268,11 +261,8 @@ RUN must call `resolveRunFrozenSpec(db, runId)`** (`main/src/orchestrator/runFro
 live-spec fallback keeps legacy/baseline runs byte-identical) — never
 `JOIN workflows … read spec_json` keyed by the run. A live read makes a structural-variant
 run walk the wrong graph and re-opens the historical bug where editing a workflow mid-run
-changed the running definition. Seven readers were migrated (RunExecutor prompt/programmatic,
-stepTransitionBridge, autoMintArtifacts, mcpQueryHandler `report_step`,
-interactiveClaudeManager step-reporting, `RunLauncher.buildStepsSnapshotJson`,
-`runs.getPhaseState`); a new per-run reader that greps its spec from `workflows` directly is
-a review-blocking defect. Reading the live spec is correct ONLY for definition-authoring
+changed the running definition. Every existing per-run reader routes through it; a new
+per-run reader that reads `workflows.spec_json` directly is a review-blocking defect. Reading the live spec is correct ONLY for definition-authoring
 surfaces (the editor, `resolveWorkflowDefinition` at variant-creation time) that are about
 the workflow, not a run.
 
@@ -283,9 +273,11 @@ the workflow, not a run.
 ## IPC handler input validation
 
 All `ipcMain.handle` handlers in `main/src/ipc/*.ts` MUST validate args via
-`validateInput` from `main/src/ipc/validateInput.ts`. Hand-rolled type guards
-are forbidden — they fork the error-shape and make the in-progress tRPC ipcLink
-migration harder.
+`validateInput` from `main/src/ipc/validateInput.ts`. A bare
+`const { projectId } = args as { projectId: number }` cast is insufficient — if the
+renderer passes `undefined`, better-sqlite3 throws or returns wrong rows silently.
+Hand-rolled type guards are forbidden — they fork the error-shape and make the
+in-progress tRPC ipcLink migration harder.
 
 Canonical usage:
 
@@ -297,14 +289,12 @@ const { projectId } = v.value;
 
 See `main/src/ipc/cyboflow.ts` for the canonical caller.
 
-Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards (resolved by TASK-726 via the `validateInput` helper).
-
 ### IPC / type-parity rules (silent-drop class)
 
 These rules all guard the same failure mode: a type declaration that drifts from the runtime
 shape on the other side of an IPC/tRPC boundary, so a field is silently dropped instead of
-caught by the compiler. `CLAUDE.md` points here before any IPC touch; the rules, case studies,
-and audit greps live here.
+caught by the compiler. The agent guide (`docs/AGENT-GUIDE.md`) points here before any IPC
+touch; the rules, case studies, and audit greps live here.
 
 - **`IPCResponse<T>` callers must pass an explicit `T`** — never rely on the default. The
   wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults
@@ -323,9 +313,9 @@ and audit greps live here.
   `frontend/src/types/electron.d.ts` and `frontend/src/utils/api.ts` MUST match the shape the
   matching `main/src/ipc/*` handler actually returns at runtime — not a legacy or aspirational
   type. A mismatched `T` forces `as unknown as X` double-casts in every consumer and hides
-  handler shape changes from TypeScript (FIND-SPRINT-024-4: `getJsonMessages` declared
-  `ClaudeJsonMessage[]` while the handler returned `UnifiedMessage[]`, causing TASK-637 to
-  silently drop all output). When changing an IPC handler's return shape, grep the channel name
+  handler shape changes from TypeScript (case study: `getJsonMessages` declared
+  `ClaudeJsonMessage[]` while the handler returned `UnifiedMessage[]`, silently dropping
+  all output). When changing an IPC handler's return shape, grep the channel name
   across `frontend/src/types/electron.d.ts`, `frontend/src/utils/api.ts`, and the handler file
   in the same pass.
 
@@ -333,16 +323,17 @@ and audit greps live here.
   frontend → main (e.g. `CreateSessionRequest`, currently dual-declared in
   `main/src/types/session.ts` and `frontend/src/types/session.ts`) MUST be kept in sync. A field
   the server reads but the client can never send silently falls back to defaults — the
-  request-direction twin of FIND-SPRINT-024-4 (FIND-SPRINT-037-5: `branchName` added to main
-  only; `quickSession` dead on both sides). On any IPC touch, grep the request interface name
+  request-direction twin of the return-shape rule above (case study: `branchName` added to
+  the main-side interface only; `quickSession` dead on both sides). On any IPC touch, grep
+  the request interface name
   across both `*/src/types/` and verify field parity. Prefer promoting to `shared/types/ipc.ts`
   over maintaining a dual declaration.
 
 - **Optional `logger?` on observability classes must be passed, not omitted.** Constructors that
   accept `logger?: Pick<ILogger, ...>` (e.g. `TypedEventNarrowing`, `RawEventsSink`,
   `MessageProjection`) gate every diagnostic on `this.logger?.…` — omitting the argument silently
-  turns the whole class into a no-op for observability (same silent-drop class as
-  FIND-SPRINT-024-4 and FIND-SPRINT-033-6). Pass a logger from the enclosing scope; if the
+  turns the whole class into a no-op for observability (the same silent-drop class).
+  Pass a logger from the enclosing scope; if the
   surrounding type uses a different logger surface (e.g. orchestrator `LoggerLike` has no
   `verbose`), adapt at the call site (e.g. `{ verbose: (m) => logger.debug(m) }`). Audit on
   touch (production code only — tests intentionally exercise the no-logger path): `grep -rn "new
@@ -353,7 +344,7 @@ and audit greps live here.
   the tRPC client infer the payload from the router. A locally-declared interface (e.g. a
   `WorkflowStepTransitionEvent` copy in the renderer) or an `unknown`-typed arg with a
   hand-rolled `'runId' in evt` guard defeats inference and silently accepts stale shapes after
-  the router output changes. Caught in TASK-768 / commit `f6240a6`. Audit: `grep -rnE "onData:
+  the router output changes. Audit: `grep -rnE "onData:
   \(evt: unknown\)|onData: \(event:" frontend/src` — each production hit is a candidate for
   inference (test files intentionally fake the shape and are exempt).
 
@@ -410,7 +401,7 @@ applying stale state after teardown.
 
 **Canonical example:** `frontend/src/hooks/useWorkflowPhaseState.ts` (subscribe before the `getPhaseState.query` `.then(...)`; both guarded by a `cancelled` flag).
 **Anti-pattern:** pre-retrofit `WorkflowProgressTimeline.tsx` ran two sibling effects;
-the query's `setStepStates` overwrote subscription deltas (FIND-SPRINT-040-12).
+the query's `setStepStates` overwrote subscription deltas.
 
 ### Entity-aware write chokepoint (`TaskChangeRouter.applyChange`)
 
@@ -438,9 +429,9 @@ columns each table carries — add a new per-type column there, not via scattere
 `if (type === 'idea')` branches.
 
 **Off-board buckets (migration 042).** Decomposing an idea stamps `ideas.decomposed_at` (the idea
-leaves the 4-stage board, reachable only via children) with NO cascade — retirement is
+leaves the 5-stage board, reachable only via children) with NO cascade — retirement is
 exclusively gate-driven (the approve-plan gate retires the planner's root idea). The CREATE seam
-is the Q1 visibility gate: a plan-gated run's epics/tasks are created PENDING
+is the visibility gate: a plan-gated run's epics/tasks are created PENDING
 (`approved_at IS NULL` = backend-invisible + sprint-ineligible) and stay so until the approve-plan
 gate stamps `workflow_runs.plan_approved_at` and REVEALS them; every non-plan-gated create is
 visible immediately. The REVEAL routes through the chokepoint per entity (the orchestrator-only
@@ -464,17 +455,21 @@ REQUIRED on `BacklogTaskItem` so an omitting constructor fails the build (silent
 
 ### Derived-stage recompute follow-ons (`recomputeTaskExecutionStage` + `recomputeEpicStage`)
 
-Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 042, so the board's
-two `derived` stages are now computed by recompute follow-ons that re-enter the chokepoint as
-`actor='orchestrator'` UPDATEs (never raw table writes). BOTH are idempotent (a target equal to
-the current stage is a no-op) and best-effort at the follow-on seam:
+Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 042; migration 066
+later re-introduced ONLY position 7 ('In development') as a derived execution stage — position 8
+('Ready-to-merge') stayed collapsed. The board's one derived stage plus the epic rollup are
+computed by recompute follow-ons that re-enter the chokepoint as `actor='orchestrator'` UPDATEs
+(never raw table writes). BOTH are idempotent (a target equal to the current stage is a no-op)
+and best-effort at the follow-on seam:
 
 - **`recomputeTaskExecutionStage(taskId)`** — the AGGREGATE over a task's runs (supports
-  parallel runs). `any outcome='merged' → Done (9)`; otherwise the task HOLDS at its
-  `entry_stage_id` (fallback Ready for development, 6) — there is no longer an in-development or
-  ready-to-merge stage to derive. Driven from the run-lifecycle follow-on seams (`runExecutor`,
-  `runLauncher`, the `runs.*` tRPC router, and the `git.ts` merge close-out, which mirrors the
-  `outcome='merged'` arm inline for sprint lanes).
+  parallel runs, both direct `workflow_runs.task_id` and sprint-batch lane runs). Four arms,
+  first match wins: (1) any run merged (or batch lane integrated) → Done (9); (2) any run not
+  yet terminal → In development (7); (3) runs exist but neither of the above → revert to
+  `entry_stage_id` (fallback Ready for development, 6); (4) no runs → no-op. A terminal-stage
+  guard on arms 2/3 never moves a task currently at Done or Won't-do. Driven from the
+  run-lifecycle follow-on seams (`runExecutor`, `runLauncher`, the `runs.*` tRPC router, and the
+  `git.ts` merge close-out, which mirrors the `outcome='merged'` arm inline for sprint lanes).
 - **`recomputeEpicStage(epicId)`** — the ROLLUP over an epic's COUNTABLE child tasks (epics
   carry no runs). A child counts only when non-archived, not parked at Won't-do (position 10 —
   an explicit retirement neither blocks Done nor demotes), and not a PENDING draft
@@ -516,20 +511,60 @@ emit after commit via `emitReviewItemChangedById`. Rules:
 - **Canonical example:** `main/src/orchestrator/reviewItemRouter.ts`;
   `main/src/orchestrator/trpc/routers/reviewItems.ts` (the two-chokepoint `promoteToTask`).
 
+### Run-scoped artifact write chokepoint (`ArtifactRouter.apply`)
+
+Every write to the run-scoped `artifacts` table (migration 035) routes through `ArtifactRouter.apply`
+(`main/src/orchestrator/artifactRouter.ts`) — the third single-table chokepoint, structurally a
+twin of `TaskChangeRouter`/`ReviewItemRouter`: a per-project `PQueue({concurrency: 1})`
+serializes writes, and each op atomically mutates `artifacts`, appends an `entity_events` delta
+under `entity_type='artifact'`, and emits an `ArtifactChangedEvent` after commit. `apply`
+dispatches on `op` (`create` | `update` | `commit`); `create` UPSERTs by `(runId, atype)` so
+re-deriving a templated artifact (auto-mint) is idempotent — one artifact per `(run_id, atype)`
+in v1. Two further ops ride the same per-project queue outside `apply` proper: `acceptAsBaseline`
+(the Accept-as-baseline git action, delegating the fs-copy + commit to an injected
+`BaselineAcceptor` so the router itself imports no `fs`/git — standalone-typecheck invariant) and
+`mergeScreenshots` (an atomic read-merge-UPSERT for concurrent screenshot deliveries). The tRPC
+sub-router, the `cyboflow_report_artifact` MCP tool family, and the orchestrator's auto-mint path
+are the only callers.
+
+- **Canonical example:** `main/src/orchestrator/artifactRouter.ts`.
+
+### `idea_components` write chokepoint (`IdeaComponentRouter.applyChange`)
+
+Every write to the `idea_components` ledger (migration 101 — each idea's idea-spec / prototype /
+architecture / epics / stories progress) routes through `IdeaComponentRouter.applyChange`
+(`main/src/orchestrator/ideaComponents/ideaComponentRouter.ts`) — the fourth single-table
+chokepoint, a miniature of `ReviewItemRouter`'s per-project `PQueue` + emit-after-commit
+architecture, scaled down for a table with no `entity_events` audit trail of its own. The merged
+read model (`resolveIdeaComponents`) is recomputed AFTER each commit and broadcast via
+`ideaComponentChangeEvents`, so a subscriber never sees a raw row or a partial component list. A
+ledger row, once written, is authoritative over derivation — `state='skipped'` is NEVER derived,
+only ever set explicitly via `setComponentState`. `TaskChangeRouter.applyChange` calls
+`IdeaComponentRouter.getInstance().applyChange(...)` directly as a POST-COMMIT follow-on
+(staleness stamping on idea edits) — the one chokepoint here that re-enters another from inside
+its own post-commit block.
+
+- **Canonical example:** `main/src/orchestrator/ideaComponents/ideaComponentRouter.ts`.
+
 ### In-repo workflow prompt bodies (self-containment)
 
-The four user-facing flows (Planner + Sprint + Compound + Ship) and their prompt BODIES live in
-app source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `compound.md`,
-`ship.md`, `builtInWorkflows.ts`). There is NO runtime read from
-`~/.claude/plugins/cache/soloflow/...`.
+Six built-in flows — `planner` / `sprint` / `compound` / `ship` / `verify-setup` / `launch` —
+and their prompt BODIES live in app source at `main/src/orchestrator/workflows/` (one `.md` per
+flow name, plus `design.md` and `idea-session.md` for the non-flow design-mode / idea-session
+spawns, and `builtInWorkflows.ts`). Five are user-facing; `verify-setup` configures a project
+(the visual-verification runbook) rather than doing project work, and launches from its own
+surface (the Verify Queue's health panel) instead of the general flow picker. There is NO
+runtime read from `~/.claude/plugins/cache/soloflow/...`.
 Rules when touching workflows:
 
-- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`), its
-  type `CyboflowWorkflowName`, and the type guard `isCyboflowWorkflowName` — all exported from
-  `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over the name array, so
-  adding/removing a flow there is a compile-time tripwire on the descriptor map and on
-  `WORKFLOW_DEFINITIONS` (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*`
-  names — NOT the historical `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` /
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES`, its type `CyboflowWorkflowName`, and the type
+  guard `isCyboflowWorkflowName` — all exported from `shared/types/workflows.ts` (grep there for
+  the current tuple rather than trusting a copy here; it is an app-wide exhaustive discriminant
+  and has grown before). `buildBuiltInWorkflows()` maps over the name array, so adding/removing a
+  flow there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
+  (`Readonly<Record<CyboflowWorkflowName, …>>`). `launch` must stay LAST in the tuple (its
+  bundled agents dedupe first-wins against the planner/sprint agents it borrows from). Use the
+  `Cyboflow*` names — NOT the historical `SoloFlow*` misnomers (removed: `SoloFlowWorkflowName` /
   `SOLOFLOW_WORKFLOW_NAMES` / `isSoloFlowWorkflowName` / `resolveSoloFlowPluginRoot` /
   `buildDefaultSoloFlowWorkflows`). `compound` was rebuilt natively from its preserved
   prose and `ship` was built natively from scratch.
@@ -548,20 +583,23 @@ Rules when touching workflows:
 
 ### Database access
 
-`main/src/services/database.ts` is the singleton. All mutations go through the main process —
-the renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
+`main/src/database/database.ts` (`DatabaseService`) is the singleton owning schema DDL, the
+migrations runner, and `seedDefaultBoard`. `main/src/services/database.ts` is a thin bootstrap
+shim (~10 lines) that constructs that `DatabaseService` instance from the boot path and calls
+`.initialize()` — nothing else lives there. All mutations go through the main process — the
+renderer never accesses SQLite directly. SQL is hand-written (no ORM); use parameterized
 queries. Migrations are plain `.sql` files in `main/src/database/migrations/`, named to sort
 in application order.
 
-ENTITY writes are the exception that proves the rule: they do not go through ad-hoc `database.ts`
-methods but through the `TaskChangeRouter` / `ReviewItemRouter` chokepoints above. `database.ts`
-still owns `seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the
-post-042 4-stage board seed (cross-check test pins this).
+ENTITY writes are the exception that proves the rule: they do not go through ad-hoc
+`DatabaseService` methods but through the write chokepoints above. `DatabaseService` still owns
+`seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the post-066
+5-stage board seed (cross-check test pins this).
 
 ### Schema reconciliation
 
-When modifying DDL for a table, run TWO greps and cover every match in `files_owned`
-(or document exclusions in `plan_decisions`):
+When modifying DDL for a table, run TWO greps and cover every match (or note why a
+match is intentionally excluded):
 
 1. Inline-DDL consumers: `grep -rn 'CREATE TABLE.*<table>' main/src/ frontend/src/`
 2. Migration-file loaders: `grep -rn 'readFileSync.*<NNN>\|join.*migrations.*<NNN>' main/src/`
@@ -595,8 +633,8 @@ while the ledger claimed success. Any migration header still describing that
 "rolls back and ledger-marks the WHOLE file" behaviour is describing the bug.
 
 **Consequence for migration authors:** every statement must be safe to re-run,
-because the ledger tracks by FILENAME and renumbering a file (113-118 were
-renumbered twice) re-applies it, as does a ledger-wiped replay. Prefer
+because the ledger tracks by FILENAME and renumbering a file re-applies it, as
+does a ledger-wiped replay. Prefer
 `CREATE … IF NOT EXISTS` and `WHERE col IS NULL`-style guarded backfills. An
 unconditional backfill needs an explicit gate on whether the columns it fills
 are actually new — `094_tracker_direction_modes.sql` shows the pattern: probe
@@ -640,20 +678,16 @@ Canonical implementation: `main/src/database/database.ts` `runFileBasedMigration
 (detects `PRAGMA foreign_keys=OFF` in the migration text and hoists the toggle
 above its own `this.transaction()` wrapper). Regression test:
 `main/src/database/__tests__/fileMigrationRunner.test.ts` `'FK-toggle path: …'`.
-TASK-757 added both after a code-reviewer caught that the inside-transaction
-variant would have CASCADE-deleted every row in `approvals`, `messages`, and
-`raw_events` during migration 010 development.
 
 ### Extract-shared-utility refactors: prove completeness
 
-Any task that extracts a shared fixture, helper, type, or constant MUST grep the
+Any change that extracts a shared fixture, helper, type, or constant MUST grep the
 PRE-refactor pattern across the entire codebase (`main/src/ frontend/src/`) — not just
-the files already in the planner's sample. Every match that is a direct substitute for
-the new utility appears in `files_owned`; intentional exclusions (different shape,
-deferred epic, manual lifecycle) get a one-sentence note in `plan_decisions`. A plan that
-lists some but not all matches without exclusion notes leaves the codebase half-migrated.
-Recent regressions: TASK-603 (2 inline DDL sites), TASK-604 (5 inline `dbAdapter` copies),
-TASK-605 (2 `mkdtempSync` leaks) all shipped with the same root cause.
+the files already in view. Migrate every match that is a direct substitute for the new
+utility; give each intentional exclusion (different shape, deferred work, manual
+lifecycle) a one-sentence note in the change description. Covering some but not all
+matches leaves the codebase half-migrated — the recurring root cause behind inline-copy
+regressions (DDL, `dbAdapter`, `mkdtempSync` cleanups have all shipped incomplete this way).
 
 ### `@cyboflow-hidden` annotation
 
@@ -664,19 +698,19 @@ caller / epic for forward-looking placeholders) to restore.
 
 Two valid categories:
 1. **Crystal-preserved** — code kept from the `stravu/crystal` baseline, disabled in v1.
-2. **Forward-looking placeholder** — fresh cyboflow code unwired until a later sprint's
-   integration task lands (e.g. satisfies a grep gate for a Day-N epic).
+2. **Forward-looking placeholder** — fresh cyboflow code unwired until a later
+   integration change lands.
 
 ```
 // @cyboflow-hidden: <what is unreachable> in cyboflow v1.
 // Re-enable by <restoring specific call site or JSX usage>.
 ```
 
-- **Canonical example (Crystal-preserved):** `main/src/services/worktreeManager.ts:502`
-  (method-group)
+- **Canonical example (whole-file case):** `main/src/services/visualVerify/baselineStore.ts`
+  (the golden-baseline feature, retired entirely — not merely behind a kill switch)
 - **Canonical example (forward-looking placeholder):**
   `main/src/services/panels/claude/claudeCodeManager.ts` — `tryTransitionToAwaitingReview`
-  (Day-3 ApprovalRouter integration point)
+  (an ApprovalRouter integration point)
 - **Audit tool:** `grep -rn '@cyboflow-hidden' main/src frontend/src` lists all
   inactive surfaces (both categories).
 
@@ -807,8 +841,7 @@ The cyboflow-era run-substrate tables (`workflow_runs`, `workflows`, `approvals`
 declaration; mirror any column add/drop into `schema.sql` in the same commit. Migrations from 007
 onward extend the schema additively (the entity model rebuild in 015 being the one destructive,
 forward-only, no-prod-data exception) — the migrations directory
-(`main/src/database/migrations/`) is the source of truth for how far that goes; it currently
-runs past 080.
+(`main/src/database/migrations/`) is the source of truth for how far that goes.
 
 **The 3-table entity model + the review inbox have their own row-shape source of truth.** Each
 of `ideas` / `epics` / `tasks` carries its own typed columns plus a single shared markdown
@@ -822,15 +855,17 @@ are pinned field-for-field against the TypeScript row interfaces in `main/src/da
 of these tables, update the migration, `schema.sql`, the `*Row` interface, and the shared type in
 the same commit — `entitySchemaParity` is the tripwire.
 
-**The 4-stage board seed is dual-sourced.** Migration `042_collapse_board` narrowed the board
-to the FOUR kept stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at
-their original positions; `database.ts` `seedDefaultBoard` seeds the same four for NEW projects.
-Both MUST be field-for-field identical; the cross-check test asserts `seedDefaultBoard` === the
-migrated 4-stage seed. The `derived` In-development / Ready-to-merge stages collapsed away — all
-four kept stages are `asserted`, and the derived execution/rollup stages are now computed by the
-`recomputeTaskExecutionStage` / `recomputeEpicStage` follow-ons (see the chokepoint pattern
-above). The off-board buckets (`ideas.decomposed_at`, `epics`+`tasks.approved_at`,
-`workflow_runs.plan_approved_at`) carry the dropped intermediate stages as nullable stamps.
+**The 5-stage board seed is dual-sourced.** Migration `042_collapse_board` narrowed the board to
+FOUR `asserted` stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at their
+original positions; migration `066_in_development_stage` later re-introduced position 7 ('In
+development') as a fifth, `derived` stage — position 8 ('Ready-to-merge') stayed collapsed and
+was never brought back. `database.ts` (`main/src/database/database.ts`) `seedDefaultBoard` seeds
+the same five for NEW projects. Both MUST be field-for-field identical; the cross-check test
+asserts `seedDefaultBoard` === the migrated 5-stage seed. The derived execution/rollup stages are
+computed by the `recomputeTaskExecutionStage` / `recomputeEpicStage` follow-ons (see the
+chokepoint pattern above). The off-board buckets (`ideas.decomposed_at`, `epics`+
+`tasks.approved_at`, `workflow_runs.plan_approved_at`) carry the dropped intermediate stages as
+nullable stamps.
 
 A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite,
 applies the schema.sql + migrations path side-by-side with the migrations-only path, and asserts
@@ -840,23 +875,56 @@ drift is caught by the test suites that import them.
 
 ## permissionMode contract
 
-**Source of truth:** `shared/types/permissionMode.ts` exports both the type alias and the default constant:
+**Source of truth:** `shared/types/permissionMode.ts` exports both the type alias and the default constant — the LEGACY 2-mode contract for quick/legacy sessions:
 
 ```typescript
 export type PermissionMode = 'approve' | 'ignore';
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'approve';
 ```
 
-**Rules — enforced by grep-gate in TASK-654:**
+This is DISTINCT from the newer 4-mode contract governing workflow runs and the current Settings
+UI — `'default' | 'acceptEdits' | 'auto' | 'dontAsk'`, ALSO named `PermissionMode` but exported
+from `shared/types/workflows.ts`. `interactiveSettingsWriter.ts` treats `'ignore'`/`'dontAsk'` as
+parallel opt-outs; do not collapse the two types or import one where the other is meant.
 
-1. **No UI surface may expose `'ignore'` as selectable.** The Settings.tsx Default Security Mode section and the BaseCliPanel.tsx Permission Mode dropdown must each offer only `value="approve"`. Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
+**Rules — grep-enforced:**
+
+1. **No UI surface may expose `'ignore'` as selectable.** The `BaseCliPanel.tsx` Permission Mode
+   dropdown must offer only `value="approve"`. (Settings.tsx no longer has a 2-mode picker at
+   all — it now exposes the separate 4-mode `defaultAgentPermissionMode` picker,
+   `SessionSettings.tsx`'s `PERMISSION_MODE_OPTIONS`, which has no `'ignore'` value to begin
+   with.) Verification: `grep -rnE 'value="ignore"' frontend/src/ tests/` must return 0 matches.
 
 2. **No default or fallback may resolve to `'ignore'`.** Use `DEFAULT_PERMISSION_MODE` (imported from `shared/types/permissionMode`) wherever a missing value must be filled in. Verification: `grep -rnE "\|\| 'ignore'" main/src/ frontend/src/ shared/` must return 0 matches.
 
-3. **`'ignore'` remains a valid typed value** — it is consumed by `claudeCodeManager.ts:389` (omits the PreToolUse hook for a legitimate debug bypass) and by test fixtures. Do NOT remove `'ignore'` from the `PermissionMode` union or the DB CHECK constraint — legacy rows and the manager's bypass path depend on it.
+3. **`'ignore'` remains a valid typed value.** Each CLI manager owns its own
+   `resolveSessionAgentPermissionMode` method (`claudeCodeManager.ts`,
+   `interactiveClaudeManager.ts`, `codexPtyManager.ts`, `ompPtyManager.ts`,
+   `piPtyManager.ts`; `piSdkManager.ts` names its equivalent `resolveGateMode`) that reads it: the Claude pair short-circuits to
+   `undefined` (preserving the legacy branch instead of resolving the 4-mode
+   `agentPermissionMode`), the non-Claude managers fold it into the equivalent `'dontAsk'`. On
+   the Claude interactive/PTY substrate specifically, `resolveInlineGatingHooks`
+   (`interactiveSettingsWriter.ts`) also still branches on it directly — `'ignore'`, like the
+   newer `'dontAsk'`/`'auto'`, omits the wildcard PreToolUse gating hook from the inline
+   `--settings` fragment. Plus test fixtures. Do NOT remove `'ignore'` from the `PermissionMode`
+   union or the DB CHECK constraint — legacy rows and these consumers depend on it.
 
 4. **DB CHECK constraint is `IN ('approve', 'ignore')`** — both values are persisted. Migration 008 (`main/src/database/migrations/008_permission_mode_approve_default.sql`) backfills NULL rows to `'approve'` on legacy installs. The DEFAULT clause on new columns uses `'approve'`.
 
 5. **Import discipline:** Import `DEFAULT_PERMISSION_MODE` and `PermissionMode` from `shared/types/permissionMode.ts`. Do NOT re-declare the type inline or hardcode the string `'approve'` as a standalone fallback literal (`|| 'approve'`). The constant import is the compile-time tripwire that catches regressions — a string literal is invisible to grep-gate sweeps once the surrounding context shifts. Verification: `grep -rnE "\|\| 'approve'" main/src/ frontend/src/ shared/ --include='*.ts' --include='*.tsx'` must return 0 matches in non-comment lines.
 
-6. **`settingSources` in `buildSdkOptions` is `['user', 'project']` — this is intentional.** Loading user settings from `~/.claude/settings.json` is needed to pick up user-level MCP servers, custom instructions, and other per-user configuration. The acknowledged risk is that user-level tool allow-lists (e.g. `defaultMode: 'auto'` + a `Bash(...)` allow entry) could cause the SDK to auto-approve tools before the `PreToolUse` hook fires, bypassing `ApprovalRouter`. This risk is mitigated by the conditional hook registration in `claudeCodeManager.ts buildSdkOptions()`: when `permissionMode === 'ignore'` the `PreToolUse` hook is omitted entirely (tools auto-approved by design), and when `permissionMode !== 'ignore'` the hook is registered unconditionally. Do NOT revert `settingSources` to `['project']`-only without also removing the user-settings UX features that depend on it. If SDK behaviour around allow-list precedence needs clarification, see TASK-797.
+6. **The Claude SDK substrate installs its `PreToolUse` hook UNCONDITIONALLY.**
+   `composeHookOptions` (`claudeCodeManager.ts` — the SDK-manager half of the dual-substrate
+   seam) ALWAYS installs exactly one dynamic `PreToolUse` hook: no per-mode fork, no
+   `'ignore'`/`dontAsk` early return. The hook live-reads the owning session's 4-mode
+   `agentPermissionMode` (`shared/types/workflows.ts`) on every call, so a mode change takes
+   effect on the very next tool call with no re-spawn. `'auto'` (when the model is capable) is
+   the only mode where the hook itself defers to the native classifier — and even then
+   `canUseTool` is installed unconditionally, so the classifier's terminal 'ask' verdict still
+   becomes a blocking `ApprovalRouter` prompt. This replaced an earlier conditional-registration
+   mechanism in the permission-mode redesign. `settingSources` in `buildSdkOptions` staying
+   `['user', 'project']` — needed to pick up user-level MCP servers, custom instructions, and
+   other per-user configuration from `~/.claude/settings.json` — is safe under this design for
+   the same reason: nothing on the tool-call path skips the hook based on user-level settings.
+   Do NOT revert `settingSources` to `['project']`-only without also removing the user-settings
+   UX features that depend on it.

@@ -100,7 +100,7 @@ import { selectRunUsageRollups } from './insightsQueries';
  * @param db     - Narrow DatabaseLike surface (same one threaded to the executor).
  * @param runId  - The run that just reached a terminal seam.
  * @param logger - Optional structured logger; warn-on-failure is gated on it
- *                 (CLAUDE.md: pass it through from the enclosing scope, never omit).
+ *                 (CODE-PATTERNS.md: pass it through from the enclosing scope, never omit).
  */
 export function rollupRunUsage(db: DatabaseLike, runId: string, logger?: LoggerLike): void {
   try {

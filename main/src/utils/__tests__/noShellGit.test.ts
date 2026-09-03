@@ -58,7 +58,7 @@ const LEGACY_ALLOWLIST: ReadonlyMap<string, string> = new Map([
   ],
   [
     'services/panels/claude/interactiveClaudeManager.ts',
-    'AbstractCliManager subclass — the CLI substrate’s own exec surface (see CLAUDE.md).',
+    'AbstractCliManager subclass — the CLI substrate’s own exec surface (see docs/AGENT-GUIDE.md).',
   ],
 ]);
 

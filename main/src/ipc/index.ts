@@ -6,7 +6,6 @@ import { registerSessionHandlers } from './session';
 import { registerProjectHandlers } from './project';
 import { registerDialogHandlers } from './dialog';
 import { registerScriptHandlers } from './script';
-import { registerPromptHandlers } from './prompt';
 import { registerFolderHandlers } from './folders';
 import { registerUIStateHandlers } from './uiState';
 import { registerDashboardHandlers } from './dashboard';
@@ -38,7 +37,6 @@ export function registerIpcHandlers(services: AppServices): void {
   registerProjectHandlers(ipcMain, services);
   registerDialogHandlers(ipcMain, services);
   registerScriptHandlers(ipcMain, services);
-  registerPromptHandlers(ipcMain, services);
   registerFolderHandlers(ipcMain, services);
   registerUIStateHandlers(services);
   registerDashboardHandlers(ipcMain, services);

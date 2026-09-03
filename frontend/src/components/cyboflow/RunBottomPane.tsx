@@ -26,6 +26,7 @@ import { DemoTerminalView } from './DemoTerminalView';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { RunShellTerminalView } from './RunShellTerminalView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useChatTabFocusRequest } from '../../stores/composerFocusStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { trpc } from '../../trpc/client';
@@ -123,6 +124,12 @@ export function RunBottomPane({ onActiveTabKindChange }: RunBottomPaneProps = {}
     setExtraTerminals(perRunTerminals.current.get(activeRunId)?.ids ?? []);
     setActiveId('chat');
   }, [activeRunId]);
+
+  // ⌘' (toggleChat) reveals the Chat tab before the composer is asked to take
+  // focus — the non-chat tabs UNMOUNT RunChatView, so without this the focus
+  // request would have no textarea to land on. The request itself is consumed by
+  // the composer (ChatInput), not here, so it survives this re-render.
+  useChatTabFocusRequest(activeRunId, () => setActiveId('chat'));
 
   const tabs = useMemo<RunTab[]>(() => {
     const list: RunTab[] = [{ id: 'chat', kind: 'chat', label: 'Chat' }];

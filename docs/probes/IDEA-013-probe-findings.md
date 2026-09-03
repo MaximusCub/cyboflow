@@ -2,7 +2,7 @@
 
 **Status:** Probes **A, A2, B(encode), C, D, E** RESOLVED via a live interactive `claude` battery on
 **2026-06-01** (sessions under `~/.claude/projects/-private-tmp-idea013-probe/`, driven through the
-`docs/probes/scratch/` kit), and **Probe H = GO** (user sign-off 2026-06-01, on operator experience).
+`docs/probes/scratch/` kit — scripts since removed; the findings below are the record), and **Probe H = GO** (user sign-off 2026-06-01, on operator experience).
 **Q1–Q4 are resolved and the whole-epic go/no-go is GO — the epic is greenlit.** The only remaining items
 are non-gating sub-probes: **B-timing** (`DISCOVERY_TIMEOUT_MS`, a constant to calibrate during S2) and
 **F/G** (validate the IDEA-029-dependent slices once that socket runtime exists).
@@ -96,6 +96,6 @@ are non-gating sub-probes: **B-timing** (`DISCOVERY_TIMEOUT_MS`, a constant to c
 > S4 (dispatch + facade) is not probe-gated; depends-on-MERGE of IDEA-029 TASK-799.
 
 ## How this was produced
-Live battery run 2026-06-01 via `docs/probes/scratch/` against a bare interactive `claude` in
+Live battery run 2026-06-01 via the (since-removed) `docs/probes/scratch/` kit against a bare interactive `claude` in
 `/private/tmp/idea013-probe` (hook log streamed to the orchestrating agent). Probes B-timing, F, G, H remain.
 Cleanup: `rm -rf /tmp/idea013-probe /tmp/idea013-probe-hook.log /tmp/idea013.sock` when done.

@@ -42,13 +42,26 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** A migrations dir holding every real migration except 110 — i.e. the pre-110 app. */
+/**
+ * A migrations dir holding every real migration strictly BEFORE 110 — i.e.
+ * the pre-110 app. Excludes 110 itself AND everything at-or-above its prefix
+ * (not just the one named file): migration 129 recreates tracker_connections
+ * from a hardcoded column list that assumes push_target already exists, so a
+ * fixture that kept 123 while dropping only 110 would fabricate a pre-state
+ * no real install is ever in (129 shipped strictly after 110) and 129's own
+ * recreate would throw "no such column: push_target" — the same class of
+ * impossible-pre-state bug migration122.test.ts's header documents fixing
+ * for itself, generalized here now that a LATER migration depends on this
+ * one's column.
+ */
 function migrationsDirWithout110(): string {
   const dir = join(tmpDir, 'migrations-pre-110');
   mkdirSync(dir);
+  const targetPrefix = parseInt(MIGRATION_110.slice(0, 3), 10);
   for (const name of readdirSync(MIGRATIONS_DIR)) {
-    if (name === MIGRATION_110) continue;
-    if (!/^\d{3}_.*\.sql$/.test(name)) continue;
+    const match = /^(\d{3})_.*\.sql$/.exec(name);
+    if (!match) continue;
+    if (parseInt(match[1], 10) >= targetPrefix) continue;
     copyFileSync(join(MIGRATIONS_DIR, name), join(dir, name));
   }
   return dir;

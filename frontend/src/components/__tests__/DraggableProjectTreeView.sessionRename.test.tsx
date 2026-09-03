@@ -65,7 +65,7 @@ function makeProps(overrides: Partial<SessionRowProps> = {}): SessionRowProps {
 describe('SessionRow — inline rename', () => {
   beforeEach(() => {
     vi.mocked(API.sessions.rename).mockReset();
-    vi.mocked(API.sessions.rename).mockResolvedValue({ success: true });
+    vi.mocked(API.sessions.rename).mockResolvedValue({ success: true, data: { id: 's1', name: 'renamed' } });
   });
 
   it('double-click on the name shows an input seeded with the current name', () => {

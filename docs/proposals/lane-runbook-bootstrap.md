@@ -1,6 +1,9 @@
 # Lane runbook bootstrap — verification that sets itself up
 
-**Status:** proposal, v2 — rewritten after adversarial review
+**Status:** SHIPPED (Phases 0-4; see §13). v2 design, rewritten after adversarial
+review, then implemented, re-reviewed post-ship, and live-smoked across three
+rounds (§16-19). Migrations 107-109 (`bootstrap_proof`, `runbook_bootstrap_stamp`,
+`runbook_bootstrap_suppression`).
 **Review history:** v1 was reviewed independently by Codex and by a Fable agent.
 Codex returned 8 blocking defects; Fable returned 9 more that Codex missed and
 judged v1 **not salvageable in its proposed shape**. Five of Codex's and two of

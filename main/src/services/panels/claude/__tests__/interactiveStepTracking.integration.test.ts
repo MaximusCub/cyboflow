@@ -229,7 +229,7 @@ function createMockConfigManager(): ConfigManager {
  * `LoggerLike` from makeSpyLogger() does not — so we supply a verbose-capable spy
  * here and keep makeSpyLogger() for the bridge LoggerLike argument. Every method
  * is a vi.fn() so the manager's optional-logger threading is exercised, never
- * omitted (CLAUDE.md optional-logger rule).
+ * omitted (CODE-PATTERNS.md optional-logger rule).
  */
 function createManagerLoggerSpy(): Pick<Logger, 'verbose' | 'info' | 'warn' | 'error'> {
   return {

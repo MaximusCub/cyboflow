@@ -1,6 +1,12 @@
 /**
  * FlowProgress — the horizontal phase stepper for a single active run.
  *
+ * NOTE: no longer rendered by the landing page itself (the Human Review Queue
+ * redesign dropped its consumer here) — the live consumer is the Project
+ * Overview's active-agents section ({@link ../overview/OverviewActiveAgents}).
+ * It stays under landing/ because PhaseRibbon and overviewChrome reference it
+ * by this path in their docs.
+ *
  * Renders one equal-width segment per workflow PHASE: a thin colored bar above a
  * tiny uppercase phase label. Bars up to and including the current phase are
  * filled with the LITERAL phase hex from the workflow definition (inline style,

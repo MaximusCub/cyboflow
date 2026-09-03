@@ -3,7 +3,9 @@
  *
  * Verifies:
  *   - Renders nothing when the progress payload is empty (totalCount: 0).
- *   - Pauses the 2s `archive:get-progress` poll while the document is hidden,
+ *   - Pauses the 2s archive-progress poll (API.sessions.getArchiveProgress —
+ *     the cyboflow.sessions tRPC query, formerly `archive:get-progress`) while
+ *     the document is hidden,
  *     resumes with an immediate catch-up load on re-show (mirrors the
  *     visibility-gate pattern in useSessionMetrics.ts / LiveCanvasEmbed).
  */
@@ -11,6 +13,16 @@ import '@testing-library/jest-dom';
 import { render, screen, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ArchiveProgress } from '../ArchiveProgress';
+import { API } from '../../utils/api';
+
+// The poll rides API.sessions.getArchiveProgress (tRPC) now; the component still
+// uses window.electron for the push 'archive:progress' subscription, which
+// mockElectron below keeps satisfying.
+vi.mock('../../utils/api', () => ({
+  API: { sessions: { getArchiveProgress: vi.fn() } },
+}));
+
+const getArchiveProgress = vi.mocked(API.sessions.getArchiveProgress);
 
 interface ArchiveTaskFixture {
   sessionId: string;
@@ -25,12 +37,12 @@ function progress(activeCount: number, tasks: ArchiveTaskFixture[] = []) {
   return { tasks, activeCount, totalCount: tasks.length };
 }
 
-function mockElectron(invoke: ReturnType<typeof vi.fn>) {
+function mockElectron() {
   Object.defineProperty(window, 'electron', {
     writable: true,
     configurable: true,
     value: {
-      invoke,
+      invoke: vi.fn(),
       on: vi.fn(() => undefined),
       off: vi.fn(),
       openExternal: vi.fn(),
@@ -40,6 +52,7 @@ function mockElectron(invoke: ReturnType<typeof vi.fn>) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  getArchiveProgress.mockReset();
 });
 
 afterEach(() => {
@@ -49,8 +62,8 @@ afterEach(() => {
 
 describe('ArchiveProgress', () => {
   it('renders nothing when there are no archive tasks', async () => {
-    const invoke = vi.fn().mockResolvedValue({ success: true, data: progress(0) });
-    mockElectron(invoke);
+    getArchiveProgress.mockResolvedValue({ success: true, data: progress(0) });
+    mockElectron();
 
     const { container } = render(<ArchiveProgress />);
     await act(async () => {
@@ -69,8 +82,8 @@ describe('ArchiveProgress', () => {
       status: 'removing-worktree',
       startTime: new Date().toISOString(),
     };
-    const invoke = vi.fn().mockResolvedValue({ success: true, data: progress(1, [task]) });
-    mockElectron(invoke);
+    getArchiveProgress.mockResolvedValue({ success: true, data: progress(1, [task]) });
+    mockElectron();
 
     const hiddenSpy = vi.spyOn(document, 'hidden', 'get');
     hiddenSpy.mockReturnValue(false);
@@ -81,7 +94,7 @@ describe('ArchiveProgress', () => {
         await Promise.resolve();
       });
       expect(screen.getByText('Archive Tasks')).toBeInTheDocument();
-      const callsAfterMount = invoke.mock.calls.length;
+      const callsAfterMount = getArchiveProgress.mock.calls.length;
 
       // Hide the document — the 2s poll must stop firing.
       hiddenSpy.mockReturnValue(true);
@@ -92,7 +105,7 @@ describe('ArchiveProgress', () => {
         vi.advanceTimersByTime(10_000);
         await Promise.resolve();
       });
-      expect(invoke.mock.calls.length).toBe(callsAfterMount);
+      expect(getArchiveProgress.mock.calls.length).toBe(callsAfterMount);
 
       // Re-show — an immediate catch-up load fires, then the 2s cadence resumes.
       hiddenSpy.mockReturnValue(false);
@@ -100,7 +113,7 @@ describe('ArchiveProgress', () => {
         document.dispatchEvent(new Event('visibilitychange'));
         await Promise.resolve();
       });
-      expect(invoke.mock.calls.length).toBeGreaterThan(callsAfterMount);
+      expect(getArchiveProgress.mock.calls.length).toBeGreaterThan(callsAfterMount);
     } finally {
       hiddenSpy.mockRestore();
     }

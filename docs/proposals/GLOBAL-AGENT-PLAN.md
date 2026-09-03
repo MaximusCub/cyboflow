@@ -1,7 +1,11 @@
 # Global Agent — Detailed Implementation Plan (Stages 0–1)
 
-Status: PROPOSED (Codex-adversarial-reviewed 2026-07-17: 8 findings, all incorporated below;
-pending human approval). Owner: Krishna.
+Status: SHIPPED (Stages 0-1). Codex-adversarial-reviewed 2026-07-17 (8 findings, all
+incorporated below); merged via commits `d17d3970d` (agent-rail thread view, composer,
+suggestion chips, digest trigger) and `a0a8b375e` (assistant proposes backlog creates),
+migrations 074/076/080/125. Owner: Krishna. Kept in `docs/proposals/` (not archived) because
+frontend source files carry `docs/proposals/GLOBAL-AGENT-PLAN.md` doc-comment pointers to its
+section numbers.
 Design reference: `design_handoff_review_queue_agent` handoff bundle (Downloads, 2026-07-06) —
 `README.md` + `Action Cards.dc.html` (card anatomy source of truth) + `Review Queue Agent.dc.html`
 (placement 2a). The packet's SoloFlow-era references (`/soloflow:*`, `dashboard.jsx`,

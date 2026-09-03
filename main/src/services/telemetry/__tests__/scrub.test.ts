@@ -5,6 +5,7 @@ import {
   scrubBreadcrumb,
   isBenignStreamWriteEpipe,
   tagCrashSource,
+  isDeliberateProcessTermination,
 } from '../scrub';
 
 describe('scrubSentryEvent', () => {
@@ -165,6 +166,45 @@ describe('scrubBreadcrumb', () => {
     const breadcrumb: Breadcrumb = { category: 'ui.click' };
     const result = scrubBreadcrumb(breadcrumb);
     expect(result).toBe(breadcrumb);
+  });
+});
+
+describe('isDeliberateProcessTermination', () => {
+  function nativeExit(reason?: string): Event {
+    return {
+      platform: 'native',
+      level: 'fatal',
+      tags: {
+        'event.environment': 'native',
+        'event.process': 'Utility',
+        ...(reason === undefined ? {} : { 'exit.reason': reason }),
+      },
+    };
+  }
+
+  // CYBOFLOW-APP-1V: Chromium stopping the Audio Service (SIGTERM, exitCode 15)
+  // uploaded a minidump whose captured stack was a macOS sourcekitdInProc /
+  // Swift dispatch_apply overflow — OS code we never call, filed as an app crash.
+  it.each(['killed', 'clean-exit'])("drops a '%s' child-process minidump", (reason) => {
+    expect(isDeliberateProcessTermination(nativeExit(reason))).toBe(true);
+  });
+
+  // A utility process dying unexpectedly is still our problem.
+  it.each(['crashed', 'oom', 'abnormal-exit', 'launch-failed', 'integrity-failure'])(
+    "keeps a '%s' child-process minidump",
+    (reason) => {
+      expect(isDeliberateProcessTermination(nativeExit(reason))).toBe(false);
+    },
+  );
+
+  it('keeps a native crash carrying no exit reason at all', () => {
+    expect(isDeliberateProcessTermination(nativeExit())).toBe(false);
+  });
+
+  // Scoped to native: this must never become a general-purpose drop.
+  it('never drops a non-native event, whatever its tags say', () => {
+    const jsError: Event = { platform: 'javascript', tags: { 'exit.reason': 'killed' } };
+    expect(isDeliberateProcessTermination(jsError)).toBe(false);
   });
 });
 

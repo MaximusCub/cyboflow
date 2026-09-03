@@ -1,7 +1,9 @@
 # Tracker field write-back — implementation plan
 
-Status: PLAN (Codex-adversarially reviewed 2026-08-21; all 6 findings addressed inline — see "Review
-findings absorbed" at the end; not started)
+Status: **SHIPPED and live-probed** (migrations `117_widen_entity_priority.sql` /
+`118_tracker_content_archive_modes.sql`; Codex-adversarially reviewed 2026-08-21 and again in a
+final round-3 pass 2026-08-24 — see "Review findings absorbed" at the end, both rounds addressed
+inline).
 Scope owner decisions (locked 2026-08-21):
 
 - Local priority widens from `P0-P2` to **`P0-P6`** (7 levels), then a per-connection priority mapping.

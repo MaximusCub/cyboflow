@@ -1,5 +1,9 @@
 # State Management Guidelines
 
+> **HISTORICAL — Crystal-era guide.** Preserved for reference to the fork baseline.
+> For cyboflow's current architecture (orchestrator, entity model, review queue, dual-substrate
+> seam) see `docs/ARCHITECTURE.md`, which is the source of truth.
+
 ⚠️ **IMPORTANT**: Crystal follows a targeted update pattern for state management to minimize unnecessary re-renders and network requests.
 
 ## Overview

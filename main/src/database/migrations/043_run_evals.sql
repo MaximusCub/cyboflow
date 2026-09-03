@@ -2,7 +2,7 @@
 -- (workflow_run, rubric_version).
 --
 -- The eval feature scores a completed built-in workflow run against the 7-dimension
--- code-review rubric (docs/proposals/code-review-eval-checklist.md, rubric v1.1). The
+-- code-review rubric (docs/eval-rubric.md, rubric v1.1). The
 -- EvalWorker captures the frozen diff AT TRIGGER (the sprint/ship "human-review begins"
 -- step transition) into this table, then runs a K-sample LLM jury and writes the verdict
 -- back onto the SAME row. Everything the worker needs to survive worktree teardown

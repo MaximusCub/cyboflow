@@ -1,0 +1,215 @@
+$ git status --porcelain
+?? transcripts/
+$ find .beads -type f
+.beads/.gitignore
+.beads/.local_version
+.beads/README.md
+.beads/config.yaml
+.beads/embeddeddolt/.lock
+.beads/embeddeddolt/f_workspace_scale/.dolt/config.json
+.beads/embeddeddolt/f_workspace_scale/.dolt/noms/LOCK
+.beads/embeddeddolt/f_workspace_scale/.dolt/noms/journal.idx
+.beads/embeddeddolt/f_workspace_scale/.dolt/noms/manifest
+.beads/embeddeddolt/f_workspace_scale/.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+.beads/embeddeddolt/f_workspace_scale/.dolt/repo_state.json
+.beads/interactions.jsonl
+.beads/metadata.json
+$ find .beads -maxdepth 2 -type d
+.beads
+.beads/embeddeddolt
+.beads/embeddeddolt/f_workspace_scale
+$ cat .git/info/exclude
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+
+# Beads stealth mode (added by bd init --stealth)
+.beads/
+.claude/settings.local.json
+
+# Beads: Dolt files kept local via .git/info/exclude (stealth / no-git-ops)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+$ du -sh .beads
+2.1M	.beads
+$ ls -la (root)
+total 0
+drwxr-xr-x@  5 raimundoesteva  wheel  160 Aug 26 21:31 .
+drwxr-xr-x@  9 raimundoesteva  wheel  288 Aug 26 21:30 ..
+drwx------@  9 raimundoesteva  wheel  288 Aug 26 21:31 .beads
+drwxr-xr-x@ 12 raimundoesteva  wheel  384 Aug 26 21:31 .git
+drwxr-xr-x@  5 raimundoesteva  wheel  160 Aug 26 21:31 transcripts
+$ cat .beads/.gitignore
+# Dolt database (managed by Dolt, not git)
+dolt/
+embeddeddolt/
+proxieddb/
+
+# Runtime files
+bd.sock
+bd.sock.startlock
+sync-state.json
+last-touched
+.exclusive-lock
+
+# Daemon runtime (lock, log, pid)
+daemon.*
+
+# Push state (runtime, per-machine)
+push-state.json
+
+# Lock files (various runtime locks)
+*.lock
+
+# Credential key (encryption key for federation peer auth — never commit)
+.beads-credential-key
+
+# Local version tracking (prevents upgrade notification spam after git ops)
+.local_version
+
+proxied_server_client_info.json
+
+# Worktree redirect file (contains relative path to main repo's .beads/)
+# Must not be committed as paths would be wrong in other clones
+redirect
+
+# Sync state (local-only, per-machine)
+# These files are machine-specific and should not be shared across clones
+.sync.lock
+export-state/
+export-state.json
+last_pull
+
+# Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
+ephemeral.sqlite3
+ephemeral.sqlite3-journal
+ephemeral.sqlite3-wal
+ephemeral.sqlite3-shm
+
+# Dolt server management (auto-started by bd)
+dolt-server.pid
+dolt-server.log
+dolt-server.lock
+dolt-server.port
+dolt-server.activity
+
+# Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
+dolt-pprof/
+
+# Corrupt backup directories (created by bd doctor --fix recovery)
+*.corrupt.backup/
+
+# Backup data (auto-exported JSONL, local-only)
+backup/
+
+# Per-project environment file (Dolt connection config, GH#2520)
+.env
+
+# Legacy files (from pre-Dolt versions)
+*.db
+*.db?*
+*.db-journal
+*.db-wal
+*.db-shm
+db.sqlite
+bd.db
+# NOTE: Do NOT add negation patterns here.
+# They would override fork protection in .git/info/exclude.
+# Config files (metadata.json, config.yaml) are tracked by git by default
+# since no pattern above ignores them.
+$ cat .beads/metadata.json
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f_workspace_scale",
+  "project_id": "424690c9-d0de-4d11-8830-5f9a1f91ad7a"
+}$ cat .beads/config.yaml
+# Beads Configuration File
+# This file configures default behavior for all bd commands in this repository
+# All settings can also be set via environment variables (BD_* prefix)
+# or overridden with command-line flags
+
+# Issue prefix for this repository (used by bd init)
+# If not set, bd init will auto-detect from directory name
+# Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
+# issue-prefix: ""
+
+# Use no-db mode: JSONL-only, no Dolt database
+# When true, .beads/issues.jsonl is the only local store
+# no-db: false
+
+# Enable JSON output by default
+# json: false
+
+# Feedback title formatting for mutating commands (create/update/close/dep/edit)
+# 0 = hide titles, N > 0 = truncate to N characters
+# output:
+#   title-length: 255
+
+# Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
+# actor: ""
+
+# Export events (audit trail) to .beads/events.jsonl on each flush/sync
+# When enabled, new events are appended incrementally using a high-water mark.
+# Use 'bd export --events' to trigger manually regardless of this setting.
+# events-export: false
+
+# Multi-repo configuration (experimental - bd-307)
+# Allows hydrating from multiple repositories and routing writes to the correct database
+# repos:
+#   primary: "."  # Primary repo (where this database lives)
+#   additional:   # Additional repos to hydrate from (read-only)
+#     - ~/beads-planning  # Personal planning repo
+#     - ~/work-planning   # Work planning repo
+
+# Dolt-native backup (periodic backup for off-machine recovery)
+# This is full database backup only. Cross-machine sync uses Dolt remotes.
+# backup:
+#   enabled: false     # Disable auto-backup entirely
+#   interval: 15m      # Minimum time between auto-backups
+#   git-push: false    # Disable git push (backup locally only)
+#   git-repo: ""       # Separate git repo for backups (default: project repo)
+
+# Optional JSONL auto-export for viewers, interchange, and issue-level migration.
+# Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
+# Use relative paths under .beads/ for JSONL import/export filenames.
+# export:
+#   auto: false
+#   path: issues.jsonl
+#   interval: 60s
+#   git-add: false
+# import:
+#   path: issues.jsonl
+
+# Integration settings (access with 'bd config get/set')
+# Non-secret keys (stored in the database):
+# - jira.url, jira.project
+# - linear.team_id
+# - github.org, github.repo
+#
+# Secret keys (stored in this file but prefer env vars to avoid git exposure):
+# - linear.api_key  → use LINEAR_API_KEY env var instead
+# - github.token    → use GITHUB_TOKEN env var instead
+$ cat .beads/.local_version
+1.2.2
+$ ls -la (root)
+total 0
+drwxr-xr-x@  5 raimundoesteva  wheel  160 Aug 26 21:31 .
+drwxr-xr-x@  9 raimundoesteva  wheel  288 Aug 26 21:30 ..
+drwx------@  9 raimundoesteva  wheel  288 Aug 26 21:31 .beads
+drwxr-xr-x@ 12 raimundoesteva  wheel  384 Aug 26 21:31 .git
+drwxr-xr-x@  5 raimundoesteva  wheel  160 Aug 26 21:31 transcripts
+$ cat .beads/metadata.json
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "f_workspace_scale",
+  "project_id": "424690c9-d0de-4d11-8830-5f9a1f91ad7a"
+}

@@ -1,0 +1,46 @@
+$ bd show bp-fgk --json
+[
+  {
+    "id": "bp-fgk",
+    "title": "Swarm: swarm epic probe",
+    "description": "Swarm molecule orchestrating epic bp-qjd.\n\nEpic: bp-qjd\nCoordinator: ",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "molecule",
+    "created_at": "2026-08-27T04:36:07Z",
+    "created_by": "Krishna",
+    "updated_at": "2026-08-27T04:36:07Z",
+    "mol_type": "swarm",
+    "dependencies": [
+      {
+        "id": "bp-qjd",
+        "title": "swarm epic probe",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "epic",
+        "owner": "13578267+kesteva@users.noreply.github.com",
+        "created_at": "2026-08-27T04:36:06Z",
+        "created_by": "Krishna",
+        "updated_at": "2026-08-27T04:36:06Z",
+        "dependency_type": "relates-to"
+      }
+    ],
+    "dependent_count": 0,
+    "dependency_count": 1,
+    "comment_count": 0
+  }
+]
+
+-- default list --
+1
+-- --all --
+1
+-- --all --include-templates --
+1
+-- --all --include-infra --
+1
+-- --all --include-gates --
+1
+-- bd list --mol-type swarm --json (dedicated filter) --
+1
+2

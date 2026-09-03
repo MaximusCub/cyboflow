@@ -4,7 +4,7 @@
  * These tests drive the REAL process-management primitives against REAL child
  * processes (detached `sh`/`node` trees), NOT the pid=0 FakePty bypass used by
  * the sibling claudeCodeManager / interactiveClaudeManager suites. Per the
- * CLAUDE.md dual-substrate note, `killProcessTree` / `getAllDescendantPids` /
+ * AGENT-GUIDE.md dual-substrate note, `killProcessTree` / `getAllDescendantPids` /
  * `spawnPtyProcess` are LIVE and load-bearing for the interactive substrate.
  *
  * Coverage:

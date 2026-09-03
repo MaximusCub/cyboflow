@@ -12,7 +12,7 @@
  * tests point at a temp dir (never touches the real `~/.claude`), and the
  * discovery timeout is injected.
  *
- * Logger contract (CLAUDE.md optional-logger rule): the structural logger is
+ * Logger contract (CODE-PATTERNS.md optional-logger rule): the structural logger is
  * REQUIRED, not optional — discovery-timeout, malformed-line-skip, and
  * watch-fallback diagnostics are all gated on it. Omitting it would silently
  * no-op observability, so the constructor demands it.
@@ -51,7 +51,7 @@ export interface TranscriptTailSourceOptions {
    * so tests can exercise the give-up path without a real 2-minute wait.
    */
   lateDiscoveryWindowMs?: number;
-  /** REQUIRED structural logger (CLAUDE.md optional-logger rule). */
+  /** REQUIRED structural logger (CODE-PATTERNS.md optional-logger rule). */
   logger: StructuralLogger;
   /**
    * Optional: invoked when a transcript binds AFTER the soft discovery timeout

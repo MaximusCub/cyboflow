@@ -1,0 +1,15 @@
+=== isolate which flag reveals ephemeral bp-wisp-yrv ===
+--- --all --include-gates only ---
+0
+--- --all --include-infra only ---
+1
+--- --all --include-templates only ---
+0
+
+=== isolate which flag reveals gate bp-4em (already know include-gates does) ===
+--- --all --include-infra only (should be 0) ---
+0
+--- --all --include-templates only (should be 0) ---
+0
+
+=== also check bd list --ephemeral flag existence? (not in help) grep ===

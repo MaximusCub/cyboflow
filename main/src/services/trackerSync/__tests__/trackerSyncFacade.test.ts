@@ -188,6 +188,8 @@ class FakeAdapter implements TrackerAdapter {
     idempotentCreate: true,
     contentWrite: { title: true, description: true, priority: true, category: false },
     archive: 'trash',
+    requiresIdReconciliation: false,
+    guardedUpdates: false,
   };
 
   readonly calls: string[] = [];
@@ -369,6 +371,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     archive_sync_mode: 'off',
     priority_mapping_json: '{}',
     category_mapping_json: '{}',
+    config_generation: 0,
     mirror_subissues: 1,
     conflict_mode: 'manual',
     cursor_updated_at: null,
@@ -1629,6 +1632,45 @@ describe('TrackerSyncService.connections', () => {
     expect(summary.lastSyncLog).toEqual([{ marker: '✓', line: 'sync complete' }]);
     expect(summary.linkedCount).toBe(1);
     expect(summary.openConflictCount).toBe(1);
+  });
+
+  /**
+   * `config_generation` is what makes a mapping/selection change re-consider
+   * ids the reconciliation ledger has already skipped (migration 123). It is
+   * bumped ONCE per patch, and only for the keys that change what is ELIGIBLE
+   * — a direction mode changes when work happens, not what qualifies.
+   */
+  it('bumps config_generation once for a patch that changes what is eligible', async () => {
+    makeConnection();
+    expect(getConnection(raw, CONN_ID)?.config_generation).toBe(0);
+
+    await service.updateSettings(CONN_ID, {
+      stateMapping: { 'state-backlog': 'idea' },
+      selectionMode: 'assignee',
+      selectionJson: { assigneeIds: ['user-1'] },
+    });
+
+    // ONE bump for the whole patch: the ledger's rule is "re-consider every
+    // skipped id once per CHANGE", and the change is the patch.
+    expect(getConnection(raw, CONN_ID)?.config_generation).toBe(1);
+  });
+
+  it('leaves config_generation alone for a direction-only patch', async () => {
+    makeConnection();
+
+    await service.updateSettings(CONN_ID, {
+      statusSyncMode: 'manual',
+      pullMode: 'manual',
+      pushMode: 'manual',
+      contentSyncMode: 'auto',
+      archiveSyncMode: 'manual',
+      mirrorSubissues: false,
+      conflictMode: 'manual',
+    });
+
+    // Nothing about WHICH remote issues qualify changed, so every ledgered skip
+    // is still a valid verdict — re-fetching them would be pure cost.
+    expect(getConnection(raw, CONN_ID)?.config_generation).toBe(0);
   });
 
   it('reports a non-pushing sibling mapping as pushTarget false', async () => {

@@ -1,7 +1,7 @@
 /**
  * Faithfulness tests for the Code-Review Eval rubric v1.2 data module.
  *
- * Guards the frozen transcription of docs/proposals/code-review-eval-checklist.md
+ * Guards the frozen transcription of docs/eval-rubric.md
  * against silent drift: dimension/weight/sub-check counts, id uniqueness, and a
  * verbatim spot-check of five sub-check propositions. serializeRubricForPrompt
  * feeds prompt_hash, so a determinism check pins its purity.

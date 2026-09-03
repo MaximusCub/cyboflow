@@ -1,5 +1,9 @@
 # Setup Troubleshooting Guide
 
+> **HISTORICAL — Crystal-era guide.** Preserved for reference to the fork baseline.
+> For cyboflow's current architecture (orchestrator, entity model, review queue, dual-substrate
+> seam) see `docs/ARCHITECTURE.md`, which is the source of truth.
+
 ## Python distutils Error
 
 If you encounter this error during `pnpm run setup`:

@@ -2,13 +2,16 @@
 
 Status: locked as of TASK-686 (IDEA-017, epic `cyboflow-shell-architecture`).
 Updated by the Protoflow UI refresh: human review folded into the rail (see below).
+Column-geometry table's Main-area row re-verified 2026-08-30 against `frontend/src/App.tsx`'s
+center-surface branch chain and `frontend/src/components/landing/LandingHome.tsx`; the rest of
+this doc was not re-checked on that pass.
 
 ## Column geometry
 
 | Column     | Component                          | Width      | Role                                                                 |
 |------------|------------------------------------|------------|----------------------------------------------------------------------|
 | Left rail  | `Sidebar` (agent rail)             | resizable  | Project tree + sessions, a **Human review** primary item with pending-count badge, and the user footer (avatar · settings). |
-| Main area  | `CyboflowRoot` **or** `ReviewQueueView` | flex-1 | Run surface (CyboflowRoot) by default; swaps to the full-width human-review pane (`ReviewQueueView`) when the rail's Human-review item is active. |
+| Main area  | `CyboflowRoot` **or** `LandingHome` | flex-1 | Run surface (CyboflowRoot) by default; swaps to `LandingHome` with `focusQueue={showHumanReview}` (scrolling to its embedded `TypeGroupedQueue`) when the rail's Human-review item is active. `ReviewQueueView.tsx` still exists but is no longer mounted anywhere in production — kept alive only by its own test. |
 
 The human-review queue is the differentiator surface described in
 `docs/cyboflow_system_design.md` §5.7. Per the Protoflow refresh it is no longer a

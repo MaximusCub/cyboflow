@@ -55,7 +55,7 @@ The tool panel system consists of several key components:
 
 ## Implemented Panel Types
 
-The tool panel system currently supports 8 panel types:
+The tool panel system currently supports 7 panel types:
 
 1. **Terminal** (`terminal`) - Multiple PTY shells per session
   - Independent processes with command history and scrollback
@@ -66,7 +66,7 @@ The tool panel system currently supports 8 panel types:
   - Permission mode: approve/ignore
   - Automatic context tracking with token usage display
 
-3. **Codex** (`codex`) - Multiple Codex CLI instances
+3. **Codex** (`codex`) - Multiple Codex CLI instances **(removed)**
   - Managed by `codexPanelManager.ts`
   - Configurable model provider and approval policy
   - Sandbox mode and web search support

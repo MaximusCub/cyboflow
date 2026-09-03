@@ -145,7 +145,7 @@ function connectToOrchestrator(): net.Socket {
   // closes when the Electron main process dies, not when this server's `claude`
   // spawner does. It is kept because it is still correct — a server with no
   // orchestrator can do nothing useful — but it must never again be mistaken
-  // for a per-run lifetime bound. See PLAN-mcp-orphan-reaper.md §2.
+  // for a per-run lifetime bound. See docs/archive/mcp-orphan-reaper-plan.md §2.
   //
   // LOAD-BEARING INVARIANT: a server whose spawner has died is provably useless
   // because MCP requests arrive ONLY via stdin — this socket carries only
@@ -340,7 +340,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // already-emitted 'end' forever, which recreates the very orphan class this
 // exists to prevent. Module scope is always safe because no I/O event is
 // delivered before the event loop starts, so nothing can be missed here.
-// See PLAN-mcp-orphan-reaper.md §5.
+// See docs/archive/mcp-orphan-reaper-plan.md §5.
 // ---------------------------------------------------------------------------
 
 let shuttingDown = false;

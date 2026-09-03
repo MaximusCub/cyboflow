@@ -1,6 +1,10 @@
 # Tracker sync integration — Linear + Plane (v1 design)
 
-Status: **proposal, decisions settled** (design conversation 2026-07-30). Rev 2 folds in the Codex adversarial-review hardening: outbox-backed idempotent remote writes, crash-safe cursor semantics, and a deletion-detection sweep.
+Status: **Base design (Linear + Plane) SHIPPED.** Decisions settled in design conversation
+2026-07-30; Rev 2 folds in the Codex adversarial-review hardening: outbox-backed idempotent
+remote writes, crash-safe cursor semantics, and a deletion-detection sweep. Two more providers
+(Dart, then Beads) landed after this design closed — see the inline shipped-notes below and
+`docs/proposals/tracker-field-writeback.md` for the field write-back layer built on top.
 Source design: `~/Downloads/Linear integration prototype.zip` — high-fidelity HTML prototype + handoff README (Settings → Integrations modal: catalog → 6-step wizard → connected view). The prototype's visual language matches the live Protoflow paper theme exactly; recreate it with the real design tokens and Tailwind utilities, not the prototype's `<x-dc>` runtime.
 
 ## Intent

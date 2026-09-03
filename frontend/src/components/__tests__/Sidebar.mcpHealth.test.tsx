@@ -87,7 +87,6 @@ function renderSidebar() {
   return render(
     <Sidebar
       onAboutClick={() => undefined}
-      onPromptHistoryClick={() => undefined}
       width={240}
       onResize={() => undefined}
       pendingReviewCount={0}

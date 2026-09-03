@@ -688,6 +688,11 @@ export class LinearAdapter implements TrackerAdapter {
     // table so the outbound trigger — which gates on the capability WITHOUT
     // an adapter in hand — can never disagree with this adapter.
     archive: PROVIDER_ARCHIVE_CAPABILITY.linear,
+    // Linear's `updatedAt` always advances on a real change, so the cursor
+    // alone is a sound ground truth — no reconciliation backstop needed.
+    requiresIdReconciliation: false,
+    // No CAS/concurrency-token primitive; writes stay unguarded, as before.
+    guardedUpdates: false,
   };
 
   private readonly apiKey: string;

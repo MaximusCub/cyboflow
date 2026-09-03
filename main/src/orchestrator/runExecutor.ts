@@ -2283,7 +2283,7 @@ export class RunExecutor {
    * Skips non-terminal phases (pre_spawn / post_spawn / sdk_initialized) and the
    * case where no `db` was injected (backward-compat with executor constructions
    * that omit it). For 'drained' / 'failed' / 'canceled' it calls the fail-soft
-   * `rollupRunUsage`, threading the executor's logger (CLAUDE.md: never omit the
+   * `rollupRunUsage`, threading the executor's logger (CODE-PATTERNS.md: never omit the
    * optional logger). The rollup writer owns its own try/catch — this seam adds
    * only the phase gate and the db presence check.
    */

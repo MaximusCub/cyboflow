@@ -1,14 +1,16 @@
 /**
- * Unit tests for the sessions:update-agent-permission-mode IPC handler (Issue #1).
+ * Unit tests for `updateAgentPermissionMode` in main/src/ipc/sessionOps.ts — the
+ * ops implementation behind the `cyboflow.sessions.updateAgentPermissionMode`
+ * tRPC procedure, formerly the `sessions:update-agent-permission-mode` IPC
+ * handler (Issue #1).
  *
- * The handler persists sessions.agent_permission_mode (next-turn re-read for the
+ * It persists sessions.agent_permission_mode (next-turn re-read for the
  * SDK substrate) and fires session-updated. No settings-file side effect exists
  * anymore: the interactive PTY gating hook rides the inline `--settings` flag
  * and is recomputed from the persisted mode at every spawn
  * (interactiveClaudeManager buildCommandArgs -> resolveInlineGatingHooks), so the
  * former .claude/settings.json re-prime (and its demo/existence/fail-soft
- * guards) is gone. Exercised via the same handler-capture harness as
- * sessionQuickCreate.test.ts.
+ * guards) is gone.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -38,32 +40,11 @@ vi.mock('../../services/database', () => ({
   },
 }));
 
-import { registerSessionHandlers } from '../session';
+import { createSessionOps } from '../sessionOps';
 import type { AppServices } from '../types';
 
-const CHANNEL = 'sessions:update-agent-permission-mode';
 const SESSION_ID = 'sess-001';
 const WORKTREE = '/tmp/project/quick-test';
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, fn);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invoke(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler registered for channel: ${channel}`);
-  return fn({} as unknown, ...args);
-}
 
 function makeServices(opts: {
   substrate?: string;
@@ -104,20 +85,11 @@ function makeServices(opts: {
   return { services, fakeDatabaseService, fakeSessionManager };
 }
 
-function registerWith(services: AppServices) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerSessionHandlers(
-    ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
-    services,
-  );
-  return handlers;
-}
-
-describe('sessions:update-agent-permission-mode — persist + emit', () => {
+describe('sessionOps.updateAgentPermissionMode — persist + emit', () => {
   it('rejects an invalid mode without persisting', async () => {
     const { services, fakeDatabaseService } = makeServices({ substrate: 'sdk' });
-    const handlers = registerWith(services);
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID, 'bogus')) as {
+    const ops = createSessionOps(services);
+    const result = (await ops.updateAgentPermissionMode({ sessionId: SESSION_ID, mode: 'bogus' })) as {
       success: boolean;
       error?: string;
     };
@@ -127,8 +99,8 @@ describe('sessions:update-agent-permission-mode — persist + emit', () => {
 
   it('persists the mode and emits session-updated for an SDK session', async () => {
     const { services, fakeDatabaseService, fakeSessionManager } = makeServices({ substrate: 'sdk' });
-    const handlers = registerWith(services);
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID, 'acceptEdits')) as {
+    const ops = createSessionOps(services);
+    const result = (await ops.updateAgentPermissionMode({ sessionId: SESSION_ID, mode: 'acceptEdits' })) as {
       success: boolean;
     };
     expect(result.success).toBe(true);
@@ -140,8 +112,8 @@ describe('sessions:update-agent-permission-mode — persist + emit', () => {
 
   it('returns Session not found when the row does not update', async () => {
     const { services } = makeServices({ substrate: 'sdk', updateReturns: false });
-    const handlers = registerWith(services);
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID, 'auto')) as {
+    const ops = createSessionOps(services);
+    const result = (await ops.updateAgentPermissionMode({ sessionId: SESSION_ID, mode: 'auto' })) as {
       success: boolean;
       error?: string;
     };

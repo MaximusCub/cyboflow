@@ -26,6 +26,20 @@ mirror the app never reads.**
   from the primary checkout or any worktree — see `docs/UPDATES.md`
   ("One-time setup"). Source with
   `set -a; . ~/Developer/cyboflow/.envrc.local; set +a`.
+- **Dependency tree re-resolved from the lockfile**, before anything is gated:
+  ```bash
+  pnpm install --frozen-lockfile
+  ```
+  `node_modules` can be self-consistent while the *lockfile* is not, so §1 would
+  otherwise pass against dependencies that no longer match what CI installs — a
+  local gate never re-resolves, so a lockfile defect is invisible to it. That is
+  how 0.2.9 shipped a dead E2E suite: a dep bump split `playwright` (1.62.1) from
+  `@playwright/test` (1.54.1) in the lock, the un-reinstalled tree still held a
+  matched 1.54.1 pair, the local smoke tier passed, and every nightly after it
+  died at spec collection with "Playwright Test did not expect test.describe()
+  to be called here". `--frozen-lockfile` additionally hard-fails when
+  `package.json` and the lockfile disagree. **Do this BEFORE the cross-arch
+  binary check below** — it prunes to host arch.
 - Both darwin agent binaries present for **both** arches (a plain install/rebuild
   prunes to host arch). Verify all four exist; if any are missing run the
   cross-arch install **with `--force`** (see
@@ -49,7 +63,7 @@ blocking mocked-SDK job for `main/src/services/panels/claude/` changes.
 pnpm typecheck        # must be clean
 pnpm lint             # 0 errors (warnings are non-gating)
 pnpm test:unit        # main + frontend vitest, schema parity, build scripts
-pnpm test:integration # 18 mocked-SDK *.itest.ts
+pnpm test:integration # the mocked-SDK *.itest.ts suite
 
 # Packaged-app smoke tier (blocking since 2026-08-14): drives the built bundle
 # via Playwright _electron.launch(). e2e:prereqs rebuilds native modules for the

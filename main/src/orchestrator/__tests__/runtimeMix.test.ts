@@ -15,7 +15,9 @@
  *   3. the tier map's mirror / step-down / step-up rules incl. both clamps;
  *   4. the execution-vs-verification split per mix, on the flow that has one;
  *   5. an explicit user `runtime` outranks the mix;
- *   6. `reconcileMixWithProvider`'s full truth table.
+ *   6. a claude-ROUTED agent is pinned `claude-sdk` on EVERY non-claude mix, so
+ *      the materialized graph never depends on the run's base provider (the mix
+ *      and the launch Runtime are orthogonal dials).
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -29,7 +31,6 @@ import {
   materializeForLevelAndMix,
   mixRoutesAgentToCodex,
   primaryProviderForMix,
-  reconcileMixWithProvider,
   resolveEffectiveDefinitionWithMix,
   type RuntimeMix,
 } from '../../../../shared/tuning/runtimeMix';
@@ -95,35 +96,6 @@ describe('runtime mix vocabulary', () => {
     expect(isMixedRuntimeMix('claude-primary')).toBe(true);
     expect(isMixedRuntimeMix('codex-primary')).toBe(true);
     expect(isMixedRuntimeMix('codex')).toBe(false);
-  });
-});
-
-describe('reconcileMixWithProvider — the full truth table', () => {
-  // The legacy launch surfaces (top-bar picker, in-session launcher, backlog
-  // launchers, "Run with modifications") send their own provider; the requested
-  // provider SWAPS the primary while the same/cross aspect survives.
-  const cases: ReadonlyArray<[RuntimeMix, 'claude' | 'codex', RuntimeMix]> = [
-    ['claude', 'claude', 'claude'],
-    ['claude', 'codex', 'codex'],
-    ['claude-primary', 'claude', 'claude-primary'],
-    ['claude-primary', 'codex', 'codex-primary'],
-    ['codex-primary', 'claude', 'claude-primary'],
-    ['codex-primary', 'codex', 'codex-primary'],
-    ['codex', 'claude', 'claude'],
-    ['codex', 'codex', 'codex'],
-  ];
-
-  it.each(cases)('%s + %s -> %s', (mix, provider, expected) => {
-    expect(reconcileMixWithProvider(mix, provider)).toBe(expected);
-  });
-
-  it('is idempotent under its own result provider', () => {
-    for (const mix of RUNTIME_MIXES) {
-      for (const provider of ['claude', 'codex'] as const) {
-        const once = reconcileMixWithProvider(mix, provider);
-        expect(reconcileMixWithProvider(once, provider)).toBe(once);
-      }
-    }
   });
 });
 
@@ -347,12 +319,20 @@ describe('applyRuntimeMix — purity and the human gate', () => {
 describe('sprint × claude-primary (standard)', () => {
   const out = mixed('sprint', 'standard', 'claude-primary');
 
-  it('leaves every execution agent unrouted, pins intact', () => {
+  it('pins every execution agent to claude-sdk, tier pins intact', () => {
+    // Pinned EXPLICITLY even though the mix's primary is Claude: the mix is
+    // orthogonal to the run's base provider, so a `claude-primary` graph
+    // launched under a CODEX orchestrator must still state its Claude routing
+    // rather than inherit the run's provider in spawnStepRunner.
     for (const key of ['implement', 'write-tests', 'dependency-analyzer', 'address-review']) {
-      expect(configFor(out, key)?.runtime, key).toBeUndefined();
+      expect(configFor(out, key)?.runtime, key).toBe('claude-sdk');
       expect(configFor(out, key)?.providerModel, key).toBeUndefined();
     }
-    expect(configFor(out, 'implement')).toEqual({ model: 'sonnet', effort: 'high' });
+    expect(configFor(out, 'implement')).toEqual({
+      model: 'sonnet',
+      effort: 'high',
+      runtime: 'claude-sdk',
+    });
   });
 
   it('routes every verification agent to codex through the tier map', () => {
@@ -459,10 +439,18 @@ describe('custom precedence — an explicit runtime outranks the mix', () => {
 describe('the single-agent flows (compound, verify-setup)', () => {
   const singles: readonly CyboflowWorkflowName[] = ['compound', 'verify-setup'];
 
-  it.each(singles)('%s: claude-primary writes NOTHING (empty verification class)', (flow) => {
+  it.each(singles)('%s: claude-primary pins every agent to claude-sdk, nothing to codex', (flow) => {
+    // The verification class is empty, so `claude-primary` routes EVERY agent to
+    // Claude. It still writes a `claude-sdk` pin apiece rather than nothing: the
+    // mix no longer decides the run's provider, so "Claude executes" has to be
+    // stated for the graph to mean that under a Codex orchestrator.
     for (const level of PRESET_LEVELS) {
       const base = applyTuningPreset(WORKFLOW_DEFINITIONS[flow], flow, level);
-      expect(applyRuntimeMix(base, flow, 'claude-primary'), `${flow}/${level}`).toEqual(base);
+      const out = applyRuntimeMix(base, flow, 'claude-primary');
+      for (const key of definitionAgentKeys(out)) {
+        if (key === 'human') continue;
+        expect(configFor(out, key)?.runtime, `${flow}/${level}/${key}`).toBe('claude-sdk');
+      }
     }
   });
 

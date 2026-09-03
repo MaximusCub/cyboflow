@@ -1,5 +1,5 @@
 // Utility for making API calls using Electron IPC
-import type { CreateSessionRequest } from '../types/session';
+import type { CreateSessionRequest, Session } from '../types/session';
 import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -8,8 +8,6 @@ import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
 import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
-import type { QuickSessionRow } from '../../../shared/types/quickSessions';
-import type { SessionSummaryPayload } from '../../../shared/types/sessionSummary';
 import type { OpenIdeaSessionRequest } from '../../../shared/types/ideaSession';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -98,19 +96,34 @@ const CATALOG_BRIDGE_FALLBACKS: {
 export class API {
   // Session management
   static sessions = {
-    async getAll() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getAll();
+    // Session records — migrated to the cyboflow.sessions tRPC router (batch 1
+    // of the session-surface IPC→tRPC migration). Each method keeps its
+    // positional signature and its response envelope, so component call sites
+    // are unchanged; only the transport moved. No isElectron() guard, matching
+    // the other trpc-backed statics (the ipcLink transport is Electron-only by
+    // construction).
+    //
+    // getAll/get keep their RENDERER-declared return type rather than letting
+    // the router's inferred one flow. main/src/types/session.ts and
+    // frontend/src/types/session.ts disagree about three fields — `createdAt` /
+    // `lastActivity` (Date vs string) and `jsonMessages` (unknown[] vs
+    // ClaudeJsonMessage[]) — a mismatch this migration inherits rather than
+    // introduces: the values were already real Dates over the old
+    // structured-clone IPC path, and superjson preserves them identically over
+    // tRPC. Pinning the renderer's declaration here keeps every call site
+    // (useIPCEvents, usePanelSurface, sessionStore, bootstrapArmSessionPanels)
+    // compiling against the type it already used, and confines the divergence to
+    // this one documented seam instead of scattering casts across the renderer.
+    async getAll(): Promise<IPCResponse<Session[]>> {
+      return trpc.cyboflow.sessions.getAll.query() as Promise<IPCResponse<Session[]>>;
     },
 
     async getAllWithProjects() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getAllWithProjects();
+      return trpc.cyboflow.sessions.getAllWithProjects.query();
     },
 
-    async get(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.get(sessionId);
+    async get(sessionId: string): Promise<IPCResponse<Session>> {
+      return trpc.cyboflow.sessions.get.query({ sessionId }) as Promise<IPCResponse<Session>>;
     },
 
     async create(request: CreateSessionRequest) {
@@ -173,8 +186,7 @@ export class API {
       return window.electronAPI.sessions.getOutput(sessionId, limit);
     },
     async getStatistics(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getStatistics(sessionId);
+      return trpc.cyboflow.sessions.getStatistics.query({ sessionId });
     },
 
     async getConversation(sessionId: string) {
@@ -188,18 +200,15 @@ export class API {
     },
 
     async markViewed(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.markViewed(sessionId);
+      return trpc.cyboflow.sessions.markViewed.mutate({ sessionId });
     },
 
-    async getSummary(sessionId: string, opts?: { catchUp?: boolean }): Promise<IPCResponse<SessionSummaryPayload>> {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getSummary(sessionId, opts);
+    async getSummary(sessionId: string, opts?: { catchUp?: boolean }) {
+      return trpc.cyboflow.sessions.getSummary.query({ sessionId, catchUp: opts?.catchUp });
     },
 
-    async listQuick(projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.listQuick(projectId);
+    async listQuick(projectId?: number) {
+      return trpc.cyboflow.sessions.listQuick.query({ projectId });
     },
 
     async stop(sessionId: string) {
@@ -280,12 +289,6 @@ export class API {
       return window.electronAPI.sessions.resizeTerminal(sessionId, cols, rows);
     },
 
-    // Prompt operations
-    async getPrompts(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getPrompts(sessionId);
-    },
-
     // Git rebase operations
     async rebaseMainIntoWorktree(sessionId: string) {
       return trpc.cyboflow.sessionGit.rebaseMainIntoWorktree.mutate({ sessionId });
@@ -328,33 +331,28 @@ export class API {
     },
 
     async rename(sessionId: string, newName: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.rename(sessionId, newName);
+      return trpc.cyboflow.sessions.rename.mutate({ sessionId, newName });
     },
 
     async toggleFavorite(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.toggleFavorite(sessionId);
+      return trpc.cyboflow.sessions.toggleFavorite.mutate({ sessionId });
     },
 
     async updateAgentPermissionMode(sessionId: string, mode: PermissionMode) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.updateAgentPermissionMode(sessionId, mode);
+      return trpc.cyboflow.sessions.updateAgentPermissionMode.mutate({ sessionId, mode });
     },
 
     // Per-session MCP DENY list (migration 036). `disabledMcpServers` is the set
     // of server names to disable (the complement of what the McpTogglePill shows
     // checked); read at SDK spawn so it applies on the next turn.
     async updateSessionMcps(sessionId: string, disabledMcpServers: string[]) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.updateSessionMcps(sessionId, disabledMcpServers);
+      return trpc.cyboflow.sessions.updateSessionMcps.mutate({ sessionId, disabledMcpServers });
     },
 
     // Per-session plugin ALLOW list (migration 036). `enabledPlugins` is the set
     // of plugin ids to force-enable; read at SDK spawn (next-turn apply).
     async updateSessionPlugins(sessionId: string, enabledPlugins: string[]) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.updateSessionPlugins(sessionId, enabledPlugins);
+      return trpc.cyboflow.sessions.updateSessionPlugins.mutate({ sessionId, enabledPlugins });
     },
 
     async getGitCommands(sessionId: string) {
@@ -397,8 +395,22 @@ export class API {
     },
 
     async reorder(sessionOrders: Array<{ id: string; displayOrder: number }>) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.reorder(sessionOrders);
+      return trpc.cyboflow.sessions.reorder.mutate({ sessionOrders });
+    },
+
+    /**
+     * Tell the backend which session the user is looking at, so GitStatusManager
+     * can favour it when polling. `null` clears the selection. Called only from
+     * sessionStore.setActiveSession, which used the generic invoke bridge before
+     * this moved onto the cyboflow.sessions router.
+     */
+    async setActiveSession(sessionId: string | null) {
+      return trpc.cyboflow.sessions.setActiveSession.mutate({ sessionId });
+    },
+
+    /** Mirrors the sidebar's archive-task poll (legacy `archive:get-progress`). */
+    async getArchiveProgress() {
+      return trpc.cyboflow.sessions.getArchiveProgress.query();
     },
 
     async generateCompactedContext(sessionId: string) {
@@ -546,14 +558,6 @@ export class API {
       return trpc.cyboflow.config.updateSessionPreferences.mutate(
         preferences as unknown as Parameters<typeof trpc.cyboflow.config.updateSessionPreferences.mutate>[0],
       );
-    },
-  };
-
-  // Prompts
-  static prompts = {
-    async getAll() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.prompts.getAll();
     },
   };
 
@@ -731,7 +735,7 @@ export class API {
 
 
   static models = {
-    /** Snapshot of guarded-model (Fable 5) availability. Empty map = all usable. */
+    /** Snapshot of guarded-model (Fable 5.1) availability. Empty map = all usable. */
     async getAvailability() {
       // Guard the `models` surface too: a preload version skew (older bridge)
       // should degrade to optimistic, not crash the picker.

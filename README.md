@@ -5,14 +5,15 @@ Cyboflow is a self-contained macOS desktop app designed to make it easier to bui
 ## What it does
 
 Cyboflow comes with five core features:
-1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including four natively included as well as a custom workflow and agent builder.
+1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including five natively included as well as a custom workflow and agent builder.
 2. **Centralized review queue**: Cyboflow has a built in central human review queue to make it easier to monitor activity across agents, grant approvals as needed, and triage any issues. 
 3. **Analytics, insights, and observability**: Cyboflow tracks token usage, failure rates, errors, and bugs across workflow runs so you can iterate and improve on them over time
 4. **Worktree isolated SDK or PTY session**: Every session runs in its own worktree and can be run via SDK (for a chat experience) or PTY (for an interactive terminal experience)
 5. **Native task tracking**: Built into Cyboflow is a native task tracking module that lets you take ideas through clarification, extraction, execution and review. 
 
 #### Multi-agent workflows
-Cyboflow ships four flows out of the box:
+Cyboflow ships five flows out of the box:
+- **Launch** interviews a brand-new project into a brief, an ordered idea set, and a first build set.
 - **Planner** turns a raw idea into a reviewed backlog: it captures the idea, optionally researches it, decomposes it into epics and tasks, and pauses at human approval gates. 
 - **Sprint** executes the ready tasks — implement, test, review, verify — across isolated worktrees, optionally fanning a batch of tasks out across parallel subagents. 
 - **Compound** mines completed work for cleanups, follow-up tasks, and codebase-doc improvements
@@ -47,25 +48,11 @@ Download Cyboflow from https://www.cyboflow.com/download/ and then drag the Cybo
 - macOS 13 Ventura or later
 - [Claude Code](https://claude.ai/code) installed and authenticated
 
-The Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
+The Launch, Planner, Sprint, Compound, and Ship flows are built into the app — no external workflow runner needs to be installed in your project.
 
-## Provenance
+## Provenance & License
 
-Cyboflow is a fork of [stravu/crystal](https://github.com/stravu/crystal) pinned at commit `1e18e0bc981225f75b5226f82a300fa741970c6f`. Crystal provides six of Cyboflow's eight required primitives — PTY management, git worktrees, SQLite persistence, macOS packaging, the permission bridge, and zombie-process detection — in production-tested form. Cyboflow adds the cross-workflow review queue, the typed stream parser, and the CyboflowMcpServer outbound bridge.
-
-The fork was taken from Crystal `0.3.5` (Crystal's final public tag) before the Crystal project was renamed to Nimbalyst and put on a different product footing.
-
-See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full lineage and audit trail.
-
-## License
-
-Cyboflow is licensed under the MIT License (see [LICENSE](LICENSE)), inheriting Crystal's MIT license. The LICENSE retains Stravu's original Crystal copyright alongside Cyboflow's, as MIT requires.
-
-### Do not merge from Nimbalyst
-
-Crystal was renamed to Nimbalyst in early 2026 and became a separate product with its own scope and direction. Nimbalyst is also MIT-licensed, but Cyboflow deliberately forked at Crystal `0.3.5` and has diverged substantially in scope and architecture. To keep a clean, auditable provenance and avoid importing decisions from a now-divergent codebase, **do not** apply patches, cherry-picks, or merges from the Nimbalyst repository (https://github.com/Nimbalyst/nimbalyst). If a bug surfaces in Cyboflow that was independently fixed in Nimbalyst, reproduce the fix from first principles or from Cyboflow-side analysis.
-
-See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full rationale.
+Cyboflow began as a fork of [Crystal](https://github.com/stravu/crystal) `0.3.5` by Stravu and has since diverged substantially in scope and architecture. It is licensed under the MIT License (see [LICENSE](LICENSE)), retaining Stravu's original Crystal copyright alongside Cyboflow's. See [docs/PROVENANCE.md](docs/PROVENANCE.md) for the full lineage.
 
 ## Development
 

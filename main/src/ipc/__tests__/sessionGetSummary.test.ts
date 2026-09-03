@@ -1,11 +1,11 @@
 /**
- * Unit tests for the sessions:get-summary IPC handler (session-summary-plan.md
+ * Unit tests for `getSummary` in main/src/ipc/sessionOps.ts — the ops
+ * implementation behind the `cyboflow.sessions.getSummary` tRPC procedure,
+ * formerly the `sessions:get-summary` IPC handler (session-summary-plan.md
  * §7). The read returns the persisted rolling summary + append-only history plus
  * the config-enabled flag, and — when it observes conversation_messages above
  * the summarizer's watermark AND the feature is enabled — fires the §2.7 lazy
  * catch-up kick (fire-and-forget; the read never awaits it or mutates state).
- *
- * Exercised via the same handler-capture harness as sessionInteractiveResume.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -45,32 +45,11 @@ vi.mock('../../orchestrator/dynamicWorkflows', () => ({
   DynamicWorkflowTracker: { tryGetInstance: vi.fn(() => undefined) },
 }));
 
-import { registerSessionHandlers } from '../session';
+import { createSessionOps } from '../sessionOps';
 import type { AppServices } from '../types';
 import type { SessionSummaryPayload } from '../../../../shared/types/sessionSummary';
 
-const GET_SUMMARY = 'sessions:get-summary';
 const SID = 'sess-001';
-
-function makeHandlerCapture() {
-  const handlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
-  const ipcMain = {
-    handle: (channel: string, fn: (...args: unknown[]) => Promise<unknown>) => {
-      handlers.set(channel, fn);
-    },
-  };
-  return { ipcMain, handlers };
-}
-
-async function invoke(
-  handlers: Map<string, (...args: unknown[]) => Promise<unknown>>,
-  channel: string,
-  ...args: unknown[]
-): Promise<unknown> {
-  const fn = handlers.get(channel);
-  if (!fn) throw new Error(`No handler registered for channel: ${channel}`);
-  return fn({} as unknown, ...args);
-}
 
 interface DbStubOpts {
   enabled?: boolean;
@@ -107,20 +86,12 @@ function makeServices(opts: DbStubOpts = {}) {
   return { services, maybeSummarizeNow, getConversationMessagesAfter };
 }
 
-function register(services: AppServices) {
-  const { ipcMain, handlers } = makeHandlerCapture();
-  registerSessionHandlers(
-    ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
-    services,
-  );
-  return handlers;
-}
 
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('sessions:get-summary', () => {
+describe('sessionOps.getSummary', () => {
   it('returns the persisted summary, updatedAt, entries and enabled flag', async () => {
     const { services } = makeServices({
       enabled: true,
@@ -131,9 +102,9 @@ describe('sessions:get-summary', () => {
       ],
       newerRows: 0,
     });
-    const handlers = register(services);
+    const ops = createSessionOps(services);
 
-    const res = (await invoke(handlers, GET_SUMMARY, SID)) as {
+    const res = (await ops.getSummary({ sessionId: SID })) as {
       success: boolean;
       data: SessionSummaryPayload;
     };
@@ -152,9 +123,9 @@ describe('sessions:get-summary', () => {
 
   it('returns null summary/updatedAt for a never-summarized session', async () => {
     const { services } = makeServices({ enabled: true, summary: undefined, newerRows: 0 });
-    const handlers = register(services);
+    const ops = createSessionOps(services);
 
-    const res = (await invoke(handlers, GET_SUMMARY, SID)) as { data: SessionSummaryPayload };
+    const res = (await ops.getSummary({ sessionId: SID })) as { data: SessionSummaryPayload };
     expect(res.data.summary).toBeNull();
     expect(res.data.updatedAt).toBeNull();
     expect(res.data.entries).toEqual([]);
@@ -166,9 +137,9 @@ describe('sessions:get-summary', () => {
       summary: { summary: 'x', last_turn_id: 4, updated_at: '2026-01-01 00:00:00' },
       newerRows: 2,
     });
-    const handlers = register(services);
+    const ops = createSessionOps(services);
 
-    await invoke(handlers, GET_SUMMARY, SID);
+    await ops.getSummary({ sessionId: SID });
 
     expect(getConversationMessagesAfter).toHaveBeenCalledWith(SID, 4);
     expect(maybeSummarizeNow).toHaveBeenCalledWith(SID, 'lazy-catchup');
@@ -176,17 +147,17 @@ describe('sessions:get-summary', () => {
 
   it('does NOT kick when there is no content above the watermark', async () => {
     const { services, maybeSummarizeNow } = makeServices({ enabled: true, newerRows: 0 });
-    const handlers = register(services);
+    const ops = createSessionOps(services);
 
-    await invoke(handlers, GET_SUMMARY, SID);
+    await ops.getSummary({ sessionId: SID });
     expect(maybeSummarizeNow).not.toHaveBeenCalled();
   });
 
   it('does NOT kick when the feature is disabled, and reports enabled:false', async () => {
     const { services, maybeSummarizeNow } = makeServices({ enabled: false, newerRows: 5 });
-    const handlers = register(services);
+    const ops = createSessionOps(services);
 
-    const res = (await invoke(handlers, GET_SUMMARY, SID)) as { data: SessionSummaryPayload };
+    const res = (await ops.getSummary({ sessionId: SID })) as { data: SessionSummaryPayload };
     expect(res.data.enabled).toBe(false);
     expect(maybeSummarizeNow).not.toHaveBeenCalled();
   });

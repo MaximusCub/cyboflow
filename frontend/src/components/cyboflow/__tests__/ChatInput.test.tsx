@@ -494,7 +494,7 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
   });
 
   // When the pinned model is a guarded model the availability guard reports
-  // UNAVAILABLE (Fable 5 pulled), the pill shows the fallback the run uses (Opus),
+  // UNAVAILABLE (Fable 5.1 pulled), the pill shows the fallback the run uses (Opus),
   // NOT the dead pin — with an explanatory tooltip.
   it('shows the fallback model (not the dead pin) when the pinned model is unavailable', () => {
     mockIsAliasUsable = (alias) => alias !== 'fable';
@@ -507,10 +507,10 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     // The pill reflects the fallback family…
     expect(screen.getByText('Opus 5 · 1M')).toBeInTheDocument();
     // …never the pulled model, and a tooltip explains the swap.
-    expect(screen.queryByText('Fable 5 · 1M')).toBeNull();
+    expect(screen.queryByText('Fable 5.1 · 1M')).toBeNull();
     expect(screen.getByText('Opus 5 · 1M').closest('span')).toHaveAttribute(
       'title',
-      'Fable 5 · 1M is unavailable — this run uses Opus 5 · 1M.',
+      'Fable 5.1 · 1M is unavailable — this run uses Opus 5 · 1M.',
     );
   });
 
@@ -522,7 +522,7 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
       });
     });
     render(<ChatInput runId={RUN_ID} />);
-    expect(screen.getByText('Fable 5 · 1M')).toBeInTheDocument();
+    expect(screen.getByText('Fable 5.1 · 1M')).toBeInTheDocument();
   });
 });
 

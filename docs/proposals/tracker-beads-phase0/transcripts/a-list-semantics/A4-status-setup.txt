@@ -1,0 +1,38 @@
+created open -> bp-1hd
+created in_progress -> bp-cwa
+created blocked -> bp-4sp
+created deferred -> bp-tmr
+created closed -> bp-ppn
+created pinned -> bp-8zk
+created hooked -> bp-5yq
+
+$ bd update bp-1hd --status open
+✓ Updated issue: bp-1hd — status probe open
+exit=0
+$ bd update bp-cwa --status in_progress
+✓ Updated issue: bp-cwa — status probe in_progress
+exit=0
+$ bd update bp-4sp --status blocked
+✓ Updated issue: bp-4sp — status probe blocked
+exit=0
+$ bd update bp-tmr --status deferred
+✓ Updated issue: bp-tmr — status probe deferred
+exit=0
+$ bd update bp-ppn --status closed
+✓ Updated issue: bp-ppn — status probe closed
+exit=0
+$ bd update bp-8zk --status pinned
+✓ Updated issue: bp-8zk — status probe pinned
+exit=0
+$ bd update bp-5yq --status hooked
+✓ Updated issue: bp-5yq — status probe hooked
+exit=0
+
+=== id map ===
+open = bp-1hd
+in_progress = bp-cwa
+blocked = bp-4sp
+deferred = bp-tmr
+closed = bp-ppn
+pinned = bp-8zk
+hooked = bp-5yq

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { IpcRendererEvent } from 'electron';
 import { Loader2, Archive, CheckCircle, AlertCircle } from 'lucide-react';
+import { API } from '../utils/api';
 
 interface ArchiveTask {
   sessionId: string;
@@ -106,9 +107,8 @@ export function ArchiveProgress() {
   }, [isExpanded]);
 
   const loadProgress = async () => {
-    if (!window.electron) return;
     try {
-      const response = await window.electron.invoke('archive:get-progress');
+      const response = await API.sessions.getArchiveProgress();
       if (response.success) {
         setProgress((prev) => (archiveProgressEqual(prev, response.data) ? prev : response.data));
       }

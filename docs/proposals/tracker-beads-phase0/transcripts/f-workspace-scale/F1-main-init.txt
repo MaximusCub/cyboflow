@@ -1,0 +1,27 @@
+$ pwd
+/private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale
+$ bd init --stealth --non-interactive (main workspace bootstrap)
+Configured git exclude for stealth mode: .git/info/exclude
+
+✓ Stealth mode configured successfully!
+
+  Git exclude: .git/info/exclude configured
+
+Your beads setup is now invisible - other repo collaborators won't see any beads-related files.
+To set up a specific AI tool, run: bd setup <claude|cursor|aider|...> --stealth
+
+Configured git exclude for Dolt files: /private/tmp/claude-501/-Users-raimundoesteva-Developer-cyboflow-worktrees-solar-moss-20260826/c83dede6-2af5-4ea1-b0fc-f9f1686e98c0/scratchpad/beads-phase0/f-workspace-scale/.git/info/exclude
+  Repository ID: 9a90ec5b
+  Clone ID: 84c0141eeeb2a8a7
+
+✓ bd initialized successfully!
+
+  Backend: dolt
+  Mode: embedded
+  Database: f_workspace_scale
+  Issue prefix: f-workspace-scale
+  Issues will be named: f-workspace-scale-<hash> (e.g., f-workspace-scale-a3f2dd)
+
+Run bd quickstart to get started.
+
+exit=0

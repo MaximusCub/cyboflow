@@ -165,7 +165,7 @@ jobs:
   # Report-only flake-watch: runs any quarantined tests (*.quarantine.test.ts /
   # *.quarantine.itest.ts) that have been pulled out of the blocking configs.
   # Exits 0 when there are none, so this job is a no-op until a test is
-  # quarantined. See docs/plans/ci-gate-mocked-sdk-integration.md "Flake
+  # quarantined. See docs/archive/ci-gate-mocked-sdk-integration.md "Flake
   # quarantine" for the promotion/demotion policy.
   flake-watch:
     name: Flake watch (quarantined tests, report-only)

@@ -38,6 +38,19 @@ describe('isSystemicStepError', () => {
     ['invalid api key', 'Invalid API Key provided'],
     ['401 unauthorized', '401 Unauthorized'],
     ['oauth token expired', 'OAuth token has expired'],
+    // The CLI's own auth-expiry wordings, harvested from the shipped binary.
+    // The first is digest d1a52bbe — the string behind the 0.2.8 cascade that
+    // was classified `other` and therefore never parked as systemic.
+    [
+      'CLI OAuth session expiry (digest d1a52bbe)',
+      'Failed to authenticate: OAuth session expired and could not be refreshed',
+    ],
+    ['bare failed-to-authenticate', 'Failed to authenticate'],
+    ['failed to authenticate through the broker', 'Failed to authenticate through the broker: '],
+    ['session expired login prompt', 'Session expired. Please run /login to sign in again.'],
+    ['your session has expired', 'Your session has expired. Please reauthenticate.'],
+    ['SSO session expired', 'SSO session expired. Run:'],
+    ['token refresh failed', 'Token refresh failed'],
     [
       'real mid-run Anthropic authentication_error shape',
       'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
@@ -71,6 +84,10 @@ describe('isSystemicStepError', () => {
     ['error_max_turns-ish text', 'error_max_turns: the step hit its max turn allowance'],
     ['ordinary text mentioning authentication alone (no error/failed word)', 'Please check your authentication settings'],
     [
+      'MCP transport session expiry reconnects in-process, not a login failure',
+      'MCP session expired (server no longer recognizes session ID), triggering reconnection',
+    ],
+    [
       'timeout wording without the word "connection" (boundary: not systemic)',
       'request timed out',
     ],
@@ -97,6 +114,18 @@ describe('classifyErrorPattern', () => {
     ['overloaded', 'overloaded_error: the server is overloaded', 'overloaded'],
     ['low credit', 'Your credit balance is too low to access the Claude API', 'billing-credit-balance'],
     ['auth 401', '401 Unauthorized', 'auth-401'],
+    [
+      'CLI OAuth session expiry',
+      'Failed to authenticate: OAuth session expired and could not be refreshed',
+      'auth-failed-to-authenticate',
+    ],
+    ['session expired without the word auth', 'Session expired. Please run /login to sign in again.', 'auth-session-expired'],
+    ['token refresh failed', 'Token refresh failed', 'auth-token-refresh-failed'],
+    [
+      'MCP transport session expiry is not an auth class',
+      'MCP session expired (server no longer recognizes session ID), triggering reconnection',
+      'other',
+    ],
     ['connection closed (systemic net)', 'API Error: Connection closed mid-response.', 'net-connection-closed'],
     ['ECONNRESET', 'ECONNRESET', 'net-econn-codes'],
     // Systemic net beats the generic non-systemic 'timed-out' bucket.
@@ -140,7 +169,9 @@ describe('classifyErrorPattern', () => {
       'usage-limit-reached', 'window-limit-reached-or-hit', 'rate-limit', 'http-429',
       'overloaded', 'http-529', 'billing-credit-balance', 'billing-quota-exceeded',
       'auth-failed', 'auth-invalid-api-key', 'auth-401', 'auth-oauth-expired',
-      'auth-authentication-error-type', 'auth-invalid-x-api-key', 'net-connection-closed',
+      'auth-authentication-error-type', 'auth-invalid-x-api-key',
+      'auth-failed-to-authenticate', 'auth-session-expired', 'auth-token-refresh-failed',
+      'net-connection-closed',
       'net-connection-failure', 'net-econn-codes', 'net-fetch-failed',
       // non-systemic buckets
       'stream-closed', 'first-event-timeout', 'max-turns-or-execution-bound',

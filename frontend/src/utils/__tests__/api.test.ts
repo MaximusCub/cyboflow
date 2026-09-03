@@ -24,12 +24,15 @@ describe('API — Electron-absent guard', () => {
 
   it('representative methods throw when window.electronAPI is undefined', async () => {
     delete (window as unknown as WinWithApi).electronAPI;
-    await expect(API.sessions.getAll()).rejects.toThrow('Electron API not available');
+    await expect(API.sessions.stop('s1')).rejects.toThrow('Electron API not available');
     await expect(API.projects.getAll()).rejects.toThrow('Electron API not available');
     // API.config.* is intentionally excluded here: it moved to the
     // cyboflow.config tRPC router (pilot slice of the IPC→tRPC migration)
     // and no longer reads window.electronAPI at all, matching every other
-    // trpc-backed call site in this codebase.
+    // trpc-backed call site in this codebase. The session RECORD reads
+    // (getAll / get / getStatistics / …) are excluded for the same reason since
+    // batch 1 of the session migration; `sessions.stop` stands in for the
+    // lifecycle channels that are still bridge-backed.
     await expect(API.providers.detect('codex')).rejects.toThrow('Electron API not available');
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
     await expect(API.models.getCatalog('codex')).rejects.toThrow('Electron API not available');
@@ -82,7 +85,7 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
 });
 
 describe('API — happy path forwards args verbatim', () => {
-  const get = vi.fn();
+  const stop = vi.fn();
   const create = vi.fn();
   const providersDetect = vi.fn();
   const modelsGetAvailability = vi.fn();
@@ -90,7 +93,7 @@ describe('API — happy path forwards args verbatim', () => {
   const modelsOnChanged = vi.fn().mockReturnValue(() => {});
 
   beforeEach(() => {
-    get.mockReset().mockResolvedValue({ success: true, data: { id: 's1' } });
+    stop.mockReset().mockResolvedValue({ success: true, data: { id: 's1' } });
     create.mockReset().mockResolvedValue({ success: true });
     providersDetect.mockReset().mockResolvedValue({
       success: true,
@@ -107,7 +110,7 @@ describe('API — happy path forwards args verbatim', () => {
     });
     modelsOnChanged.mockClear();
     setElectronAPI({
-      sessions: { get, create },
+      sessions: { stop, create },
       providers: { detect: providersDetect },
       models: {
         getAvailability: modelsGetAvailability,
@@ -120,9 +123,9 @@ describe('API — happy path forwards args verbatim', () => {
     delete (window as unknown as WinWithApi).electronAPI;
   });
 
-  it('sessions.get forwards the sessionId and returns the bridge result', async () => {
-    const res = await API.sessions.get('sess-42');
-    expect(get).toHaveBeenCalledWith('sess-42');
+  it('sessions.stop forwards the sessionId and returns the bridge result', async () => {
+    const res = await API.sessions.stop('sess-42');
+    expect(stop).toHaveBeenCalledWith('sess-42');
     expect(res).toEqual({ success: true, data: { id: 's1' } });
   });
 

@@ -28,7 +28,10 @@ substitution is not.
   (the specific test file, a typecheck of the touched package) — never the full
   suite.
 - **doc** — the instruction-file edit, in one of two rungs:
-  - **`doc:claude-md`** — a `CLAUDE.md` edit. At most ONE per run.
+  - **`doc:claude-md`** — an edit to the always-loaded instruction layer:
+    `docs/AGENT-GUIDE.md` for rules that apply to every runtime, or the thin
+    `CLAUDE.md` / `AGENTS.md` entry files for runtime-specific ones. At most ONE
+    per run.
   - **`doc:reference`** — a `docs/*.md` edit, including CODE-PATTERNS.md and
     ARCHITECTURE.md.
 
@@ -51,10 +54,10 @@ treatment:
   fixed in" history into the rule. Those describe the incident; the rule has to
   outlive it. If the edit cannot be written without one, it is not a doc edit —
   report it `SKIPPED` with that reason.
-- **Shortest form that states the rule.** A CLAUDE.md edit especially: it loads
-  into every session of every flow. Depth that belongs to one subsystem goes in
-  `docs/*.md` behind the existing load-on-demand pointer, never inline in
-  CLAUDE.md.
+- **Shortest form that states the rule.** A `doc:claude-md` edit especially: that
+  layer loads into every session of every flow. Depth that belongs to one
+  subsystem goes in `docs/*.md` behind the existing load-on-demand pointer, never
+  inline in the instruction layer.
 - **Match the file.** Follow the surrounding heading structure, list style, and
   voice of the file you are editing rather than importing a house style of your
   own.

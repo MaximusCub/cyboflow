@@ -40,7 +40,7 @@ type RouterOutputs = inferRouterOutputs<AppRouter>;
 /** AppRouter-inferred result shapes — these discriminated unions live only on
  *  the router (main/src/orchestrator/trpc/routers/agentThread.ts), not in
  *  shared/types, so they are pulled in via inference rather than a hand
- *  mirror (CLAUDE.md IPC rule). */
+ *  mirror (CODE-PATTERNS.md IPC rule). */
 export type ConfirmProposalResult = RouterOutputs['cyboflow']['agentThread']['confirmProposal'];
 export type DigestTriggerResult = RouterOutputs['cyboflow']['agentThread']['triggerDigest'];
 

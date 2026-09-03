@@ -6,6 +6,49 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-09-02
+
+### Added
+
+- **Beads as a fourth tracker provider.** A keyless CLI adapter for [beads](https://github.com/steveyegge/beads): a Detect wizard step that names the workspace folder instead of asking for a token, an "Initialize beads here" button that creates a missing workspace in place, and a Map step that offers sync / don't-sync per project. Writes go through a guarded-update contract (identity sandwich, fingerprint revisions, detect-after-write) with a reconciliation sweep, ledger, and recovery surfaces — remap, adopt-new-workspace, and a Dolt-HEAD guard (migration 129).
+- **Human Review Queue redesign.** The landing page is rebuilt around a page-state machine and a recommended-actions engine, with a load-error state, a simplified Add-an-idea modal, and an idea-only New Task dialog. The Launch-flow card is hidden for established codebases.
+- **Keyboard shortcuts.** Eight remappable global shortcuts (new session, rails, chat, queue, backlog) with a dedicated Shortcuts tab in Settings, plus a custom application menu. `Cmd+,` opens Settings, `Cmd+/` opens the Shortcuts tab, and `Cmd+]` also toggles the global-assistant rail on landing surfaces.
+- **Claude Fable 5.1**, via an Agent SDK bump to 0.3.257.
+
+### Changed
+
+- The launch wizard presents workflows in a curated order (Ship first, Compound last).
+- Reload moves to `Shift+Cmd+R` under the new application menu; `Alt+Cmd+R` stays pinned to force-reload, and remaps onto either reserved accelerator are rejected.
+- Review-queue surfaces get a raised cream card treatment over a white canvas sheet, and their grids are intrinsically sized so narrow panes stack instead of overflowing.
+
+### Fixed
+
+- **Boot opens the landing page again.** The rail's auto-select pass navigated to the first project, which since the project-overview feature also opened the full Project page — and because the navigation store is not persisted, this ran at every launch, making it impossible to boot to LandingHome whenever any project existed. Selection no longer implies navigation.
+- **The updater runs over Node's HTTP stack**, with `electron.net` as a fallback that now recovers by rebinding its poisoned session.
+- Systemic environment conditions are no longer reported as app errors, and minidumps are dropped for deliberately terminated child processes.
+- A too-old-CLI model rejection is treated as model-unavailable rather than a hard failure.
+
+## [0.2.10] — 2026-08-31
+
+### Added
+
+- **Project overview page.** Clicking a project in the sidebar opens a per-project home: stage tiles that fill the card, a Select-tasks CTA that opens the sprint batch picker, and a dismissed-actions toggle (card-sized ghost tile, full-width well when all are dismissed) with per-action Restore.
+
+### Changed
+
+- **Session-record IPC → tRPC.** Fifteen session-record IPC handlers migrated to a `cyboflow.sessions` tRPC router, continuing the move off the legacy `ipcMain.handle` surface.
+- Removed the prompt-history module.
+- Monaco no longer bundles its TypeScript worker, trimming the renderer build; the unreachable editor-panel surface is marked `@cyboflow-hidden`.
+- Documentation restructured around a shared `docs/AGENT-GUIDE.md` with thin per-runtime entry files and directory-scoped `AGENTS.md` rules.
+
+### Fixed
+
+- Runtime mix and the launch Runtime are now orthogonal dials.
+- The IPC sender guard now also covers the `trpc-electron` channel.
+- The CLI's own auth-expiry wordings are classified as systemic, and the opaque `other` class is split at the verify-request-failed seam.
+- Pinned `playwright` and `@playwright/test` to one exact version, closing the lockfile split that silently broke the nightly E2E suite.
+- The frontend Vite build gets a 4 GB heap ceiling.
+
 ## [0.2.9] — 2026-08-28
 
 ### Added

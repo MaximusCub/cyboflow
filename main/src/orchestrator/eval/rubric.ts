@@ -1,6 +1,6 @@
 /**
  * Code-Review Eval rubric v1.2 — the frozen, data-only transcription of
- * docs/proposals/code-review-eval-checklist.md that an out-of-loop judge runs
+ * docs/eval-rubric.md that an out-of-loop judge runs
  * against a workflow's pre-human diff snapshot.
  *
  * This module is DATA + PURE HELPERS only — zero I/O, no Date/random. The judge

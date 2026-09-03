@@ -36,7 +36,21 @@ Work through the phases **in order** and do not skip verification.
 3. Confirm creds exist in `./.envrc.local` (8 vars): Apple `APPLE_ID`,
    `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`, `CSC_KEY_PASSWORD`
    + R2 `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
-4. Confirm all four agent binaries are present (a plain install prunes to host
+4. **Re-resolve the dependency tree before gating** — the gate is otherwise
+   blind to lockfile defects:
+   ```bash
+   pnpm install --frozen-lockfile
+   ```
+   `node_modules` can be self-consistent while the *lockfile* is not, so Phase 1
+   would pass against dependencies that no longer match what CI installs. This
+   is exactly how 0.2.9 shipped a dead E2E suite: a dep bump split `playwright`
+   (1.62.1) from `@playwright/test` (1.54.1) in the lock, but the un-reinstalled
+   tree still held a matched 1.54.1 pair, so the local smoke tier passed and
+   every nightly after it failed at spec collection. `--frozen-lockfile` also
+   hard-fails outright when `package.json` and the lockfile disagree.
+   **Runs BEFORE step 5 on purpose**: it prunes to host arch, so the cross-arch
+   binary check must follow it, never precede it.
+5. Confirm all four agent binaries are present (a plain install prunes to host
    arch):
    ```bash
    ls -d node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64} \

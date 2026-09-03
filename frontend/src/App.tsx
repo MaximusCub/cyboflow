@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { useIPCEvents } from './hooks/useIPCEvents';
 import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
@@ -8,7 +9,6 @@ import { PerfProfiler } from './components/cyboflow/PerfProfiler';
 import { perfProbeStart } from './utils/perfProbe';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
-import { PromptHistoryModal } from './components/PromptHistoryModal';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
@@ -17,6 +17,9 @@ import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
 import { useNavigationStore } from './stores/navigationStore';
+import { useLayoutStore } from './stores/layoutStore';
+import { useGlobalKeyboardShortcuts } from './hooks/useGlobalKeyboardShortcuts';
+import { useKeyboardShortcutsHydration } from './hooks/useKeyboardShortcutsHydration';
 import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
@@ -28,6 +31,7 @@ import { InsightsView } from './components/Insights/InsightsView';
 import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
+import { ProjectOverviewPage } from './components/overview/ProjectOverviewPage';
 import { StatusBar } from './components/StatusBar';
 import { DesignModeSurface } from './components/cyboflow/design/DesignModeSurface';
 import { DesignPlannerPrompt } from './components/cyboflow/design/DesignPlannerPrompt';
@@ -50,7 +54,6 @@ import {
 
 function App() {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
   const view = useNavigationStore((s) => s.view);
   const showHumanReview = useNavigationStore((s) => s.humanReviewOpen);
@@ -64,6 +67,10 @@ function App() {
   const experimentComparisonId = useNavigationStore((s) => s.experimentComparisonId);
   const showVerifyQueue = useNavigationStore((s) => s.verifyQueueOpen);
   const toggleVerifyQueue = useNavigationStore((s) => s.toggleVerifyQueue);
+  // The per-project overview page (sidebar project click). Rendered only with a
+  // resolved activeProjectId — a set flag with no project falls through to
+  // LandingHome rather than rendering a project page for no project.
+  const showProjectOverview = useNavigationStore((s) => s.projectOverviewOpen);
   // Human-review rail badge: pending PERMISSION approvals (global approval
   // stream) + pending decision/human_task/notification review items aggregated
   // across all projects from the landing store (init'd app-wide below). Approvals alone
@@ -116,9 +123,19 @@ function App() {
     storageKey: 'cyboflow-sidebar-width'
   });
   
+  // Left-rail (sidebar) collapse — shared with the ⌘[ global shortcut, so it
+  // lives in layoutStore rather than App-local state.
+  const leftRailCollapsed = useLayoutStore((s) => s.leftRailCollapsed);
+  const toggleLeftRail = useLayoutStore((s) => s.toggleLeftRail);
+
   useIPCEvents();
   useNotifications();
   useStuckNotifications();
+  // Seed the shortcut overrides from config.json, then run THE single global
+  // keydown listener for the six remappable actions (hydration first so the
+  // listener binds the user's own bindings as soon as they arrive).
+  useKeyboardShortcutsHydration();
+  useGlobalKeyboardShortcuts();
 
   // Start the MCP health polling subscription on mount. Narrowed selector
   // (not the broad `useMcpHealthStore()` destructure) — the store bumps
@@ -230,21 +247,6 @@ function App() {
   // arrows defeat React.memo on every App re-render; these keep referential
   // identity across renders since the underlying setters are themselves stable.
   const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
-  const handlePromptHistoryClick = useCallback(() => setIsPromptHistoryOpen(true), []);
-
-  // Add keyboard shortcut for prompt history
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Cmd/Ctrl + P to open prompt history
-      if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
-        e.preventDefault();
-        setIsPromptHistoryOpen(true);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
 
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
@@ -271,7 +273,6 @@ function App() {
         <TitleBar
           searchQuery={globalSearch}
           onSearchChange={setGlobalSearch}
-          onPromptHistoryClick={handlePromptHistoryClick}
         />
         {/* v0.5 design-mode takeover: swap the entire shell row + StatusBar for
             the fullscreen surface. TitleBar (native drag region) and the dialog
@@ -287,12 +288,20 @@ function App() {
             rail as a primary item that swaps the center to a full-width review
             pane (see docs/SHELL-LAYOUT.md). */}
         <div className="flex flex-1 overflow-hidden">
+          {/* Left rail. Collapsing hides the Sidebar rather than unmounting it
+              (mirrors the TerminalDock invariant): the project tree's expansion
+              state and its in-flight queries survive a collapse, and re-expanding
+              is instant. The hide is applied INSIDE Sidebar, to its own root box
+              only — Sidebar also renders the Settings / bug-report / status-guide
+              dialogs as siblings, and a display:none wrapper here would hide
+              those too (Settings is openable from surfaces far outside the rail). */}
           <PerfProfiler id="sidebar">
             <Sidebar
               onAboutClick={handleAboutClick}
-              onPromptHistoryClick={handlePromptHistoryClick}
               width={sidebarWidth}
               onResize={startResize}
+              collapsed={leftRailCollapsed}
+              onCollapse={toggleLeftRail}
               pendingReviewCount={reviewQueueCount}
               humanReviewActive={showHumanReview}
               onToggleHumanReview={toggleHumanReview}
@@ -308,6 +317,28 @@ function App() {
               onToggleVerifyQueue={toggleVerifyQueue}
             />
           </PerfProfiler>
+          {/* Collapsed left rail — a thin strip with only a re-expand chevron,
+              deliberately the same 28px geometry + affordance as RunRightRail's
+              collapsed strip (mirrored horizontally). */}
+          {leftRailCollapsed && (
+            <aside
+              data-testid="sidebar-collapsed"
+              className="relative w-[28px] shrink-0 border-r border-border-primary bg-bg-secondary"
+            >
+              {/* Vertically centered on the strip, mirroring the expanded rail's
+                  divider-centered collapse handle. */}
+              <button
+                type="button"
+                data-testid="sidebar-expand"
+                aria-label="Expand left rail"
+                title="Expand left rail"
+                onClick={toggleLeftRail}
+                className="absolute top-1/2 -translate-y-1/2 flex h-9 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+              >
+                <ChevronRight size={14} />
+              </button>
+            </aside>
+          )}
           {/* Center-surface state machine, keyed off navigationStore.view:
                 • 'session' → CyboflowRoot (the active run/session workspace, the
                   only mount point for the run surface; legacy SessionView retired
@@ -390,6 +421,17 @@ function App() {
               )}>
                 <BacklogPane projectId={activeProjectId} />
               </ErrorBoundary>
+            ) : showProjectOverview && activeProjectId !== null ? (
+              <ErrorBoundary fallback={(error) => (
+                <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
+                  <div className="text-center">
+                    <p className="text-sm text-status-error font-semibold mb-2">Project overview error — restart app</p>
+                    <p className="text-xs text-text-muted">{error.message}</p>
+                  </div>
+                </div>
+              )}>
+                <ProjectOverviewPage projectId={activeProjectId} />
+              </ErrorBoundary>
             ) : (
               <ErrorBoundary fallback={(error) => (
                 <div className="h-full flex items-center justify-center p-4 bg-bg-secondary">
@@ -421,11 +463,6 @@ function App() {
           details={currentError?.details}
           command={currentError?.command}
         />
-        <PromptHistoryModal
-          isOpen={isPromptHistoryOpen}
-          onClose={() => setIsPromptHistoryOpen(false)}
-        />
-        
         {/* Token Test Modal - Toggle with Cmd/Ctrl + Shift + T (Development Only) */}
         {isTokenTestOpen && process.env.NODE_ENV === 'development' && (
           <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50 p-4 overflow-y-auto">

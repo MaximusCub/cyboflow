@@ -18,6 +18,12 @@ export interface Project {
    * 'trusted' | 'untrusted' are terminal.
    */
   permission_trust?: 'trusted' | 'untrusted' | null;
+  /**
+   * Computed by `projects:get-all` (not stored): true when the project's repo
+   * has enough commit history to count as an established codebase rather than
+   * a fresh project. Absent on responses from other project endpoints.
+   */
+  established_repo?: boolean;
 }
 
 export interface ProjectRunCommand {

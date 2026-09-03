@@ -134,7 +134,7 @@ jobs:
         CI: true
       timeout-minutes: 8
 
-  # Report-only coverage — no threshold yet (see docs/proposals/test-coverage-tightening-plan.md
+  # Report-only coverage — no threshold yet (see docs/archive/test-coverage-tightening-plan.md
   # Workstream C). Split into its own job (needs: test, if: always(),
   # continue-on-error) so its four ~always() steps stop inflating the PR critical
   # path — they gate nothing and roughly doubled the `test` job's wall-clock.

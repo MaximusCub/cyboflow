@@ -9,7 +9,7 @@
  * a new subscription channel.
  *
  * The query return type is AppRouter-inferred (VerificationRequestRow[]) — never
- * a local mirror or `unknown` + shape guard (CLAUDE.md hard rule). Returns `[]`
+ * a local mirror or `unknown` + shape guard (CODE-PATTERNS.md hard rule). Returns `[]`
  * until `projectId` is non-null; the effect re-seeds + re-polls when any of
  * `projectId` / `runId` / `status` / `refetchIntervalMs` changes, and clears the
  * interval on unmount / dep change.
