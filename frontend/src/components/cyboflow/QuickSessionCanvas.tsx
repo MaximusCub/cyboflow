@@ -34,7 +34,11 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../utils/onboarding';
+import {
+  ONBOARDING_ANCHOR_ATTR,
+  ONBOARDING_ANCHORS,
+  ONBOARDING_SHIP_CHIP_STEP,
+} from '../../utils/onboarding';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import {
   useDynamicWorkflowStore,
@@ -136,9 +140,9 @@ function WorkflowCmdButton({
   disabled: boolean;
   onClick: () => void;
   testId: string;
-  /** Onboarding coachmark anchor id (tour step 5 targets ONLY the /ship chip). */
+  /** Onboarding coachmark anchor id (tour step 10 targets ONLY the /ship chip). */
   onboardingAnchor?: string;
-  /** Tour step-5 treatment: rust inset bar + "Start here" tag (design packet step 5). */
+  /** Tour treatment for the coachmarked chip: rust inset bar + "Start here" tag. */
   startHere?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -267,14 +271,18 @@ export function QuickSessionCanvas({
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId, {
     forceNew: isRawCheckout,
   });
-  // Tour step-8 accent on the /ship chip (design packet: rust inset bar +
-  // "Start here" tag while the coachmark points at it).
-  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 8);
+  // The /ship chip's accent fires only while its tour coachmark points at it.
+  const onboardingShipStep = useOnboardingStore(
+    (s) => s.status === 'active' && s.step === ONBOARDING_SHIP_CHIP_STEP,
+  );
   // The idea-picker opened DURING the tour's /ship step (clicking the chip parks
   // 'pending', so accept either). First-run users have no backlog, so the picker
   // opens on "New idea" with the what's-an-idea explainer.
   const onboardingIdeaGate = useOnboardingStore(
-    (s) => s.hydrated && (s.status === 'active' || s.status === 'pending') && s.step === 8,
+    (s) =>
+      s.hydrated &&
+      (s.status === 'active' || s.status === 'pending') &&
+      s.step === ONBOARDING_SHIP_CHIP_STEP,
   );
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)

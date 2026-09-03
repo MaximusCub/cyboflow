@@ -203,8 +203,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   // Forward the three real-action window events into the store's coach machine.
   useEffect(() => {
     const forward = (kind: OnboardingRealEvent) => () => realEvent(kind);
-    // project-created also keeps the local projects list fresh (step-4 display,
-    // step-5 wizard lockProjectId) when the project was created via the normal
+    // project-created also keeps the local projects list fresh (step-5 display,
+    // step-6 wizard lockProjectId) when the project was created via the normal
     // CreateProjectDialog rather than the tour's own card.
     const onProject = (e: Event): void => {
       const detail = (e as CustomEvent<Project | undefined>).detail;
@@ -384,8 +384,8 @@ export function OnboardingGate(): React.JSX.Element | null {
         const created = res.data;
         setProjects((prev) => [...prev, created]);
         // Mirror CreateProjectDialog's broadcast (we bypass that dialog); the
-        // gate's own listener advances the tour to step 5. goToWizard matches the
-        // app's real post-create flow so the step-5 anchor exists.
+        // gate's own listener advances the tour from step 5 to step 6. goToWizard
+        // matches the app's real post-create flow so the step-6 anchor exists.
         window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.projectCreated, { detail: created }));
         useNavigationStore.getState().goToWizard({ lockProjectId: created.id, allowQuick: true });
       }

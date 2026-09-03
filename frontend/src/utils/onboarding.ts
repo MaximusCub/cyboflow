@@ -74,6 +74,13 @@ export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [7, 8, 9];
 export const ONBOARDING_DEFAULT_RUNTIME_STEP = 2;
 
 /**
+ * The step whose coachmark points at the QuickSessionCanvas "/ship" chip. Named
+ * because the canvas reads it from two places, and the defect this replaces was
+ * exactly a bare index left behind when the steps were renumbered.
+ */
+export const ONBOARDING_SHIP_CHIP_STEP = 10;
+
+/**
  * Progress numbering that EXCLUDES the steps this run skips, so a single-
  * provider install reads "STEP 3 / 12" rather than "STEP 4 / 13" with a dot
  * nobody can reach. Both helpers take the live skipped set (the gate derives it
